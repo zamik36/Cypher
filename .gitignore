@@ -11,7 +11,7 @@ dist/
 .env
 .env.*
 /config.toml
-!.cargo/config.toml
+.cargo/
 *.pem
 *.key
 *.crt
