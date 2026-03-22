@@ -1,5 +1,5 @@
-use dashmap::DashMap;
 use cypher_common::{FileId, FileMeta};
+use dashmap::DashMap;
 use std::path::PathBuf;
 
 /// Ephemeral in-memory store that tracks in-progress file transfers.

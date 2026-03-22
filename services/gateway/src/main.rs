@@ -458,7 +458,9 @@ impl Gateway {
 
                         // Rewrite peer_id from target → sender so the receiver
                         // knows who the message is from.
-                        let sender_peer_id = self.connections.get(&session_id)
+                        let sender_peer_id = self
+                            .connections
+                            .get(&session_id)
                             .map(|c| c.peer_id.clone())
                             .unwrap_or_default();
                         let rewritten_chat = cypher_proto::ChatSend {
@@ -472,17 +474,11 @@ impl Gateway {
                         // Attempt direct peer-to-peer routing within this gateway.
                         if let Some(target_session) = self.peers.get(&target_peer_id) {
                             if let Some(conn) = self.connections.get(target_session.value()) {
-                                let _ = conn
-                                    .writer
-                                    .send((rewritten, FrameFlags::NONE))
-                                    .await;
+                                let _ = conn.writer.send((rewritten, FrameFlags::NONE)).await;
                                 return Ok(());
                             }
                         }
-                        (
-                            "signaling.chat_send".to_string(),
-                            Some(target_peer_id),
-                        )
+                        ("signaling.chat_send".to_string(), Some(target_peer_id))
                     }
                     // File transfer messages: route directly if the peer is local,
                     // else forward via signaling (same pattern as ChatSend).

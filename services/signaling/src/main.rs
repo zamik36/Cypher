@@ -527,8 +527,7 @@ impl SignalingService {
             chat.peer_id = sender_bytes;
 
             let rewritten = chat.serialize();
-            self.forward_to_peer(&target_peer_hex, &rewritten)
-                .await?;
+            self.forward_to_peer(&target_peer_hex, &rewritten).await?;
             debug!(
                 target_peer = %target_peer_hex,
                 sender = %sender_hex,
@@ -682,8 +681,9 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     /// Deterministic transaction ID for tests.
-    const TEST_TXN_ID: [u8; 12] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                                    0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C];
+    const TEST_TXN_ID: [u8; 12] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+    ];
 
     #[test]
     fn test_build_binding_response_ipv4() {

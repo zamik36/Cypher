@@ -1,8 +1,8 @@
-use dashmap::DashMap;
 use cypher_common::{Error, Result};
 use cypher_crypto::identity::{IdentityKeyPair, KeyBundle, SignedPreKey};
 use cypher_crypto::ratchet::RatchetState;
 use cypher_crypto::x3dh::SharedSecret;
+use dashmap::DashMap;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
 /// Manages session keys for a single local identity.
@@ -58,11 +58,7 @@ impl KeyManager {
     ///
     /// The receiver provides their own SPK secret; the send chain is set up
     /// when the first message from the sender triggers a DH ratchet step.
-    pub fn init_receiver_session(
-        &self,
-        peer_id: &[u8],
-        shared_secret: &SharedSecret,
-    ) {
+    pub fn init_receiver_session(&self, peer_id: &[u8], shared_secret: &SharedSecret) {
         let state = RatchetState::init_receiver(shared_secret, self.spk.secret.clone());
         self.peer_sessions.insert(peer_id.to_vec(), state);
     }

@@ -29,13 +29,17 @@ pub fn encode_bytes(buf: &mut Vec<u8>, data: &[u8]) {
 /// Returns the decoded bytes and the new offset (after data + padding).
 pub fn decode_bytes(buf: &[u8], offset: usize) -> cypher_common::Result<(Vec<u8>, usize)> {
     if offset + 4 > buf.len() {
-        return Err(cypher_common::Error::Protocol("truncated bytes length".into()));
+        return Err(cypher_common::Error::Protocol(
+            "truncated bytes length".into(),
+        ));
     }
     let len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
     let data_start = offset + 4;
     let data_end = data_start + len;
     if data_end > buf.len() {
-        return Err(cypher_common::Error::Protocol("truncated bytes data".into()));
+        return Err(cypher_common::Error::Protocol(
+            "truncated bytes data".into(),
+        ));
     }
     let data = buf[data_start..data_end].to_vec();
     let padding = (4 - (len % 4)) % 4;

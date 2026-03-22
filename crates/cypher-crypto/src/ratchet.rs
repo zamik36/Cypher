@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use hkdf::Hkdf;
 use cypher_common::{Error, Result};
+use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
@@ -128,9 +128,9 @@ impl RatchetState {
     ///
     /// Returns `(ciphertext, ratchet_public_key, message_number)`.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(Vec<u8>, X25519PublicKey, u32)> {
-        let send_chain_key = self
-            .send_chain_key
-            .ok_or_else(|| Error::Crypto("send_chain_key must be initialized before encrypting".into()))?;
+        let send_chain_key = self.send_chain_key.ok_or_else(|| {
+            Error::Crypto("send_chain_key must be initialized before encrypting".into())
+        })?;
 
         let (new_chain_key, message_key) = kdf_chain(&send_chain_key);
         self.send_chain_key = Some(new_chain_key);

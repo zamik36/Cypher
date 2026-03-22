@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "cypher-crypto-fuzz"
 version = "0.0.0"

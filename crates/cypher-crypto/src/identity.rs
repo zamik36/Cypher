@@ -1,5 +1,5 @@
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use cypher_common::{Error, PeerId, Result};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 

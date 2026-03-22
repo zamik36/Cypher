@@ -9,8 +9,6 @@ pub mod cert;
 pub mod config;
 
 pub use cert::SelfSignedCert;
-pub use config::{
-    make_client_config, make_server_config, make_server_config_from_cert,
-};
 #[cfg(feature = "insecure-tls")]
 pub use config::make_client_config_insecure;
+pub use config::{make_client_config, make_server_config, make_server_config_from_cert};

@@ -1,7 +1,7 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use hkdf::Hkdf;
 use cypher_common::{Error, Result};
+use hkdf::Hkdf;
 use sha2::Sha256;
 
 /// Derive a 12-byte nonce from arbitrary nonce material using HKDF.
