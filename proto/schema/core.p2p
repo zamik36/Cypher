@@ -1,0 +1,26 @@
+// Session
+@0xA1000001 session.init client_id:Bytes nonce:Bytes = session.InitReq;
+@0xA1000002 session.ack server_nonce:Bytes timestamp:Long = session.InitAck;
+
+// Signaling
+@0xB1000001 signal.requestPeer link_id:String = signal.PeerInfo;
+@0xB1000002 signal.iceCandidate candidate:String peer_id:Bytes = signal.Ok;
+@0xB1000003 signal.offer sdp:Bytes peer_id:Bytes = signal.Ok;
+@0xB1000004 signal.answer sdp:Bytes peer_id:Bytes = signal.Ok;
+
+// Key exchange
+@0xB2000001 keys.uploadPrekeys identity_key:Bytes signed_prekey:Bytes = keys.Ok;
+@0xB2000002 keys.getPrekeys peer_id:Bytes = keys.PrekeyBundle;
+
+// Chat (E2EE)
+@0xC1000001 chat.send peer_id:Bytes ciphertext:Bytes ratchet_key:Bytes msg_no:Int = chat.Sent;
+@0xC1000002 chat.receive = chat.Messages;
+
+// File transfer (routed via gateway relay, E2EE between peers)
+// peer_id = target for offer/chunk/complete; target (sender) for accept/chunkAck
+@0xD1000001 file.offer peer_id:Bytes file_id:Bytes name:String size:Long chunks:Int hash:Bytes compressed:Int = file.OfferAck;
+@0xD1000002 file.accept peer_id:Bytes file_id:Bytes = file.AcceptAck;
+@0xD1000003 file.chunk peer_id:Bytes file_id:Bytes index:Int data:Bytes hash:Bytes ratchet_key:Bytes msg_no:Int = file.ChunkAck;
+@0xD1000004 file.complete peer_id:Bytes file_id:Bytes = file.Ok;
+@0xD1000005 file.chunkAck peer_id:Bytes file_id:Bytes index:Int = file.Ok;
+@0xD1000006 file.resume peer_id:Bytes file_id:Bytes missing:Bytes = file.ResumeAck;

@@ -1,0 +1,21 @@
+[package]
+name = "cypher-nat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+cypher-transport.workspace = true
+cypher-tls.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+crc32fast.workspace = true
+futures.workspace = true
+tokio-util.workspace = true
+sha2.workspace = true
+hmac = "0.12"

@@ -1,0 +1,22 @@
+[package]
+name = "cypher-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cypher-proto = { path = ".." }
+
+[[bin]]
+name = "fuzz_dispatch"
+path = "fuzz_targets/fuzz_dispatch.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_decode_bytes"
+path = "fuzz_targets/fuzz_decode_bytes.rs"
+doc = false

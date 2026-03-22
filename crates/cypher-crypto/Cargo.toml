@@ -1,0 +1,17 @@
+[package]
+name = "cypher-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+serde.workspace = true
+zeroize.workspace = true

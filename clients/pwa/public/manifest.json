@@ -1,0 +1,15 @@
+{
+  "name": "P2P Share",
+  "short_name": "P2P",
+  "description": "Anonymous, end-to-end encrypted file sharing. No accounts. No tracking.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "icons": [
+    { "src": "/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml" },
+    { "src": "/icons/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml" }
+  ],
+  "categories": ["utilities", "productivity"]
+}

@@ -1,0 +1,24 @@
+[package]
+name = "cypher-client-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+cypher-proto.workspace = true
+cypher-crypto.workspace = true
+cypher-tls = { workspace = true, features = ["insecure-tls"] }
+cypher-transport.workspace = true
+cypher-nat.workspace = true
+cypher-transfer.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+dashmap.workspace = true
+x25519-dalek.workspace = true
+serde_json.workspace = true
+rand.workspace = true

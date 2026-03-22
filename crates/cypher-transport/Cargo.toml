@@ -1,0 +1,21 @@
+[package]
+name = "cypher-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+cypher-proto.workspace = true
+cypher-crypto.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+cypher-tls.workspace = true
+tokio = { version = "1", features = ["full"] }

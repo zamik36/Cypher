@@ -1,0 +1,24 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+cypher-proto.workspace = true
+cypher-tls.workspace = true
+cypher-transport.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+async-nats.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+prometheus.workspace = true
+rand.workspace = true
+tokio-tungstenite.workspace = true

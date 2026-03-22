@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cypher-common",
+    "crates/cypher-proto",
+    "crates/cypher-crypto",
+    "crates/cypher-tls",
+    "crates/cypher-transport",
+    "crates/cypher-nat",
+    "crates/cypher-transfer",
+    "crates/cypher-client-core",
+    "services/gateway",
+    "services/signaling",
+    "services/relay",
+    "tools/load-test",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+bytes = "1"
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+config = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+crc32fast = "1"
+nom = "7"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+nats = "0.25"
+async-nats = "0.38"
+futures = "0.3"
+zstd = "0.13"
+prometheus = "0.13"
+clap = { version = "4", features = ["derive"] }
+rcgen = { version = "0.13", features = ["pem"] }
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-tungstenite = "0.24"
+
+# Internal crates
+cypher-common = { path = "crates/cypher-common" }
+cypher-proto = { path = "crates/cypher-proto" }
+cypher-crypto = { path = "crates/cypher-crypto" }
+cypher-tls = { path = "crates/cypher-tls", default-features = false }
+cypher-transport = { path = "crates/cypher-transport" }
+cypher-nat = { path = "crates/cypher-nat" }
+cypher-transfer = { path = "crates/cypher-transfer" }
+cypher-client-core = { path = "crates/cypher-client-core" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = 3

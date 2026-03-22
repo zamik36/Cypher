@@ -1,0 +1,17 @@
+[package]
+name = "cypher-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+config.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+rand.workspace = true
+prometheus.workspace = true
+tokio.workspace = true

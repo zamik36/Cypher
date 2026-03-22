@@ -1,0 +1,17 @@
+[package]
+name = "cypher-transfer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+cypher-proto.workspace = true
+cypher-crypto.workspace = true
+cypher-transport.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+futures.workspace = true
+zstd.workspace = true

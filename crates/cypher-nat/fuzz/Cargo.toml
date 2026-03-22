@@ -1,0 +1,17 @@
+[package]
+name = "cypher-nat-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cypher-nat = { path = ".." }
+
+[[bin]]
+name = "fuzz_stun"
+path = "fuzz_targets/fuzz_stun.rs"
+doc = false

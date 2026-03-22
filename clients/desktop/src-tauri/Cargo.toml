@@ -1,0 +1,35 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE: This crate is NOT a member of the workspace at the repo root.
+# Tauri manages its own build via `cargo tauri dev` / `cargo tauri build`.
+# Do not add this to /Cargo.toml workspace members.
+
+# Isolate from the repo-root workspace so plain `cargo build` works here.
+[workspace]
+
+[lib]
+name = "desktop_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+cypher-client-core = { path = "../../../crates/cypher-client-core" }
+cypher-common = { path = "../../../crates/cypher-common" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+once_cell = "1"
+tauri-plugin-notification = "2"
+qrcode = "0.14"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }

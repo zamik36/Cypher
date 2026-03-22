@@ -1,0 +1,18 @@
+{
+  "name": "cypher-pwa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1.8"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vite": "^5",
+    "vite-plugin-solid": "^2"
+  }
+}

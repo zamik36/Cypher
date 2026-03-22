@@ -1,0 +1,14 @@
+[package]
+name = "cypher-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cypher-common.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+crc32fast.workspace = true
+
+[build-dependencies]
+nom.workspace = true
+crc32fast.workspace = true

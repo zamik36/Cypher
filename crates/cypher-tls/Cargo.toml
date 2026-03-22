@@ -1,0 +1,19 @@
+[package]
+name = "cypher-tls"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+insecure-tls = []
+
+[dependencies]
+cypher-common.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
+webpki-roots.workspace = true
+tokio-rustls.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

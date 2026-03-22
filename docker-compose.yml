@@ -1,0 +1,25 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - internal
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "127.0.0.1:4222:4222"
+    command: ["--jetstream", "-m", "8222"]
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  redis-data:

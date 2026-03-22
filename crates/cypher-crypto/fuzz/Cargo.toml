@@ -1,0 +1,24 @@
+[package]
+name = "cypher-crypto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cypher-crypto = { path = ".." }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
+
+[[bin]]
+name = "fuzz_aead"
+path = "fuzz_targets/fuzz_aead.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ratchet"
+path = "fuzz_targets/fuzz_ratchet.rs"
+doc = false

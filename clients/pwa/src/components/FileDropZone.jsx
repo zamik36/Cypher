@@ -1,0 +1,59 @@
+import { createSignal, Show } from "solid-js";
+import { api } from "../api";
+import { upsertTransfer } from "../stores/transfers";
+import { UploadIcon } from "./Icons";
+export default function FileDropZone() {
+    const [dragging, setDragging] = createSignal(false);
+    const [error, setError] = createSignal(null);
+    let fileInput;
+    function onDragOver(e) { e.preventDefault(); setDragging(true); }
+    function onDragLeave() { setDragging(false); }
+    async function sendFiles(files) {
+        setError(null);
+        for (const file of Array.from(files)) {
+            try {
+                const info = await api.sendFile(file);
+                upsertTransfer({
+                    file_id: info.file_id,
+                    file_name: info.file_name,
+                    total_size: info.total_size,
+                    progress: 0,
+                    direction: "send",
+                    status: "active",
+                });
+            }
+            catch (err) {
+                setError(String(err));
+            }
+        }
+    }
+    async function onDrop(e) {
+        e.preventDefault();
+        setDragging(false);
+        const files = e.dataTransfer?.files;
+        if (!files || files.length === 0)
+            return;
+        await sendFiles(files);
+    }
+    function onBrowse() {
+        fileInput?.click();
+    }
+    async function onFileSelected() {
+        const files = fileInput?.files;
+        if (!files || files.length === 0)
+            return;
+        await sendFiles(files);
+        if (fileInput)
+            fileInput.value = "";
+    }
+    return (<>
+      <input type="file" ref={fileInput} multiple style={{ display: "none" }} onChange={onFileSelected}/>
+      <div class={`drop-zone ${dragging() ? "dragging" : ""}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} onClick={onBrowse}>
+        <UploadIcon width="32" height="32"/>
+        <p>Drop files here or tap to browse</p>
+      </div>
+      <Show when={error()}>
+        <p class="error">{error()}</p>
+      </Show>
+    </>);
+}
