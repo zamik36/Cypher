@@ -14,6 +14,11 @@ members = [
     "services/relay",
     "tools/load-test",
 ]
+exclude = [
+    "crates/cypher-proto/fuzz",
+    "crates/cypher-crypto/fuzz",
+    "crates/cypher-nat/fuzz",
+]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

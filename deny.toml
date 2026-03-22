@@ -1,9 +1,4 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "deny"
-yanked = "deny"
-notice = "warn"
 ignore = []
 
 [licenses]
@@ -18,11 +13,8 @@ allow = [
     "OpenSSL",
     "CC0-1.0",
     "Zlib",
+    "Unicode-3.0",
 ]
-deny = []
-copyleft = "warn"
-allow-osi-fsf-free = "neither"
-default = "deny"
 confidence-threshold = 0.8
 
 [bans]
