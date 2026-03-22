@@ -4,6 +4,7 @@ assets/photo.png
 assets/photo_b64.txt
 _photo_b64.txt
 **/target/
+**/gen/
 node_modules/
 dist/
 
