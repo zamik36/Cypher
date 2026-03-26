@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/${{ github.repository }}
 
 jobs:
   check:
@@ -38,22 +40,26 @@ jobs:
         run: cargo test --all
 
   fuzz:
-    name: Fuzz Tests
+    name: Fuzz ${{ matrix.target.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { crate: cypher-proto, name: fuzz_dispatch }
+          - { crate: cypher-proto, name: fuzz_decode_bytes }
+          - { crate: cypher-crypto, name: fuzz_aead }
+          - { crate: cypher-crypto, name: fuzz_ratchet }
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          key: fuzz-${{ matrix.target.crate }}-${{ matrix.target.name }}
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
-      - name: Fuzz proto dispatch
-        run: cd crates/cypher-proto && cargo +nightly fuzz run fuzz_dispatch -- -max_total_time=60
-      - name: Fuzz proto decode_bytes
-        run: cd crates/cypher-proto && cargo +nightly fuzz run fuzz_decode_bytes -- -max_total_time=60
-      - name: Fuzz crypto aead
-        run: cd crates/cypher-crypto && cargo +nightly fuzz run fuzz_aead -- -max_total_time=60
-      - name: Fuzz crypto ratchet
-        run: cd crates/cypher-crypto && cargo +nightly fuzz run fuzz_ratchet -- -max_total_time=60
+      - name: Run fuzzer
+        run: cd crates/${{ matrix.target.crate }} && cargo +nightly fuzz run ${{ matrix.target.name }} -- -max_total_time=30
 
   deny:
     name: Deny (license & advisories)
@@ -107,6 +113,8 @@ jobs:
       - name: Determine tag
         id: tag
         run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tag=latest" >> "$GITHUB_OUTPUT"
           else
@@ -121,8 +129,8 @@ jobs:
           target: gateway
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/cypher-gateway:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ github.repository }}/cypher-gateway:${{ steps.tag.outputs.sha }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-gateway:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-gateway:${{ steps.tag.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -133,8 +141,8 @@ jobs:
           target: signaling
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/cypher-signaling:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ github.repository }}/cypher-signaling:${{ steps.tag.outputs.sha }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-signaling:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-signaling:${{ steps.tag.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -145,8 +153,8 @@ jobs:
           target: relay
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/cypher-relay:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ github.repository }}/cypher-relay:${{ steps.tag.outputs.sha }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-relay:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-relay:${{ steps.tag.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -156,7 +164,7 @@ jobs:
           context: ./clients/pwa
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/cypher-pwa:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ github.repository }}/cypher-pwa:${{ steps.tag.outputs.sha }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-pwa:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-pwa:${{ steps.tag.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
