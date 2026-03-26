@@ -8,12 +8,12 @@ permissions:
 
 jobs:
   setup:
-    name: Initial VPS Setup
+    name: Initial Project Setup
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      - name: Setup server via SSH
+      - name: Init project on VPS
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DOMAIN: ${{ secrets.DOMAIN }}
@@ -26,57 +26,26 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,REPO_URL
-          script_stop: true
-          command_timeout: 10m
+          command_timeout: 15m
           script: |
             set -e
-
-            echo "=== 1. System packages ==="
-            sudo apt-get update
-            sudo apt-get install -y docker.io docker-compose-plugin git curl ufw
-
-            echo "=== 2. Docker permissions ==="
-            sudo usermod -aG docker "$USER"
-            sudo systemctl enable docker
-            sudo systemctl start docker
-
-            echo "=== 3. Firewall ==="
-            sudo ufw --force reset
-            sudo ufw default deny incoming
-            sudo ufw default allow outgoing
-            sudo ufw allow 22/tcp
-            sudo ufw allow 80/tcp
-            sudo ufw allow 443/tcp
-            sudo ufw allow 443/udp
-            sudo ufw allow 9100/tcp
-            sudo ufw allow 9300/tcp
-            sudo ufw allow 3478/udp
-            sudo ufw --force enable
-
-            echo "=== 4. Clone repository ==="
             DEPLOY_DIR="${DEPLOY_PATH:-$HOME/cypher}"
+            echo "=== 1. Clone repository ==="
             if [ -d "$DEPLOY_DIR/.git" ]; then
               echo "Repository exists, pulling latest..."
-              cd "$DEPLOY_DIR" && git pull origin main
+              cd "$DEPLOY_DIR"
+              git pull origin main
             else
               git clone "$REPO_URL" "$DEPLOY_DIR"
               cd "$DEPLOY_DIR"
             fi
-
-            echo "=== 5. Generate .env ==="
+            echo "=== 2. Generate .env ==="
             umask 077
-            cat > .env <<EOF
-            DOMAIN=${DOMAIN}
-            REDIS_PASSWORD=${REDIS_PASSWORD}
-            NATS_AUTH_TOKEN=${NATS_AUTH_TOKEN}
-            EOF
-            sed -i 's/^            //' .env
-
-            echo "=== 6. Build & start services ==="
-            sg docker -c "docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build"
-
-            echo "=== 7. Wait for health ==="
-            for i in 1 2 3 4 5 6 7 8 9 10; do
+            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\n' "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" > .env
+            echo "=== 3. Build & start services ==="
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            echo "=== 4. Wait for health ==="
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
               sleep 5
               if curl -sf http://localhost:9090/metrics > /dev/null 2>&1; then
                 echo "Services healthy"
@@ -84,8 +53,6 @@ jobs:
               fi
               echo "Waiting... ($i)"
             done
-
-            echo "=== 8. Status ==="
-            sg docker -c "docker compose ps"
-            echo ""
+            echo "=== 5. Status ==="
+            docker compose ps
             echo "Setup complete!"

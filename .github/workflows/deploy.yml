@@ -46,12 +46,7 @@ jobs:
 
             # Generate .env with restricted permissions
             umask 077
-            cat > .env <<EOF
-            DOMAIN=${DOMAIN}
-            REDIS_PASSWORD=${REDIS_PASSWORD}
-            NATS_AUTH_TOKEN=${NATS_AUTH_TOKEN}
-            EOF
-            sed -i 's/^            //' .env
+            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\n' "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" > .env
 
             # Pull latest images
             docker compose pull
