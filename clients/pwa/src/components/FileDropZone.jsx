@@ -50,7 +50,11 @@ export default function FileDropZone() {
       <input type="file" ref={fileInput} multiple style={{ display: "none" }} onChange={onFileSelected}/>
       <div class={`drop-zone ${dragging() ? "dragging" : ""}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} onClick={onBrowse}>
         <UploadIcon width="32" height="32"/>
-        <p>Drop files here or tap to browse</p>
+        <p class="drop-zone-desktop">Drag & drop files here, or click to browse</p>
+        <p class="drop-zone-mobile">Tap to choose a file</p>
+        <button class="btn-secondary btn-sm drop-zone-btn" onClick={(e) => { e.stopPropagation(); onBrowse(); }}>
+          Choose File
+        </button>
       </div>
       <Show when={error()}>
         <p class="error">{error()}</p>

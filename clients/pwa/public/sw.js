@@ -1,5 +1,6 @@
 /// Service Worker for P2P Share PWA — cache-first for static assets.
-const CACHE_NAME = "p2p-pwa-v1";
+/// __BUILD_HASH__ is replaced at build time by vite; falls back to "v2" in dev.
+const CACHE_NAME = "p2p-pwa-__BUILD_HASH__";
 const PRECACHE = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
@@ -23,9 +24,25 @@ self.addEventListener("fetch", (e) => {
   // Skip non-GET and WebSocket requests.
   if (request.method !== "GET" || request.url.includes("/ws")) return;
 
+  // Navigation fallback: return index.html for SPA routes.
+  if (request.mode === "navigate") {
+    e.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match("/index.html").then((r) => r || fetch(request)))
+    );
+    return;
+  }
+
+  // Static assets: cache-first with background revalidation.
   e.respondWith(
     caches.match(request).then((cached) => {
-      // Return cached, but also fetch and update cache in background.
       const fetched = fetch(request)
         .then((response) => {
           if (response.ok) {

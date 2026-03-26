@@ -5,7 +5,12 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:-changeme}"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     networks:
       - internal
 
@@ -13,7 +18,84 @@ services:
     image: nats:2-alpine
     ports:
       - "127.0.0.1:4222:4222"
-    command: ["--jetstream", "-m", "8222"]
+    command: ["--jetstream", "-m", "8222", "--auth", "${NATS_AUTH_TOKEN:-changeme}"]
+    # -m 8222 enables monitoring; healthcheck uses the monitoring endpoint
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - internal
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway
+    ports:
+      - "9100:9100"
+      - "9101:9101"
+      - "9090:9090"
+    environment:
+      P2P_GATEWAY_ADDR: "0.0.0.0:9100"
+      P2P_WS_ADDR: "0.0.0.0:9101"
+      P2P_NATS_URL: "nats://${NATS_AUTH_TOKEN:-changeme}@nats:4222"
+      P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
+      P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  signaling:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: signaling
+    ports:
+      - "9200:9200"
+      - "3478:3478/udp"
+      - "9091:9091"
+    environment:
+      P2P_SIGNALING_ADDR: "0.0.0.0:9200"
+      P2P_STUN_ADDR: "0.0.0.0:3478"
+      P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
+      P2P_NATS_URL: "nats://${NATS_AUTH_TOKEN:-changeme}@nats:4222"
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: relay
+    ports:
+      - "9300:9300"
+      - "9092:9092"
+    environment:
+      P2P_RELAY_ADDR: "0.0.0.0:9300"
+      P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
+      P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  pwa:
+    build:
+      context: ./clients/pwa
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    restart: unless-stopped
     networks:
       - internal
 

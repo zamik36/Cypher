@@ -1,0 +1,90 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@2ead5e36573904b0eedad50e5a4750080e6a4b68 # v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH || '~/p2p' }}
+
+            # Save current commit SHA for rollback
+            PREV_SHA=$(git rev-parse --short=8 HEAD)
+            echo "Previous SHA: $PREV_SHA"
+
+            # Pull latest code
+            git pull origin main
+
+            CURR_SHA=$(git rev-parse --short=8 HEAD)
+            echo "Deploying SHA: $CURR_SHA"
+
+            # Pull latest images
+            docker compose pull
+
+            # Restart services with zero downtime
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+            # Wait for services to start
+            sleep 5
+
+            # Smoke test: check gateway metrics
+            if curl -sf http://localhost:9090/metrics > /dev/null; then
+              echo "Gateway healthy"
+            else
+              echo "Gateway health check failed"
+              docker compose logs gateway --tail=20
+              exit 1
+            fi
+
+            # Check signaling metrics
+            if curl -sf http://localhost:9091/metrics > /dev/null; then
+              echo "Signaling healthy"
+            else
+              echo "Signaling health check failed"
+              docker compose logs signaling --tail=20
+              exit 1
+            fi
+
+            # Persist previous SHA for rollback
+            echo "$PREV_SHA" > .prev-deploy-sha
+            echo "Deploy successful (SHA: $CURR_SHA)"
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@2ead5e36573904b0eedad50e5a4750080e6a4b68 # v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH || '~/p2p' }}
+
+            # Use saved SHA for deterministic rollback
+            if [ -f .prev-deploy-sha ]; then
+              PREV_SHA=$(cat .prev-deploy-sha)
+              echo "Rolling back to SHA: $PREV_SHA"
+              git checkout "$PREV_SHA"
+            else
+              echo "No previous SHA recorded, rolling back one commit"
+              git checkout HEAD~1
+            fi
+
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate
+            echo "Rolled back successfully"

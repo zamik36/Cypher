@@ -1,5 +1,7 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import Sidebar from "./components/Sidebar";
+import BottomNav from "./components/BottomNav";
+import InstallPrompt from "./components/InstallPrompt";
 import HomeView from "./components/HomeView";
 import ChatPane from "./components/ChatPane";
 import FilesView from "./components/FilesView";
@@ -117,6 +119,8 @@ export default function App() {
       </main>
 
       <StatusBar />
+      <BottomNav page={page()} setPage={navigateTo} unread={unread()}/>
+      <InstallPrompt />
       <ToastContainer />
     </div>);
 }

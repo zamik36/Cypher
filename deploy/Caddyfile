@@ -1,0 +1,25 @@
+{$DOMAIN} {
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+	}
+
+	handle {
+		reverse_proxy pwa:80
+	}
+
+	handle /ws* {
+		reverse_proxy gateway:9101
+	}
+}
+
+:{$GATEWAY_PORT:9100} {
+	reverse_proxy gateway:9100
+}
+
+:{$RELAY_PORT:9300} {
+	reverse_proxy relay:9300
+}

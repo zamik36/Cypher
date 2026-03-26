@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  docker-release:
+    name: Docker Release Images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push gateway
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          target: gateway
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/cypher-gateway:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}/cypher-gateway:latest
+          cache-from: type=gha
+
+      - name: Build & push signaling
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          target: signaling
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/cypher-signaling:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}/cypher-signaling:latest
+          cache-from: type=gha
+
+      - name: Build & push relay
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          target: relay
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/cypher-relay:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}/cypher-relay:latest
+          cache-from: type=gha
+
+      - name: Build & push PWA
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: ./clients/pwa
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/cypher-pwa:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}/cypher-pwa:latest
+          cache-from: type=gha
+
+  desktop-release:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Install desktop dependencies
+        run: cd clients/desktop && npm install
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: clients/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "Cypher ${{ github.ref_name }}"
+          releaseBody: "See the assets for platform-specific installers."
+          releaseDraft: false
+          prerelease: false
+
+  android-release:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: cd clients/desktop && npm install
+      - name: Build Android APK
+        run: cd clients/desktop && cargo tauri android build --apk
+      - name: Upload APK
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          files: clients/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -16,6 +16,12 @@ pub struct AppConfig {
     pub redis_url: String,
     #[serde(default = "default_nats_url")]
     pub nats_url: String,
+    /// Path to TLS certificate file (PEM). If unset, a self-signed cert is generated.
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key file (PEM). If unset, a self-signed cert is generated.
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
 }
 
 impl AppConfig {
@@ -38,6 +44,8 @@ impl Default for AppConfig {
             stun_addr: default_stun_addr(),
             redis_url: default_redis_url(),
             nats_url: default_nats_url(),
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
