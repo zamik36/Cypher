@@ -203,7 +203,11 @@ struct SignalingService {
 }
 
 impl SignalingService {
-    async fn new(redis_url: &str, nats_url: &str, nats_token: Option<&str>) -> anyhow::Result<Self> {
+    async fn new(
+        redis_url: &str,
+        nats_url: &str,
+        nats_token: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let client = redis::Client::open(redis_url)?;
         let redis = client.get_connection_manager().await?;
         let nats = match nats_token {
@@ -675,7 +679,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
-    let service = Arc::new(SignalingService::new(&config.redis_url, &config.nats_url, nats_token.as_deref()).await?);
+    let service = Arc::new(
+        SignalingService::new(&config.redis_url, &config.nats_url, nats_token.as_deref()).await?,
+    );
 
     info!("Signaling service running");
     service.run().await?;
