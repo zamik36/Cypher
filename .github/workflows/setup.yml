@@ -21,31 +21,33 @@ jobs:
           NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           REPO_URL: https://github.com/${{ github.repository }}.git
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,REPO_URL
+          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,REPO_URL,GHCR_TOKEN,GHCR_USER
           command_timeout: 15m
           script: |
             set -e
             DEPLOY_DIR="${DEPLOY_PATH:-$HOME/cypher}"
-            echo "=== 1. Clone repository ==="
             if [ -d "$DEPLOY_DIR/.git" ]; then
-              echo "Repository exists, pulling latest..."
-              cd "$DEPLOY_DIR"
-              git pull origin main
+              cd "$DEPLOY_DIR" && git pull origin main
             else
               git clone "$REPO_URL" "$DEPLOY_DIR"
               cd "$DEPLOY_DIR"
             fi
-            echo "=== 2. Generate .env ==="
             umask 077
-            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\n' "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" > .env
-            echo "=== 3. Build & start services ==="
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-            echo "=== 4. Wait for health ==="
-            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            GHCR_REPO="ghcr.io/zamik36/cypher"
+            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\nGHCR_REPO=%s\n' \
+              "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" "$GHCR_REPO" > .env
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate
+            echo "Waiting for services..."
+            for i in 1 2 3 4 5 6 7 8 9 10; do
               sleep 5
               if curl -sf http://localhost:9090/metrics > /dev/null 2>&1; then
                 echo "Services healthy"
@@ -53,6 +55,6 @@ jobs:
               fi
               echo "Waiting... ($i)"
             done
-            echo "=== 5. Status ==="
-            docker compose ps
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+            docker logout ghcr.io
             echo "Setup complete!"

@@ -1,4 +1,7 @@
 # Production overlay — use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Uses pre-built images from ghcr.io. Set GHCR_REPO in .env (e.g. ghcr.io/zamik36/cypher).
+# Falls back to local build if image is not available.
 services:
   caddy:
     image: caddy:2-alpine
@@ -21,10 +24,10 @@ services:
     networks:
       - internal
 
-  # Override: remove external port bindings (Caddy handles external traffic).
+  # Override: use ghcr.io images, remove external port bindings.
   # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
-  # Caddy terminates TLS and proxies /ws* to gateway:9101 inside the Docker network.
   gateway:
+    image: ${GHCR_REPO}/cypher-gateway:latest
     ports:
       - "127.0.0.1:9090:9090"
     deploy:
@@ -34,6 +37,7 @@ services:
           cpus: "1.0"
 
   signaling:
+    image: ${GHCR_REPO}/cypher-signaling:latest
     ports:
       - "3478:3478/udp"
       - "127.0.0.1:9091:9091"
@@ -44,6 +48,7 @@ services:
           cpus: "0.5"
 
   relay:
+    image: ${GHCR_REPO}/cypher-relay:latest
     ports:
       - "127.0.0.1:9092:9092"
     deploy:
@@ -53,6 +58,7 @@ services:
           cpus: "1.0"
 
   pwa:
+    image: ${GHCR_REPO}/cypher-pwa:latest
     ports: []
 
   redis:
