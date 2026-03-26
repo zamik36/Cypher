@@ -52,7 +52,8 @@ jobs:
             docker compose pull
 
             # Restart services
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml down --remove-orphans
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --force-recreate
 
             # Wait for services to become healthy
             echo "Waiting for services..."
