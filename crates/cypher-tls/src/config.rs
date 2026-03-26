@@ -29,10 +29,7 @@ pub fn make_server_config_from_cert(cert: SelfSignedCert) -> Result<Arc<ServerCo
 /// Build a TLS [`ServerConfig`] from PEM certificate and key files on disk.
 ///
 /// Suitable for production use with CA-signed certificates (e.g. from Let's Encrypt).
-pub fn make_server_config_from_pem(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<Arc<ServerConfig>> {
+pub fn make_server_config_from_pem(cert_path: &str, key_path: &str) -> Result<Arc<ServerConfig>> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use std::io::BufReader;
 
