@@ -1,0 +1,91 @@
+name: Setup VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Initial VPS Setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Setup server via SSH
+        uses: appleboy/ssh-action@2ead5e36573904b0eedad50e5a4750080e6a4b68 # v1
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          REPO_URL: https://github.com/${{ github.repository }}.git
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,REPO_URL
+          script_stop: true
+          command_timeout: 10m
+          script: |
+            set -e
+
+            echo "=== 1. System packages ==="
+            sudo apt-get update
+            sudo apt-get install -y docker.io docker-compose-plugin git curl ufw
+
+            echo "=== 2. Docker permissions ==="
+            sudo usermod -aG docker "$USER"
+            sudo systemctl enable docker
+            sudo systemctl start docker
+
+            echo "=== 3. Firewall ==="
+            sudo ufw --force reset
+            sudo ufw default deny incoming
+            sudo ufw default allow outgoing
+            sudo ufw allow 22/tcp
+            sudo ufw allow 80/tcp
+            sudo ufw allow 443/tcp
+            sudo ufw allow 443/udp
+            sudo ufw allow 9100/tcp
+            sudo ufw allow 9300/tcp
+            sudo ufw allow 3478/udp
+            sudo ufw --force enable
+
+            echo "=== 4. Clone repository ==="
+            DEPLOY_DIR="${DEPLOY_PATH:-$HOME/cypher}"
+            if [ -d "$DEPLOY_DIR/.git" ]; then
+              echo "Repository exists, pulling latest..."
+              cd "$DEPLOY_DIR" && git pull origin main
+            else
+              git clone "$REPO_URL" "$DEPLOY_DIR"
+              cd "$DEPLOY_DIR"
+            fi
+
+            echo "=== 5. Generate .env ==="
+            umask 077
+            cat > .env <<EOF
+            DOMAIN=${DOMAIN}
+            REDIS_PASSWORD=${REDIS_PASSWORD}
+            NATS_AUTH_TOKEN=${NATS_AUTH_TOKEN}
+            EOF
+            sed -i 's/^            //' .env
+
+            echo "=== 6. Build & start services ==="
+            sg docker -c "docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build"
+
+            echo "=== 7. Wait for health ==="
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              sleep 5
+              if curl -sf http://localhost:9090/metrics > /dev/null 2>&1; then
+                echo "Services healthy"
+                break
+              fi
+              echo "Waiting... ($i)"
+            done
+
+            echo "=== 8. Status ==="
+            sg docker -c "docker compose ps"
+            echo ""
+            echo "Setup complete!"

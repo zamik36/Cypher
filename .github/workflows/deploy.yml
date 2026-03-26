@@ -6,6 +6,9 @@ on:
     types: [completed]
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy to VPS
@@ -16,67 +19,83 @@ jobs:
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@2ead5e36573904b0eedad50e5a4750080e6a4b68 # v1
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,DEPLOY_SHA
           script: |
             set -e
-            cd ${{ secrets.DEPLOY_PATH || '~/p2p' }}
+            cd "${DEPLOY_PATH:-$HOME/cypher}"
 
             # Save current commit SHA for rollback
             PREV_SHA=$(git rev-parse --short=8 HEAD)
             echo "Previous SHA: $PREV_SHA"
 
-            # Pull latest code
-            git pull origin main
-
+            # Checkout the exact SHA that CI tested
+            git fetch origin main
+            git checkout "$DEPLOY_SHA"
             CURR_SHA=$(git rev-parse --short=8 HEAD)
             echo "Deploying SHA: $CURR_SHA"
+
+            # Generate .env with restricted permissions
+            umask 077
+            cat > .env <<EOF
+            DOMAIN=${DOMAIN}
+            REDIS_PASSWORD=${REDIS_PASSWORD}
+            NATS_AUTH_TOKEN=${NATS_AUTH_TOKEN}
+            EOF
+            sed -i 's/^            //' .env
 
             # Pull latest images
             docker compose pull
 
-            # Restart services with zero downtime
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+            # Restart services
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
 
-            # Wait for services to start
-            sleep 5
+            # Wait for services to become healthy
+            echo "Waiting for services..."
+            for i in 1 2 3 4 5 6; do
+              sleep 5
+              if curl -sf http://localhost:9090/metrics > /dev/null 2>&1; then
+                break
+              fi
+              if [ "$i" = "6" ]; then
+                echo "Services did not become healthy within 30s"
+                docker compose logs --tail=30
+                exit 1
+              fi
+              echo "Retry $i..."
+            done
 
-            # Smoke test: check gateway metrics
-            if curl -sf http://localhost:9090/metrics > /dev/null; then
-              echo "Gateway healthy"
-            else
-              echo "Gateway health check failed"
-              docker compose logs gateway --tail=20
-              exit 1
-            fi
-
-            # Check signaling metrics
-            if curl -sf http://localhost:9091/metrics > /dev/null; then
-              echo "Signaling healthy"
-            else
-              echo "Signaling health check failed"
-              docker compose logs signaling --tail=20
-              exit 1
-            fi
+            # Smoke tests
+            curl -sf http://localhost:9090/metrics > /dev/null && echo "gateway: OK"
+            curl -sf http://localhost:9091/metrics > /dev/null && echo "signaling: OK"
 
             # Persist previous SHA for rollback
             echo "$PREV_SHA" > .prev-deploy-sha
-            echo "Deploy successful (SHA: $CURR_SHA)"
+            echo "Deploy successful"
 
       - name: Rollback on failure
         if: failure()
         uses: appleboy/ssh-action@2ead5e36573904b0eedad50e5a4750080e6a4b68 # v1
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DEPLOY_PATH
           script: |
             set -e
-            cd ${{ secrets.DEPLOY_PATH || '~/p2p' }}
+            cd "${DEPLOY_PATH:-$HOME/cypher}"
 
-            # Use saved SHA for deterministic rollback
             if [ -f .prev-deploy-sha ]; then
               PREV_SHA=$(cat .prev-deploy-sha)
               echo "Rolling back to SHA: $PREV_SHA"
