@@ -86,8 +86,15 @@ struct Gateway {
 }
 
 impl Gateway {
-    async fn new(nats_url: &str) -> anyhow::Result<Self> {
-        let nats = async_nats::connect(nats_url).await?;
+    async fn new(nats_url: &str, nats_token: Option<&str>) -> anyhow::Result<Self> {
+        let nats = match nats_token {
+            Some(token) if !token.is_empty() => {
+                async_nats::ConnectOptions::with_token(token.to_string())
+                    .connect(nats_url)
+                    .await?
+            }
+            _ => async_nats::connect(nats_url).await?,
+        };
         Ok(Self {
             connections: Arc::new(DashMap::new()),
             peers: Arc::new(DashMap::new()),
@@ -777,7 +784,8 @@ async fn main() -> anyhow::Result<()> {
 
     cypher_common::metrics::spawn_metrics_server(9090);
 
-    let gateway = Arc::new(Gateway::new(&config.nats_url).await?);
+    let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
+    let gateway = Arc::new(Gateway::new(&config.nats_url, nats_token.as_deref()).await?);
 
     {
         let gw = gateway.clone();
