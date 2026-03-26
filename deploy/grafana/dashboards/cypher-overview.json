@@ -1,0 +1,396 @@
+{
+  "uid": "cypher-overview",
+  "title": "Cypher Overview",
+  "description": "Metrics overview for Gateway, Signaling, and Relay services",
+  "tags": ["cypher"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Gateway",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Active Connections",
+      "gridPos": { "x": 0, "y": 1, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "gateway_active_connections",
+          "legendFormat": "connections",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages / sec",
+      "gridPos": { "x": 8, "y": 1, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(gateway_messages_routed_total[1m])",
+          "legendFormat": "msg/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes / sec",
+      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(gateway_bytes_relayed_total[1m])",
+          "legendFormat": "bytes/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Signaling",
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer Sessions",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "signaling_peer_sessions",
+          "legendFormat": "sessions",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Links Created / sec",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(signaling_links_created_total[1m])",
+          "legendFormat": "links/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Relay",
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Active Sessions",
+      "gridPos": { "x": 0, "y": 19, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "relay_active_sessions",
+          "legendFormat": "sessions",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Relay Bytes / sec",
+      "gridPos": { "x": 12, "y": 19, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(relay_bytes_total[1m])",
+          "legendFormat": "bytes/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Overview",
+      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Connections",
+      "gridPos": { "x": 0, "y": 28, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "gateway_active_connections",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 50, "color": "yellow" },
+              { "value": 100, "color": "red" }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Peer Sessions",
+      "gridPos": { "x": 6, "y": 28, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "signaling_peer_sessions",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 50, "color": "yellow" },
+              { "value": 100, "color": "red" }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Relay Sessions",
+      "gridPos": { "x": 12, "y": 28, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "relay_active_sessions",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 30, "color": "yellow" },
+              { "value": 60, "color": "red" }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Msg Rate (5m avg)",
+      "gridPos": { "x": 18, "y": 28, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(gateway_messages_routed_total[5m])",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 100, "color": "yellow" },
+              { "value": 500, "color": "red" }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

@@ -13,5 +13,17 @@ pub fn init_tracing() {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    fmt().with_env_filter(filter).with_target(true).init();
+    let json = std::env::var("LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    if json {
+        fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_target(true)
+            .init();
+    } else {
+        fmt().with_env_filter(filter).with_target(true).init();
+    }
 }

@@ -96,13 +96,25 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 Caddy автоматически получает TLS-сертификаты через Let's Encrypt. Подробнее — в [DEPLOY.md](DEPLOY.md).
 
-### Мониторинг (опционально)
+### Мониторинг
+
+В production-окружении Prometheus, Grafana, Loki и Promtail поднимаются автоматически.
+
+- **Grafana**: `https://<DOMAIN>/grafana/` — дашборды провизионируются автоматически:
+  - *Cypher Overview* — метрики Gateway, Signaling, Relay
+  - *Cypher Logs* — централизованные логи с фильтрацией по сервису и уровню
+- **Loki + Promtail**: сбор логов контейнеров через Docker socket
+- **Prometheus**: скрейпинг метрик каждые 15 сек, retention 30 дней
+
+Для локальной разработки (опционально):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 ```
 
 Prometheus на `:9190`, Grafana на `:3000`.
+
+Сервисы в контейнерах автоматически пишут логи в JSON-формате (`LOG_FORMAT=json`), что позволяет Loki парсить structured fields (level, target, span и т.д.).
 
 ### Разработка
 

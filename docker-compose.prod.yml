@@ -25,6 +25,38 @@ services:
     networks:
       - internal
 
+  loki:
+    image: grafana/loki:3.0.0
+    volumes:
+      - ./deploy/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    networks:
+      - internal
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    volumes:
+      - ./deploy/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    networks:
+      - internal
+
   prometheus:
     image: prom/prometheus:v2.51.0
     volumes:
@@ -41,12 +73,15 @@ services:
     image: grafana/grafana:11.0.0
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
     depends_on:
       - prometheus
+      - loki
     restart: unless-stopped
     networks:
       - internal
@@ -55,6 +90,8 @@ services:
   # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
   gateway:
     image: ${GHCR_REPO}/cypher-gateway:latest
+    environment:
+      LOG_FORMAT: json
     ports:
       - "127.0.0.1:9090:9090"
     deploy:
@@ -65,6 +102,8 @@ services:
 
   signaling:
     image: ${GHCR_REPO}/cypher-signaling:latest
+    environment:
+      LOG_FORMAT: json
     ports:
       - "3478:3478/udp"
       - "127.0.0.1:9091:9091"
@@ -76,6 +115,8 @@ services:
 
   relay:
     image: ${GHCR_REPO}/cypher-relay:latest
+    environment:
+      LOG_FORMAT: json
     ports:
       - "127.0.0.1:9092:9092"
     deploy:
@@ -99,3 +140,4 @@ volumes:
   caddy-config:
   prometheus-data:
   grafana-data:
+  loki-data:
