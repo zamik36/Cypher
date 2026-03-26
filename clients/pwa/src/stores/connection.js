@@ -3,7 +3,9 @@ import { setActivePeerForTransfer } from "../api";
 const [connection, setConnection] = createStore({
     connected: false,
     peerId: null,
-    gatewayAddr: `${location.hostname}:9101`,
+    gatewayAddr: location.protocol === "https:"
+        ? `${location.host}/ws`
+        : `${location.hostname}:9101`,
     status: "disconnected",
     gatewayConnecting: false,
     gatewayError: null,
