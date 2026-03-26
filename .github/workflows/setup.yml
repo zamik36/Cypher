@@ -19,6 +19,7 @@ jobs:
           DOMAIN: ${{ secrets.DOMAIN }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
+          GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           REPO_URL: https://github.com/${{ github.repository }}.git
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
@@ -27,7 +28,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,REPO_URL,GHCR_TOKEN,GHCR_USER
+          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,GRAFANA_PASSWORD,DEPLOY_PATH,REPO_URL,GHCR_TOKEN,GHCR_USER
           command_timeout: 15m
           script: |
             set -e
@@ -39,9 +40,11 @@ jobs:
               cd "$DEPLOY_DIR"
             fi
             umask 077
-            GHCR_REPO="ghcr.io/zamik36/cypher"
-            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\nGHCR_REPO=%s\n' \
-              "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" "$GHCR_REPO" > .env
+            export GHCR_REPO="ghcr.io/zamik36/cypher"
+            : > .env
+            for var in DOMAIN REDIS_PASSWORD NATS_AUTH_TOKEN GHCR_REPO GRAFANA_PASSWORD; do
+              printf '%s=%s\n' "$var" "$(printenv "$var")" >> .env
+            done
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
             docker compose -f docker-compose.yml -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true

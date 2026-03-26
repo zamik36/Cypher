@@ -11,6 +11,10 @@
 		reverse_proxy gateway:9101
 	}
 
+	handle /grafana* {
+		reverse_proxy grafana:3000
+	}
+
 	handle {
 		reverse_proxy pwa:80
 	}

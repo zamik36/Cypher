@@ -24,6 +24,7 @@ jobs:
           DOMAIN: ${{ secrets.DOMAIN }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
+          GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
@@ -32,7 +33,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
+          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,GRAFANA_PASSWORD,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
           command_timeout: 10m
           script: |
             set -e
@@ -45,11 +46,13 @@ jobs:
             git checkout "$DEPLOY_SHA"
             echo "Deploying SHA: $(git rev-parse --short=8 HEAD)"
 
-            # Generate .env
+            # Generate .env — secrets come from envs parameter, values stay in-file only
             umask 077
-            GHCR_REPO="ghcr.io/zamik36/cypher"
-            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\nGHCR_REPO=%s\n' \
-              "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" "$GHCR_REPO" > .env
+            export GHCR_REPO="ghcr.io/zamik36/cypher"
+            : > .env
+            for var in DOMAIN REDIS_PASSWORD NATS_AUTH_TOKEN GHCR_REPO GRAFANA_PASSWORD; do
+              printf '%s=%s\n' "$var" "$(printenv "$var")" >> .env
+            done
 
             # Pull pre-built images from ghcr.io
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
