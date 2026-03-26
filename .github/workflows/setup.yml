@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
       - name: Setup server via SSH
-        uses: appleboy/ssh-action@2ead5e36573904b0eedad50e5a4750080e6a4b68 # v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DOMAIN: ${{ secrets.DOMAIN }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
