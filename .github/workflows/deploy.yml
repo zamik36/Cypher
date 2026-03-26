@@ -25,37 +25,40 @@ jobs:
           NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,DEPLOY_SHA
+          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
+          command_timeout: 10m
           script: |
             set -e
             cd "${DEPLOY_PATH:-$HOME/cypher}"
 
-            # Save current commit SHA for rollback
             PREV_SHA=$(git rev-parse --short=8 HEAD)
             echo "Previous SHA: $PREV_SHA"
 
-            # Checkout the exact SHA that CI tested
             git fetch origin main
             git checkout "$DEPLOY_SHA"
-            CURR_SHA=$(git rev-parse --short=8 HEAD)
-            echo "Deploying SHA: $CURR_SHA"
+            echo "Deploying SHA: $(git rev-parse --short=8 HEAD)"
 
-            # Generate .env with restricted permissions
+            # Generate .env
             umask 077
-            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\n' "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" > .env
+            GHCR_REPO="ghcr.io/zamik36/cypher"
+            printf 'DOMAIN=%s\nREDIS_PASSWORD=%s\nNATS_AUTH_TOKEN=%s\nGHCR_REPO=%s\n' \
+              "$DOMAIN" "$REDIS_PASSWORD" "$NATS_AUTH_TOKEN" "$GHCR_REPO" > .env
 
-            # Pull latest images
-            docker compose pull
+            # Pull pre-built images from ghcr.io
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
 
-            # Restart services
+            # Restart
             docker compose -f docker-compose.yml -f docker-compose.prod.yml down --remove-orphans
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --force-recreate
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate
 
-            # Wait for services to become healthy
+            # Health checks
             echo "Waiting for services..."
             for i in 1 2 3 4 5 6; do
               sleep 5
@@ -64,18 +67,17 @@ jobs:
               fi
               if [ "$i" = "6" ]; then
                 echo "Services did not become healthy within 30s"
-                docker compose logs --tail=30
+                docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=30
                 exit 1
               fi
               echo "Retry $i..."
             done
 
-            # Smoke tests
             curl -sf http://localhost:9090/metrics > /dev/null && echo "gateway: OK"
             curl -sf http://localhost:9091/metrics > /dev/null && echo "signaling: OK"
 
-            # Persist previous SHA for rollback
             echo "$PREV_SHA" > .prev-deploy-sha
+            docker logout ghcr.io
             echo "Deploy successful"
 
       - name: Rollback on failure
