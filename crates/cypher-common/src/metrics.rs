@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 
 pub fn spawn_metrics_server(port: u16) {
     tokio::spawn(async move {
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("0.0.0.0:{}", port);
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(e) => {
