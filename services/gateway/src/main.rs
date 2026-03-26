@@ -764,10 +764,16 @@ async fn main() -> anyhow::Result<()> {
     cypher_common::init_tracing();
     let config = cypher_common::AppConfig::load()?;
 
-    // Build a TLS server config using a freshly-generated self-signed cert.
-    // In production, replace with `cypher_tls::make_server_config_from_cert`
-    // loading a CA-signed certificate from disk.
-    let tls_config = cypher_tls::make_server_config(&["localhost"])?;
+    let tls_config = match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
+            info!("Loading TLS certificate from {} / {}", cert, key);
+            cypher_tls::make_server_config_from_pem(cert, key)?
+        }
+        _ => {
+            warn!("No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production.");
+            cypher_tls::make_server_config(&["localhost"])?
+        }
+    };
 
     cypher_common::metrics::spawn_metrics_server(9090);
 

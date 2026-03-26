@@ -1,4 +1,4 @@
-import { createSignal, createEffect, For, Show } from "solid-js";
+import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
 import { api } from "../api";
 import { chatsByPeer, addMessage, getMessages } from "../stores/chat";
 import { connection, setActivePeer, shortName } from "../stores/connection";
@@ -9,6 +9,7 @@ function formatTime(ts) {
 export default function ChatPane(props) {
     const [draft, setDraft] = createSignal("");
     let messagesRef;
+    let chatAreaRef;
     const activePeer = () => connection.activePeerId;
     const activeMessages = () => activePeer() ? getMessages(activePeer()) : [];
     createEffect(() => {
@@ -17,6 +18,20 @@ export default function ChatPane(props) {
             void (chatsByPeer[peer]?.length);
         if (messagesRef) {
             setTimeout(() => messagesRef.scrollTop = messagesRef.scrollHeight, 10);
+        }
+    });
+    // Handle virtual keyboard resize (keeps input visible above keyboard)
+    onMount(() => {
+        if (window.visualViewport) {
+            const vv = window.visualViewport;
+            const onResize = () => {
+                if (chatAreaRef) {
+                    const offset = window.innerHeight - vv.height;
+                    chatAreaRef.style.paddingBottom = offset > 0 ? `${offset}px` : "";
+                }
+            };
+            vv.addEventListener("resize", onResize);
+            onCleanup(() => vv.removeEventListener("resize", onResize));
         }
     });
     async function send() {
@@ -68,7 +83,7 @@ export default function ChatPane(props) {
             </For>
           </div>
 
-          <div class="chat-area">
+          <div class="chat-area" ref={chatAreaRef}>
             <Show when={activePeer()} fallback={<div class="empty-state">
                 <ChatIcon width="48" height="48"/>
                 <p>Select a chat from the list</p>

@@ -1,0 +1,10 @@
+target/
+.git/
+node_modules/
+clients/desktop/src-tauri/gen/
+clients/pwa/node_modules/
+clients/pwa/dist/
+*.md
+*.log
+.github/
+fuzz/

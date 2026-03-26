@@ -1,0 +1,35 @@
+# Monitoring overlay — use with:
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    ports:
+      - "127.0.0.1:9093:9090"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - internal
+
+volumes:
+  prometheus-data:
+  grafana-data:

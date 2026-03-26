@@ -336,7 +336,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let tls_config = cypher_tls::make_server_config(&["localhost"])?;
+    let tls_config = match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
+            info!("Loading TLS certificate from {} / {}", cert, key);
+            cypher_tls::make_server_config_from_pem(cert, key)?
+        }
+        _ => {
+            warn!("No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production.");
+            cypher_tls::make_server_config(&["localhost"])?
+        }
+    };
     let acceptor = TlsAcceptor::from(tls_config);
 
     let listener = TcpListener::bind(&config.relay_addr).await?;

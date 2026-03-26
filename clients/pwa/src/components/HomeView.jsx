@@ -66,6 +66,9 @@ export default function HomeView(props) {
         if (!code)
             return;
         navigator.clipboard.writeText(code);
+        // Haptic feedback on supported devices
+        if (navigator.vibrate)
+            navigator.vibrate(50);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
     }

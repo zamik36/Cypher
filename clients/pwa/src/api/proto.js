@@ -1,5 +1,5 @@
 /**
- * Binary protocol codec matching the Rust p2p-proto wire format.
+ * Binary protocol codec matching the Rust cypher-proto wire format.
  *
  * Wire format (little-endian):
  *   constructor_id: u32

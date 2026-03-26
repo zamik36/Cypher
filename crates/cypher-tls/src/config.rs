@@ -26,6 +26,46 @@ pub fn make_server_config_from_cert(cert: SelfSignedCert) -> Result<Arc<ServerCo
     Ok(Arc::new(config))
 }
 
+/// Build a TLS [`ServerConfig`] from PEM certificate and key files on disk.
+///
+/// Suitable for production use with CA-signed certificates (e.g. from Let's Encrypt).
+pub fn make_server_config_from_pem(cert_path: &str, key_path: &str) -> Result<Arc<ServerConfig>> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::io::BufReader;
+
+    ensure_crypto_provider();
+
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| Error::Transport(format!("failed to open cert {cert_path}: {e}")))?;
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| Error::Transport(format!("failed to open key {key_path}: {e}")))?;
+
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .filter_map(|r| match r {
+            Ok(cert) => Some(cert),
+            Err(e) => {
+                tracing::warn!("skipping invalid certificate entry in {}: {}", cert_path, e);
+                None
+            }
+        })
+        .collect();
+    if certs.is_empty() {
+        return Err(Error::Transport("no certificates found in PEM file".into()));
+    }
+
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+        .map_err(|e| Error::Transport(format!("failed to read private key: {e}")))?
+        .ok_or_else(|| Error::Transport("no private key found in PEM file".into()))?;
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| Error::Transport(format!("TLS server config error: {e}")))?;
+
+    debug!("TLS server config created from PEM files");
+    Ok(Arc::new(config))
+}
+
 /// Build a TLS [`ServerConfig`] using a freshly generated self-signed certificate.
 ///
 /// Intended for development and testing. In production, use
@@ -75,7 +115,10 @@ pub fn make_client_config() -> Arc<ClientConfig> {
 ///
 /// **Development/testing only** — disables all certificate verification.
 /// Use [`make_client_config`] in production.
+///
+/// Compile-time guarded: only available with `insecure-tls` feature AND debug builds.
 #[cfg(feature = "insecure-tls")]
+#[cfg(debug_assertions)]
 pub fn make_client_config_insecure() -> Arc<ClientConfig> {
     ensure_crypto_provider();
 
@@ -89,10 +132,12 @@ pub fn make_client_config_insecure() -> Arc<ClientConfig> {
 
 /// Certificate verifier that accepts everything (dev only).
 #[cfg(feature = "insecure-tls")]
+#[cfg(debug_assertions)]
 #[derive(Debug)]
 struct NoCertVerifier;
 
 #[cfg(feature = "insecure-tls")]
+#[cfg(debug_assertions)]
 impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
     fn verify_server_cert(
         &self,

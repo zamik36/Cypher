@@ -65,7 +65,11 @@ export default function FileDropZone() {
         onClick={onBrowse}
       >
         <UploadIcon width="32" height="32" />
-        <p>Drop files here or click to browse</p>
+        <p class="drop-zone-desktop">Drag & drop files here, or click to browse</p>
+        <p class="drop-zone-mobile">Tap to choose a file</p>
+        <button class="btn-secondary btn-sm drop-zone-btn" onClick={(e) => { e.stopPropagation(); onBrowse(); }}>
+          Choose File
+        </button>
       </div>
       <Show when={error()}>
         <p class="error">{error()}</p>
