@@ -119,8 +119,14 @@ function handleMessage(data) {
 export const api = {
     connectToGateway(addr) {
         return new Promise((resolve, reject) => {
-            // Determine WS URL: if addr is host:port, use ws://host:port.
-            const wsUrl = addr.startsWith("ws") ? addr : `ws://${addr}`;
+            // Determine WS URL: use wss:// when page is served over HTTPS.
+            let wsUrl;
+            if (addr.startsWith("ws")) {
+                wsUrl = addr;
+            } else {
+                const protocol = location.protocol === "https:" ? "wss" : "ws";
+                wsUrl = `${protocol}://${addr}`;
+            }
             try {
                 if (ws)
                     ws.close();

@@ -7,12 +7,12 @@
 		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 	}
 
-	handle {
-		reverse_proxy pwa:80
-	}
-
 	handle /ws* {
 		reverse_proxy gateway:9101
+	}
+
+	handle {
+		reverse_proxy pwa:80
 	}
 }
 
