@@ -20,6 +20,33 @@ services:
     depends_on:
       - gateway
       - pwa
+      - grafana
+    restart: unless-stopped
+    networks:
+      - internal
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+    depends_on:
+      - prometheus
     restart: unless-stopped
     networks:
       - internal
@@ -70,3 +97,5 @@ services:
 volumes:
   caddy-data:
   caddy-config:
+  prometheus-data:
+  grafana-data:
