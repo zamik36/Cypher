@@ -24,7 +24,7 @@ interface ConnectionState {
 const [connection, setConnection] = createStore<ConnectionState>({
   connected: false,
   peerId: null,
-  gatewayAddr: "127.0.0.1:9100",
+  gatewayAddr: "cyphermessanger.tech:9100",
   status: "disconnected",
   gatewayConnecting: false,
   gatewayError: null,

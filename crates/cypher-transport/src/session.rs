@@ -41,6 +41,10 @@ impl TransportSession {
 
     #[instrument(skip(tls_config))]
     pub async fn connect(addr: &str, tls_config: Arc<rustls::ClientConfig>) -> Result<Self> {
+        let addr = addr
+            .strip_prefix("wss://")
+            .or_else(|| addr.strip_prefix("ws://"))
+            .unwrap_or(addr);
         let tcp = TcpStream::connect(addr).await?;
         let connector = TlsConnector::from(tls_config);
 
