@@ -91,6 +91,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
       - name: Install desktop dependencies
         run: cd clients/desktop && npm install
       - name: Build Tauri app
@@ -124,7 +129,7 @@ jobs:
       - name: Install dependencies
         run: cd clients/desktop && npm install
       - name: Build Android APK
-        run: cd clients/desktop && cargo tauri android build --apk
+        run: cd clients/desktop && npx tauri android build --apk
       - name: Upload APK
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
