@@ -771,6 +771,8 @@ async fn main() -> anyhow::Result<()> {
     cypher_common::init_tracing();
     let config = cypher_common::AppConfig::load()?;
 
+    cypher_common::metrics::spawn_metrics_server(9090);
+
     let tls_config = match (&config.tls_cert_path, &config.tls_key_path) {
         (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
             info!("Loading TLS certificate from {} / {}", cert, key);
@@ -782,8 +784,6 @@ async fn main() -> anyhow::Result<()> {
             cypher_tls::make_server_config(&["localhost"])?
         }
     };
-
-    cypher_common::metrics::spawn_metrics_server(9090);
 
     let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
     let gateway = Arc::new(Gateway::new(&config.nats_url, nats_token.as_deref()).await?);
