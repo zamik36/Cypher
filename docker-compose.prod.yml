@@ -13,11 +13,6 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
     environment:
       DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
     depends_on:
@@ -105,9 +100,6 @@ services:
     ports:
       - "9100:9100"
       - "127.0.0.1:9090:9090"
-    depends_on:
-      caddy:
-        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -138,9 +130,6 @@ services:
     ports:
       - "9300:9300"
       - "127.0.0.1:9092:9092"
-    depends_on:
-      caddy:
-        condition: service_healthy
     deploy:
       resources:
         limits:
