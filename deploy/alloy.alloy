@@ -1,0 +1,56 @@
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.containers.targets
+
+  // Extract container name
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // Extract service type (gateway, signaling, relay)
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = ".*_(gateway|signaling|relay)_.*"
+    target_label  = "service"
+  }
+
+  // Drop infra containers
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = ".*_(loki|alloy|prometheus|grafana|caddy|redis|nats|pwa)_.*"
+    action        = "drop"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.docker_logs.rules
+  forward_to    = [loki.process.json_logs.receiver]
+}
+
+loki.process "json_logs" {
+  stage.docker {}
+
+  stage.json {
+    expressions = { "level" = "level" }
+  }
+
+  stage.labels {
+    values = { "level" = "" }
+  }
+
+  forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

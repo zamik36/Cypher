@@ -14,23 +14,23 @@
       {
         "name": "service",
         "type": "custom",
-        "current": { "text": "All", "value": "" },
+        "current": { "text": "All", "value": ".+" },
         "options": [
-          { "text": "All", "value": "", "selected": true },
+          { "text": "All", "value": ".+", "selected": true },
           { "text": "gateway", "value": "gateway", "selected": false },
           { "text": "signaling", "value": "signaling", "selected": false },
           { "text": "relay", "value": "relay", "selected": false }
         ],
         "query": "gateway,signaling,relay",
         "includeAll": true,
-        "allValue": ""
+        "allValue": ".+"
       },
       {
         "name": "level",
         "type": "custom",
-        "current": { "text": "All", "value": "" },
+        "current": { "text": "All", "value": ".+" },
         "options": [
-          { "text": "All", "value": "", "selected": true },
+          { "text": "All", "value": ".+", "selected": true },
           { "text": "ERROR", "value": "ERROR", "selected": false },
           { "text": "WARN", "value": "WARN", "selected": false },
           { "text": "INFO", "value": "INFO", "selected": false },
@@ -38,7 +38,7 @@
         ],
         "query": "ERROR,WARN,INFO,DEBUG",
         "includeAll": true,
-        "allValue": ""
+        "allValue": ".+"
       }
     ]
   },
@@ -126,7 +126,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\", service=~\"${service:regex}\"} | json ${level:pipe}",
+          "expr": "{job=\"docker\", service=~\"${service:regex}\"} | json | level =~ \"${level}\"",
           "refId": "A"
         }
       ],

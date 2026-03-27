@@ -40,12 +40,15 @@ services:
     networks:
       - internal
 
-  promtail:
-    image: grafana/promtail:3.0.0
+  alloy:
+    image: grafana/alloy:v1.14.2
     volumes:
-      - ./deploy/promtail.yml:/etc/promtail/config.yml:ro
+      - ./deploy/alloy.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    command: -config.file=/etc/promtail/config.yml
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
     depends_on:
       - loki
     restart: unless-stopped
