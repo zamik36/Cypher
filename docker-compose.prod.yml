@@ -13,11 +13,6 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
     environment:
       DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
     depends_on:
@@ -96,18 +91,16 @@ services:
   # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
   gateway:
     image: ${GHCR_REPO}/cypher-gateway:latest
+    user: "0:0"
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     volumes:
-      - caddy-data:/data/caddy:ro
+      - caddy-data:/data:ro
     ports:
       - "9100:9100"
       - "127.0.0.1:9090:9090"
-    depends_on:
-      caddy:
-        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -129,18 +122,16 @@ services:
 
   relay:
     image: ${GHCR_REPO}/cypher-relay:latest
+    user: "0:0"
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     volumes:
-      - caddy-data:/data/caddy:ro
+      - caddy-data:/data:ro
     ports:
       - "9300:9300"
       - "127.0.0.1:9092:9092"
-    depends_on:
-      caddy:
-        condition: service_healthy
     deploy:
       resources:
         limits:
