@@ -33,3 +33,10 @@ tauri-plugin-notification = "2"
 qrcode = "0.14"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+strip = "symbols"
+panic = "abort"
+opt-level = "s"

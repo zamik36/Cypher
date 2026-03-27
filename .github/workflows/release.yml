@@ -13,7 +13,7 @@ jobs:
     name: Docker Release Images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
@@ -87,11 +87,14 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
-          node-version: 20
+          key: desktop-${{ matrix.target }}
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -115,10 +118,14 @@ jobs:
     name: Android APK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          key: android
+          workspaces: clients/desktop/src-tauri
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
@@ -126,15 +133,36 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - name: Install Android NDK
         run: sdkmanager "ndk;27.0.12077973"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
-          node-version: 20
+          node-version: 22
       - name: Install dependencies
         run: cd clients/desktop && npm install
       - name: Initialize Android project
         run: cd clients/desktop && npx tauri android init
+      - name: Decode signing keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > clients/desktop/src-tauri/gen/android/release.keystore
+      - name: Configure APK signing
+        run: |
+          GRADLE_FILE="clients/desktop/src-tauri/gen/android/app/build.gradle.kts"
+          KEYSTORE_PATH="${{ github.workspace }}/clients/desktop/src-tauri/gen/android/release.keystore"
+
+          # Insert signingConfigs block before buildTypes
+          sed -i "/buildTypes {/i\\
+              signingConfigs {\\
+                  create(\"release\") {\\
+                      storeFile = file(\"${KEYSTORE_PATH}\")\\
+                      storePassword = \"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}\"\\
+                      keyAlias = \"${{ secrets.ANDROID_KEY_ALIAS }}\"\\
+                      keyPassword = \"${{ secrets.ANDROID_KEY_PASSWORD }}\"\\
+                  }\\
+              }" "$GRADLE_FILE"
+
+          # Wire release buildType to use the signing config
+          sed -i '/getByName("release") {/a\
+                      signingConfig = signingConfigs.getByName("release")' "$GRADLE_FILE"
       - name: Build Android APK
-        run: cd clients/desktop && npx tauri android build --apk
+        run: cd clients/desktop && npx tauri android build --apk --release --target aarch64
       - name: Upload APK
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
