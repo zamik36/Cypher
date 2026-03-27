@@ -77,6 +77,7 @@ jobs:
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -123,11 +124,15 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.0.12077973"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - name: Install dependencies
         run: cd clients/desktop && npm install
+      - name: Initialize Android project
+        run: cd clients/desktop && npx tauri android init
       - name: Build Android APK
         run: cd clients/desktop && npx tauri android build --apk
       - name: Upload APK

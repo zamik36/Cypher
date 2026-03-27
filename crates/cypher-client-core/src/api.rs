@@ -135,7 +135,10 @@ impl ClientApi {
     /// on every start) work out of the box.  In production, switch to
     /// [`connect_to_gateway_with_config`] with a proper [`rustls::ClientConfig`].
     pub async fn connect_to_gateway(&self, addr: &str) -> Result<()> {
+        #[cfg(debug_assertions)]
         let tls_config = cypher_tls::make_client_config_insecure();
+        #[cfg(not(debug_assertions))]
+        let tls_config = cypher_tls::make_client_config();
         self.do_connect(addr, tls_config).await
     }
 
