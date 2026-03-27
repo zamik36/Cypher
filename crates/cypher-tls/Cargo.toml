@@ -15,6 +15,7 @@ rustls-pemfile.workspace = true
 rustls-pki-types.workspace = true
 rcgen.workspace = true
 webpki-roots.workspace = true
+tokio.workspace = true
 tokio-rustls.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

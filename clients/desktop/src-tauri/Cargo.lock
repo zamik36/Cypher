@@ -836,6 +836,145 @@ dependencies = [
 ]
 
 [[package]]
+name = "cypher-client-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cypher-common",
+ "cypher-crypto",
+ "cypher-nat",
+ "cypher-proto",
+ "cypher-tls",
+ "cypher-transfer",
+ "cypher-transport",
+ "dashmap",
+ "futures",
+ "rand 0.8.5",
+ "rustls",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "cypher-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "config",
+ "prometheus",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "cypher-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "bytes",
+ "cypher-common",
+ "ed25519-dalek",
+ "hkdf",
+ "rand 0.8.5",
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "cypher-nat"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "cypher-common",
+ "cypher-tls",
+ "cypher-transport",
+ "futures",
+ "hmac",
+ "rand 0.8.5",
+ "rustls",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "cypher-proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "cypher-common",
+ "nom",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cypher-tls"
+version = "0.1.0"
+dependencies = [
+ "cypher-common",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "thiserror 2.0.18",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "cypher-transfer"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cypher-common",
+ "cypher-crypto",
+ "cypher-proto",
+ "cypher-transport",
+ "futures",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
+name = "cypher-transport"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cypher-common",
+ "cypher-crypto",
+ "cypher-proto",
+ "futures",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -943,10 +1082,10 @@ name = "desktop"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cypher-client-core",
+ "cypher-common",
  "image",
  "once_cell",
- "p2p-client-core",
- "p2p-common",
  "qrcode",
  "serde",
  "serde_json",
@@ -2849,145 +2988,6 @@ checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "p2p-client-core"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "dashmap",
- "futures",
- "p2p-common",
- "p2p-crypto",
- "p2p-nat",
- "p2p-proto",
- "p2p-tls",
- "p2p-transfer",
- "p2p-transport",
- "rand 0.8.5",
- "rustls",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tracing",
- "x25519-dalek",
-]
-
-[[package]]
-name = "p2p-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "config",
- "prometheus",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "p2p-crypto"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "bytes",
- "ed25519-dalek",
- "hkdf",
- "p2p-common",
- "rand 0.8.5",
- "serde",
- "sha2",
- "thiserror 2.0.18",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "p2p-nat"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "crc32fast",
- "futures",
- "hmac",
- "p2p-common",
- "p2p-tls",
- "p2p-transport",
- "rand 0.8.5",
- "rustls",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "p2p-proto"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "crc32fast",
- "nom",
- "p2p-common",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "p2p-tls"
-version = "0.1.0"
-dependencies = [
- "p2p-common",
- "rcgen",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "thiserror 2.0.18",
- "tokio-rustls",
- "tracing",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "p2p-transfer"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "p2p-common",
- "p2p-crypto",
- "p2p-proto",
- "p2p-transport",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "zstd",
-]
-
-[[package]]
-name = "p2p-transport"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "p2p-common",
- "p2p-crypto",
- "p2p-proto",
- "rustls",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

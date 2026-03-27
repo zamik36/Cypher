@@ -1,3 +1,7 @@
+{
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
 {$DOMAIN} {
 	header {
 		X-Content-Type-Options "nosniff"
@@ -18,12 +22,4 @@
 	handle {
 		reverse_proxy pwa:80
 	}
-}
-
-:{$GATEWAY_PORT:9100} {
-	reverse_proxy gateway:9100
-}
-
-:{$RELAY_PORT:9300} {
-	reverse_proxy relay:9300
 }

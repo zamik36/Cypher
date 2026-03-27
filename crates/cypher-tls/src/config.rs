@@ -66,6 +66,67 @@ pub fn make_server_config_from_pem(cert_path: &str, key_path: &str) -> Result<Ar
     Ok(Arc::new(config))
 }
 
+/// Load TLS server config from PEM files, retrying if files are not yet available.
+///
+/// Useful when certificates are provided by another container (e.g. Caddy with
+/// auto-HTTPS) that may not have written them to disk at the moment this
+/// service starts.
+pub async fn load_pem_with_retry(
+    cert_path: &str,
+    key_path: &str,
+    max_attempts: u32,
+    interval: std::time::Duration,
+) -> Result<Arc<ServerConfig>> {
+    let mut last_err = None;
+
+    for attempt in 1..=max_attempts {
+        // Fail fast on permanent errors (wrong permissions, not a file, etc.).
+        // Only retry when the file simply does not exist yet (ENOENT).
+        for path in [cert_path, key_path] {
+            match std::fs::metadata(path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // File not yet written — transient, worth retrying.
+                }
+                Err(e) => {
+                    return Err(Error::Transport(format!(
+                        "permanent I/O error for {path}: {e}"
+                    )));
+                }
+            }
+        }
+
+        match make_server_config_from_pem(cert_path, key_path) {
+            Ok(config) => {
+                tracing::info!(
+                    attempt,
+                    max_attempts,
+                    "TLS certificates loaded from PEM files"
+                );
+                return Ok(config);
+            }
+            Err(e) if attempt < max_attempts => {
+                tracing::warn!(
+                    attempt,
+                    max_attempts,
+                    %e,
+                    "TLS cert not ready, retrying in {:?}…",
+                    interval
+                );
+                last_err = Some(e);
+                tokio::time::sleep(interval).await;
+            }
+            Err(e) => {
+                return Err(Error::Transport(format!(
+                    "failed to load TLS certs after {max_attempts} attempts: {e}"
+                )));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| Error::Transport("no retry attempts made".into())))
+}
+
 /// Build a TLS [`ServerConfig`] using a freshly generated self-signed certificate.
 ///
 /// Intended for development and testing. In production, use
