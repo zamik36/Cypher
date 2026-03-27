@@ -91,6 +91,7 @@ services:
   # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
   gateway:
     image: ${GHCR_REPO}/cypher-gateway:latest
+    user: "0:0"
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
@@ -121,6 +122,7 @@ services:
 
   relay:
     image: ${GHCR_REPO}/cypher-relay:latest
+    user: "0:0"
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
