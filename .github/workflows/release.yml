@@ -162,7 +162,7 @@ jobs:
           sed -i '/getByName("release") {/a\
                       signingConfig = signingConfigs.getByName("release")' "$GRADLE_FILE"
       - name: Build Android APK
-        run: cd clients/desktop && npx tauri android build --apk --release --target aarch64
+        run: cd clients/desktop && npx tauri android build --apk --target aarch64
       - name: Upload APK
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
