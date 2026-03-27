@@ -6,6 +6,12 @@ discovery.docker "containers" {
 discovery.relabel "docker_logs" {
   targets = discovery.docker.containers.targets
 
+  // Assign job label expected by Grafana dashboards
+  rule {
+    target_label = "job"
+    replacement  = "docker"
+  }
+
   // Extract container name
   rule {
     source_labels = ["__meta_docker_container_name"]

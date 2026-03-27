@@ -101,7 +101,7 @@ services:
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     volumes:
-      - caddy-data:/data/caddy:ro
+      - caddy-data:/data:ro
     ports:
       - "9100:9100"
       - "127.0.0.1:9090:9090"
@@ -134,7 +134,7 @@ services:
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     volumes:
-      - caddy-data:/data/caddy:ro
+      - caddy-data:/data:ro
     ports:
       - "9300:9300"
       - "127.0.0.1:9092:9092"
