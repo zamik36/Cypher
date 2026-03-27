@@ -16,14 +16,14 @@ discovery.relabel "docker_logs" {
   // Extract service type (gateway, signaling, relay)
   rule {
     source_labels = ["__meta_docker_container_name"]
-    regex         = ".*_(gateway|signaling|relay)_.*"
+    regex         = ".*[-_](gateway|signaling|relay)[-_].*"
     target_label  = "service"
   }
 
   // Drop infra containers
   rule {
     source_labels = ["__meta_docker_container_name"]
-    regex         = ".*_(loki|alloy|prometheus|grafana|caddy|redis|nats|pwa)_.*"
+    regex         = ".*[-_](loki|alloy|prometheus|grafana|caddy|redis|nats|pwa)[-_].*"
     action        = "drop"
   }
 }
