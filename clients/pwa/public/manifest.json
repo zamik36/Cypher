@@ -1,7 +1,7 @@
 {
-  "name": "P2P Share",
-  "short_name": "P2P",
-  "description": "Anonymous, end-to-end encrypted file sharing. No accounts. No tracking.",
+  "name": "Шифр",
+  "short_name": "Шифр",
+  "description": "Anonymous, end-to-end encrypted messenger. No accounts. No tracking.",
   "start_url": "/",
   "scope": "/",
   "id": "/",

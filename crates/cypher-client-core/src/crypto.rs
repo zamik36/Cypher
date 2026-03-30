@@ -108,4 +108,29 @@ impl KeyManager {
 
         state.decrypt(ciphertext, &rk, msg_no)
     }
+
+    /// Get an owned copy of the ratchet state for persistence.
+    ///
+    /// Uses serialize+deserialize because `RatchetState` intentionally does not
+    /// implement `Clone` (it holds secret key material with a zeroizing `Drop`).
+    pub fn get_ratchet_state(&self, peer_id: &[u8]) -> Option<RatchetState> {
+        let state_ref = self.peer_sessions.get(peer_id)?;
+        let blob = state_ref.serialize().ok()?;
+        RatchetState::deserialize(&blob).ok()
+    }
+
+    /// Restore a previously persisted ratchet state for a peer.
+    pub fn restore_ratchet_state(&self, peer_id: &[u8], state: RatchetState) {
+        self.peer_sessions.insert(peer_id.to_vec(), state);
+    }
+
+    /// Check whether a ratchet session already exists for a peer.
+    pub fn has_session(&self, peer_id: &[u8]) -> bool {
+        self.peer_sessions.contains_key(peer_id)
+    }
+
+    /// Remove all peer sessions (used during cache clear).
+    pub fn clear_sessions(&self) {
+        self.peer_sessions.clear();
+    }
 }

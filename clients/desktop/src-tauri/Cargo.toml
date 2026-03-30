@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 cypher-client-core = { path = "../../../crates/cypher-client-core" }
+cypher-crypto = { path = "../../../crates/cypher-crypto" }
 cypher-common = { path = "../../../crates/cypher-common" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,5 +1,6 @@
 mod commands;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use cypher_client_core::api::{ClientApi, ClientEvent};
@@ -10,16 +11,21 @@ use tokio::sync::Mutex;
 
 /// Shared application state injected into every Tauri command via `State<AppState>`.
 pub struct AppState {
-    pub api: Arc<ClientApi>,
+    /// The client API. Wrapped in Arc<Mutex> so it can be replaced when the user
+    /// unlocks or creates an identity (switching from ephemeral to persistent).
+    pub api: Arc<Mutex<ClientApi>>,
     /// All connected remote peers.
-    pub peers: Arc<Mutex<Vec<PeerId>>>,
+    pub peers: Arc<Mutex<HashSet<PeerId>>>,
+    /// Current nickname (set after identity unlock/create).
+    pub nickname: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            api: Arc::new(ClientApi::new()),
-            peers: Arc::new(Mutex::new(Vec::new())),
+            api: Arc::new(Mutex::new(ClientApi::new())),
+            peers: Arc::new(Mutex::new(HashSet::new())),
+            nickname: Mutex::new(None),
         }
     }
 }
@@ -47,7 +53,7 @@ pub fn run() {
             let peers = Arc::clone(&state.peers);
 
             tauri::async_runtime::spawn(async move {
-                event_loop(api, peers, handle).await;
+                event_loop_wrapper(api, peers, handle).await;
             });
 
             Ok(())
@@ -63,34 +69,66 @@ pub fn run() {
             commands::transfer::accept_file,
             commands::transfer::get_transfers,
             commands::qr::generate_qr,
+            commands::identity::has_identity,
+            commands::identity::create_identity,
+            commands::identity::unlock_identity,
+            commands::identity::export_mnemonic,
+            commands::identity::import_mnemonic,
+            commands::identity::get_conversations,
+            commands::identity::get_history,
+            commands::identity::clear_chat_history,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");
 }
 
-async fn event_loop(
-    api: Arc<ClientApi>,
-    peers: Arc<Mutex<Vec<PeerId>>>,
+/// Wrapper that locks the API to call next_event, then releases the lock
+/// before processing the event (so commands aren't blocked).
+async fn event_loop_wrapper(
+    api: Arc<Mutex<ClientApi>>,
+    peers: Arc<Mutex<HashSet<PeerId>>>,
     handle: tauri::AppHandle,
 ) {
-    while let Some(event) = api.next_event().await {
+    loop {
+        let event = {
+            let api_guard = api.lock().await;
+            api_guard.next_event().await
+        };
+        let Some(event) = event else { break };
+        handle_event(event, &api, &peers, &handle).await;
+    }
+}
+
+async fn handle_event(
+    event: ClientEvent,
+    api: &Arc<Mutex<ClientApi>>,
+    peers: &Arc<Mutex<HashSet<PeerId>>>,
+    handle: &tauri::AppHandle,
+) {
         match event {
             ClientEvent::Connected { peer_id } => {
                 let _ = handle.emit("cypher://connected", peer_id_hex(&peer_id));
             }
             ClientEvent::Disconnected => {
+                // Clear peer list on disconnect — sessions are invalid after reconnect.
+                peers.lock().await.clear();
                 let _ = handle.emit("cypher://disconnected", ());
             }
             ClientEvent::PeerConnected { peer_id } => {
-                // Add peer to the list and auto-initiate E2EE session.
+                // Add peer (O(1) dedup via HashSet) and auto-initiate E2EE session.
                 {
-                    let mut list = peers.lock().await;
-                    if !list.iter().any(|p| p.as_bytes() == peer_id.as_bytes()) {
-                        list.push(peer_id.clone());
-                    }
+                    let mut set = peers.lock().await;
+                    set.insert(peer_id.clone());
                 }
-                if let Err(e) = api.initiate_session(&peer_id).await {
-                    tracing::warn!("auto initiate_session failed: {e}");
+                {
+                    let api_guard = api.lock().await;
+                    if let Err(e) = api_guard.initiate_session(&peer_id).await {
+                        tracing::warn!("auto initiate_session failed: {e}");
+                    }
+                    // Auto-save conversation when a new peer connects.
+                    if let Some(store) = api_guard.message_store() {
+                        let _ = store.save_conversation(&peer_id, None);
+                    }
                 }
                 let _ = handle.emit("cypher://peer_connected", peer_id_hex(&peer_id));
             }
@@ -162,5 +200,10 @@ fn peer_id_hex(id: &PeerId) -> String {
 }
 
 fn bytes_to_hex(b: &[u8]) -> String {
-    b.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write;
+    let mut s = String::with_capacity(b.len() * 2);
+    for byte in b {
+        let _ = write!(s, "{byte:02x}");
+    }
+    s
 }

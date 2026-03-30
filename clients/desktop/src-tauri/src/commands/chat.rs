@@ -29,9 +29,8 @@ pub async fn send_message(
     let pid = cypher_common::PeerId::from_bytes(&peer_id_bytes)
         .ok_or("peer_id must be 32 bytes")?;
 
-    state
-        .api
-        .send_message(&pid, text.as_bytes())
+    let api = state.api.lock().await;
+    api.send_message(&pid, text.as_bytes())
         .await
         .map_err(|e| e.to_string())
 }

@@ -1196,4 +1196,127 @@ input[type="text"]::placeholder { color: var(--text-muted); }
 
   /* ── Empty state ─────────────────────────────────────────────── */
   .empty-state { padding: 30px 0; }
+
+  /* ── Identity (mobile) ──────────────────────────────────────── */
+  .identity-card { margin: 16px; padding: 24px 20px; }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+   Identity View (unlock / create / import)
+   ══════════════════════════════════════════════════════════════════ */
+
+.identity-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  padding: 16px;
+}
+
+.identity-card {
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 40px 32px;
+  max-width: 380px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}
+
+.identity-card h2 {
+  margin: 0 0 4px;
+  font-size: 28px;
+  letter-spacing: 2px;
+}
+
+.identity-subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 0 0 28px;
+}
+
+.identity-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.identity-form input {
+  text-align: center;
+}
+
+.identity-links {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 0;
+}
+.link-btn:hover { text-decoration: underline; }
+
+.identity-error {
+  margin-top: 12px;
+  color: var(--red);
+  font-size: 13px;
+}
+
+/* ── Settings: Clear confirmation ─────────────────────────────── */
+
+.btn-danger {
+  background: var(--red);
+  color: #fff;
+  border: none;
+  padding: 9px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+}
+.btn-danger:hover { opacity: 0.9; }
+.btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.clear-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.clear-warning {
+  font-size: 13px;
+  color: var(--red);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.seed-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.seed-display code {
+  flex: 1;
+  font-size: 11px;
+  word-break: break-all;
+  color: var(--accent);
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
 }

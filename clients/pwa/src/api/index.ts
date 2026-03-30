@@ -22,20 +22,33 @@ export interface TransferInfo {
 }
 
 
-type EventCallback<T> = (payload: T) => void;
 type Unsubscribe = () => void;
 
-const listeners: Record<string, EventCallback<unknown>[]> = {};
+interface EventMap {
+  connected: string;
+  disconnected: undefined;
+  peer_connected: string;
+  message: ChatMessage;
+  message_sent: { to: string; text: string; timestamp: number };
+  file_offered: { from: string; file_id: string; name: string; size: number };
+  file_progress: { file_id: string; progress: number };
+  file_complete: string;
+  error: string;
+}
 
-function emit(event: string, payload: unknown) {
+type EventCallback<T> = (payload: T) => void;
+
+const listeners: { [K in keyof EventMap]?: EventCallback<EventMap[K]>[] } = {};
+
+function emit<K extends keyof EventMap>(event: K, payload: EventMap[K]) {
   for (const cb of listeners[event] ?? []) cb(payload);
 }
 
-function on<T>(event: string, cb: EventCallback<T>): Unsubscribe {
+function on<K extends keyof EventMap>(event: K, cb: EventCallback<EventMap[K]>): Unsubscribe {
   if (!listeners[event]) listeners[event] = [];
-  listeners[event].push(cb as EventCallback<unknown>);
+  listeners[event]!.push(cb);
   return () => {
-    listeners[event] = listeners[event].filter((x) => x !== cb);
+    listeners[event] = listeners[event]!.filter((x) => x !== cb) as typeof listeners[K];
   };
 }
 
@@ -43,13 +56,32 @@ function on<T>(event: string, cb: EventCallback<T>): Unsubscribe {
 let ws: WebSocket | null = null;
 let peerId: Uint8Array = randomBytes(32);
 let peerIdHex = hexEncode(peerId);
+
+/** Replace the peerId with a persistent one (called after identity unlock). */
+export function setPeerId(newPeerId: Uint8Array) {
+  peerId = newPeerId;
+  peerIdHex = hexEncode(peerId);
+}
+let activePeerForTransfer: string | null = null;
+
 let pendingLinkResolve: ((v: string) => void) | null = null;
 let pendingLinkReject: ((e: Error) => void) | null = null;
 
-// File receive buffers: fileId hex → chunks[]
-const fileBuffers = new Map<string, { name: string; size: number; totalChunks: number; chunks: Map<number, Uint8Array>; hash: Uint8Array }>();
+// File receive buffers: fileId hex → chunks[] + creation timestamp for timeout.
+const FILE_TRANSFER_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const fileBuffers = new Map<string, { name: string; size: number; totalChunks: number; chunks: Map<number, Uint8Array>; hash: Uint8Array; createdAt: number }>();
 
 const CHUNK_SIZE = 64 * 1024; // 64 KB
+
+function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+  return true;
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[\/\\?%*:|"<>]/g, "_");
+}
 
 function send(data: Uint8Array) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -66,7 +98,9 @@ function handleMessage(data: ArrayBuffer) {
     case "ChatSend": {
       const from = hexEncode(msg.msg.peerId);
       // For PWA-to-PWA: ciphertext is plaintext UTF-8.
-      const text = new TextDecoder().decode(msg.msg.ciphertext);
+      const MAX_MSG_LEN = 50_000;
+      const raw = new TextDecoder().decode(msg.msg.ciphertext);
+      const text = raw.length > MAX_MSG_LEN ? raw.slice(0, MAX_MSG_LEN) + "… [truncated]" : raw;
       emit("message", { from, text, timestamp: Date.now() } as ChatMessage);
       break;
     }
@@ -79,7 +113,15 @@ function handleMessage(data: ArrayBuffer) {
         totalChunks: msg.msg.chunks,
         chunks: new Map(),
         hash: msg.msg.hash,
+        createdAt: Date.now(),
       });
+      // Auto-cleanup stale transfer after timeout.
+      setTimeout(() => {
+        if (fileBuffers.has(fileId)) {
+          fileBuffers.delete(fileId);
+          emit("error", `File transfer "${msg.msg.name}" timed out`);
+        }
+      }, FILE_TRANSFER_TIMEOUT_MS);
       emit("file_offered", { from, file_id: fileId, name: msg.msg.name, size: msg.msg.size });
       break;
     }
@@ -100,21 +142,36 @@ function handleMessage(data: ArrayBuffer) {
       const fileId = hexEncode(msg.msg.fileId);
       const buf = fileBuffers.get(fileId);
       if (buf) {
-        // Assemble file and trigger download.
+        // Assemble file.
         const parts: Uint8Array[] = [];
+        let totalLen = 0;
         for (let i = 0; i < buf.totalChunks; i++) {
           const chunk = buf.chunks.get(i);
-          if (chunk) parts.push(chunk);
+          if (chunk) { parts.push(chunk); totalLen += chunk.length; }
         }
-        const blob = new Blob(parts as BlobPart[]);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = buf.name;
-        a.click();
-        URL.revokeObjectURL(url);
-        fileBuffers.delete(fileId);
-        emit("file_complete", fileId);
+        const assembled = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const part of parts) { assembled.set(part, offset); offset += part.length; }
+
+        // Verify SHA-256 hash integrity.
+        crypto.subtle.digest("SHA-256", assembled).then((hashBuf) => {
+          const hash = new Uint8Array(hashBuf);
+          if (buf.hash.length > 0 && !arraysEqual(hash, buf.hash)) {
+            emit("error", "File integrity check failed — hash mismatch");
+            fileBuffers.delete(fileId);
+            return;
+          }
+          // Hash OK — trigger download.
+          const blob = new Blob([assembled]);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = sanitizeFilename(buf.name);
+          a.click();
+          URL.revokeObjectURL(url);
+          fileBuffers.delete(fileId);
+          emit("file_complete", fileId);
+        });
       }
       break;
     }
@@ -158,29 +215,43 @@ export const api = {
       }
       try { if (ws) ws.close(); } catch { /* ignore */ }
 
+      let settled = false;
       ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
-        // Send SESSION_INIT immediately.
+        // Send SESSION_INIT — don't resolve until SessionAck arrives.
         const nonce = randomBytes(32);
         send(encodeSessionInit(peerId, nonce));
-        resolve();
       };
 
       ws.onmessage = (e: MessageEvent) => {
         if (e.data instanceof ArrayBuffer) {
+          // Resolve on first SessionAck (gateway confirmed our session).
+          if (!settled) {
+            const msg = protoDispatch(new Uint8Array(e.data));
+            if (msg.type === "SessionAck") {
+              settled = true;
+              resolve();
+            }
+          }
           handleMessage(e.data);
         }
       };
 
       ws.onclose = () => {
+        if (!settled) { settled = true; reject(new Error("Connection closed before SessionAck")); }
         emit("disconnected", undefined);
       };
 
       ws.onerror = () => {
-        reject(new Error("WebSocket connection failed"));
+        if (!settled) { settled = true; reject(new Error("WebSocket connection failed")); }
       };
+
+      // Timeout: don't wait forever for SessionAck.
+      setTimeout(() => {
+        if (!settled) { settled = true; reject(new Error("SessionAck timeout")); try { ws?.close(); } catch { /* ignore */ } }
+      }, 10_000);
     });
   },
 
@@ -207,7 +278,7 @@ export const api = {
   joinLink(linkId: string): Promise<string> {
     return new Promise((resolve, reject) => {
       // Listen for peer_connected event once.
-      const unsub = on<string>("peer_connected", (remotePeerId) => {
+      const unsub = on("peer_connected", (remotePeerId) => {
         unsub();
         resolve(remotePeerId);
       });
@@ -220,6 +291,8 @@ export const api = {
     // PWA-to-PWA: send plaintext in ciphertext field.
     const ciphertext = new TextEncoder().encode(text);
     send(encodeChatSend(hexDecode(targetPeerId), ciphertext, new Uint8Array(0), 0));
+    // Notify listeners so App.tsx can persist the sent message.
+    emit("message_sent", { to: targetPeerId, text, timestamp: Date.now() });
     return Promise.resolve();
   },
 
@@ -229,7 +302,7 @@ export const api = {
 
   sendFile(file: File): Promise<TransferInfo> {
     return new Promise((resolve, reject) => {
-      const activePeer = (globalThis as Record<string, unknown>).__p2pActivePeer as string | undefined;
+      const activePeer = activePeerForTransfer;
       if (!activePeer) {
         reject(new Error("No active peer to send to"));
         return;
@@ -302,7 +375,7 @@ export function onConnected(cb: (peerId: string) => void): Promise<Unsubscribe> 
   return Promise.resolve(on("connected", cb));
 }
 export function onDisconnected(cb: () => void): Promise<Unsubscribe> {
-  return Promise.resolve(on("disconnected", cb));
+  return Promise.resolve(on("disconnected", cb as EventCallback<undefined>));
 }
 export function onPeerConnected(cb: (peerId: string) => void): Promise<Unsubscribe> {
   return Promise.resolve(on("peer_connected", cb));
@@ -322,8 +395,11 @@ export function onFileComplete(cb: (fileId: string) => void): Promise<Unsubscrib
 export function onError(cb: (msg: string) => void): Promise<Unsubscribe> {
   return Promise.resolve(on("error", cb));
 }
+export function onMessageSent(cb: (info: { to: string; text: string; timestamp: number }) => void): Promise<Unsubscribe> {
+  return Promise.resolve(on("message_sent", cb));
+}
 
 /** Set the active peer for file sending. Called from stores. */
 export function setActivePeerForTransfer(peerId: string | null) {
-  (globalThis as Record<string, unknown>).__p2pActivePeer = peerId;
+  activePeerForTransfer = peerId;
 }

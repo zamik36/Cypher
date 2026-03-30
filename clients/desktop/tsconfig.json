@@ -7,6 +7,7 @@
     "moduleResolution": "bundler",
     "jsxImportSource": "solid-js",
     "jsx": "preserve",
+    "noEmit": true,
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,

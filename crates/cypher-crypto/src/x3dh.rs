@@ -3,6 +3,8 @@ use sha2::Sha256;
 use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroize;
 
+use x25519_dalek::StaticSecret as X25519StaticSecret;
+
 use crate::identity::{EphemeralKeyPair, IdentityKeyPair, SignedPreKey};
 
 /// A 32-byte shared secret derived from X3DH.
@@ -90,25 +92,45 @@ pub fn x3dh_responder(
 /// Symmetric key agreement for mutual session establishment.
 ///
 /// Both peers call this with each other's public keys. The result is the same
-/// shared secret regardless of which side calls it, because the DH outputs
-/// are sorted before concatenation.
+/// shared secret regardless of which side calls it, because the cross-DH
+/// outputs are sorted before concatenation.
 ///
-/// This is used when both peers independently fetch each other's prekeys and
-/// need to derive the same shared secret without transmitting an ephemeral key.
+/// Including both IK and SPK in the derivation provides forward secrecy:
+/// compromising the long-term identity key alone does not reveal past sessions
+/// (as long as the SPK was rotated).
 ///
 /// Computes:
-///   DH1 = X25519(our_ik_dh, their_spk)
-///   DH2 = X25519(our_ik_dh, their_ik_dh)
-///   SK  = HKDF-SHA256(sort(DH1, DH2))
+///   DH_ik  = X25519(our_ik_dh, their_ik_dh)           — symmetric
+///   DH_a   = X25519(our_ik_dh, their_spk)             — cross term
+///   DH_b   = X25519(our_spk_secret, their_ik_dh)      — cross term (counterpart)
+///   SK     = HKDF-SHA256(DH_ik || sort(DH_a, DH_b))
 pub fn x3dh_mutual(
     our_ik: &IdentityKeyPair,
+    our_spk_secret: &X25519StaticSecret,
     their_ik_dh: &X25519PublicKey,
-    _their_spk: &X25519PublicKey,
+    their_spk: &X25519PublicKey,
 ) -> SharedSecret {
-    // Symmetric ECDH: DH(our_ik, their_ik) produces the same shared secret
-    // on both sides. Combined with HKDF for proper key derivation.
-    let dh = our_ik.dh_secret.diffie_hellman(their_ik_dh);
-    kdf(dh.as_bytes())
+    // DH between identity keys — symmetric by construction.
+    let dh_ik = our_ik.dh_secret.diffie_hellman(their_ik_dh);
+
+    // Cross-terms: our_ik × their_spk  and  our_spk × their_ik.
+    // By DH commutativity the other side computes the same two values
+    // in swapped positions, so sorting ensures identical concatenation.
+    let dh_cross_a = our_ik.dh_secret.diffie_hellman(their_spk);
+    let dh_cross_b = our_spk_secret.diffie_hellman(their_ik_dh);
+
+    let (first, second) = if dh_cross_a.as_bytes() <= dh_cross_b.as_bytes() {
+        (dh_cross_a, dh_cross_b)
+    } else {
+        (dh_cross_b, dh_cross_a)
+    };
+
+    let mut dh_concat = Vec::with_capacity(96);
+    dh_concat.extend_from_slice(dh_ik.as_bytes());
+    dh_concat.extend_from_slice(first.as_bytes());
+    dh_concat.extend_from_slice(second.as_bytes());
+
+    kdf(&dh_concat)
 }
 
 #[cfg(test)]
@@ -150,8 +172,8 @@ mod tests {
         let bob_ik = IdentityKeyPair::generate();
         let bob_spk = SignedPreKey::generate();
 
-        let alice_secret = x3dh_mutual(&alice_ik, &bob_ik.dh_public_key(), &bob_spk.public_key());
-        let bob_secret = x3dh_mutual(&bob_ik, &alice_ik.dh_public_key(), &alice_spk.public_key());
+        let alice_secret = x3dh_mutual(&alice_ik, &alice_spk.secret, &bob_ik.dh_public_key(), &bob_spk.public_key());
+        let bob_secret = x3dh_mutual(&bob_ik, &bob_spk.secret, &alice_ik.dh_public_key(), &alice_spk.public_key());
 
         assert_eq!(alice_secret.0, bob_secret.0);
     }

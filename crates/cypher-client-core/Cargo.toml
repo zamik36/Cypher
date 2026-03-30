@@ -23,3 +23,13 @@ dashmap.workspace = true
 x25519-dalek.workspace = true
 serde_json.workspace = true
 rand.workspace = true
+aes-gcm.workspace = true
+argon2.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+bincode.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

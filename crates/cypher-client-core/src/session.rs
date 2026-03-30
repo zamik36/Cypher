@@ -15,6 +15,12 @@ impl ClientSession {
         Self { identity, peer_id }
     }
 
+    /// Create a session from an existing (persistent) identity keypair.
+    pub fn from_identity(identity: IdentityKeyPair) -> Self {
+        let peer_id = identity.peer_id();
+        Self { identity, peer_id }
+    }
+
     pub fn peer_id(&self) -> &PeerId {
         &self.peer_id
     }
