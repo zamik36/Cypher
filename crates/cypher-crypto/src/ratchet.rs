@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use cypher_common::{Error, Result};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use zeroize::Zeroize;
@@ -46,8 +47,11 @@ pub fn dh_ratchet(root_key: &[u8; 32], dh_output: &[u8; 32]) -> ([u8; 32], [u8; 
 /// Key for looking up skipped message keys: (ratchet public key, message number).
 type SkippedKey = ([u8; 32], u32);
 
-/// Maximum number of skipped message keys to store per ratchet public key.
+/// Maximum number of skipped message keys to store per ratchet step.
 const MAX_SKIP: u32 = 256;
+
+/// Global cap on total skipped keys stored per session to prevent memory exhaustion.
+const MAX_TOTAL_SKIPPED: usize = 2048;
 
 /// The Double Ratchet state for a single session.
 pub struct RatchetState {
@@ -124,6 +128,41 @@ impl RatchetState {
         }
     }
 
+    /// Serialize the ratchet state to a binary blob (for encrypted storage).
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        let s = SerializableRatchetState {
+            root_key: self.root_key,
+            send_chain_key: self.send_chain_key,
+            recv_chain_key: self.recv_chain_key,
+            send_ratchet_secret: self.send_ratchet_secret.to_bytes(),
+            send_ratchet_key: self.send_ratchet_key.to_bytes(),
+            recv_ratchet_key: self.recv_ratchet_key.map(|k| k.to_bytes()),
+            send_count: self.send_count,
+            recv_count: self.recv_count,
+            prev_send_count: self.prev_send_count,
+            skipped_keys: self.skipped_keys.clone(),
+        };
+        postcard::to_allocvec(&s).map_err(|e| Error::Crypto(format!("ratchet serialize: {e}")))
+    }
+
+    /// Deserialize a ratchet state from a binary blob.
+    pub fn deserialize(data: &[u8]) -> Result<Self> {
+        let s: SerializableRatchetState = postcard::from_bytes(data)
+            .map_err(|e| Error::Crypto(format!("ratchet deserialize: {e}")))?;
+        Ok(Self {
+            root_key: s.root_key,
+            send_chain_key: s.send_chain_key,
+            recv_chain_key: s.recv_chain_key,
+            send_ratchet_secret: X25519StaticSecret::from(s.send_ratchet_secret),
+            send_ratchet_key: X25519PublicKey::from(s.send_ratchet_key),
+            recv_ratchet_key: s.recv_ratchet_key.map(X25519PublicKey::from),
+            send_count: s.send_count,
+            recv_count: s.recv_count,
+            prev_send_count: s.prev_send_count,
+            skipped_keys: s.skipped_keys,
+        })
+    }
+
     /// Encrypt a plaintext message.
     ///
     /// Returns `(ciphertext, ratchet_public_key, message_number)`.
@@ -138,8 +177,12 @@ impl RatchetState {
         let msg_no = self.send_count;
         self.send_count += 1;
 
-        // Use message number as nonce material.
-        let nonce_material = msg_no.to_be_bytes();
+        // Nonce material = message_key || msg_no — guarantees uniqueness even if
+        // msg_no resets after a ratchet step (defense-in-depth; message_key is already
+        // unique per message, but including it prevents nonce reuse under any KDF failure).
+        let mut nonce_material = Vec::with_capacity(36);
+        nonce_material.extend_from_slice(&message_key);
+        nonce_material.extend_from_slice(&msg_no.to_be_bytes());
         // Use ratchet public key as AAD.
         let aad = self.send_ratchet_key.as_bytes();
 
@@ -161,7 +204,9 @@ impl RatchetState {
         // Check if this is a skipped message key.
         let skip_key = (ratchet_pubkey.to_bytes(), msg_no);
         if let Some(message_key) = self.skipped_keys.remove(&skip_key) {
-            let nonce_material = msg_no.to_be_bytes();
+            let mut nonce_material = Vec::with_capacity(36);
+            nonce_material.extend_from_slice(&message_key);
+            nonce_material.extend_from_slice(&msg_no.to_be_bytes());
             let aad = ratchet_pubkey.as_bytes();
             return aead_decrypt(&message_key, &nonce_material, ciphertext, aad);
         }
@@ -210,7 +255,9 @@ impl RatchetState {
         self.recv_chain_key = Some(new_chain_key);
         self.recv_count += 1;
 
-        let nonce_material = msg_no.to_be_bytes();
+        let mut nonce_material = Vec::with_capacity(36);
+        nonce_material.extend_from_slice(&message_key);
+        nonce_material.extend_from_slice(&msg_no.to_be_bytes());
         let aad = ratchet_pubkey.as_bytes();
         aead_decrypt(&message_key, &nonce_material, ciphertext, aad)
     }
@@ -227,6 +274,12 @@ impl RatchetState {
                     to_skip
                 )));
             }
+            if self.skipped_keys.len() + to_skip as usize > MAX_TOTAL_SKIPPED {
+                return Err(Error::Crypto(format!(
+                    "Global skipped key limit reached ({})",
+                    MAX_TOTAL_SKIPPED
+                )));
+            }
 
             let mut chain_key = recv_chain_key;
             for i in self.recv_count..until {
@@ -240,6 +293,21 @@ impl RatchetState {
         }
         Ok(())
     }
+}
+
+/// Serde-friendly representation of [`RatchetState`] for bincode serialization.
+#[derive(Serialize, Deserialize)]
+struct SerializableRatchetState {
+    root_key: [u8; 32],
+    send_chain_key: Option<[u8; 32]>,
+    recv_chain_key: Option<[u8; 32]>,
+    send_ratchet_secret: [u8; 32],
+    send_ratchet_key: [u8; 32],
+    recv_ratchet_key: Option<[u8; 32]>,
+    send_count: u32,
+    recv_count: u32,
+    prev_send_count: u32,
+    skipped_keys: HashMap<SkippedKey, [u8; 32]>,
 }
 
 impl Drop for RatchetState {
@@ -319,6 +387,31 @@ mod tests {
 
         let pt1 = bob.decrypt(&ct1, &rk1, mn1).unwrap();
         assert_eq!(pt1, b"msg 1");
+    }
+
+    #[test]
+    fn ratchet_serialize_roundtrip() {
+        let shared_secret = SharedSecret([99u8; 32]);
+        let bob_ratchet_secret = X25519StaticSecret::random_from_rng(OsRng);
+        let bob_ratchet_public = X25519PublicKey::from(&bob_ratchet_secret);
+
+        let mut alice = RatchetState::init_sender(&shared_secret, &bob_ratchet_public);
+        let mut bob = RatchetState::init_receiver(&shared_secret, bob_ratchet_secret);
+
+        // Exchange some messages to build up state.
+        let (ct, rk, mn) = alice.encrypt(b"hello").unwrap();
+        bob.decrypt(&ct, &rk, mn).unwrap();
+        let (ct2, rk2, mn2) = bob.encrypt(b"world").unwrap();
+        alice.decrypt(&ct2, &rk2, mn2).unwrap();
+
+        // Serialize and deserialize Alice's state.
+        let blob = alice.serialize().unwrap();
+        let mut restored = RatchetState::deserialize(&blob).unwrap();
+
+        // Restored state should produce identical encryption.
+        let (ct3, rk3, mn3) = restored.encrypt(b"after restore").unwrap();
+        let pt3 = bob.decrypt(&ct3, &rk3, mn3).unwrap();
+        assert_eq!(pt3, b"after restore");
     }
 
     #[test]

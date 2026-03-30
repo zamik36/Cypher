@@ -28,12 +28,13 @@ pub async fn send_file(
         .peers
         .lock()
         .await
-        .first()
+        .iter()
+        .next()
         .cloned()
         .ok_or_else(|| "no peer connected".to_string())?;
 
-    let meta = state
-        .api
+    let api = state.api.lock().await;
+    let meta = api
         .send_file(&peer_id, Path::new(&path))
         .await
         .map_err(|e| e.to_string())?;
@@ -58,9 +59,8 @@ pub async fn accept_file(
     dest_path: String,
 ) -> Result<(), String> {
     let id_bytes = hex_decode(&file_id).map_err(|e| e.to_string())?;
-    state
-        .api
-        .accept_file(&id_bytes, Path::new(&dest_path))
+    let api = state.api.lock().await;
+    api.accept_file(&id_bytes, Path::new(&dest_path))
         .await
         .map_err(|e| e.to_string())
 }
@@ -86,15 +86,16 @@ pub async fn browse_and_send(
         .peers
         .lock()
         .await
-        .first()
+        .iter()
+        .next()
         .cloned()
         .ok_or_else(|| "no peer connected".to_string())?;
 
+    let api = state.api.lock().await;
     let mut result = Vec::new();
     for path_buf in paths {
         let path_str = path_buf.to_string();
-        let meta = state
-            .api
+        let meta = api
             .send_file(&peer_id, Path::new(&path_str))
             .await
             .map_err(|e| e.to_string())?;

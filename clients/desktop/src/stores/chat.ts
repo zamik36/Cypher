@@ -1,14 +1,18 @@
 import { createStore } from "solid-js/store";
 import type { ChatMessage } from "../api/tauri";
 
+/** Max messages kept in memory per peer — older ones are evicted. */
+const MAX_IN_MEMORY = 1500;
+
 /** Per-peer message storage: peerId → ChatMessage[] */
 const [chatsByPeer, setChatsByPeer] = createStore<Record<string, ChatMessage[]>>({});
 
 export function addMessage(peerId: string, msg: ChatMessage) {
-  setChatsByPeer((prev) => ({
-    ...prev,
-    [peerId]: [...(prev[peerId] || []), msg],
-  }));
+  setChatsByPeer((prev) => {
+    const existing = prev[peerId] || [];
+    const updated = [...existing, msg];
+    return { ...prev, [peerId]: updated.length > MAX_IN_MEMORY ? updated.slice(-MAX_IN_MEMORY) : updated };
+  });
 }
 
 export function getMessages(peerId: string): ChatMessage[] {

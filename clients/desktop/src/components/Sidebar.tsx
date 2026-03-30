@@ -12,6 +12,7 @@ interface SidebarProps {
   unread: number;
   drawerOpen: boolean;
   setDrawerOpen: (open: boolean) => void;
+  nickname: string | null;
 }
 
 export default function Sidebar(props: SidebarProps) {
@@ -41,7 +42,7 @@ export default function Sidebar(props: SidebarProps) {
       <aside class={`sidebar ${props.drawerOpen ? "open" : ""}`}>
         <div class="sidebar-logo">
           <LinkIcon width="22" height="22" />
-          <span>P2P Share</span>
+          <span>Cypher</span>
         </div>
 
         <nav class="sidebar-nav">
@@ -80,6 +81,11 @@ export default function Sidebar(props: SidebarProps) {
               <SunIcon /> Light mode
             </Show>
           </button>
+          <Show when={props.nickname}>
+            <div class="sidebar-identity">
+              <span class="identity-nick">{props.nickname}</span>
+            </div>
+          </Show>
           <div class="sidebar-status">
             <span class={`dot ${connection.connected ? "connected" : ""}`} />
             <span>{connection.connected ? "Connected" : "Offline"}</span>

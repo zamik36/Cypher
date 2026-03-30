@@ -1,7 +1,69 @@
 use cypher_common::{Error, PeerId, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hkdf::Hkdf;
 use rand::rngs::OsRng;
+use rand::RngCore;
+use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// A 256-bit seed from which all identity keys are deterministically derived.
+///
+/// The seed can be exported as a BIP39 mnemonic (24 words) for backup/restore.
+/// On disk it is stored encrypted with a user-chosen passphrase via Argon2id + AES-256-GCM.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct IdentitySeed(pub [u8; 32]);
+
+impl IdentitySeed {
+    /// Generate a new random 256-bit seed.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    /// Encode the seed as a 24-word BIP39 mnemonic.
+    pub fn to_mnemonic(&self) -> String {
+        let m =
+            bip39::Mnemonic::from_entropy(&self.0).expect("32 bytes is valid entropy for BIP39");
+        m.to_string()
+    }
+
+    /// Decode a 24-word BIP39 mnemonic back into a seed.
+    pub fn from_mnemonic(phrase: &str) -> Result<Self> {
+        let m = bip39::Mnemonic::parse(phrase)
+            .map_err(|e| Error::Crypto(format!("invalid mnemonic: {e}")))?;
+        let entropy = m.to_entropy();
+        if entropy.len() != 32 {
+            return Err(Error::Crypto(format!(
+                "expected 32-byte entropy, got {}",
+                entropy.len()
+            )));
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&entropy);
+        Ok(Self(bytes))
+    }
+
+    /// Deterministically derive an [`IdentityKeyPair`] from this seed.
+    pub fn derive_identity(&self) -> IdentityKeyPair {
+        IdentityKeyPair::from_seed(self)
+    }
+
+    /// Derive a Storage Encryption Key (SEK) for encrypting local data at rest.
+    pub fn derive_storage_key(&self) -> [u8; 32] {
+        let hk = Hkdf::<Sha256>::new(None, &self.0);
+        let mut sek = [0u8; 32];
+        hk.expand(b"cypher-storage-key", &mut sek)
+            .expect("32 bytes is valid for HKDF-SHA256");
+        sek
+    }
+
+    /// Return the raw seed bytes (for encryption/storage purposes).
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
 
 /// An identity keypair containing both Ed25519 (for signing) and X25519 (for DH).
 ///
@@ -15,10 +77,34 @@ pub struct IdentityKeyPair {
 }
 
 impl IdentityKeyPair {
-    /// Generate a new random identity keypair.
+    /// Generate a new random identity keypair (ephemeral, not persistent).
     pub fn generate() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         let dh_secret = X25519StaticSecret::random_from_rng(OsRng);
+        Self {
+            signing_key,
+            dh_secret,
+        }
+    }
+
+    /// Deterministically derive an identity keypair from a seed via HKDF-SHA256.
+    pub fn from_seed(seed: &IdentitySeed) -> Self {
+        let hk_ed = Hkdf::<Sha256>::new(None, &seed.0);
+        let mut ed_bytes = [0u8; 32];
+        hk_ed
+            .expand(b"cypher-ed25519", &mut ed_bytes)
+            .expect("32 bytes is valid for HKDF-SHA256");
+        let signing_key = SigningKey::from_bytes(&ed_bytes);
+        ed_bytes.zeroize();
+
+        let hk_dh = Hkdf::<Sha256>::new(None, &seed.0);
+        let mut dh_bytes = [0u8; 32];
+        hk_dh
+            .expand(b"cypher-x25519", &mut dh_bytes)
+            .expect("32 bytes is valid for HKDF-SHA256");
+        let dh_secret = X25519StaticSecret::from(dh_bytes);
+        dh_bytes.zeroize();
+
         Self {
             signing_key,
             dh_secret,
@@ -242,5 +328,58 @@ mod tests {
         let kp = IdentityKeyPair::generate();
         let peer_id = kp.peer_id();
         assert_eq!(peer_id.as_bytes(), &kp.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn seed_deterministic_derivation() {
+        let seed = IdentitySeed::generate();
+        let kp1 = seed.derive_identity();
+        let kp2 = seed.derive_identity();
+        assert_eq!(kp1.peer_id().as_bytes(), kp2.peer_id().as_bytes());
+        assert_eq!(
+            kp1.dh_public_key().as_bytes(),
+            kp2.dh_public_key().as_bytes()
+        );
+    }
+
+    #[test]
+    fn seed_mnemonic_roundtrip() {
+        let seed = IdentitySeed::generate();
+        let mnemonic = seed.to_mnemonic();
+        let words: Vec<&str> = mnemonic.split_whitespace().collect();
+        assert_eq!(words.len(), 24);
+
+        let restored = IdentitySeed::from_mnemonic(&mnemonic).unwrap();
+        assert_eq!(seed.0, restored.0);
+
+        // Derived identity must match.
+        let kp1 = seed.derive_identity();
+        let kp2 = restored.derive_identity();
+        assert_eq!(kp1.peer_id().as_bytes(), kp2.peer_id().as_bytes());
+    }
+
+    #[test]
+    fn seed_storage_key_deterministic() {
+        let seed = IdentitySeed::generate();
+        let sek1 = seed.derive_storage_key();
+        let sek2 = seed.derive_storage_key();
+        assert_eq!(sek1, sek2);
+        // SEK must differ from signing key bytes.
+        let kp = seed.derive_identity();
+        assert_ne!(&sek1, kp.verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn different_seeds_different_identities() {
+        let seed1 = IdentitySeed::generate();
+        let seed2 = IdentitySeed::generate();
+        let kp1 = seed1.derive_identity();
+        let kp2 = seed2.derive_identity();
+        assert_ne!(kp1.peer_id().as_bytes(), kp2.peer_id().as_bytes());
+    }
+
+    #[test]
+    fn invalid_mnemonic_fails() {
+        assert!(IdentitySeed::from_mnemonic("not a valid mnemonic").is_err());
     }
 }

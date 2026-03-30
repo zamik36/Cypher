@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for the P2P desktop app",
+  "description": "Default capabilities for the Cypher desktop app",
   "windows": ["main"],
   "permissions": [
     "core:default",

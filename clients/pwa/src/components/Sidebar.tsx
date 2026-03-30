@@ -41,7 +41,7 @@ export default function Sidebar(props: SidebarProps) {
       <aside class={`sidebar ${props.drawerOpen ? "open" : ""}`}>
         <div class="sidebar-logo">
           <LinkIcon width="22" height="22" />
-          <span>P2P Share</span>
+          <span>Cypher</span>
         </div>
 
         <nav class="sidebar-nav">

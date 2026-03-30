@@ -42,6 +42,10 @@ hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
+argon2 = "0.5"
+bip39 = { version = "2", features = ["std"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 crc32fast = "1"
 nom = "7"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }

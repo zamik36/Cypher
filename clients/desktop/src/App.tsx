@@ -7,6 +7,7 @@ import FilesView from "./components/FilesView";
 import SettingsView from "./components/SettingsView";
 import StatusBar from "./components/StatusBar";
 import ToastContainer from "./components/ToastContainer";
+import IdentityView from "./components/IdentityView";
 import {
   onConnected, onDisconnected, onPeerConnected,
   onMessage, onFileOffered, onFileProgress, onFileComplete, onError,
@@ -22,6 +23,15 @@ export default function App() {
   const [theme, setTheme] = createSignal<"dark" | "light">("dark");
   const [unread, setUnread] = createSignal(0);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
+  const [nickname, setNickname] = createSignal<string | null>(null);
+  const [unlocked, setUnlocked] = createSignal(false);
+
+  function handleIdentityUnlocked(peerId: string, nick: string) {
+    setNickname(nick);
+    setConnection({ peerId });
+    setUnlocked(true);
+    startApp();
+  }
 
   // Track pending room info so we can associate the next PeerConnected with a room
   let pendingRoom: { code: string; role: "host" | "guest" } | null = null;
@@ -47,18 +57,16 @@ export default function App() {
   let cleanupFns: Array<() => void> = [];
   onCleanup(() => cleanupFns.forEach((fn) => fn()));
 
-  onMount(async () => {
+  async function startApp() {
     // Register event listeners BEFORE connecting, so we don't miss the Connected event
     const unlisten = await Promise.all([
       onConnected((peerId) => {
-        console.log("[P2P] event: connected, peerId:", peerId);
         setConnection({ connected: true, peerId, status: "connected", gatewayConnecting: false, gatewayError: null });
       }),
       onDisconnected(() => {
         setConnection({ connected: false, peerId: null, status: "disconnected" });
       }),
       onPeerConnected((remotePeerId) => {
-        console.log("[P2P] event: peer_connected", remotePeerId);
         const room = pendingRoom || { code: "direct", role: "guest" as const };
         addPeer({
           peerId: remotePeerId,
@@ -72,7 +80,6 @@ export default function App() {
         navigateTo("chat");
       }),
       onMessage((msg) => {
-        // msg.from is the peer's hex id
         const peerId = msg.from;
         addMessage(peerId, msg);
         if (page() !== "chat") {
@@ -108,25 +115,23 @@ export default function App() {
       }),
       onError((msg) => {
         addToast(msg, "error");
-        console.error("p2p error:", msg);
       }),
     ]);
 
     cleanupFns = unlisten;
 
-    // Now auto-connect to gateway (listeners are already in place)
+    // Auto-connect to gateway.
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
       await api.connectToGateway(connection.gatewayAddr);
-      console.log("[P2P] connectToGateway resolved OK");
       setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
-      console.error("[P2P] connectToGateway error:", e);
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
     }
-  });
+  }
 
   return (
+    <Show when={unlocked()} fallback={<IdentityView onUnlocked={handleIdentityUnlocked} />}>
     <div class="app">
       <Sidebar
         page={page()}
@@ -136,6 +141,7 @@ export default function App() {
         unread={unread()}
         drawerOpen={drawerOpen()}
         setDrawerOpen={setDrawerOpen}
+        nickname={nickname()}
       />
 
       <main class="content">
@@ -145,7 +151,7 @@ export default function App() {
         <Show when={page() === "chat"}><ChatPane onNavigate={navigateTo} /></Show>
         <Show when={page() === "files"}><FilesView /></Show>
         <Show when={page() === "settings"}>
-          <SettingsView theme={theme()} setTheme={(t) => { setTheme(t); document.documentElement.setAttribute("data-theme", t); }} />
+          <SettingsView theme={theme()} setTheme={(t) => { setTheme(t); document.documentElement.setAttribute("data-theme", t); }} nickname={nickname()} />
         </Show>
       </main>
 
@@ -153,5 +159,6 @@ export default function App() {
       <BottomNav page={page()} setPage={navigateTo} unread={unread()} />
       <ToastContainer />
     </div>
+    </Show>
   );
 }

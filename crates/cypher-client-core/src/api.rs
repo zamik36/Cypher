@@ -32,6 +32,7 @@ use cypher_transport::{FrameFlags, TransportSession};
 
 use crate::connection::ServerConnection;
 use crate::crypto::KeyManager;
+use crate::persistence::MessageStore;
 use crate::session::ClientSession;
 use crate::signaling::SignalingClient;
 use crate::transfer::TransferManager;
@@ -98,14 +99,39 @@ pub struct ClientApi {
     p2p_socket: Mutex<Option<Arc<UdpSocket>>>,
     /// Relay client for TURN-like fallback (set during connect_relay).
     relay_client: Arc<Mutex<Option<cypher_nat::RelayClient>>>,
+    /// Optional persistent message store for chat history.
+    message_store: Option<Arc<dyn MessageStore>>,
 }
 
 impl ClientApi {
+    /// Create a new client with an ephemeral (random) identity.
     pub fn new() -> Self {
         let session = Arc::new(ClientSession::new());
         let keys = Arc::new(KeyManager::new(
             cypher_crypto::identity::IdentityKeyPair::generate(),
         ));
+        Self::build(session, keys, None)
+    }
+
+    /// Create a new client with a persistent identity derived from a seed,
+    /// and an optional message store for chat history.
+    pub fn with_seed(
+        seed: &cypher_crypto::IdentitySeed,
+        message_store: Option<Arc<dyn MessageStore>>,
+    ) -> Self {
+        // Derive two independent copies of the keypair (deterministic from seed).
+        let session_identity = seed.derive_identity();
+        let keys_identity = seed.derive_identity();
+        let session = Arc::new(ClientSession::from_identity(session_identity));
+        let keys = Arc::new(KeyManager::new(keys_identity));
+        Self::build(session, keys, message_store)
+    }
+
+    fn build(
+        session: Arc<ClientSession>,
+        keys: Arc<KeyManager>,
+        message_store: Option<Arc<dyn MessageStore>>,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(256);
         Self {
             session,
@@ -121,11 +147,17 @@ impl ClientApi {
             ice_agent: Arc::new(Mutex::new(None)),
             p2p_socket: Mutex::new(None),
             relay_client: Arc::new(Mutex::new(None)),
+            message_store,
         }
     }
 
     pub fn peer_id(&self) -> &PeerId {
         self.session.peer_id()
+    }
+
+    /// Access the key manager (for restoring ratchet states, etc.).
+    pub fn keys(&self) -> &Arc<KeyManager> {
+        &self.keys
     }
 
     /// Connect to the gateway over TLS.
@@ -220,6 +252,7 @@ impl ClientApi {
         let pending_metas = Arc::clone(&self.pending_metas);
         let active_sends = Arc::clone(&self.active_sends);
         let ice_agent = Arc::clone(&self.ice_agent);
+        let message_store = self.message_store.clone();
         tokio::spawn(async move {
             run_io_loop(
                 session,
@@ -233,6 +266,7 @@ impl ClientApi {
                 pending_metas,
                 active_sends,
                 ice_agent,
+                message_store,
             )
             .await;
         });
@@ -293,6 +327,12 @@ impl ClientApi {
     /// and initialises the Double-Ratchet sender state.  After this call,
     /// [`send_message`](ClientApi::send_message) works for `peer_id`.
     pub async fn initiate_session(&self, peer_id: &PeerId) -> Result<()> {
+        // Skip if a ratchet session already exists for this peer.
+        if self.keys.has_session(peer_id.as_bytes()) {
+            debug!(peer_id = %peer_id, "session already exists, skipping initiate");
+            return Ok(());
+        }
+
         let (tx, rx) = oneshot::channel();
         self.pending.insert(PendingKind::GetPrekeys, tx);
 
@@ -326,8 +366,12 @@ impl ClientApi {
                 .map_err(|_| Error::Crypto("signed_prekey must be 32 bytes".into()))?,
         );
 
-        let shared_secret =
-            cypher_crypto::x3dh::x3dh_mutual(self.keys.identity(), &their_ik_dh, &their_spk);
+        let shared_secret = cypher_crypto::x3dh::x3dh_mutual(
+            self.keys.identity(),
+            &self.keys.spk_secret(),
+            &their_ik_dh,
+            &their_spk,
+        );
 
         // Deterministic role: lower peer_id = sender, higher = receiver.
         // This ensures both sides agree on who is Alice (sender) and Bob (receiver)
@@ -348,6 +392,11 @@ impl ClientApi {
         Ok(())
     }
 
+    /// Return a reference to the message store, if one was configured.
+    pub fn message_store(&self) -> Option<&Arc<dyn MessageStore>> {
+        self.message_store.as_ref()
+    }
+
     /// Encrypt and send a message to `peer_id`.
     ///
     /// Requires a session to be established via
@@ -365,6 +414,25 @@ impl ClientApi {
         self.send_raw(Bytes::from(msg.serialize()), FrameFlags::NONE)
             .await?;
         debug!(peer_id = %peer_id, msg_no, "sent encrypted message");
+
+        // Persist the outgoing message and ratchet state.
+        if let Some(store) = &self.message_store {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Err(e) =
+                store.save_message(peer_id, crate::persistence::Direction::Sent, plaintext, now)
+            {
+                warn!(peer_id = %peer_id, error = %e, "failed to persist sent message — message was sent but may not appear in history after restart");
+            }
+            if let Some(state) = self.keys.get_ratchet_state(peer_id.as_bytes()) {
+                if let Err(e) = store.save_ratchet_state(peer_id, &state) {
+                    warn!(peer_id = %peer_id, error = %e, "failed to persist ratchet state — session may break after restart");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -593,6 +661,7 @@ async fn run_io_loop(
     pending_metas: Arc<DashMap<Vec<u8>, (FileMeta, PeerId)>>,
     active_sends: Arc<DashMap<Vec<u8>, mpsc::Sender<u32>>>,
     ice_agent: Arc<Mutex<Option<IceAgent>>>,
+    message_store: Option<Arc<dyn MessageStore>>,
 ) {
     loop {
         tokio::select! {
@@ -622,6 +691,7 @@ async fn run_io_loop(
                         &pending_metas,
                         &active_sends,
                         &ice_agent,
+                        &message_store,
                     )
                     .await;
                 }
@@ -651,6 +721,7 @@ async fn dispatch_inbound(
     pending_metas: &DashMap<Vec<u8>, (FileMeta, PeerId)>,
     active_sends: &Arc<DashMap<Vec<u8>, mpsc::Sender<u32>>>,
     ice_agent: &Arc<Mutex<Option<IceAgent>>>,
+    message_store: &Option<Arc<dyn MessageStore>>,
 ) {
     // JSON → signaling service response.
     if payload.first() == Some(&b'{') {
@@ -677,6 +748,26 @@ async fn dispatch_inbound(
             };
             match keys.decrypt_from_peer(&chat.peer_id, &chat.ciphertext, &rk_bytes, chat.msg_no) {
                 Ok(plaintext) => {
+                    // Persist incoming message and ratchet state.
+                    if let Some(ref store) = message_store {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if let Err(e) = store.save_message(
+                            &from,
+                            crate::persistence::Direction::Received,
+                            &plaintext,
+                            now,
+                        ) {
+                            warn!("failed to persist received message: {e}");
+                        }
+                        if let Some(state) = keys.get_ratchet_state(&chat.peer_id) {
+                            if let Err(e) = store.save_ratchet_state(&from, &state) {
+                                warn!("failed to persist ratchet state: {e}");
+                            }
+                        }
+                    }
                     let _ = event_tx
                         .send(ClientEvent::MessageReceived { from, plaintext })
                         .await;
@@ -943,9 +1034,18 @@ async fn send_chunks(
     selective_indices: Option<Vec<u32>>,
 ) {
     // Extract FileChunker from Arc<Mutex<>>.
-    let chunker = Arc::try_unwrap(chunker_mu)
-        .unwrap_or_else(|_| panic!("chunker arc should have single owner"))
-        .into_inner();
+    let chunker = match Arc::try_unwrap(chunker_mu) {
+        Ok(mutex) => mutex.into_inner(),
+        Err(_) => {
+            warn!("chunker arc has multiple owners, cannot proceed with file send");
+            let _ = event_tx
+                .send(ClientEvent::Error(
+                    "file send failed: chunker still referenced".into(),
+                ))
+                .await;
+            return;
+        }
+    };
 
     let mut sender = TransferSender::new(chunker, DEFAULT_WINDOW_SIZE);
 

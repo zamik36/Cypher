@@ -20,6 +20,7 @@ export default function HomeView(props: HomeViewProps) {
   const [pendingCode, setPendingCode] = createSignal<string | null>(null);
 
   async function handleCreate() {
+    if (busy()) return;
     setBusy(true);
     setError(null);
     try {
@@ -34,6 +35,7 @@ export default function HomeView(props: HomeViewProps) {
   }
 
   async function handleJoin() {
+    if (busy()) return;
     const code = joinCode().trim();
     if (!code) return;
     setBusy(true);

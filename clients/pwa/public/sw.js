@@ -1,6 +1,6 @@
-/// Service Worker for P2P Share PWA — cache-first for static assets.
+/// Service Worker for Cypher PWA — cache-first for static assets.
 /// __BUILD_HASH__ is replaced at build time by vite; falls back to "v2" in dev.
-const CACHE_NAME = "p2p-pwa-__BUILD_HASH__";
+const CACHE_NAME = "cypher-pwa-__BUILD_HASH__";
 const PRECACHE = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
@@ -40,19 +40,17 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // Static assets: cache-first with background revalidation.
+  // Static assets: network-first — ensures security patches reach users quickly.
+  // Falls back to cache only when offline.
   e.respondWith(
-    caches.match(request).then((cached) => {
-      const fetched = fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          }
-          return response;
-        })
-        .catch(() => cached);
-      return cached || fetched;
-    })
+    fetch(request)
+      .then((response) => {
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+        }
+        return response;
+      })
+      .catch(() => caches.match(request))
   );
 });

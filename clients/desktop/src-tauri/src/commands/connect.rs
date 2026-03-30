@@ -10,9 +10,8 @@ pub async fn connect_to_gateway(
     state: tauri::State<'_, AppState>,
     addr: String,
 ) -> Result<(), String> {
-    state
-        .api
-        .connect_to_gateway(&addr)
+    let api = state.api.lock().await;
+    api.connect_to_gateway(&addr)
         .await
         .map_err(|e| e.to_string())
 }

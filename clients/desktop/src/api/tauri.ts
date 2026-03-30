@@ -12,6 +12,9 @@ export interface TransferInfo {
   status: "active" | "complete" | "error";
 }
 
+export interface ConversationEntry { peer_id: string; display_name: string | null; last_ts: number; }
+export interface HistoryMessage { direction: "sent" | "received"; text: string; timestamp: number; }
+
 export const api = {
   connectToGateway: (addr: string) => invoke<void>("connect_to_gateway", { addr }),
   createLink: () => invoke<LinkInfo>("create_link"),
@@ -23,6 +26,16 @@ export const api = {
   acceptFile: (fileId: string, destPath: string) => invoke<void>("accept_file", { fileId, destPath }),
   getTransfers: () => invoke<TransferInfo[]>("get_transfers"),
   generateQr: (linkId: string) => invoke<string>("generate_qr", { linkId }),
+  // Identity
+  hasIdentity: () => invoke<boolean>("has_identity"),
+  createIdentity: (nickname: string, passphrase: string) => invoke<string>("create_identity", { nickname, passphrase }),
+  unlockIdentity: (passphrase: string) => invoke<string>("unlock_identity", { passphrase }),
+  exportMnemonic: (passphrase: string) => invoke<string>("export_mnemonic", { passphrase }),
+  importMnemonic: (mnemonic: string, nickname: string, passphrase: string) => invoke<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
+  // Chat history
+  getConversations: () => invoke<ConversationEntry[]>("get_conversations"),
+  getHistory: (peerId: string, limit: number) => invoke<HistoryMessage[]>("get_history", { peerId, limit }),
+  clearChatHistory: () => invoke<void>("clear_chat_history"),
 };
 
 
