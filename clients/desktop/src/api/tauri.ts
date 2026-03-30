@@ -29,7 +29,7 @@ export const api = {
   // Identity
   hasIdentity: () => invoke<boolean>("has_identity"),
   createIdentity: (nickname: string, passphrase: string) => invoke<string>("create_identity", { nickname, passphrase }),
-  unlockIdentity: (passphrase: string) => invoke<string>("unlock_identity", { passphrase }),
+  unlockIdentity: (passphrase: string) => invoke<[string, string]>("unlock_identity", { passphrase }),
   exportMnemonic: (passphrase: string) => invoke<string>("export_mnemonic", { passphrase }),
   importMnemonic: (mnemonic: string, nickname: string, passphrase: string) => invoke<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
   // Chat history

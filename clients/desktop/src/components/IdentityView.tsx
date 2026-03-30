@@ -25,7 +25,7 @@ export default function IdentityView(props: IdentityViewProps) {
     setBusy(true);
     setError("");
     try {
-      const [peerId, nick] = await api.unlockIdentity(passphrase()) as [string, string];
+      const [peerId, nick] = await api.unlockIdentity(passphrase());
       setPassphrase("");
       props.onUnlocked(peerId, nick);
     } catch (e) {
