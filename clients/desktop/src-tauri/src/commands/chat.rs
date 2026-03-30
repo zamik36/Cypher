@@ -26,8 +26,8 @@ pub async fn send_message(
         .collect::<Result<Vec<u8>, _>>()
         .map_err(|e| format!("invalid peer_id hex: {e}"))?;
 
-    let pid = cypher_common::PeerId::from_bytes(&peer_id_bytes)
-        .ok_or("peer_id must be 32 bytes")?;
+    let pid =
+        cypher_common::PeerId::from_bytes(&peer_id_bytes).ok_or("peer_id must be 32 bytes")?;
 
     let api = state.api.lock().await;
     api.send_message(&pid, text.as_bytes())

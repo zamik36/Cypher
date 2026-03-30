@@ -105,92 +105,91 @@ async fn handle_event(
     peers: &Arc<Mutex<HashSet<PeerId>>>,
     handle: &tauri::AppHandle,
 ) {
-        match event {
-            ClientEvent::Connected { peer_id } => {
-                let _ = handle.emit("cypher://connected", peer_id_hex(&peer_id));
+    match event {
+        ClientEvent::Connected { peer_id } => {
+            let _ = handle.emit("cypher://connected", peer_id_hex(&peer_id));
+        }
+        ClientEvent::Disconnected => {
+            // Clear peer list on disconnect — sessions are invalid after reconnect.
+            peers.lock().await.clear();
+            let _ = handle.emit("cypher://disconnected", ());
+        }
+        ClientEvent::PeerConnected { peer_id } => {
+            // Add peer (O(1) dedup via HashSet) and auto-initiate E2EE session.
+            {
+                let mut set = peers.lock().await;
+                set.insert(peer_id.clone());
             }
-            ClientEvent::Disconnected => {
-                // Clear peer list on disconnect — sessions are invalid after reconnect.
-                peers.lock().await.clear();
-                let _ = handle.emit("cypher://disconnected", ());
-            }
-            ClientEvent::PeerConnected { peer_id } => {
-                // Add peer (O(1) dedup via HashSet) and auto-initiate E2EE session.
-                {
-                    let mut set = peers.lock().await;
-                    set.insert(peer_id.clone());
+            {
+                let api_guard = api.lock().await;
+                if let Err(e) = api_guard.initiate_session(&peer_id).await {
+                    tracing::warn!("auto initiate_session failed: {e}");
                 }
-                {
-                    let api_guard = api.lock().await;
-                    if let Err(e) = api_guard.initiate_session(&peer_id).await {
-                        tracing::warn!("auto initiate_session failed: {e}");
-                    }
-                    // Auto-save conversation when a new peer connects.
-                    if let Some(store) = api_guard.message_store() {
-                        let _ = store.save_conversation(&peer_id, None);
-                    }
+                // Auto-save conversation when a new peer connects.
+                if let Some(store) = api_guard.message_store() {
+                    let _ = store.save_conversation(&peer_id, None);
                 }
-                let _ = handle.emit("cypher://peer_connected", peer_id_hex(&peer_id));
             }
-            ClientEvent::MessageReceived { from, plaintext } => {
-                let text = String::from_utf8_lossy(&plaintext).into_owned();
-                let payload = serde_json::json!({
-                    "from": peer_id_hex(&from),
-                    "text": text,
-                    "timestamp": std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                });
-                let _ = handle.emit("cypher://message", payload);
-            }
-            ClientEvent::FileOffered { from, meta } => {
-                let _ = handle
-                    .notification()
-                    .builder()
-                    .title("File Offered")
-                    .body(format!("{} ({} bytes)", meta.name, meta.size))
-                    .show();
-                let payload = serde_json::json!({
-                    "from": peer_id_hex(&from),
-                    "file_id": bytes_to_hex(&meta.file_id.to_vec()),
-                    "name": meta.name,
-                    "size": meta.size,
-                    "chunks": meta.chunk_count,
-                });
-                let _ = handle.emit("cypher://file_offered", payload);
-            }
-            ClientEvent::FileProgress { file_id, progress } => {
-                let payload = serde_json::json!({
-                    "file_id": bytes_to_hex(&file_id),
-                    "progress": progress,
-                });
-                let _ = handle.emit("cypher://file_progress", payload);
-            }
-            ClientEvent::FileComplete { file_id } => {
-                let _ = handle
-                    .notification()
-                    .builder()
-                    .title("Transfer Complete")
-                    .body("File transfer finished successfully")
-                    .show();
-                let _ = handle.emit("cypher://file_complete", bytes_to_hex(&file_id));
-            }
-            ClientEvent::IceCandidateReceived { from, candidate } => {
-                tracing::debug!(
-                    from = bytes_to_hex(&from),
-                    addr = %candidate.addr,
-                    "remote ICE candidate received"
-                );
-                let payload = serde_json::json!({
-                    "from": bytes_to_hex(&from),
-                    "addr": format!("{}", candidate.addr),
-                });
-                let _ = handle.emit("cypher://ice_candidate", payload);
-            }
-            ClientEvent::Error(msg) => {
-                let _ = handle.emit("cypher://error", msg);
-            }
+            let _ = handle.emit("cypher://peer_connected", peer_id_hex(&peer_id));
+        }
+        ClientEvent::MessageReceived { from, plaintext } => {
+            let text = String::from_utf8_lossy(&plaintext).into_owned();
+            let payload = serde_json::json!({
+                "from": peer_id_hex(&from),
+                "text": text,
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+            let _ = handle.emit("cypher://message", payload);
+        }
+        ClientEvent::FileOffered { from, meta } => {
+            let _ = handle
+                .notification()
+                .builder()
+                .title("File Offered")
+                .body(format!("{} ({} bytes)", meta.name, meta.size))
+                .show();
+            let payload = serde_json::json!({
+                "from": peer_id_hex(&from),
+                "file_id": bytes_to_hex(&meta.file_id.to_vec()),
+                "name": meta.name,
+                "size": meta.size,
+                "chunks": meta.chunk_count,
+            });
+            let _ = handle.emit("cypher://file_offered", payload);
+        }
+        ClientEvent::FileProgress { file_id, progress } => {
+            let payload = serde_json::json!({
+                "file_id": bytes_to_hex(&file_id),
+                "progress": progress,
+            });
+            let _ = handle.emit("cypher://file_progress", payload);
+        }
+        ClientEvent::FileComplete { file_id } => {
+            let _ = handle
+                .notification()
+                .builder()
+                .title("Transfer Complete")
+                .body("File transfer finished successfully")
+                .show();
+            let _ = handle.emit("cypher://file_complete", bytes_to_hex(&file_id));
+        }
+        ClientEvent::IceCandidateReceived { from, candidate } => {
+            tracing::debug!(
+                from = bytes_to_hex(&from),
+                addr = %candidate.addr,
+                "remote ICE candidate received"
+            );
+            let payload = serde_json::json!({
+                "from": bytes_to_hex(&from),
+                "addr": format!("{}", candidate.addr),
+            });
+            let _ = handle.emit("cypher://ice_candidate", payload);
+        }
+        ClientEvent::Error(msg) => {
+            let _ = handle.emit("cypher://error", msg);
         }
     }
 }

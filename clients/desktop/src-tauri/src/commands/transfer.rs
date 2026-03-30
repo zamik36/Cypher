@@ -128,7 +128,9 @@ fn bytes_to_hex(b: &[u8]) -> String {
 
 fn hex_decode(hex: &str) -> cypher_common::Result<Vec<u8>> {
     if !hex.len().is_multiple_of(2) {
-        return Err(cypher_common::Error::Protocol("odd-length hex string".into()));
+        return Err(cypher_common::Error::Protocol(
+            "odd-length hex string".into(),
+        ));
     }
     (0..hex.len())
         .step_by(2)
