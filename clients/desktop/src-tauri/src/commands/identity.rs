@@ -1,5 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use tauri::Manager;
 
 use crate::AppState;
 use cypher_client_core::identity_store::IdentityStore;
@@ -49,10 +51,7 @@ pub async fn unlock_identity(
 }
 
 #[tauri::command]
-pub async fn export_mnemonic(
-    app: tauri::AppHandle,
-    passphrase: String,
-) -> Result<String, String> {
+pub async fn export_mnemonic(app: tauri::AppHandle, passphrase: String) -> Result<String, String> {
     IdentityStore::new(data_dir(&app)?)
         .export_mnemonic(&passphrase)
         .map_err(|e| e.to_string())
@@ -134,9 +133,7 @@ pub async fn get_history(
 }
 
 #[tauri::command]
-pub async fn clear_chat_history(
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn clear_chat_history(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let api = state.api.lock().await;
     if let Some(store) = api.message_store() {
         store.clear_all().map_err(|e| e.to_string())?;
@@ -153,11 +150,12 @@ pub async fn clear_chat_history(
 async fn activate_identity(
     state: &AppState,
     seed: &IdentitySeed,
-    data_dir: &PathBuf,
+    data_dir: &Path,
 ) -> Result<String, String> {
     let sek = seed.derive_storage_key();
-    let msg_store: Arc<dyn MessageStore> =
-        Arc::new(SqliteMessageStore::open(data_dir.join("messages.db"), sek).map_err(|e| e.to_string())?);
+    let msg_store: Arc<dyn MessageStore> = Arc::new(
+        SqliteMessageStore::open(data_dir.join("messages.db"), sek).map_err(|e| e.to_string())?,
+    );
 
     let api = ClientApi::with_seed(seed, Some(msg_store.clone()));
 
@@ -193,7 +191,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("odd-length hex string".into());
     }
     (0..hex.len())

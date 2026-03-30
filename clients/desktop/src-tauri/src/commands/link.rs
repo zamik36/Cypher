@@ -23,10 +23,7 @@ pub async fn join_link(
     link_id: String,
 ) -> Result<String, String> {
     let api = state.api.lock().await;
-    let peer_id = api
-        .join_link(&link_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let peer_id = api.join_link(&link_id).await.map_err(|e| e.to_string())?;
 
     // Initiate the X3DH session as the joiner (we initiated the connection).
     api.initiate_session(&peer_id)
@@ -39,6 +36,10 @@ pub async fn join_link(
         set.insert(peer_id.clone());
     }
 
-    let hex: String = peer_id.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = peer_id
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok(hex)
 }
