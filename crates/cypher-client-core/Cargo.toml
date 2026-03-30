@@ -29,7 +29,7 @@ rusqlite.workspace = true
 zstd.workspace = true
 zeroize.workspace = true
 serde.workspace = true
-bincode.workspace = true
+postcard.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

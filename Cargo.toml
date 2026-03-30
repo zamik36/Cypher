@@ -44,7 +44,7 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
 bip39 = { version = "2", features = ["std"] }
-bincode = "1"
+postcard = { version = "1", features = ["alloc"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 crc32fast = "1"
 nom = "7"

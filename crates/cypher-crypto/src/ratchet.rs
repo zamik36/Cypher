@@ -142,13 +142,13 @@ impl RatchetState {
             prev_send_count: self.prev_send_count,
             skipped_keys: self.skipped_keys.clone(),
         };
-        bincode::serialize(&s).map_err(|e| Error::Crypto(format!("ratchet serialize: {e}")))
+        postcard::to_allocvec(&s).map_err(|e| Error::Crypto(format!("ratchet serialize: {e}")))
     }
 
     /// Deserialize a ratchet state from a binary blob.
     pub fn deserialize(data: &[u8]) -> Result<Self> {
         let s: SerializableRatchetState =
-            bincode::deserialize(data).map_err(|e| Error::Crypto(format!("ratchet deserialize: {e}")))?;
+            postcard::from_bytes(data).map_err(|e| Error::Crypto(format!("ratchet deserialize: {e}")))?;
         Ok(Self {
             root_key: s.root_key,
             send_chain_key: s.send_chain_key,
