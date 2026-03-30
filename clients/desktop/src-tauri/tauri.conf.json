@@ -1,6 +1,6 @@
 {
   "productName": "Cypher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "dev.cypher.app",
   "build": {
     "frontendDist": "../dist",
