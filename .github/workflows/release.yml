@@ -163,6 +163,15 @@ jobs:
                       signingConfig = signingConfigs.getByName("release")' "$GRADLE_FILE"
       - name: Build Android APK
         run: cd clients/desktop && npx tauri android build --apk --target aarch64
+      - name: Rename APK with version and commit hash
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          APK_DIR="clients/desktop/src-tauri/gen/android/app/build/outputs/apk"
+          find "$APK_DIR" -name '*.apk' | while read -r apk; do
+            dir=$(dirname "$apk")
+            mv "$apk" "$dir/cypher-${VERSION}-${SHORT_SHA}.apk"
+          done
       - name: Upload APK
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
