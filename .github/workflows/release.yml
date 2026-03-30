@@ -91,7 +91,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
-          key: desktop-${{ matrix.target }}
+          key: desktop-${{ matrix.target }}-${{ hashFiles('crates/**/*.rs', 'clients/desktop/src-tauri/src/**/*.rs') }}
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: 22
@@ -124,7 +124,7 @@ jobs:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
-          key: android
+          key: android-${{ hashFiles('crates/**/*.rs', 'clients/desktop/src-tauri/src/**/*.rs') }}
           workspaces: clients/desktop/src-tauri
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
