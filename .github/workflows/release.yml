@@ -142,6 +142,20 @@ jobs:
         run: cd clients/desktop && npx tauri android init
       - name: Decode signing keystore
         run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > clients/desktop/src-tauri/gen/android/release.keystore
+      - name: Patch Android version code
+        run: |
+          GRADLE_FILE="clients/desktop/src-tauri/gen/android/app/build.gradle.kts"
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH * 100))
+
+          sed -i "s/versionCode = .*/versionCode = ${VERSION_CODE}/" "$GRADLE_FILE"
+          sed -i "s/versionName = .*/versionName = \"${VERSION}\"/" "$GRADLE_FILE"
+
+          echo "Set versionCode=${VERSION_CODE}, versionName=${VERSION}"
+          grep -E 'versionCode|versionName' "$GRADLE_FILE"
       - name: Configure APK signing
         run: |
           GRADLE_FILE="clients/desktop/src-tauri/gen/android/app/build.gradle.kts"
