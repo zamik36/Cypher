@@ -147,8 +147,8 @@ impl RatchetState {
 
     /// Deserialize a ratchet state from a binary blob.
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        let s: SerializableRatchetState =
-            postcard::from_bytes(data).map_err(|e| Error::Crypto(format!("ratchet deserialize: {e}")))?;
+        let s: SerializableRatchetState = postcard::from_bytes(data)
+            .map_err(|e| Error::Crypto(format!("ratchet deserialize: {e}")))?;
         Ok(Self {
             root_key: s.root_key,
             send_chain_key: s.send_chain_key,

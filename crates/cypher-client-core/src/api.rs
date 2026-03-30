@@ -366,8 +366,12 @@ impl ClientApi {
                 .map_err(|_| Error::Crypto("signed_prekey must be 32 bytes".into()))?,
         );
 
-        let shared_secret =
-            cypher_crypto::x3dh::x3dh_mutual(self.keys.identity(), &self.keys.spk_secret(), &their_ik_dh, &their_spk);
+        let shared_secret = cypher_crypto::x3dh::x3dh_mutual(
+            self.keys.identity(),
+            &self.keys.spk_secret(),
+            &their_ik_dh,
+            &their_spk,
+        );
 
         // Deterministic role: lower peer_id = sender, higher = receiver.
         // This ensures both sides agree on who is Alice (sender) and Bob (receiver)
@@ -417,12 +421,9 @@ impl ClientApi {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            if let Err(e) = store.save_message(
-                peer_id,
-                crate::persistence::Direction::Sent,
-                plaintext,
-                now,
-            ) {
+            if let Err(e) =
+                store.save_message(peer_id, crate::persistence::Direction::Sent, plaintext, now)
+            {
                 warn!(peer_id = %peer_id, error = %e, "failed to persist sent message — message was sent but may not appear in history after restart");
             }
             if let Some(state) = self.keys.get_ratchet_state(peer_id.as_bytes()) {
@@ -1038,7 +1039,9 @@ async fn send_chunks(
         Err(_) => {
             warn!("chunker arc has multiple owners, cannot proceed with file send");
             let _ = event_tx
-                .send(ClientEvent::Error("file send failed: chunker still referenced".into()))
+                .send(ClientEvent::Error(
+                    "file send failed: chunker still referenced".into(),
+                ))
                 .await;
             return;
         }

@@ -24,8 +24,8 @@ impl IdentitySeed {
 
     /// Encode the seed as a 24-word BIP39 mnemonic.
     pub fn to_mnemonic(&self) -> String {
-        let m = bip39::Mnemonic::from_entropy(&self.0)
-            .expect("32 bytes is valid entropy for BIP39");
+        let m =
+            bip39::Mnemonic::from_entropy(&self.0).expect("32 bytes is valid entropy for BIP39");
         m.to_string()
     }
 
@@ -336,7 +336,10 @@ mod tests {
         let kp1 = seed.derive_identity();
         let kp2 = seed.derive_identity();
         assert_eq!(kp1.peer_id().as_bytes(), kp2.peer_id().as_bytes());
-        assert_eq!(kp1.dh_public_key().as_bytes(), kp2.dh_public_key().as_bytes());
+        assert_eq!(
+            kp1.dh_public_key().as_bytes(),
+            kp2.dh_public_key().as_bytes()
+        );
     }
 
     #[test]

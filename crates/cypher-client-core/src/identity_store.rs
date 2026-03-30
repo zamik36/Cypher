@@ -44,8 +44,8 @@ impl IdentityStore {
 
     /// Decrypt the stored identity and return the seed + nickname.
     pub fn unlock(&self, passphrase: &str) -> Result<(IdentitySeed, String)> {
-        let data = fs::read(&self.path)
-            .map_err(|e| Error::Crypto(format!("read identity file: {e}")))?;
+        let data =
+            fs::read(&self.path).map_err(|e| Error::Crypto(format!("read identity file: {e}")))?;
 
         let min_len = SALT_LEN + encryption::NONCE_LEN + SEED_LEN + 4;
         if data.len() < min_len {
@@ -192,7 +192,9 @@ mod tests {
 
         let dir2 = TempDir::new().unwrap();
         let store2 = IdentityStore::new(dir2.path());
-        let imported = store2.import_mnemonic(&mnemonic, "charlie", "newpin").unwrap();
+        let imported = store2
+            .import_mnemonic(&mnemonic, "charlie", "newpin")
+            .unwrap();
 
         assert_eq!(seed.as_bytes(), imported.as_bytes());
     }

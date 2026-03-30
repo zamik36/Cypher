@@ -172,8 +172,18 @@ mod tests {
         let bob_ik = IdentityKeyPair::generate();
         let bob_spk = SignedPreKey::generate();
 
-        let alice_secret = x3dh_mutual(&alice_ik, &alice_spk.secret, &bob_ik.dh_public_key(), &bob_spk.public_key());
-        let bob_secret = x3dh_mutual(&bob_ik, &bob_spk.secret, &alice_ik.dh_public_key(), &alice_spk.public_key());
+        let alice_secret = x3dh_mutual(
+            &alice_ik,
+            &alice_spk.secret,
+            &bob_ik.dh_public_key(),
+            &bob_spk.public_key(),
+        );
+        let bob_secret = x3dh_mutual(
+            &bob_ik,
+            &bob_spk.secret,
+            &alice_ik.dh_public_key(),
+            &alice_spk.public_key(),
+        );
 
         assert_eq!(alice_secret.0, bob_secret.0);
     }

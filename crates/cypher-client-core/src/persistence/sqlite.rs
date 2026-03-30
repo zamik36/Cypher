@@ -55,19 +55,23 @@ pub struct SqliteMessageStore {
 impl SqliteMessageStore {
     /// Open (or create) the database at the given path.
     pub fn open(db_path: impl AsRef<Path>, sek: [u8; 32]) -> Result<Self> {
-        let conn = Connection::open(db_path)
-            .map_err(|e| Error::Crypto(format!("sqlite open: {e}")))?;
+        let conn =
+            Connection::open(db_path).map_err(|e| Error::Crypto(format!("sqlite open: {e}")))?;
         let store = Self {
             conn: Mutex::new(conn),
             sek,
         };
-        store.conn()?.execute_batch(SCHEMA)
+        store
+            .conn()?
+            .execute_batch(SCHEMA)
             .map_err(|e| Error::Crypto(format!("schema init: {e}")))?;
         Ok(store)
     }
 
     fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|_| Error::Crypto("sqlite mutex poisoned".into()))
+        self.conn
+            .lock()
+            .map_err(|_| Error::Crypto("sqlite mutex poisoned".into()))
     }
 }
 
@@ -129,20 +133,17 @@ impl MessageStore for SqliteMessageStore {
             .map_err(|e| Error::Crypto(format!("prepare: {e}")))?;
 
         let rows = stmt
-            .query_map(
-                params![peer_id.as_bytes().as_slice(), bid, limit],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as u64,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, u8>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                        row.get::<_, Vec<u8>>(4)?,
-                        row.get::<_, i32>(5)? != 0,
-                        row.get::<_, i64>(6)? as u64,
-                    ))
-                },
-            )
+            .query_map(params![peer_id.as_bytes().as_slice(), bid, limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, u8>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i32>(5)? != 0,
+                    row.get::<_, i64>(6)? as u64,
+                ))
+            })
             .map_err(|e| Error::Crypto(format!("query: {e}")))?
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
@@ -270,10 +271,16 @@ impl MessageStore for SqliteMessageStore {
         let peer = peer_id.as_bytes().as_slice();
         conn.execute("DELETE FROM messages WHERE peer_id = ?1", params![peer])
             .map_err(|e| Error::Crypto(format!("delete messages: {e}")))?;
-        conn.execute("DELETE FROM ratchet_state WHERE peer_id = ?1", params![peer])
-            .map_err(|e| Error::Crypto(format!("delete ratchet: {e}")))?;
-        conn.execute("DELETE FROM conversations WHERE peer_id = ?1", params![peer])
-            .map_err(|e| Error::Crypto(format!("delete conversation: {e}")))?;
+        conn.execute(
+            "DELETE FROM ratchet_state WHERE peer_id = ?1",
+            params![peer],
+        )
+        .map_err(|e| Error::Crypto(format!("delete ratchet: {e}")))?;
+        conn.execute(
+            "DELETE FROM conversations WHERE peer_id = ?1",
+            params![peer],
+        )
+        .map_err(|e| Error::Crypto(format!("delete conversation: {e}")))?;
         Ok(())
     }
 
@@ -319,8 +326,12 @@ mod tests {
         let peer = test_peer();
         store.save_conversation(&peer, Some("alice")).unwrap();
 
-        let id1 = store.save_message(&peer, Direction::Sent, b"hello", 1000).unwrap();
-        let id2 = store.save_message(&peer, Direction::Received, b"world", 1001).unwrap();
+        let id1 = store
+            .save_message(&peer, Direction::Sent, b"hello", 1000)
+            .unwrap();
+        let id2 = store
+            .save_message(&peer, Direction::Received, b"world", 1001)
+            .unwrap();
         assert!(id2 > id1);
 
         let msgs = store.load_messages(&peer, 10, None).unwrap();
@@ -336,7 +347,9 @@ mod tests {
         store.save_conversation(&peer, None).unwrap();
 
         let long_msg = "a]".repeat(100);
-        store.save_message(&peer, Direction::Sent, long_msg.as_bytes(), 2000).unwrap();
+        store
+            .save_message(&peer, Direction::Sent, long_msg.as_bytes(), 2000)
+            .unwrap();
 
         let msgs = store.load_messages(&peer, 1, None).unwrap();
         assert_eq!(msgs[0].plaintext, long_msg.as_bytes());
@@ -348,7 +361,9 @@ mod tests {
         let peer = test_peer();
         store.save_conversation(&peer, None).unwrap();
 
-        store.save_message(&peer, Direction::Sent, b"hi", 3000).unwrap();
+        store
+            .save_message(&peer, Direction::Sent, b"hi", 3000)
+            .unwrap();
         let msgs = store.load_messages(&peer, 1, None).unwrap();
         assert_eq!(msgs[0].plaintext, b"hi");
     }
@@ -360,7 +375,14 @@ mod tests {
         store.save_conversation(&peer, None).unwrap();
 
         for i in 0..5u64 {
-            store.save_message(&peer, Direction::Sent, format!("msg{i}").as_bytes(), 4000 + i).unwrap();
+            store
+                .save_message(
+                    &peer,
+                    Direction::Sent,
+                    format!("msg{i}").as_bytes(),
+                    4000 + i,
+                )
+                .unwrap();
         }
 
         let page1 = store.load_messages(&peer, 2, None).unwrap();
@@ -375,8 +397,12 @@ mod tests {
     #[test]
     fn conversations_list() {
         let (_dir, store) = test_store();
-        store.save_conversation(&PeerId([1u8; 32]), Some("alice")).unwrap();
-        store.save_conversation(&PeerId([2u8; 32]), Some("bob")).unwrap();
+        store
+            .save_conversation(&PeerId([1u8; 32]), Some("alice"))
+            .unwrap();
+        store
+            .save_conversation(&PeerId([2u8; 32]), Some("bob"))
+            .unwrap();
         assert_eq!(store.list_conversations().unwrap().len(), 2);
     }
 
@@ -385,7 +411,9 @@ mod tests {
         let (_dir, store) = test_store();
         let peer = test_peer();
         store.save_conversation(&peer, None).unwrap();
-        store.save_message(&peer, Direction::Sent, b"msg", 5000).unwrap();
+        store
+            .save_message(&peer, Direction::Sent, b"msg", 5000)
+            .unwrap();
 
         store.clear_all().unwrap();
         assert!(store.list_conversations().unwrap().is_empty());
@@ -399,8 +427,12 @@ mod tests {
         let p2 = PeerId([2u8; 32]);
         store.save_conversation(&p1, Some("alice")).unwrap();
         store.save_conversation(&p2, Some("bob")).unwrap();
-        store.save_message(&p1, Direction::Sent, b"hi alice", 6000).unwrap();
-        store.save_message(&p2, Direction::Sent, b"hi bob", 6001).unwrap();
+        store
+            .save_message(&p1, Direction::Sent, b"hi alice", 6000)
+            .unwrap();
+        store
+            .save_message(&p2, Direction::Sent, b"hi bob", 6001)
+            .unwrap();
 
         store.delete_conversation(&p1).unwrap();
         assert_eq!(store.list_conversations().unwrap().len(), 1);
