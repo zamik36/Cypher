@@ -1,4 +1,4 @@
-import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, onCleanup, Show } from "solid-js";
 import Sidebar, { type Page } from "./components/Sidebar";
 import BottomNav from "./components/BottomNav";
 import HomeView from "./components/HomeView";
