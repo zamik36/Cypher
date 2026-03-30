@@ -140,6 +140,8 @@ jobs:
         run: cd clients/desktop && npm install
       - name: Initialize Android project
         run: cd clients/desktop && npx tauri android init
+      - name: Generate Android icons from source
+        run: cd clients/desktop && npx tauri icon src-tauri/icons/icon.png
       - name: Decode signing keystore
         run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > clients/desktop/src-tauri/gen/android/release.keystore
       - name: Patch Android version code
