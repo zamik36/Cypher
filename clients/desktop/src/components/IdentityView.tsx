@@ -1,5 +1,6 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, Show, createMemo, onMount } from "solid-js";
 import { api } from "../api/tauri";
+import { ShieldIcon } from "./Icons";
 
 interface IdentityViewProps {
   onUnlocked: (peerId: string, nickname: string) => void;
@@ -14,10 +15,17 @@ export default function IdentityView(props: IdentityViewProps) {
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
 
-  // Check on first render whether identity exists.
-  api.hasIdentity().then((exists) => {
-    setHasId(exists);
-    if (!exists) setMode("create");
+  onMount(() => {
+    api.hasIdentity()
+      .then((exists) => {
+        setHasId(exists);
+        if (!exists) setMode("create");
+      })
+      .catch((e) => {
+        setHasId(false);
+        setMode("create");
+        setError(String(e));
+      });
   });
 
   async function handleUnlock() {
@@ -66,6 +74,15 @@ export default function IdentityView(props: IdentityViewProps) {
     }
   }
 
+  const strengthLevel = createMemo(() => {
+    const len = passphrase().length;
+    if (len >= 32) return 4;
+    if (len >= 24) return 3;
+    if (len >= 16) return 2;
+    if (len >= 12) return 1;
+    return 0;
+  });
+
   function onKeyDown(e: KeyboardEvent, handler: () => void) {
     if (e.key === "Enter") handler();
   }
@@ -74,6 +91,9 @@ export default function IdentityView(props: IdentityViewProps) {
     <div class="identity-view">
       <Show when={hasId() !== null}>
         <div class="identity-card">
+          <div class="identity-logo-icon">
+            <ShieldIcon width="48" height="48" />
+          </div>
           <h2>Cypher</h2>
           <p class="identity-subtitle">Anonymous encrypted messenger</p>
 
@@ -113,6 +133,14 @@ export default function IdentityView(props: IdentityViewProps) {
                 onInput={(e) => setPassphrase(e.currentTarget.value)}
                 onKeyDown={(e) => onKeyDown(e, handleCreate)}
               />
+              <Show when={passphrase().length > 0}>
+                <div class="strength-bar">
+                  <div class={`strength-segment ${strengthLevel() >= 1 ? "weak" : ""}`} />
+                  <div class={`strength-segment ${strengthLevel() >= 2 ? "fair" : ""}`} />
+                  <div class={`strength-segment ${strengthLevel() >= 3 ? "good" : ""}`} />
+                  <div class={`strength-segment ${strengthLevel() >= 4 ? "strong" : ""}`} />
+                </div>
+              </Show>
               <button
                 class="btn-primary"
                 onClick={handleCreate}
@@ -128,11 +156,16 @@ export default function IdentityView(props: IdentityViewProps) {
 
           <Show when={mode() === "import"}>
             <div class="identity-form">
-              <input
-                type="text"
+              <textarea
                 placeholder="Mnemonic (24 words)"
                 value={mnemonic()}
                 onInput={(e) => setMnemonic(e.currentTarget.value)}
+                rows={3}
+                spellcheck={false}
+                autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                inputmode="text"
               />
               <input
                 type="text"

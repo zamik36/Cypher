@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface LinkInfo { link_id: string; }
@@ -15,62 +15,92 @@ export interface TransferInfo {
 export interface ConversationEntry { peer_id: string; display_name: string | null; last_ts: number; }
 export interface HistoryMessage { direction: "sent" | "received"; text: string; timestamp: number; }
 
+type TauriListenerCleanup = () => void;
+
+function isTauriRuntimeAvailable() {
+  if (typeof globalThis === "undefined") {
+    return false;
+  }
+
+  return isTauri();
+}
+
+function tauriUnavailableError(method: string) {
+  return new Error(`${method} is unavailable outside the Tauri runtime. Start the app with \`npm run tauri dev\`.`);
+}
+
+function invokeCommand<T>(command: string, args?: Record<string, unknown>, fallback?: () => T): Promise<T> {
+  if (!isTauriRuntimeAvailable()) {
+    if (fallback) {
+      return Promise.resolve(fallback());
+    }
+
+    return Promise.reject(tauriUnavailableError(command));
+  }
+
+  return invoke<T>(command, args);
+}
+
+function listenToEvent<T>(event: string, cb: (payload: T) => void): Promise<TauriListenerCleanup> {
+  if (!isTauriRuntimeAvailable()) {
+    return Promise.resolve(() => {});
+  }
+
+  return listen<T>(event, (e) => cb(e.payload));
+}
+
 export const api = {
-  connectToGateway: (addr: string) => invoke<void>("connect_to_gateway", { addr }),
-  createLink: () => invoke<LinkInfo>("create_link"),
-  joinLink: (linkId: string) => invoke<string>("join_link", { linkId }),
-  sendMessage: (peerId: string, text: string) => invoke<void>("send_message", { peerId, text }),
-  getMessages: () => invoke<ChatMessage[]>("get_messages"),
-  sendFile: (path: string) => invoke<TransferInfo>("send_file", { path }),
-  browseAndSend: () => invoke<TransferInfo[]>("browse_and_send"),
-  acceptFile: (fileId: string, destPath: string) => invoke<void>("accept_file", { fileId, destPath }),
-  getTransfers: () => invoke<TransferInfo[]>("get_transfers"),
-  generateQr: (linkId: string) => invoke<string>("generate_qr", { linkId }),
+  connectToGateway: (addr: string) => invokeCommand<void>("connect_to_gateway", { addr }),
+  createLink: () => invokeCommand<LinkInfo>("create_link"),
+  joinLink: (linkId: string) => invokeCommand<string>("join_link", { linkId }),
+  sendMessage: (peerId: string, text: string) => invokeCommand<void>("send_message", { peerId, text }),
+  getMessages: () => invokeCommand<ChatMessage[]>("get_messages"),
+  sendFile: (path: string) => invokeCommand<TransferInfo>("send_file", { path }),
+  browseAndSend: () => invokeCommand<TransferInfo[]>("browse_and_send"),
+  acceptFile: (fileId: string, destPath: string) => invokeCommand<void>("accept_file", { fileId, destPath }),
+  getTransfers: () => invokeCommand<TransferInfo[]>("get_transfers"),
+  generateQr: (linkId: string) => invokeCommand<string>("generate_qr", { linkId }),
   // Identity
-  hasIdentity: () => invoke<boolean>("has_identity"),
-  createIdentity: (nickname: string, passphrase: string) => invoke<string>("create_identity", { nickname, passphrase }),
-  unlockIdentity: (passphrase: string) => invoke<[string, string]>("unlock_identity", { passphrase }),
-  exportMnemonic: (passphrase: string) => invoke<string>("export_mnemonic", { passphrase }),
-  importMnemonic: (mnemonic: string, nickname: string, passphrase: string) => invoke<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
+  hasIdentity: () => invokeCommand<boolean>("has_identity", undefined, () => false),
+  createIdentity: (nickname: string, passphrase: string) => invokeCommand<string>("create_identity", { nickname, passphrase }),
+  unlockIdentity: (passphrase: string) => invokeCommand<[string, string]>("unlock_identity", { passphrase }),
+  exportMnemonic: (passphrase: string) => invokeCommand<string>("export_mnemonic", { passphrase }),
+  importMnemonic: (mnemonic: string, nickname: string, passphrase: string) => invokeCommand<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
   // Chat history
-  getConversations: () => invoke<ConversationEntry[]>("get_conversations"),
-  getHistory: (peerId: string, limit: number) => invoke<HistoryMessage[]>("get_history", { peerId, limit }),
-  clearChatHistory: () => invoke<void>("clear_chat_history"),
+  getConversations: () => invokeCommand<ConversationEntry[]>("get_conversations"),
+  getHistory: (peerId: string, limit: number) => invokeCommand<HistoryMessage[]>("get_history", { peerId, limit }),
+  clearChatHistory: () => invokeCommand<void>("clear_chat_history"),
 };
 
 
 export function onConnected(cb: (peerId: string) => void) {
-  return listen<string>("cypher://connected", (e) => cb(e.payload));
+  return listenToEvent<string>("cypher://connected", cb);
 }
 
 export function onDisconnected(cb: () => void) {
-  return listen<void>("cypher://disconnected", () => cb());
+  return listenToEvent<void>("cypher://disconnected", () => cb());
 }
 
 export function onPeerConnected(cb: (peerId: string) => void) {
-  return listen<string>("cypher://peer_connected", (e) => cb(e.payload));
+  return listenToEvent<string>("cypher://peer_connected", cb);
 }
 
 export function onMessage(cb: (msg: ChatMessage) => void) {
-  return listen<ChatMessage>("cypher://message", (e) => cb(e.payload));
+  return listenToEvent<ChatMessage>("cypher://message", cb);
 }
 
 export function onFileOffered(cb: (info: { from: string; file_id: string; name: string; size: number }) => void) {
-  return listen<{ from: string; file_id: string; name: string; size: number }>(
-    "cypher://file_offered", (e) => cb(e.payload)
-  );
+  return listenToEvent<{ from: string; file_id: string; name: string; size: number }>("cypher://file_offered", cb);
 }
 
 export function onFileProgress(cb: (info: { file_id: string; progress: number }) => void) {
-  return listen<{ file_id: string; progress: number }>(
-    "cypher://file_progress", (e) => cb(e.payload)
-  );
+  return listenToEvent<{ file_id: string; progress: number }>("cypher://file_progress", cb);
 }
 
 export function onFileComplete(cb: (fileId: string) => void) {
-  return listen<string>("cypher://file_complete", (e) => cb(e.payload));
+  return listenToEvent<string>("cypher://file_complete", cb);
 }
 
 export function onError(cb: (msg: string) => void) {
-  return listen<string>("cypher://error", (e) => cb(e.payload));
+  return listenToEvent<string>("cypher://error", cb);
 }
