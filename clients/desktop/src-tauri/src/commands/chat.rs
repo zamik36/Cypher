@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::AppState;
+use crate::{current_api, AppState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
@@ -29,7 +29,7 @@ pub async fn send_message(
     let pid =
         cypher_common::PeerId::from_bytes(&peer_id_bytes).ok_or("peer_id must be 32 bytes")?;
 
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     api.send_message(&pid, text.as_bytes())
         .await
         .map_err(|e| e.to_string())

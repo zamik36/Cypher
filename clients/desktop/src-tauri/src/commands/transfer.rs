@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::AppState;
+use crate::{current_api, AppState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransferInfo {
@@ -33,7 +33,7 @@ pub async fn send_file(
         .cloned()
         .ok_or_else(|| "no peer connected".to_string())?;
 
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     let meta = api
         .send_file(&peer_id, Path::new(&path))
         .await
@@ -59,7 +59,7 @@ pub async fn accept_file(
     dest_path: String,
 ) -> Result<(), String> {
     let id_bytes = hex_decode(&file_id).map_err(|e| e.to_string())?;
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     api.accept_file(&id_bytes, Path::new(&dest_path))
         .await
         .map_err(|e| e.to_string())
@@ -91,7 +91,7 @@ pub async fn browse_and_send(
         .cloned()
         .ok_or_else(|| "no peer connected".to_string())?;
 
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     let mut result = Vec::new();
     for path_buf in paths {
         let path_str = path_buf.to_string();

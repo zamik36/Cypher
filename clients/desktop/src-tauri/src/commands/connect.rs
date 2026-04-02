@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::{current_api, AppState};
 
 /// Connect to the P2P gateway over TLS.
 ///
@@ -10,7 +10,7 @@ pub async fn connect_to_gateway(
     state: tauri::State<'_, AppState>,
     addr: String,
 ) -> Result<(), String> {
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     api.connect_to_gateway(&addr)
         .await
         .map_err(|e| e.to_string())
