@@ -5,27 +5,30 @@ use std::sync::Arc;
 
 use cypher_client_core::api::{ClientApi, ClientEvent};
 use cypher_common::PeerId;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tauri_plugin_notification::NotificationExt;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex, RwLock};
 
 /// Shared application state injected into every Tauri command via `State<AppState>`.
 pub struct AppState {
-    /// The client API. Wrapped in Arc<Mutex> so it can be replaced when the user
-    /// unlocks or creates an identity (switching from ephemeral to persistent).
-    pub api: Arc<Mutex<ClientApi>>,
+    /// The active client API. Commands clone the current Arc under a short read
+    /// lock and then release it before awaiting network operations.
+    pub api: RwLock<Arc<ClientApi>>,
     /// All connected remote peers.
     pub peers: Arc<Mutex<HashSet<PeerId>>>,
     /// Current nickname (set after identity unlock/create).
     pub nickname: Mutex<Option<String>>,
+    /// Cancellation channel for the currently running event loop, if any.
+    pub event_loop_cancel: Mutex<Option<watch::Sender<bool>>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            api: Arc::new(Mutex::new(ClientApi::new())),
+            api: RwLock::new(Arc::new(ClientApi::new())),
             peers: Arc::new(Mutex::new(HashSet::new())),
             nickname: Mutex::new(None),
+            event_loop_cancel: Mutex::new(None),
         }
     }
 }
@@ -46,18 +49,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
-        .setup(|app| {
-            let handle = app.handle().clone();
-            let state: tauri::State<'_, AppState> = app.state();
-            let api = Arc::clone(&state.api);
-            let peers = Arc::clone(&state.peers);
-
-            tauri::async_runtime::spawn(async move {
-                event_loop_wrapper(api, peers, handle).await;
-            });
-
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect_to_gateway,
             commands::link::create_link,
@@ -82,17 +73,46 @@ pub fn run() {
         .expect("error running tauri application");
 }
 
-/// Wrapper that locks the API to call next_event, then releases the lock
-/// before processing the event (so commands aren't blocked).
+pub async fn current_api(state: &AppState) -> Arc<ClientApi> {
+    state.api.read().await.clone()
+}
+
+pub async fn restart_event_loop(state: &AppState, handle: tauri::AppHandle) {
+    let api = current_api(state).await;
+    let peers = Arc::clone(&state.peers);
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+
+    let previous_cancel = {
+        let mut guard = state.event_loop_cancel.lock().await;
+        guard.replace(cancel_tx)
+    };
+
+    if let Some(tx) = previous_cancel {
+        let _ = tx.send(true);
+    }
+
+    tauri::async_runtime::spawn(async move {
+        event_loop_wrapper(api, peers, handle, cancel_rx).await;
+    });
+}
+
 async fn event_loop_wrapper(
-    api: Arc<Mutex<ClientApi>>,
+    api: Arc<ClientApi>,
     peers: Arc<Mutex<HashSet<PeerId>>>,
     handle: tauri::AppHandle,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
     loop {
-        let event = {
-            let api_guard = api.lock().await;
-            api_guard.next_event().await
+        let event = tokio::select! {
+            changed = cancel_rx.changed() => {
+                if changed.is_ok() && *cancel_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            event = api.next_event() => {
+                event
+            }
         };
         let Some(event) = event else { break };
         handle_event(event, &api, &peers, &handle).await;
@@ -101,7 +121,7 @@ async fn event_loop_wrapper(
 
 async fn handle_event(
     event: ClientEvent,
-    api: &Arc<Mutex<ClientApi>>,
+    api: &Arc<ClientApi>,
     peers: &Arc<Mutex<HashSet<PeerId>>>,
     handle: &tauri::AppHandle,
 ) {
@@ -121,12 +141,11 @@ async fn handle_event(
                 set.insert(peer_id.clone());
             }
             {
-                let api_guard = api.lock().await;
-                if let Err(e) = api_guard.initiate_session(&peer_id).await {
+                if let Err(e) = api.initiate_session(&peer_id).await {
                     tracing::warn!("auto initiate_session failed: {e}");
                 }
                 // Auto-save conversation when a new peer connects.
-                if let Some(store) = api_guard.message_store() {
+                if let Some(store) = api.message_store() {
                     let _ = store.save_conversation(&peer_id, None);
                 }
             }

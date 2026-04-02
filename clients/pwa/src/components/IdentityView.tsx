@@ -1,6 +1,7 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, Show, createMemo } from "solid-js";
 import { hasIdentity, createIdentity, unlockIdentity, importSeed } from "../storage/identity";
 import type { IdentityData } from "../storage/identity";
+import { ShieldIcon } from "./Icons";
 
 interface IdentityViewProps {
   onUnlocked: (data: IdentityData) => void;
@@ -16,6 +17,15 @@ export default function IdentityView(props: IdentityViewProps) {
   const [seedHex, setSeedHex] = createSignal("");
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+
+  const strengthLevel = createMemo(() => {
+    const len = passphrase().length;
+    if (len >= 32) return 4;
+    if (len >= 24) return 3;
+    if (len >= 16) return 2;
+    if (len >= 12) return 1;
+    return 0;
+  });
 
   async function handleUnlock() {
     if (!passphrase()) return;
@@ -33,7 +43,7 @@ export default function IdentityView(props: IdentityViewProps) {
   }
 
   async function handleCreate() {
-    if (!nickname() || !passphrase()) return;
+    if (!nickname() || passphrase().length < 12) return;
     setBusy(true);
     setError("");
     try {
@@ -70,17 +80,20 @@ export default function IdentityView(props: IdentityViewProps) {
   return (
     <div class="identity-view">
       <div class="identity-card">
+        <div class="identity-logo-icon">
+          <ShieldIcon width="48" height="48" />
+        </div>
         <h2>Cypher</h2>
         <p class="identity-subtitle">Anonymous encrypted messenger</p>
 
         <Show when={mode() === "unlock"}>
           <div class="identity-form">
-            <input
-              type="password"
-              placeholder="PIN / passphrase"
-              value={passphrase()}
-              onInput={(e) => setPassphrase(e.currentTarget.value)}
-              onKeyDown={(e) => onKeyDown(e, handleUnlock)}
+              <input
+                type="password"
+                placeholder="Passphrase"
+                value={passphrase()}
+                onInput={(e) => setPassphrase(e.currentTarget.value)}
+                onKeyDown={(e) => onKeyDown(e, handleUnlock)}
               autofocus
             />
             <button class="btn-primary" onClick={handleUnlock} disabled={busy() || !passphrase()}>
@@ -106,13 +119,21 @@ export default function IdentityView(props: IdentityViewProps) {
               onInput={(e) => setNickname(e.currentTarget.value)}
               autofocus
             />
-            <input
-              type="password"
-              placeholder="Passphrase (min 12 chars)"
-              value={passphrase()}
-              onInput={(e) => setPassphrase(e.currentTarget.value)}
-              onKeyDown={(e) => onKeyDown(e, handleCreate)}
-            />
+              <input
+                type="password"
+                placeholder="Passphrase (min 12 chars)"
+                value={passphrase()}
+                onInput={(e) => setPassphrase(e.currentTarget.value)}
+                onKeyDown={(e) => onKeyDown(e, handleCreate)}
+              />
+            <Show when={passphrase().length > 0}>
+              <div class="strength-bar">
+                <div class={`strength-segment ${strengthLevel() >= 1 ? "weak" : ""}`} />
+                <div class={`strength-segment ${strengthLevel() >= 2 ? "fair" : ""}`} />
+                <div class={`strength-segment ${strengthLevel() >= 3 ? "good" : ""}`} />
+                <div class={`strength-segment ${strengthLevel() >= 4 ? "strong" : ""}`} />
+              </div>
+            </Show>
             <button
               class="btn-primary"
               onClick={handleCreate}
@@ -130,11 +151,16 @@ export default function IdentityView(props: IdentityViewProps) {
 
         <Show when={mode() === "import"}>
           <div class="identity-form">
-            <input
-              type="text"
+            <textarea
               placeholder="Seed (64 hex characters)"
               value={seedHex()}
               onInput={(e) => setSeedHex(e.currentTarget.value)}
+              rows={3}
+              spellcheck={false}
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              inputmode="text"
             />
             <input
               type="text"
@@ -142,12 +168,12 @@ export default function IdentityView(props: IdentityViewProps) {
               value={nickname()}
               onInput={(e) => setNickname(e.currentTarget.value)}
             />
-            <input
-              type="password"
-              placeholder="PIN / passphrase"
-              value={passphrase()}
-              onInput={(e) => setPassphrase(e.currentTarget.value)}
-              onKeyDown={(e) => onKeyDown(e, handleImport)}
+              <input
+                type="password"
+                placeholder="Passphrase"
+                value={passphrase()}
+                onInput={(e) => setPassphrase(e.currentTarget.value)}
+                onKeyDown={(e) => onKeyDown(e, handleImport)}
             />
             <button
               class="btn-primary"

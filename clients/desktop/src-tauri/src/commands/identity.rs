@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
-use crate::AppState;
+use crate::{current_api, restart_event_loop, AppState};
 use cypher_client_core::identity_store::IdentityStore;
 use cypher_client_core::persistence::sqlite::SqliteMessageStore;
 use cypher_client_core::persistence::MessageStore;
@@ -30,7 +30,7 @@ pub async fn create_identity(
     let seed = IdentityStore::new(&dir)
         .create(&nickname, &passphrase)
         .map_err(|e| e.to_string())?;
-    let peer_id = activate_identity(&state, &seed, &dir).await?;
+    let peer_id = activate_identity(&app, &state, &seed, &dir).await?;
     *state.nickname.lock().await = Some(nickname);
     Ok(peer_id)
 }
@@ -45,7 +45,7 @@ pub async fn unlock_identity(
     let (seed, nickname) = IdentityStore::new(&dir)
         .unlock(&passphrase)
         .map_err(|e| e.to_string())?;
-    let peer_id = activate_identity(&state, &seed, &dir).await?;
+    let peer_id = activate_identity(&app, &state, &seed, &dir).await?;
     *state.nickname.lock().await = Some(nickname.clone());
     Ok((peer_id, nickname))
 }
@@ -69,7 +69,7 @@ pub async fn import_mnemonic(
     let seed = IdentityStore::new(&dir)
         .import_mnemonic(&mnemonic, &nickname, &passphrase)
         .map_err(|e| e.to_string())?;
-    let peer_id = activate_identity(&state, &seed, &dir).await?;
+    let peer_id = activate_identity(&app, &state, &seed, &dir).await?;
     *state.nickname.lock().await = Some(nickname);
     Ok(peer_id)
 }
@@ -82,7 +82,7 @@ pub async fn import_mnemonic(
 pub async fn get_conversations(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     let Some(store) = api.message_store() else {
         return Ok(Vec::new());
     };
@@ -108,7 +108,7 @@ pub async fn get_history(
     limit: u32,
     before_id: Option<u64>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     let Some(store) = api.message_store() else {
         return Ok(Vec::new());
     };
@@ -134,7 +134,7 @@ pub async fn get_history(
 
 #[tauri::command]
 pub async fn clear_chat_history(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let api = state.api.lock().await;
+    let api = current_api(&state).await;
     if let Some(store) = api.message_store() {
         store.clear_all().map_err(|e| e.to_string())?;
     }
@@ -148,6 +148,7 @@ pub async fn clear_chat_history(state: tauri::State<'_, AppState>) -> Result<(),
 
 /// Initialize a ClientApi from a seed + open the message DB, replace in AppState.
 async fn activate_identity(
+    app: &tauri::AppHandle,
     state: &AppState,
     seed: &IdentitySeed,
     data_dir: &Path,
@@ -157,7 +158,7 @@ async fn activate_identity(
         SqliteMessageStore::open(data_dir.join("messages.db"), sek).map_err(|e| e.to_string())?,
     );
 
-    let api = ClientApi::with_seed(seed, Some(msg_store.clone()));
+    let api = Arc::new(ClientApi::with_seed(seed, Some(msg_store.clone())));
 
     // Restore ratchet states for known conversations.
     if let Ok(convos) = msg_store.list_conversations() {
@@ -171,7 +172,12 @@ async fn activate_identity(
     }
 
     let peer_id = hex_encode(api.peer_id().as_bytes());
-    *state.api.lock().await = api;
+    {
+        let mut current = state.api.write().await;
+        *current = Arc::clone(&api);
+    }
+    state.peers.lock().await.clear();
+    restart_event_loop(state, app.clone()).await;
     Ok(peer_id)
 }
 
