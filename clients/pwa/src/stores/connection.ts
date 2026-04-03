@@ -6,6 +6,7 @@ export interface PeerInfo {
   roomCode: string;
   role: "host" | "guest";
   displayName: string;
+  online: boolean;
 }
 
 interface ConnectionState {
@@ -34,13 +35,24 @@ const [connection, setConnection] = createStore<ConnectionState>({
 
 export function addPeer(peer: PeerInfo) {
   setConnection("peers", (prev) => {
-    if (prev.some((p) => p.peerId === peer.peerId)) return prev;
+    const idx = prev.findIndex((p) => p.peerId === peer.peerId);
+    if (idx >= 0) {
+      const updated = [...prev];
+      updated[idx] = { ...updated[idx], online: peer.online, displayName: peer.displayName };
+      return updated;
+    }
     return [...prev, peer];
   });
   if (!connection.activePeerId) {
     setConnection("activePeerId", peer.peerId);
     setActivePeerForTransfer(peer.peerId);
   }
+}
+
+export function setPeerOnline(peerId: string, online: boolean) {
+  setConnection("peers", (prev) =>
+    prev.map((p) => p.peerId === peerId ? { ...p, online } : p),
+  );
 }
 
 export function removePeer(peerId: string) {

@@ -87,6 +87,16 @@ export async function exportSeed(passphrase: string): Promise<string> {
 /** Delete the stored identity. */
 export function deleteIdentity(): void {
   localStorage.removeItem(STORAGE_KEY);
+  sessionStorage.removeItem("cypher-session-sek");
+  sessionStorage.removeItem("cypher-session-peerId");
+  sessionStorage.removeItem("cypher-session-nickname");
+}
+
+/** Clear the cached session (forces re-authentication on next load). */
+export function clearSession(): void {
+  sessionStorage.removeItem("cypher-session-sek");
+  sessionStorage.removeItem("cypher-session-peerId");
+  sessionStorage.removeItem("cypher-session-nickname");
 }
 
 /** Derive peerId from seed (must match Rust HKDF derivation). */
