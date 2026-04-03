@@ -1,9 +1,11 @@
 import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
 import { api } from "../api";
-import { chatsByPeer, addMessage, getMessages } from "../stores/chat";
+import { chatsByPeer, addMessage, getMessages, setMessages } from "../stores/chat";
 import { connection, setActivePeer, shortName } from "../stores/connection";
+import { loadMessages } from "../storage/messages";
 import { SendIcon, ChatIcon } from "./Icons";
 import type { Page } from "./Sidebar";
+import { t } from "../i18n";
 
 interface ChatPaneProps {
   onNavigate: (p: Page) => void;
@@ -18,8 +20,34 @@ export default function ChatPane(props: ChatPaneProps) {
   let messagesRef: HTMLDivElement | undefined;
   let chatAreaRef: HTMLDivElement | undefined;
 
+  const [loadingHistory, setLoadingHistory] = createSignal(false);
   const activePeer = () => connection.activePeerId;
   const activeMessages = () => activePeer() ? getMessages(activePeer()!) : [];
+  const activePeerInfo = () => connection.peers.find((p) => p.peerId === activePeer());
+
+  // Load message history from IndexedDB when selecting a peer with no in-memory messages.
+  // Track the target peer to avoid race conditions on rapid switching.
+  let loadingForPeer: string | null = null;
+  createEffect(() => {
+    const peer = activePeer();
+    if (!peer) return;
+    if (getMessages(peer).length > 0) return;
+    loadingForPeer = peer;
+    setLoadingHistory(true);
+    loadMessages(peer, 200).then((decrypted) => {
+      // Discard result if user switched to a different peer.
+      if (loadingForPeer !== peer) return;
+      if (decrypted.length > 0) {
+        const msgs = decrypted.reverse().map((m) => ({
+          from: m.direction === "sent" ? "me" : m.peerId,
+          text: m.text,
+          timestamp: m.timestamp,
+        }));
+        setMessages(peer, msgs);
+      }
+    }).catch((e) => console.warn("Failed to load history:", e))
+      .finally(() => { if (loadingForPeer === peer) setLoadingHistory(false); });
+  });
 
   createEffect(() => {
     const peer = activePeer();
@@ -64,15 +92,15 @@ export default function ChatPane(props: ChatPaneProps) {
       <Show when={noPeers()}>
         <div class="empty-state">
           <ChatIcon width="48" height="48" />
-          <p>Connect to a peer first to start chatting.</p>
-          <button class="btn-primary" onClick={() => props.onNavigate("home")}>Go to Home</button>
+          <p>{t().chat_empty}</p>
+          <button class="btn-primary" onClick={() => props.onNavigate("home")}>{t().chat_go_home}</button>
         </div>
       </Show>
 
       <Show when={!noPeers()}>
         <div class="chat-layout">
           <div class="peer-list">
-            <div class="peer-list-header">Chats</div>
+            <div class="peer-list-header">{t().chat_header}</div>
             <For each={connection.peers}>
               {(peer) => {
                 const isActive = () => activePeer() === peer.peerId;
@@ -86,11 +114,14 @@ export default function ChatPane(props: ChatPaneProps) {
                     class={`peer-item ${isActive() ? "active" : ""}`}
                     onClick={() => setActivePeer(peer.peerId)}
                   >
-                    <div class="peer-avatar">{peer.displayName.slice(0, 2).toUpperCase()}</div>
+                    <div class="peer-avatar">
+                      {peer.displayName.slice(0, 2).toUpperCase()}
+                      <span class={`online-dot ${peer.online ? "online" : "offline"}`} />
+                    </div>
                     <div class="peer-info">
                       <span class="peer-name">{peer.displayName}</span>
                       <span class="peer-last-msg">
-                        {lastMsg()?.text?.slice(0, 30) || "No messages yet"}
+                        {lastMsg()?.text?.slice(0, 30) || t().chat_no_messages}
                       </span>
                     </div>
                   </button>
@@ -103,20 +134,30 @@ export default function ChatPane(props: ChatPaneProps) {
             <Show when={activePeer()} fallback={
               <div class="empty-state">
                 <ChatIcon width="48" height="48" />
-                <p>Select a chat from the list</p>
+                <p>{t().chat_select}</p>
               </div>
             }>
               <div class="chat-header">
                 <div class="peer-avatar small">
                   {shortName(activePeer()!).slice(0, 2).toUpperCase()}
+                  <span class={`online-dot ${activePeerInfo()?.online ? "online" : "offline"}`} />
                 </div>
                 <span>{shortName(activePeer()!)}</span>
+                <Show when={activePeerInfo() && !activePeerInfo()!.online}>
+                  <span class="offline-badge">{t().chat_offline_badge}</span>
+                </Show>
               </div>
 
-              <Show when={activeMessages().length === 0}>
+              <Show when={loadingHistory()}>
+                <div class="empty-state">
+                  <p>{t().chat_loading}</p>
+                </div>
+              </Show>
+
+              <Show when={!loadingHistory() && activeMessages().length === 0}>
                 <div class="empty-state">
                   <ChatIcon width="48" height="48" />
-                  <p>No messages yet. Say hello!</p>
+                  <p>{t().chat_say_hello}</p>
                 </div>
               </Show>
 
@@ -127,7 +168,7 @@ export default function ChatPane(props: ChatPaneProps) {
                     return (
                       <div class={`message-group ${isMine ? "mine" : "theirs"}`}>
                         <div class={`avatar ${isMine ? "me" : "peer"}`}>
-                          {isMine ? "Me" : "P"}
+                          {isMine ? t().chat_me : t().chat_peer}
                         </div>
                         <div class="message-content">
                           <div class="bubble">{msg.text}</div>
@@ -139,18 +180,24 @@ export default function ChatPane(props: ChatPaneProps) {
                 </For>
               </div>
 
-              <div class="input-row">
-                <input
-                  type="text"
-                  value={draft()}
-                  onInput={(e) => setDraft(e.currentTarget.value)}
-                  onKeyDown={(e) => e.key === "Enter" && send()}
-                  placeholder="Type a message..."
-                />
-                <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
-                  <SendIcon />
-                </button>
-              </div>
+              <Show when={activePeerInfo()?.online} fallback={
+                <div class="input-row offline-hint">
+                  <span>{t().chat_offline_hint}</span>
+                </div>
+              }>
+                <div class="input-row">
+                  <input
+                    type="text"
+                    value={draft()}
+                    onInput={(e) => setDraft(e.currentTarget.value)}
+                    onKeyDown={(e) => e.key === "Enter" && send()}
+                    placeholder={t().chat_placeholder}
+                  />
+                  <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
+                    <SendIcon />
+                  </button>
+                </div>
+              </Show>
             </Show>
           </div>
         </div>

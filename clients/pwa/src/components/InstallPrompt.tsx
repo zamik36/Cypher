@@ -1,5 +1,6 @@
 import { createSignal, Show, onMount, onCleanup } from "solid-js";
 import { XIcon } from "./Icons";
+import { t } from "../i18n";
 
 const DISMISS_KEY = "pwa-install-dismissed";
 
@@ -39,12 +40,9 @@ export default function InstallPrompt() {
 
     window.addEventListener("beforeinstallprompt", handleBeforeInstall);
 
-    // iOS Safari: no beforeinstallprompt, show manual instructions.
     if (isIos() && !isInStandaloneMode()) {
       setShowIosHint(true);
     }
-    // Android: if beforeinstallprompt hasn't fired after 3s and not standalone,
-    // show manual "Add to Home Screen" hint for browsers that don't fire the event.
     if (isAndroid() && !isInStandaloneMode()) {
       setTimeout(() => {
         if (!deferredPrompt()) setShowIosHint(true);
@@ -79,25 +77,25 @@ export default function InstallPrompt() {
       <div class="install-prompt">
         <div class="install-prompt-content">
           <Show when={deferredPrompt()}>
-            <span>Install Cypher for the best experience</span>
+            <span>{t().install_text}</span>
             <button class="btn-primary btn-sm" onClick={install}>
-              Install
+              {t().install_btn}
             </button>
           </Show>
           <Show when={showIosHint() && !deferredPrompt()}>
             <span>
               {isIos() ? (
                 <>
-                  Tap{" "}
+                  {t().install_ios.split('"')[0]}
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ "vertical-align": "middle" }}>
                     <path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8" />
                     <polyline points="16 6 12 2 8 6" />
                     <line x1="12" y1="2" x2="12" y2="15" />
                   </svg>{" "}
-                  Share, then "Add to Home Screen"
+                  {t().install_ios}
                 </>
               ) : (
-                <>Menu &#8942; then "Add to Home Screen" or "Install app"</>
+                <>{t().install_android}</>
               )}
             </span>
           </Show>

@@ -19,6 +19,21 @@ self.addEventListener("activate", (e) => {
   self.clients.claim();
 });
 
+// Handle notification clicks — focus the app window.
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      // Focus existing window if available.
+      for (const client of clients) {
+        if ("focus" in client) return client.focus();
+      }
+      // Otherwise open a new window.
+      return self.clients.openWindow("/");
+    })
+  );
+});
+
 self.addEventListener("fetch", (e) => {
   const { request } = e;
   // Skip non-GET and WebSocket requests.

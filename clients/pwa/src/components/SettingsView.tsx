@@ -1,10 +1,19 @@
-import { createSignal, onCleanup } from "solid-js";
+import { createSignal, onCleanup, Show } from "solid-js";
 import { connection, setConnection } from "../stores/connection";
 import { api } from "../api";
 import { clearAll as clearMessageStore } from "../storage/messages";
 import { clearAllMessages } from "../stores/chat";
-import { exportSeed } from "../storage/identity";
+import { exportSeed, clearSession } from "../storage/identity";
 import { addToast } from "../stores/toasts";
+import {
+  notificationsSupported,
+  notificationsEnabled,
+  setNotificationsEnabled,
+  previewEnabled,
+  setPreviewEnabled,
+  requestNotificationPermission,
+} from "../utils/notifications";
+import { t, locale, setLocale, type Locale } from "../i18n";
 
 interface SettingsViewProps {
   theme: string;
@@ -19,6 +28,25 @@ export default function SettingsView(props: SettingsViewProps) {
   const [clearCountdown, setClearCountdown] = createSignal(0);
   const [exportPass, setExportPass] = createSignal("");
   const [seedHex, setSeedHex] = createSignal<string | null>(null);
+  const [notifEnabled, setNotifEnabled] = createSignal(notificationsEnabled());
+  const [prevEnabled, setPrevEnabled] = createSignal(previewEnabled());
+
+  async function handleToggleNotifications() {
+    if (!notifEnabled()) {
+      const perm = await requestNotificationPermission();
+      if (perm === "granted") {
+        setNotificationsEnabled(true);
+        setNotifEnabled(true);
+        addToast(t().toast_notif_enabled, "success");
+      } else {
+        addToast(t().toast_notif_denied, "error");
+      }
+    } else {
+      setNotificationsEnabled(false);
+      setNotifEnabled(false);
+      addToast(t().toast_notif_disabled, "success");
+    }
+  }
 
   async function handleReconnect() {
     setReconnecting(true);
@@ -50,9 +78,9 @@ export default function SettingsView(props: SettingsViewProps) {
     try {
       await clearMessageStore();
       clearAllMessages();
-      addToast("Chat history cleared", "success");
+      addToast(t().toast_history_cleared, "success");
     } catch (e) {
-      addToast(`Failed to clear: ${e}`, "error");
+      addToast(t().toast_clear_failed(String(e)), "error");
     }
     setConfirmClear(false);
   }
@@ -62,7 +90,6 @@ export default function SettingsView(props: SettingsViewProps) {
     try {
       const hex = await exportSeed(exportPass());
       setSeedHex(hex);
-      // Auto-clear seed from display after 30 seconds for security.
       setTimeout(() => setSeedHex(null), 30_000);
     } catch (e) {
       addToast(String(e), "error");
@@ -72,64 +99,129 @@ export default function SettingsView(props: SettingsViewProps) {
 
   return (
     <div class="settings-view">
-      <h2>Settings</h2>
+      <h2>{t().settings_title}</h2>
 
       {props.nickname && (
         <div class="settings-group">
-          <label>Identity</label>
+          <label>{t().settings_identity}</label>
           <div class="about-info">
-            <p>Nickname: <strong>{props.nickname}</strong></p>
+            <p>{t().settings_nickname} <strong>{props.nickname}</strong></p>
             <p style={{ "font-size": "12px", "opacity": "0.7" }}>
-              PeerId: {connection.peerId?.slice(0, 12)}...
+              {t().settings_peerid} {connection.peerId?.slice(0, 12)}...
             </p>
           </div>
+          <button class="btn-secondary" style={{ "margin-top": "8px" }} onClick={() => {
+            clearSession();
+            location.reload();
+          }}>
+            {t().settings_lock}
+          </button>
         </div>
       )}
 
       <div class="settings-group">
-        <label>Gateway Server</label>
+        <label>{t().settings_gateway}</label>
         <div class="settings-row">
           <input
             type="text"
             value={addr()}
             onInput={(e: InputEvent & { currentTarget: HTMLInputElement }) => setAddr(e.currentTarget.value)}
-            placeholder="host:port"
+            placeholder={t().home_host_port}
           />
           <button class="btn-secondary" onClick={handleReconnect} disabled={reconnecting()}>
-            {reconnecting() ? "Connecting..." : "Reconnect"}
+            {reconnecting() ? t().settings_reconnecting : t().settings_reconnect}
           </button>
         </div>
       </div>
 
       <div class="settings-group">
-        <label>Theme</label>
+        <label>{t().settings_theme}</label>
         <div class="theme-options">
           <button
             class={`theme-option ${props.theme === "dark" ? "active" : ""}`}
             onClick={() => props.setTheme("dark")}
           >
-            Dark
+            {t().settings_dark}
           </button>
           <button
             class={`theme-option ${props.theme === "light" ? "active" : ""}`}
             onClick={() => props.setTheme("light")}
           >
-            Light
+            {t().settings_light}
           </button>
         </div>
       </div>
 
       <div class="settings-group">
-        <label>Export Seed (Backup)</label>
+        <label>{t().settings_language}</label>
+        <div class="theme-options">
+          <button
+            class={`theme-option ${locale() === "en" ? "active" : ""}`}
+            onClick={() => setLocale("en" as Locale)}
+          >
+            English
+          </button>
+          <button
+            class={`theme-option ${locale() === "ru" ? "active" : ""}`}
+            onClick={() => setLocale("ru" as Locale)}
+          >
+            Русский
+          </button>
+        </div>
+      </div>
+
+      <Show when={notificationsSupported()}>
+        <div class="settings-group">
+          <label>{t().settings_notifications}</label>
+          <div class="settings-row">
+            <span style={{ flex: 1, "font-size": "13px" }}>
+              {Notification.permission === "denied"
+                ? t().settings_notif_blocked
+                : notifEnabled()
+                  ? t().settings_notif_on
+                  : t().settings_notif_off}
+            </span>
+            <button
+              class={notifEnabled() ? "btn-secondary" : "btn-primary"}
+              onClick={handleToggleNotifications}
+              disabled={Notification.permission === "denied"}
+            >
+              {notifEnabled() ? t().settings_notif_disable : t().settings_notif_enable}
+            </button>
+          </div>
+          <Show when={notifEnabled()}>
+            <div class="settings-row" style={{ "margin-top": "8px" }}>
+              <span style={{ flex: 1, "font-size": "13px" }}>
+                {prevEnabled()
+                  ? t().settings_preview_shown
+                  : t().settings_preview_hidden}
+              </span>
+              <button
+                class="btn-secondary"
+                onClick={() => {
+                  const next = !prevEnabled();
+                  setPreviewEnabled(next);
+                  setPrevEnabled(next);
+                }}
+              >
+                {prevEnabled() ? t().settings_preview_hide : t().settings_preview_show}
+              </button>
+            </div>
+          </Show>
+        </div>
+      </Show>
+
+      <div class="settings-group">
+        <label>{t().settings_export}</label>
         <div class="settings-row">
           <input
             type="password"
             value={exportPass()}
             onInput={(e: InputEvent & { currentTarget: HTMLInputElement }) => setExportPass(e.currentTarget.value)}
-            placeholder="Enter passphrase to export"
+            placeholder={t().settings_export_placeholder}
           />
           <button class="btn-secondary" onClick={handleExportSeed} disabled={!exportPass()}>
-            Export
+            {t().settings_export_btn}
           </button>
         </div>
         {seedHex() && (
@@ -139,50 +231,46 @@ export default function SettingsView(props: SettingsViewProps) {
               class="btn-sm btn-secondary"
               onClick={() => {
                 navigator.clipboard.writeText(seedHex()!);
-                addToast("Seed copied!", "success");
+                addToast(t().toast_seed_copied, "success");
               }}
             >
-              Copy
+              {t().settings_copy}
             </button>
           </div>
         )}
       </div>
 
       <div class="settings-group">
-        <label>Data</label>
+        <label>{t().settings_data}</label>
         {!confirmClear() ? (
           <button class="btn-danger" onClick={startClearConfirmation}>
-            Clear chat history
+            {t().settings_clear}
           </button>
         ) : (
           <div class="clear-confirm">
             <p class="clear-warning">
-              All messages and chat history will be permanently deleted.
-              Ratchet sessions will be reset — reconnecting to peers will
-              require a new key exchange.
+              {t().settings_clear_warning}
             </p>
             <button
               class="btn-danger"
               onClick={handleClearHistory}
               disabled={clearCountdown() > 0}
             >
-              {clearCountdown() > 0
-                ? `Confirm (${clearCountdown()}s)`
-                : "Confirm delete"}
+              {t().settings_clear_confirm(clearCountdown())}
             </button>
             <button class="btn-secondary" onClick={() => setConfirmClear(false)}>
-              Cancel
+              {t().settings_cancel}
             </button>
           </div>
         )}
       </div>
 
       <div class="settings-group">
-        <label>About</label>
+        <label>{t().settings_about}</label>
         <div class="about-info">
-          <p>Cypher v0.1.1 (PWA)</p>
-          <p>Anonymous, end-to-end encrypted messaging.</p>
-          <p>No accounts. No tracking. No logs.</p>
+          <p>{t().settings_version}</p>
+          <p>{t().settings_about_desc}</p>
+          <p>{t().settings_about_motto}</p>
         </div>
       </div>
     </div>

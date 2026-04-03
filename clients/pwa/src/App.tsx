@@ -20,7 +20,10 @@ import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
 import type { IdentityData } from "./storage/identity";
 import { deriveStorageKey } from "./storage/identity";
-import { openMessageStore, saveMessage, saveConversation } from "./storage/messages";
+import { openMessageStore, saveMessage, saveConversation, listConversations } from "./storage/messages";
+import { hexEncode } from "./api/proto";
+import { notifyMessage } from "./utils/notifications";
+import { t } from "./i18n";
 
 export default function App() {
   const [page, setPage] = createSignal<Page>("home");
@@ -29,6 +32,29 @@ export default function App() {
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [unlocked, setUnlocked] = createSignal(false);
   const [identityNickname, setIdentityNickname] = createSignal<string | null>(null);
+
+  const SESSION_SEK_KEY = "cypher-session-sek";
+  const SESSION_PEERID_KEY = "cypher-session-peerId";
+  const SESSION_NICKNAME_KEY = "cypher-session-nickname";
+
+  function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    for (const b of bytes) binary += String.fromCharCode(b);
+    return btoa(binary);
+  }
+
+  function base64ToBytes(b64: string): Uint8Array {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function hexToBytes(hex: string): Uint8Array {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+    return bytes;
+  }
 
   let pendingRoom: { code: string; role: "host" | "guest" } | null = null;
 
@@ -56,9 +82,29 @@ export default function App() {
     try {
       const sek = await deriveStorageKey(data.seed);
       await openMessageStore(sek);
+      // Cache session data for page refresh (not tab close).
+      sessionStorage.setItem(SESSION_SEK_KEY, bytesToBase64(sek));
+      sessionStorage.setItem(SESSION_PEERID_KEY, hexEncode(data.peerId));
+      sessionStorage.setItem(SESSION_NICKNAME_KEY, data.nickname);
     } catch (e) {
       console.error("Failed to open message store:", e);
-      addToast("Message history unavailable — messages won't persist across restarts", "error");
+      addToast(t().toast_msg_unavailable, "error");
+    }
+
+    // Restore saved conversations from IndexedDB.
+    try {
+      const conversations = await listConversations();
+      for (const conv of conversations) {
+        addPeer({
+          peerId: conv.peerId,
+          roomCode: "saved",
+          role: "guest",
+          displayName: conv.nickname || shortName(conv.peerId),
+          online: false,
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to load saved conversations:", e);
     }
 
     setUnlocked(true);
@@ -83,10 +129,11 @@ export default function App() {
           roomCode: room.code,
           role: room.role,
           displayName: shortName(remotePeerId),
+          online: true,
         });
         pendingRoom = null;
         setConnection({ status: "peer connected" });
-        addToast("Peer connected!", "success");
+        addToast(t().toast_peer_connected, "success");
         navigateTo("chat");
         // Save conversation to IndexedDB.
         saveConversation(remotePeerId, null).catch(() => {});
@@ -95,6 +142,8 @@ export default function App() {
         const peerId = msg.from;
         addMessage(peerId, msg);
         if (page() !== "chat") setUnread((n: number) => n + 1);
+        // Show system notification when app is not focused.
+        notifyMessage(shortName(peerId), msg.text);
         // Persist received message.
         saveMessage(peerId, "received", msg.text, msg.timestamp).catch((e) =>
           console.warn("Failed to persist received message:", e));
@@ -109,7 +158,7 @@ export default function App() {
           direction: "receive",
           status: "active",
         });
-        addToast(`Receiving: ${info.name}`, "info");
+        addToast(t().toast_receiving(info.name), "info");
         navigateTo("files");
       }),
       onFileProgress((info) => {
@@ -117,7 +166,7 @@ export default function App() {
       }),
       onFileComplete((fileId) => {
         upsertTransfer({ file_id: fileId, progress: 1.0, status: "complete" });
-        addToast("Transfer complete!", "success");
+        addToast(t().toast_transfer_complete, "success");
       }),
       onMessageSent((info) => {
         // Persist sent message to IndexedDB.
@@ -141,9 +190,53 @@ export default function App() {
     }
   }
 
-  onMount(() => {
-    // If no identity exists yet, show identity screen right away.
-    // The actual app boot happens after identity unlock.
+  onMount(async () => {
+    // Try to restore session from sessionStorage (survives page refresh, not tab close).
+    const sekB64 = sessionStorage.getItem(SESSION_SEK_KEY);
+    const peerIdHex = sessionStorage.getItem(SESSION_PEERID_KEY);
+    const nickname = sessionStorage.getItem(SESSION_NICKNAME_KEY);
+
+    if (sekB64 && peerIdHex && nickname) {
+      try {
+        const sek = base64ToBytes(sekB64);
+        const peerId = hexToBytes(peerIdHex);
+
+        // Validate restored data integrity.
+        if (sek.length !== 32 || peerId.length !== 32 || peerId.some((b) => Number.isNaN(b))) {
+          throw new Error("Corrupted session cache");
+        }
+
+        apiSetPeerId(peerId);
+        setIdentityNickname(nickname);
+        await openMessageStore(sek);
+
+        // Restore saved conversations.
+        try {
+          const conversations = await listConversations();
+          for (const conv of conversations) {
+            addPeer({
+              peerId: conv.peerId,
+              roomCode: "saved",
+              role: "guest",
+              displayName: conv.nickname || shortName(conv.peerId),
+              online: false,
+            });
+          }
+        } catch (e) {
+          console.warn("Failed to load saved conversations:", e);
+        }
+
+        setUnlocked(true);
+        startApp();
+        return;
+      } catch (e) {
+        console.warn("Session restore failed, clearing cache:", e);
+        sessionStorage.removeItem(SESSION_SEK_KEY);
+        sessionStorage.removeItem(SESSION_PEERID_KEY);
+        sessionStorage.removeItem(SESSION_NICKNAME_KEY);
+      }
+    }
+    // Otherwise show identity/unlock screen (handled by Show fallback).
   });
 
   return (

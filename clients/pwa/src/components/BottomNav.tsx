@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
 import { HomeIcon, ChatIcon, FilesIcon, SettingsIcon } from "./Icons";
 import type { Page } from "./Sidebar";
+import { t } from "../i18n";
 
 interface BottomNavProps {
   page: Page;
@@ -16,7 +17,7 @@ export default function BottomNav(props: BottomNavProps) {
         onClick={() => props.setPage("home")}
       >
         <HomeIcon width="22" height="22" />
-        <span>Home</span>
+        <span>{t().nav_home}</span>
       </button>
       <button
         class={`bottom-nav-item ${props.page === "chat" ? "active" : ""}`}
@@ -28,21 +29,21 @@ export default function BottomNav(props: BottomNavProps) {
             <span class="bottom-nav-badge">{props.unread > 99 ? "99+" : props.unread}</span>
           </Show>
         </span>
-        <span>Chat</span>
+        <span>{t().nav_chat}</span>
       </button>
       <button
         class={`bottom-nav-item ${props.page === "files" ? "active" : ""}`}
         onClick={() => props.setPage("files")}
       >
         <FilesIcon width="22" height="22" />
-        <span>Files</span>
+        <span>{t().nav_files}</span>
       </button>
       <button
         class={`bottom-nav-item ${props.page === "settings" ? "active" : ""}`}
         onClick={() => props.setPage("settings")}
       >
         <SettingsIcon width="22" height="22" />
-        <span>Settings</span>
+        <span>{t().nav_settings}</span>
       </button>
     </nav>
   );
