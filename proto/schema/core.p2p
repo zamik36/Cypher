@@ -9,7 +9,7 @@
 @0xB1000004 signal.answer sdp:Bytes peer_id:Bytes = signal.Ok;
 
 // Key exchange
-@0xB2000001 keys.uploadPrekeys identity_key:Bytes signed_prekey:Bytes = keys.Ok;
+@0xB2000001 keys.uploadPrekeys identity_key:Bytes signed_prekey:Bytes inbox_id:Bytes = keys.Ok;
 @0xB2000002 keys.getPrekeys peer_id:Bytes = keys.PrekeyBundle;
 
 // Chat (E2EE)
@@ -24,3 +24,8 @@
 @0xD1000004 file.complete peer_id:Bytes file_id:Bytes = file.Ok;
 @0xD1000005 file.chunkAck peer_id:Bytes file_id:Bytes index:Int = file.Ok;
 @0xD1000006 file.resume peer_id:Bytes file_id:Bytes missing:Bytes = file.ResumeAck;
+
+// Blind inbox (anonymous offline message queue)
+@0xC2000001 inbox.store inbox_id:Bytes ciphertext:Bytes = inbox.Ok;
+@0xC2000002 inbox.fetch inbox_id:Bytes = inbox.Messages;
+@0xC2000003 inbox.messages messages:Bytes count:Int = inbox.Ok;

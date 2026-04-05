@@ -100,10 +100,12 @@ impl SignalingClient {
         &mut self,
         identity_key: Vec<u8>,
         signed_prekey: Vec<u8>,
+        inbox_id: Vec<u8>,
     ) -> Result<()> {
         let msg = cypher_proto::KeysUploadPrekeys {
             identity_key,
             signed_prekey,
+            inbox_id,
         };
         self.conn
             .send_payload(Bytes::from(msg.serialize()), FrameFlags::NONE)

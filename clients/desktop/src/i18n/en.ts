@@ -108,7 +108,7 @@ const en = {
   settings_clear_confirm: (s: number) => s > 0 ? `Confirm (${s}s)` : "Confirm delete",
   settings_cancel: "Cancel",
   settings_about: "About",
-  settings_version: "Cypher v0.1.1 (PWA)",
+  settings_version: "Cypher v0.1.1",
   settings_about_desc: "Anonymous, end-to-end encrypted messaging.",
   settings_about_motto: "No accounts. No tracking. No logs.",
 
@@ -123,12 +123,6 @@ const en = {
   toast_history_cleared: "Chat history cleared",
   toast_clear_failed: (e: string) => `Failed to clear: ${e}`,
   toast_seed_copied: "Seed copied!",
-
-  // -- Install prompt --
-  install_text: "Install Cypher for the best experience",
-  install_btn: "Install",
-  install_ios: "Share, then \"Add to Home Screen\"",
-  install_android: "Menu \u2630 then \"Add to Home Screen\" or \"Install app\"",
 
   // -- Sidebar --
   sidebar_light_mode: "Light mode",

@@ -17,6 +17,7 @@ import { connection, setConnection, addPeer, shortName } from "./stores/connecti
 import { addMessage } from "./stores/chat";
 import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
+import { t } from "./i18n";
 
 export default function App() {
   const [page, setPage] = createSignal<Page>("home");
@@ -26,9 +27,26 @@ export default function App() {
   const [nickname, setNickname] = createSignal<string | null>(null);
   const [unlocked, setUnlocked] = createSignal(false);
 
-  function handleIdentityUnlocked(peerId: string, nick: string) {
+  async function handleIdentityUnlocked(peerId: string, nick: string) {
     setNickname(nick);
     setConnection({ peerId });
+
+    // Restore saved conversations from SQLite.
+    try {
+      const conversations = await api.getConversations();
+      for (const conv of conversations) {
+        addPeer({
+          peerId: conv.peer_id,
+          roomCode: "saved",
+          role: "guest",
+          displayName: conv.display_name || shortName(conv.peer_id),
+          online: false,
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to load saved conversations:", e);
+    }
+
     setUnlocked(true);
     startApp();
   }
@@ -73,10 +91,11 @@ export default function App() {
           roomCode: room.code,
           role: room.role,
           displayName: shortName(remotePeerId),
+          online: true,
         });
         pendingRoom = null;
         setConnection({ status: "peer connected" });
-        addToast("Peer connected!", "success");
+        addToast(t().toast_peer_connected, "success");
         navigateTo("chat");
       }),
       onMessage((msg) => {
@@ -96,7 +115,7 @@ export default function App() {
           direction: "receive",
           status: "active",
         });
-        addToast(`Receiving: ${info.name}`, "info");
+        addToast(t().toast_receiving(info.name), "info");
         navigateTo("files");
       }),
       onFileProgress((info) => {
@@ -111,7 +130,7 @@ export default function App() {
           progress: 1.0,
           status: "complete",
         });
-        addToast("Transfer complete!", "success");
+        addToast(t().toast_transfer_complete, "success");
       }),
       onError((msg) => {
         addToast(msg, "error");

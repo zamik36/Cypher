@@ -18,7 +18,8 @@ const SCHEMA: &str = "
         peer_id      BLOB PRIMARY KEY,
         nickname     TEXT,
         created_at   INTEGER NOT NULL,
-        last_msg_at  INTEGER NOT NULL
+        last_msg_at  INTEGER NOT NULL,
+        inbox_id     BLOB
     );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -65,6 +66,10 @@ impl SqliteMessageStore {
             .conn()?
             .execute_batch(SCHEMA)
             .map_err(|e| Error::Crypto(format!("schema init: {e}")))?;
+        // Migration: add inbox_id column if missing (existing databases).
+        let _ = store.conn()?.execute_batch(
+            "ALTER TABLE conversations ADD COLUMN inbox_id BLOB;",
+        );
         Ok(store)
     }
 
@@ -245,7 +250,7 @@ impl MessageStore for SqliteMessageStore {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT peer_id, nickname, created_at, last_msg_at
+                "SELECT peer_id, nickname, created_at, last_msg_at, inbox_id
                  FROM conversations ORDER BY last_msg_at DESC",
             )
             .map_err(|e| Error::Crypto(format!("prepare: {e}")))?;
@@ -257,6 +262,7 @@ impl MessageStore for SqliteMessageStore {
                     nickname: row.get(1)?,
                     created_at: row.get::<_, i64>(2)? as u64,
                     last_message_at: row.get::<_, i64>(3)? as u64,
+                    inbox_id: row.get(4)?,
                 })
             })
             .map_err(|e| Error::Crypto(format!("query: {e}")))?
@@ -282,6 +288,29 @@ impl MessageStore for SqliteMessageStore {
         )
         .map_err(|e| Error::Crypto(format!("delete conversation: {e}")))?;
         Ok(())
+    }
+
+    fn save_peer_inbox_id(&self, peer_id: &PeerId, inbox_id: &[u8]) -> Result<()> {
+        self.conn()?
+            .execute(
+                "UPDATE conversations SET inbox_id = ?1 WHERE peer_id = ?2",
+                params![inbox_id, peer_id.as_bytes().as_slice()],
+            )
+            .map_err(|e| Error::Crypto(format!("save_peer_inbox_id: {e}")))?;
+        Ok(())
+    }
+
+    fn load_peer_inbox_id(&self, peer_id: &PeerId) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn()?;
+        let result: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT inbox_id FROM conversations WHERE peer_id = ?1",
+                params![peer_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(result)
     }
 
     fn clear_all(&self) -> Result<()> {

@@ -6,6 +6,7 @@ export interface PeerInfo {
   role: "host" | "guest";
   /** Short display name derived from peerId */
   displayName: string;
+  online: boolean;
 }
 
 interface ConnectionState {
@@ -24,7 +25,7 @@ interface ConnectionState {
 const [connection, setConnection] = createStore<ConnectionState>({
   connected: false,
   peerId: null,
-  gatewayAddr: "cyphermessanger.tech:9100",
+  gatewayAddr: localStorage.getItem("cypher-gateway") || "cyphermessanger.tech:9100",
   status: "disconnected",
   gatewayConnecting: false,
   gatewayError: null,
@@ -34,13 +35,24 @@ const [connection, setConnection] = createStore<ConnectionState>({
 
 export function addPeer(peer: PeerInfo) {
   setConnection("peers", (prev) => {
-    if (prev.some((p) => p.peerId === peer.peerId)) return prev;
+    const idx = prev.findIndex((p) => p.peerId === peer.peerId);
+    if (idx >= 0) {
+      const updated = [...prev];
+      updated[idx] = { ...updated[idx], online: peer.online, displayName: peer.displayName };
+      return updated;
+    }
     return [...prev, peer];
   });
   // Auto-select if first peer
   if (!connection.activePeerId) {
     setConnection("activePeerId", peer.peerId);
   }
+}
+
+export function setPeerOnline(peerId: string, online: boolean) {
+  setConnection("peers", (prev) =>
+    prev.map((p) => p.peerId === peerId ? { ...p, online } : p),
+  );
 }
 
 export function removePeer(peerId: string) {
@@ -62,5 +74,8 @@ export function shortName(peerId: string): string {
 export function resetRoom() {
   setConnection({ peers: [], activePeerId: null });
 }
+
+// Persist gateway address changes
+const originalSetConnection = setConnection;
 
 export { connection, setConnection };

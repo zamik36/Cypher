@@ -460,6 +460,8 @@ impl Gateway {
                     }
                     Message::KeysUploadPrekeys(_) => ("signaling.upload_prekeys".to_string(), None),
                     Message::KeysGetPrekeys(_) => ("signaling.get_prekeys".to_string(), None),
+                    Message::InboxStore(_) => ("signaling.inbox_store".to_string(), None),
+                    Message::InboxFetch(_) => ("signaling.inbox_fetch".to_string(), None),
                     Message::ChatSend(ref chat) => {
                         let target_peer_id = chat.peer_id.clone();
 

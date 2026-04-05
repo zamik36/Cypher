@@ -101,6 +101,8 @@ pub struct ClientApi {
     relay_client: Arc<Mutex<Option<cypher_nat::RelayClient>>>,
     /// Optional persistent message store for chat history.
     message_store: Option<Arc<dyn MessageStore>>,
+    /// Blind inbox ID derived from identity seed (for offline message delivery).
+    inbox_id: Vec<u8>,
 }
 
 impl ClientApi {
@@ -110,7 +112,7 @@ impl ClientApi {
         let keys = Arc::new(KeyManager::new(
             cypher_crypto::identity::IdentityKeyPair::generate(),
         ));
-        Self::build(session, keys, None)
+        Self::build(session, keys, None, Vec::new())
     }
 
     /// Create a new client with a persistent identity derived from a seed,
@@ -122,15 +124,17 @@ impl ClientApi {
         // Derive two independent copies of the keypair (deterministic from seed).
         let session_identity = seed.derive_identity();
         let keys_identity = seed.derive_identity();
+        let inbox_id = seed.derive_inbox_id().to_vec();
         let session = Arc::new(ClientSession::from_identity(session_identity));
         let keys = Arc::new(KeyManager::new(keys_identity));
-        Self::build(session, keys, message_store)
+        Self::build(session, keys, message_store, inbox_id)
     }
 
     fn build(
         session: Arc<ClientSession>,
         keys: Arc<KeyManager>,
         message_store: Option<Arc<dyn MessageStore>>,
+        inbox_id: Vec<u8>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(256);
         Self {
@@ -148,7 +152,13 @@ impl ClientApi {
             p2p_socket: Mutex::new(None),
             relay_client: Arc::new(Mutex::new(None)),
             message_store,
+            inbox_id,
         }
+    }
+
+    /// Return the blind inbox ID (empty for ephemeral identities).
+    pub fn inbox_id(&self) -> &[u8] {
+        &self.inbox_id
     }
 
     pub fn peer_id(&self) -> &PeerId {
@@ -218,6 +228,7 @@ impl ClientApi {
             .upload_prekeys(
                 raw[32..64].to_vec(), // identity_dh_key
                 raw[64..96].to_vec(), // signed_prekey
+                self.inbox_id.clone(),
             )
             .await?;
         info!("do_connect: prekeys uploaded");
@@ -234,6 +245,23 @@ impl ClientApi {
                 peer_id: self.session.peer_id().clone(),
             })
             .await;
+
+        // Fetch any queued offline messages from our blind inbox.
+        if !self.inbox_id.is_empty() {
+            let inbox_msg = cypher_proto::InboxFetch {
+                inbox_id: self.inbox_id.clone(),
+            };
+            if let Some(tx) = self.outbound_tx.lock().await.as_ref() {
+                let _ = tx
+                    .send(OutboundCmd::Send {
+                        payload: Bytes::from(inbox_msg.serialize()),
+                        flags: FrameFlags::NONE,
+                    })
+                    .await;
+                info!("do_connect: sent InboxFetch for blind inbox");
+            }
+        }
+
         info!("do_connect: done");
         Ok(())
     }
@@ -357,6 +385,17 @@ impl ClientApi {
         let ik_dh_bytes = json_bytes_field(&resp, "identity_key")?;
         let spk_bytes = json_bytes_field(&resp, "signed_prekey")?;
 
+        // Extract peer's inbox_id if present (for offline message delivery).
+        let peer_inbox_id = resp
+            .get("inbox_id")
+            .and_then(|v| {
+                if v.is_null() {
+                    return None;
+                }
+                // inbox_id comes as a hex string from signaling
+                v.as_str().and_then(|hex| hex_decode(hex).ok())
+            });
+
         let their_ik_dh = X25519PublicKey::from(
             <[u8; 32]>::try_from(ik_dh_bytes.as_slice())
                 .map_err(|_| Error::Crypto("identity_key must be 32 bytes".into()))?,
@@ -389,12 +428,53 @@ impl ClientApi {
                 .init_receiver_session(peer_id.as_bytes(), &shared_secret);
             info!(peer_id = %peer_id, role = "receiver", "mutual key agreement session initialised");
         }
+
+        // Persist the peer's inbox_id for future offline message delivery.
+        if let (Some(inbox), Some(store)) = (&peer_inbox_id, &self.message_store) {
+            if let Err(e) = store.save_peer_inbox_id(peer_id, inbox) {
+                warn!(peer_id = %peer_id, error = %e, "failed to persist peer inbox_id");
+            }
+        }
+
         Ok(())
     }
 
     /// Return a reference to the message store, if one was configured.
     pub fn message_store(&self) -> Option<&Arc<dyn MessageStore>> {
         self.message_store.as_ref()
+    }
+
+    /// Fetch queued offline messages from our blind inbox.
+    ///
+    /// Sends `InboxFetch` with our inbox_id; the signaling service returns all
+    /// queued messages and clears the inbox. Returned messages are dispatched
+    /// through the normal I/O loop as proto payloads.
+    pub async fn fetch_inbox(&self) -> Result<()> {
+        if self.inbox_id.is_empty() {
+            return Ok(());
+        }
+        let msg = cypher_proto::InboxFetch {
+            inbox_id: self.inbox_id.clone(),
+        };
+        self.send_raw(Bytes::from(msg.serialize()), FrameFlags::NONE)
+            .await?;
+        debug!("sent InboxFetch");
+        Ok(())
+    }
+
+    /// Store a message in a peer's blind inbox for offline delivery.
+    ///
+    /// The `ciphertext` must already be E2EE-encrypted. The server only sees
+    /// the inbox_id (unlinkable to peer_id) and opaque ciphertext.
+    pub async fn send_to_inbox(&self, inbox_id: &[u8], ciphertext: &[u8]) -> Result<()> {
+        let msg = cypher_proto::InboxStore {
+            inbox_id: inbox_id.to_vec(),
+            ciphertext: ciphertext.to_vec(),
+        };
+        self.send_raw(Bytes::from(msg.serialize()), FrameFlags::NONE)
+            .await?;
+        debug!("sent InboxStore");
+        Ok(())
     }
 
     /// Encrypt and send a message to `peer_id`.
@@ -1008,6 +1088,73 @@ async fn dispatch_inbound(
                 Err(e) => {
                     warn!(candidate = %candidate_str, error = %e, "invalid ICE candidate address");
                 }
+            }
+        }
+
+        Ok(Message::InboxMessages(inbox)) => {
+            // Each message in the blob is length-prefixed: [u32 len][bytes]...
+            // Each inner payload is a serialized ChatSend proto.
+            let mut offset = 0usize;
+            let blob = &inbox.messages;
+            let mut delivered = 0u32;
+            while offset + 4 <= blob.len() {
+                let len = u32::from_le_bytes(blob[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+                if offset + len > blob.len() {
+                    break;
+                }
+                let msg_bytes = &blob[offset..offset + len];
+                offset += len;
+
+                // Each stored message is a serialized ChatSend.
+                match dispatch(msg_bytes) {
+                    Ok(Message::ChatSend(chat)) => {
+                        let Some(from) = PeerId::from_bytes(&chat.peer_id) else {
+                            continue;
+                        };
+                        let rk_bytes: [u8; 32] = match chat.ratchet_key.as_slice().try_into() {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+                        match keys.decrypt_from_peer(
+                            &chat.peer_id,
+                            &chat.ciphertext,
+                            &rk_bytes,
+                            chat.msg_no,
+                        ) {
+                            Ok(plaintext) => {
+                                if let Some(ref store) = message_store {
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    let _ = store.save_message(
+                                        &from,
+                                        crate::persistence::Direction::Received,
+                                        &plaintext,
+                                        now,
+                                    );
+                                    if let Some(state) = keys.get_ratchet_state(&chat.peer_id) {
+                                        let _ = store.save_ratchet_state(&from, &state);
+                                    }
+                                }
+                                let _ = event_tx
+                                    .send(ClientEvent::MessageReceived { from, plaintext })
+                                    .await;
+                                delivered += 1;
+                            }
+                            Err(e) => {
+                                warn!("inbox message decrypt failed: {e}");
+                            }
+                        }
+                    }
+                    _ => {
+                        debug!("inbox contained non-ChatSend message, skipping");
+                    }
+                }
+            }
+            if delivered > 0 {
+                info!(delivered, "processed inbox messages");
             }
         }
 

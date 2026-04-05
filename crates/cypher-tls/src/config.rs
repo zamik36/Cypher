@@ -157,12 +157,30 @@ pub fn make_client_config_with_cert(
     Ok(Arc::new(config))
 }
 
-/// Build a TLS [`ClientConfig`] using the system's trusted root certificates.
+/// Build a TLS [`ClientConfig`] using both native OS certificates and the
+/// Mozilla root store as a fallback.
 ///
-/// Suitable for production use when connecting to servers with CA-signed certs.
+/// Tries `rustls-native-certs` first (Android, Windows, macOS, Linux) so that
+/// platform-trusted CAs are honoured, then adds `webpki-roots` as a baseline
+/// to guarantee coverage when the OS store is empty or unavailable.
 pub fn make_client_config() -> Arc<ClientConfig> {
     ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
+
+    // Native OS trust store (works on Android, Windows, macOS, Linux).
+    let native = rustls_native_certs::load_native_certs();
+    let count = native.certs.len();
+    for cert in native.certs {
+        let _ = roots.add(cert);
+    }
+    if count > 0 {
+        debug!("loaded {} native CA certificates", count);
+    }
+    for e in native.errors {
+        tracing::warn!("native cert load error: {e}");
+    }
+
+    // Always include webpki-roots as baseline fallback.
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     let config = ClientConfig::builder()

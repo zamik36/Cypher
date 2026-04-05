@@ -118,7 +118,7 @@ const ru: TranslationKeys = {
   settings_clear_confirm: (s: number) => s > 0 ? `Подтвердить (${s}с)` : "Подтвердить удаление",
   settings_cancel: "Отмена",
   settings_about: "О приложении",
-  settings_version: "Шифр v0.1.1 (PWA)",
+  settings_version: "Шифр v0.1.1",
   settings_about_desc: "Анонимный мессенджер со сквозным шифрованием.",
   settings_about_motto: "Без аккаунтов. Без слежки. Без логов.",
 
@@ -133,12 +133,6 @@ const ru: TranslationKeys = {
   toast_history_cleared: "История чатов очищена",
   toast_clear_failed: (e: string) => `Ошибка очистки: ${e}`,
   toast_seed_copied: "Seed скопирован!",
-
-  // -- Install prompt --
-  install_text: "Установите Шифр для лучшего опыта",
-  install_btn: "Установить",
-  install_ios: "Поделиться, затем \"На экран Домой\"",
-  install_android: "Меню \u2630, затем \"На экран Домой\" или \"Установить\"",
 
   // -- Sidebar --
   sidebar_light_mode: "Светлая тема",

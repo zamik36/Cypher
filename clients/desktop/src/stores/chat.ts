@@ -23,6 +23,10 @@ export function clearMessages(peerId: string) {
   setChatsByPeer((prev) => ({ ...prev, [peerId]: [] }));
 }
 
+export function setMessages(peerId: string, msgs: ChatMessage[]) {
+  setChatsByPeer((prev) => ({ ...prev, [peerId]: msgs }));
+}
+
 export function clearAllMessages() {
   setChatsByPeer({});
 }

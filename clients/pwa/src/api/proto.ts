@@ -26,6 +26,9 @@ export const CID = {
   FileComplete:       0xD1000004,
   FileChunkAck:       0xD1000005,
   FileResume:         0xD1000006,
+  InboxStore:         0xC2000001,
+  InboxFetch:         0xC2000002,
+  InboxMessages:      0xC2000003,
 } as const;
 
 
@@ -126,6 +129,7 @@ export interface FileChunkMsg {
 export interface FileCompleteMsg { peerId: Uint8Array; fileId: Uint8Array }
 export interface FileChunkAckMsg { peerId: Uint8Array; fileId: Uint8Array; index: number }
 export interface SignalRequestPeerMsg { linkId: string }
+export interface InboxMessagesMsg { messages: Uint8Array; count: number }
 
 export type ProtoMessage =
   | { type: "SessionInit"; msg: SessionInit }
@@ -137,6 +141,7 @@ export type ProtoMessage =
   | { type: "FileChunk"; msg: FileChunkMsg }
   | { type: "FileComplete"; msg: FileCompleteMsg }
   | { type: "FileChunkAck"; msg: FileChunkAckMsg }
+  | { type: "InboxMessages"; msg: InboxMessagesMsg }
   | { type: "Unknown"; cid: number };
 
 
@@ -213,6 +218,21 @@ export function encodeFileComplete(peerId: Uint8Array, fileId: Uint8Array): Uint
   return w.build();
 }
 
+export function encodeInboxFetch(inboxId: Uint8Array): Uint8Array {
+  const w = new Writer();
+  w.u32(CID.InboxFetch);
+  w.bytes(inboxId);
+  return w.build();
+}
+
+export function encodeInboxStore(inboxId: Uint8Array, ciphertext: Uint8Array): Uint8Array {
+  const w = new Writer();
+  w.u32(CID.InboxStore);
+  w.bytes(inboxId);
+  w.bytes(ciphertext);
+  return w.build();
+}
+
 export function encodeFileChunkAck(peerId: Uint8Array, fileId: Uint8Array, index: number): Uint8Array {
   const w = new Writer();
   w.u32(CID.FileChunkAck);
@@ -247,6 +267,8 @@ export function dispatch(data: Uint8Array): ProtoMessage {
       return { type: "FileComplete", msg: { peerId: r.bytes(), fileId: r.bytes() } };
     case CID.FileChunkAck:
       return { type: "FileChunkAck", msg: { peerId: r.bytes(), fileId: r.bytes(), index: r.u32() } };
+    case CID.InboxMessages:
+      return { type: "InboxMessages", msg: { messages: r.bytes(), count: r.u32() } };
     default:
       return { type: "Unknown", cid };
   }

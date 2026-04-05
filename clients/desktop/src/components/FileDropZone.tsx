@@ -2,6 +2,7 @@ import { createSignal, Show } from "solid-js";
 import { api } from "../api/tauri";
 import { upsertTransfer } from "../stores/transfers";
 import { UploadIcon } from "./Icons";
+import { t } from "../i18n";
 
 export default function FileDropZone() {
   const [dragging, setDragging] = createSignal(false);
@@ -65,10 +66,10 @@ export default function FileDropZone() {
         onClick={onBrowse}
       >
         <UploadIcon width="32" height="32" />
-        <p class="drop-zone-desktop">Drag & drop files here, or click to browse</p>
-        <p class="drop-zone-mobile">Tap to choose a file</p>
+        <p class="drop-zone-desktop">{t().files_drop_desktop}</p>
+        <p class="drop-zone-mobile">{t().files_drop_mobile}</p>
         <button class="btn-secondary btn-sm drop-zone-btn" onClick={(e) => { e.stopPropagation(); onBrowse(); }}>
-          Choose File
+          {t().files_choose}
         </button>
       </div>
       <Show when={error()}>

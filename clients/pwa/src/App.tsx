@@ -12,14 +12,14 @@ import IdentityView from "./components/IdentityView";
 import {
   onConnected, onDisconnected, onPeerConnected,
   onMessage, onMessageSent, onFileOffered, onFileProgress, onFileComplete, onError,
-  api, setPeerId as apiSetPeerId,
+  api, setPeerId as apiSetPeerId, setInboxId as apiSetInboxId,
 } from "./api";
 import { connection, setConnection, addPeer, shortName } from "./stores/connection";
 import { addMessage } from "./stores/chat";
 import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
 import type { IdentityData } from "./storage/identity";
-import { deriveStorageKey } from "./storage/identity";
+import { deriveStorageKey, deriveInboxId } from "./storage/identity";
 import { openMessageStore, saveMessage, saveConversation, listConversations } from "./storage/messages";
 import { hexEncode } from "./api/proto";
 import { notifyMessage } from "./utils/notifications";
@@ -77,6 +77,14 @@ export default function App() {
     // Set the API's peerId to the persistent one.
     apiSetPeerId(data.peerId);
     setIdentityNickname(data.nickname);
+
+    // Derive and set blind inbox ID for offline message delivery.
+    try {
+      const inbox = await deriveInboxId(data.seed);
+      apiSetInboxId(inbox);
+    } catch (e) {
+      console.warn("Failed to derive inbox ID:", e);
+    }
 
     // Open encrypted message store.
     try {

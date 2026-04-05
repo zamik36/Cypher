@@ -59,6 +59,18 @@ impl IdentitySeed {
         sek
     }
 
+    /// Derive a Blind Inbox ID for anonymous offline message delivery.
+    ///
+    /// The inbox ID is **not linked** to the peer ID (different HKDF info
+    /// strings), so the server cannot correlate them.
+    pub fn derive_inbox_id(&self) -> [u8; 32] {
+        let hk = Hkdf::<Sha256>::new(None, &self.0);
+        let mut inbox = [0u8; 32];
+        hk.expand(b"cypher-inbox", &mut inbox)
+            .expect("32 bytes is valid for HKDF-SHA256");
+        inbox
+    }
+
     /// Return the raw seed bytes (for encryption/storage purposes).
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

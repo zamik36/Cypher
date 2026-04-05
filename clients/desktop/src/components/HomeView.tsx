@@ -4,6 +4,7 @@ import { connection, setConnection, addPeer, shortName } from "../stores/connect
 import Spinner from "./Spinner";
 import { UsersIcon, LinkIcon, CopyIcon, CheckIcon } from "./Icons";
 import type { Page } from "./Sidebar";
+import { t } from "../i18n";
 
 interface HomeViewProps {
   onNavigate: (p: Page) => void;
@@ -58,6 +59,7 @@ export default function HomeView(props: HomeViewProps) {
         roomCode: code,
         role: "guest",
         displayName: shortName(remotePeerId),
+        online: true,
       });
       setConnection({ status: "peer connected" });
       setJoinCode("");
@@ -74,6 +76,7 @@ export default function HomeView(props: HomeViewProps) {
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
       await api.connectToGateway(advancedAddr());
+      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected", gatewayAddr: advancedAddr() });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
     }
@@ -105,16 +108,16 @@ export default function HomeView(props: HomeViewProps) {
       <Show when={isConnecting()}>
         <div class="home-connecting">
           <Spinner size={48} />
-          <p>Connecting to network...</p>
+          <p>{t().home_connecting}</p>
         </div>
       </Show>
 
       <Show when={isError()}>
         <div class="home-error">
           <p class="error-msg">{connection.gatewayError}</p>
-          <button class="btn-primary" onClick={handleRetry}>Retry</button>
+          <button class="btn-primary" onClick={handleRetry}>{t().home_retry}</button>
           <button class="advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced())}>
-            {showAdvanced() ? "Hide advanced" : "Advanced options"}
+            {showAdvanced() ? t().home_advanced_hide : t().home_advanced_show}
           </button>
           <Show when={showAdvanced()}>
             <div class="advanced-panel">
@@ -122,9 +125,9 @@ export default function HomeView(props: HomeViewProps) {
                 type="text"
                 value={advancedAddr()}
                 onInput={(e) => setAdvancedAddr(e.currentTarget.value)}
-                placeholder="host:port"
+                placeholder={t().home_host_port}
               />
-              <button class="btn-secondary" onClick={handleRetry}>Connect</button>
+              <button class="btn-secondary" onClick={handleRetry}>{t().home_connect}</button>
             </div>
           </Show>
         </div>
@@ -134,30 +137,30 @@ export default function HomeView(props: HomeViewProps) {
         {/* Show active peers summary */}
         <Show when={connection.peers.length > 0}>
           <div class="active-peers-bar">
-            <span>{connection.peers.length} active chat{connection.peers.length > 1 ? "s" : ""}</span>
-            <button class="btn-secondary btn-sm" onClick={() => props.onNavigate("chat")}>Open Chats</button>
+            <span>{t().status_active_chats(connection.peers.length)}</span>
+            <button class="btn-secondary btn-sm" onClick={() => props.onNavigate("chat")}>{t().home_open_chats}</button>
           </div>
         </Show>
 
         {/* Show pending room waiting for peer */}
         <Show when={pendingCode()}>
           <div class="room-active">
-            <h3>Your Room Code</h3>
+            <h3>{t().home_room_code}</h3>
             <div class="room-code">{pendingCode()}</div>
             <div class="room-actions">
               <button class="btn-secondary" onClick={copyCode}>
-                <Show when={copied()} fallback={<><CopyIcon width="16" height="16" /> Copy Code</>}>
-                  <CheckIcon width="16" height="16" /> Copied!
+                <Show when={copied()} fallback={<><CopyIcon width="16" height="16" /> {t().home_copy_code}</>}>
+                  <CheckIcon width="16" height="16" /> {t().home_copied}
                 </Show>
               </button>
-              <button class="btn-secondary" onClick={handleNewRoom}>New Room</button>
+              <button class="btn-secondary" onClick={handleNewRoom}>{t().home_new_room}</button>
             </div>
             <Show when={qrDataUri()}>
               <div class="qr-code">
                 <img src={qrDataUri()} alt="QR code" width="180" height="180" />
               </div>
             </Show>
-            <p class="room-waiting">Waiting for someone to join...</p>
+            <p class="room-waiting">{t().home_waiting}</p>
           </div>
         </Show>
 
@@ -168,10 +171,10 @@ export default function HomeView(props: HomeViewProps) {
               <div class="card-icon">
                 <LinkIcon width="24" height="24" />
               </div>
-              <h3>Create Room</h3>
-              <p>Start a private room and share the code with someone to connect.</p>
+              <h3>{t().home_create_title}</h3>
+              <p>{t().home_create_desc}</p>
               <button class="btn-primary" onClick={handleCreate} disabled={busy()}>
-                {busy() ? "Creating..." : "Create Room"}
+                {busy() ? t().home_creating : t().home_create_btn}
               </button>
             </div>
 
@@ -179,18 +182,18 @@ export default function HomeView(props: HomeViewProps) {
               <div class="card-icon">
                 <UsersIcon width="24" height="24" />
               </div>
-              <h3>Join Room</h3>
-              <p>Enter a room code from someone to establish a secure connection.</p>
+              <h3>{t().home_join_title}</h3>
+              <p>{t().home_join_desc}</p>
               <div class="join-form">
                 <input
                   type="text"
-                  placeholder="Enter room code"
+                  placeholder={t().home_join_placeholder}
                   value={joinCode()}
                   onInput={(e) => setJoinCode(e.currentTarget.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleJoin()}
                 />
                 <button class="btn-primary" onClick={handleJoin} disabled={busy() || !joinCode().trim()}>
-                  Join
+                  {t().home_join_btn}
                 </button>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
 import { HomeIcon, ChatIcon, FilesIcon, SettingsIcon, SunIcon, MoonIcon, LinkIcon } from "./Icons";
 import { connection } from "../stores/connection";
+import { t } from "../i18n";
 
 export type Page = "home" | "chat" | "files" | "settings";
 
@@ -42,7 +43,7 @@ export default function Sidebar(props: SidebarProps) {
       <aside class={`sidebar ${props.drawerOpen ? "open" : ""}`}>
         <div class="sidebar-logo">
           <LinkIcon width="22" height="22" />
-          <span>Cypher</span>
+          <span>{t().identity_title}</span>
         </div>
 
         <nav class="sidebar-nav">
@@ -50,13 +51,13 @@ export default function Sidebar(props: SidebarProps) {
             class={`nav-item ${props.page === "home" ? "active" : ""}`}
             onClick={() => navigate("home")}
           >
-            <HomeIcon /> Home
+            <HomeIcon /> {t().nav_home}
           </button>
           <button
             class={`nav-item ${props.page === "chat" ? "active" : ""}`}
             onClick={() => navigate("chat")}
           >
-            <ChatIcon /> Chat
+            <ChatIcon /> {t().nav_chat}
             <Show when={props.unread > 0}>
               <span class="nav-badge">{props.unread}</span>
             </Show>
@@ -65,7 +66,7 @@ export default function Sidebar(props: SidebarProps) {
             class={`nav-item ${props.page === "files" ? "active" : ""}`}
             onClick={() => navigate("files")}
           >
-            <FilesIcon /> Files
+            <FilesIcon /> {t().nav_files}
           </button>
         </nav>
 
@@ -74,11 +75,11 @@ export default function Sidebar(props: SidebarProps) {
             class={`nav-item ${props.page === "settings" ? "active" : ""}`}
             onClick={() => navigate("settings")}
           >
-            <SettingsIcon /> Settings
+            <SettingsIcon /> {t().nav_settings}
           </button>
           <button class="nav-item" onClick={props.toggleTheme}>
-            <Show when={props.theme === "dark"} fallback={<><MoonIcon /> Dark mode</>}>
-              <SunIcon /> Light mode
+            <Show when={props.theme === "dark"} fallback={<><MoonIcon /> {t().sidebar_dark_mode}</>}>
+              <SunIcon /> {t().sidebar_light_mode}
             </Show>
           </button>
           <Show when={props.nickname}>
@@ -88,7 +89,7 @@ export default function Sidebar(props: SidebarProps) {
           </Show>
           <div class="sidebar-status">
             <span class={`dot ${connection.connected ? "connected" : ""}`} />
-            <span>{connection.connected ? "Connected" : "Offline"}</span>
+            <span>{connection.connected ? t().status_connected : t().status_offline}</span>
           </div>
         </div>
       </aside>

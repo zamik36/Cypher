@@ -66,7 +66,14 @@ struct PeerSession {
 struct PrekeyBundle {
     identity_key: Vec<u8>,
     signed_prekey: Vec<u8>,
+    #[serde(default)]
+    inbox_id: Option<String>,
 }
+
+/// TTL for blind inbox queues (24 hours, same as links).
+const INBOX_TTL_SECS: i64 = 24 * 60 * 60;
+/// Maximum messages per inbox to prevent abuse.
+const INBOX_MAX_MESSAGES: isize = 100;
 
 /// RFC 5389 STUN server — responds to Binding Requests with the
 /// client's server-reflexive address (XOR-MAPPED-ADDRESS attribute).
@@ -245,6 +252,8 @@ impl SignalingService {
             "signaling.file_complete",
             "signaling.file_chunk_ack",
             "signaling.file_resume",
+            "signaling.inbox_store",
+            "signaling.inbox_fetch",
             "signaling.data",
             "signaling.raw",
         ];
@@ -302,6 +311,8 @@ impl SignalingService {
             "signaling.file_complete" => self.handle_file_forward(msg, "file.complete").await,
             "signaling.file_chunk_ack" => self.handle_file_forward(msg, "file.chunkAck").await,
             "signaling.file_resume" => self.handle_file_forward(msg, "file.resume").await,
+            "signaling.inbox_store" => self.handle_inbox_store(msg).await,
+            "signaling.inbox_fetch" => self.handle_inbox_fetch(msg).await,
             _ => {
                 debug!(subject, "unhandled signaling message");
                 Ok(())
@@ -467,9 +478,16 @@ impl SignalingService {
             let peer_hex = self.get_peer_id_for_session(envelope.session_id).await?;
             let key = format!("peer:{}:prekeys", peer_hex);
 
+            let inbox_id_hex = if upload.inbox_id.is_empty() {
+                None
+            } else {
+                Some(hex_encode(&upload.inbox_id))
+            };
+
             let bundle = PrekeyBundle {
                 identity_key: upload.identity_key,
                 signed_prekey: upload.signed_prekey,
+                inbox_id: inbox_id_hex,
             };
             let value = serde_json::to_string(&bundle)?;
 
@@ -498,12 +516,11 @@ impl SignalingService {
             let response = match bundle_json {
                 Some(json) => {
                     let bundle: PrekeyBundle = serde_json::from_str(&json)?;
-                    // Build a KeysGetPrekeys response as raw proto bytes
-                    // so the gateway can forward it directly.
                     serde_json::json!({
                         "found": true,
                         "identity_key": bundle.identity_key,
                         "signed_prekey": bundle.signed_prekey,
+                        "inbox_id": bundle.inbox_id,
                     })
                 }
                 None => {
@@ -538,12 +555,21 @@ impl SignalingService {
             chat.peer_id = sender_bytes;
 
             let rewritten = chat.serialize();
-            self.forward_to_peer(&target_peer_hex, &rewritten).await?;
-            debug!(
-                target_peer = %target_peer_hex,
-                sender = %sender_hex,
-                "forwarded chat message"
-            );
+
+            // Try to forward to the online peer first.
+            if self.try_forward_or_inbox(&target_peer_hex, &rewritten).await? {
+                debug!(
+                    target_peer = %target_peer_hex,
+                    sender = %sender_hex,
+                    "forwarded chat message"
+                );
+            } else {
+                debug!(
+                    target_peer = %target_peer_hex,
+                    sender = %sender_hex,
+                    "peer offline, stored in blind inbox"
+                );
+            }
         }
 
         Ok(())
@@ -580,6 +606,75 @@ impl SignalingService {
         Ok(())
     }
 
+    /// Store a message in a peer's blind inbox (offline message queue).
+    ///
+    /// Redis key: `inbox:{inbox_id_hex}` — LPUSH + LTRIM + EXPIRE.
+    /// The server never sees the plaintext; `ciphertext` is E2EE.
+    async fn handle_inbox_store(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
+        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let proto_msg = dispatch(&envelope.payload)?;
+
+        if let Message::InboxStore(store) = proto_msg {
+            let inbox_hex = hex_encode(&store.inbox_id);
+            let key = format!("inbox:{}", inbox_hex);
+
+            let mut redis = self.redis.clone();
+            // Store as hex-encoded string for Redis safety.
+            let encoded = hex_encode(&store.ciphertext);
+            let _: () = redis.lpush(&key, &encoded).await?;
+            let _: () = redis.ltrim(&key, 0, INBOX_MAX_MESSAGES - 1).await?;
+            let _: () = redis.expire(&key, INBOX_TTL_SECS).await?;
+
+            debug!(inbox = %inbox_hex, "stored inbox message");
+        }
+
+        Ok(())
+    }
+
+    /// Fetch all queued messages from a peer's blind inbox.
+    ///
+    /// Returns all messages as a single `InboxMessages` proto and then
+    /// deletes the inbox key (atomic read-and-clear).
+    async fn handle_inbox_fetch(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
+        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let proto_msg = dispatch(&envelope.payload)?;
+
+        if let Message::InboxFetch(fetch) = proto_msg {
+            let inbox_hex = hex_encode(&fetch.inbox_id);
+            let key = format!("inbox:{}", inbox_hex);
+
+            let mut redis = self.redis.clone();
+            let messages: Vec<String> = redis.lrange(&key, 0, -1).await?;
+            let _: () = redis.del(&key).await?;
+
+            // Decode each hex message back to bytes, concatenate with
+            // length-prefixed framing: [u32 len][bytes]...
+            let mut blob = Vec::new();
+            let count = messages.len() as u32;
+            for encoded in &messages {
+                let raw = hex_decode_bytes(encoded);
+                if !raw.is_empty() {
+                    blob.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+                    blob.extend_from_slice(&raw);
+                }
+            }
+
+            // Build InboxMessages response and send back to requester.
+            let response = cypher_proto::InboxMessages {
+                messages: blob,
+                count,
+            };
+            let reply_subject = format!("gateway.session.{}", envelope.session_id);
+            self.nats
+                .publish(reply_subject, Bytes::from(response.serialize()))
+                .await?;
+
+            debug!(inbox = %inbox_hex, count, "fetched inbox messages");
+        }
+
+        Ok(())
+    }
+
     async fn handle_create_link(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
         #[derive(Deserialize)]
         struct CreateLinkRequest {
@@ -608,6 +703,46 @@ impl SignalingService {
         LINKS_CREATED.inc();
         info!(link_id = %link_id.as_str(), peer = %req.peer_id, "created link");
         Ok(())
+    }
+
+    /// Try to forward a message to a peer. If offline, store in their blind
+    /// inbox (if they have one registered). Returns `true` if delivered online.
+    async fn try_forward_or_inbox(
+        &self,
+        peer_id_hex: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<bool> {
+        let session_key = format!("peer:{}:session", peer_id_hex);
+        let mut redis = self.redis.clone();
+        let session_json: Option<String> = redis.get(&session_key).await?;
+
+        if let Some(json) = session_json {
+            let session: PeerSession = serde_json::from_str(&json)?;
+            let target_subject = format!("gateway.session.{}", session.session_id);
+            self.nats
+                .publish(target_subject, Bytes::from(payload.to_vec()))
+                .await?;
+            return Ok(true);
+        }
+
+        // Peer is offline — try to store in their blind inbox.
+        let prekey_key = format!("peer:{}:prekeys", peer_id_hex);
+        let bundle_json: Option<String> = redis.get(&prekey_key).await?;
+        if let Some(json) = bundle_json {
+            if let Ok(bundle) = serde_json::from_str::<PrekeyBundle>(&json) {
+                if let Some(inbox_hex) = &bundle.inbox_id {
+                    let inbox_key = format!("inbox:{}", inbox_hex);
+                    let encoded = hex_encode(payload);
+                    let _: () = redis.lpush(&inbox_key, &encoded).await?;
+                    let _: () = redis.ltrim(&inbox_key, 0, INBOX_MAX_MESSAGES - 1).await?;
+                    let _: () = redis.expire(&inbox_key, INBOX_TTL_SECS).await?;
+                    return Ok(false);
+                }
+            }
+        }
+
+        warn!(peer = %peer_id_hex, "peer offline, no inbox_id available — message dropped");
+        Ok(false)
     }
 
     /// Forward a proto payload to a peer by looking up their gateway session in Redis.

@@ -1,6 +1,7 @@
 import { createSignal, Show, createMemo, onMount } from "solid-js";
 import { api } from "../api/tauri";
 import { ShieldIcon } from "./Icons";
+import { t } from "../i18n";
 
 interface IdentityViewProps {
   onUnlocked: (peerId: string, nickname: string) => void;
@@ -94,25 +95,25 @@ export default function IdentityView(props: IdentityViewProps) {
           <div class="identity-logo-icon">
             <ShieldIcon width="48" height="48" />
           </div>
-          <h2>Cypher</h2>
-          <p class="identity-subtitle">Anonymous encrypted messenger</p>
+          <h2>{t().identity_title}</h2>
+          <p class="identity-subtitle">{t().identity_subtitle}</p>
 
           <Show when={mode() === "unlock"}>
             <div class="identity-form">
               <input
                 type="password"
-                placeholder="Passphrase"
+                placeholder={t().identity_passphrase}
                 value={passphrase()}
                 onInput={(e) => setPassphrase(e.currentTarget.value)}
                 onKeyDown={(e) => onKeyDown(e, handleUnlock)}
                 autofocus
               />
               <button class="btn-primary" onClick={handleUnlock} disabled={busy() || !passphrase()}>
-                {busy() ? "Unlocking..." : "Unlock"}
+                {busy() ? t().identity_unlocking : t().identity_unlock}
               </button>
               <div class="identity-links">
-                <button class="link-btn" onClick={() => setMode("create")}>New identity</button>
-                <button class="link-btn" onClick={() => setMode("import")}>Import</button>
+                <button class="link-btn" onClick={() => setMode("create")}>{t().identity_new}</button>
+                <button class="link-btn" onClick={() => setMode("import")}>{t().identity_import}</button>
               </div>
             </div>
           </Show>
@@ -121,14 +122,14 @@ export default function IdentityView(props: IdentityViewProps) {
             <div class="identity-form">
               <input
                 type="text"
-                placeholder="Nickname"
+                placeholder={t().identity_nickname}
                 value={nickname()}
                 onInput={(e) => setNickname(e.currentTarget.value)}
                 autofocus
               />
               <input
                 type="password"
-                placeholder="Passphrase (min 12 chars)"
+                placeholder={t().identity_passphrase_min}
                 value={passphrase()}
                 onInput={(e) => setPassphrase(e.currentTarget.value)}
                 onKeyDown={(e) => onKeyDown(e, handleCreate)}
@@ -146,10 +147,10 @@ export default function IdentityView(props: IdentityViewProps) {
                 onClick={handleCreate}
                 disabled={busy() || !nickname() || passphrase().length < 12}
               >
-                {busy() ? "Creating..." : "Create identity"}
+                {busy() ? t().identity_creating : t().identity_create}
               </button>
               <Show when={hasId()}>
-                <button class="link-btn" onClick={() => setMode("unlock")}>Back to unlock</button>
+                <button class="link-btn" onClick={() => setMode("unlock")}>{t().identity_back_unlock}</button>
               </Show>
             </div>
           </Show>
@@ -157,7 +158,7 @@ export default function IdentityView(props: IdentityViewProps) {
           <Show when={mode() === "import"}>
             <div class="identity-form">
               <textarea
-                placeholder="Mnemonic (24 words)"
+                placeholder={t().identity_seed_placeholder}
                 value={mnemonic()}
                 onInput={(e) => setMnemonic(e.currentTarget.value)}
                 rows={3}
@@ -169,13 +170,13 @@ export default function IdentityView(props: IdentityViewProps) {
               />
               <input
                 type="text"
-                placeholder="Nickname"
+                placeholder={t().identity_nickname}
                 value={nickname()}
                 onInput={(e) => setNickname(e.currentTarget.value)}
               />
               <input
                 type="password"
-                placeholder="Passphrase"
+                placeholder={t().identity_passphrase}
                 value={passphrase()}
                 onInput={(e) => setPassphrase(e.currentTarget.value)}
                 onKeyDown={(e) => onKeyDown(e, handleImport)}
@@ -185,9 +186,9 @@ export default function IdentityView(props: IdentityViewProps) {
                 onClick={handleImport}
                 disabled={busy() || !mnemonic() || !nickname() || !passphrase()}
               >
-                {busy() ? "Importing..." : "Import"}
+                {busy() ? t().identity_importing : t().identity_import}
               </button>
-              <button class="link-btn" onClick={() => setMode(hasId() ? "unlock" : "create")}>Back</button>
+              <button class="link-btn" onClick={() => setMode(hasId() ? "unlock" : "create")}>{t().identity_back}</button>
             </div>
           </Show>
 

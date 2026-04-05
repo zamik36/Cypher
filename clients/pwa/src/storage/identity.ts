@@ -123,6 +123,11 @@ export async function deriveStorageKey(seed: Uint8Array): Promise<Uint8Array> {
   return hkdfDerive(seed, "cypher-storage-key");
 }
 
+/** Derive the Blind Inbox ID from seed (matches Rust IdentitySeed::derive_inbox_id). */
+export async function deriveInboxId(seed: Uint8Array): Promise<Uint8Array> {
+  return hkdfDerive(seed, "cypher-inbox");
+}
+
 // --- Internal helpers ---
 
 async function saveEncrypted(
