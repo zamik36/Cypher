@@ -75,7 +75,4 @@ export function resetRoom() {
   setConnection({ peers: [], activePeerId: null });
 }
 
-// Persist gateway address changes
-const originalSetConnection = setConnection;
-
 export { connection, setConnection };

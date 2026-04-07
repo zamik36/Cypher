@@ -3,7 +3,7 @@ import { connection, setConnection } from "../stores/connection";
 import { api } from "../api/tauri";
 import { addToast } from "../stores/toasts";
 import { t } from "../i18n";
-import { locale, setLocale, type Locale } from "../i18n";
+import { locale, setLocale } from "../i18n";
 
 interface SettingsViewProps {
   theme: string;

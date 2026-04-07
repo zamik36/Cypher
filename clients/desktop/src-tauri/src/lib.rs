@@ -207,6 +207,14 @@ async fn handle_event(
             });
             let _ = handle.emit("cypher://ice_candidate", payload);
         }
+        ClientEvent::AnonymityLevelChanged { level } => {
+            let payload = serde_json::json!({
+                "level": level as u8,
+                "label": level.to_string(),
+                "description": level.description(),
+            });
+            let _ = handle.emit("cypher://anonymity_level", payload);
+        }
         ClientEvent::Error(msg) => {
             let _ = handle.emit("cypher://error", msg);
         }
