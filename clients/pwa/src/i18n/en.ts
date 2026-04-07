@@ -62,7 +62,7 @@ const en = {
   chat_say_hello: "No messages yet. Say hello!",
   chat_me: "Me",
   chat_peer: "P",
-  chat_offline_hint: "Peer is offline. Connect to send messages.",
+  chat_offline_hint: "Peer is offline. Messages will be delivered when they reconnect.",
   chat_placeholder: "Type a message...",
 
   // -- Files --

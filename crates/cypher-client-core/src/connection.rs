@@ -25,6 +25,11 @@ pub struct ServerConnection {
 }
 
 impl ServerConnection {
+    /// Wrap an existing transport session.
+    pub fn from_session(session: TransportSession) -> Self {
+        Self { session }
+    }
+
     /// Open a TLS connection to `addr` using the given [`rustls::ClientConfig`].
     ///
     /// This is the production path. For development / local-gateway, use

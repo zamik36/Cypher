@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 cypher-common.workspace = true
+cypher-crypto.workspace = true
 cypher-proto.workspace = true
 cypher-tls.workspace = true
 cypher-transport.workspace = true
@@ -24,3 +25,14 @@ tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 prometheus.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+aes-gcm.workspace = true
+async-nats.workspace = true
+redis.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

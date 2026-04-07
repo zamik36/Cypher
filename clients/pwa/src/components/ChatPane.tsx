@@ -180,24 +180,21 @@ export default function ChatPane(props: ChatPaneProps) {
                 </For>
               </div>
 
-              <Show when={activePeerInfo()?.online} fallback={
-                <div class="input-row offline-hint">
-                  <span>{t().chat_offline_hint}</span>
-                </div>
-              }>
-                <div class="input-row">
-                  <input
-                    type="text"
-                    value={draft()}
-                    onInput={(e) => setDraft(e.currentTarget.value)}
-                    onKeyDown={(e) => e.key === "Enter" && send()}
-                    placeholder={t().chat_placeholder}
-                  />
-                  <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
-                    <SendIcon />
-                  </button>
-                </div>
+              <Show when={activePeerInfo() && !activePeerInfo()!.online}>
+                <div class="offline-banner">{t().chat_offline_hint}</div>
               </Show>
+              <div class="input-row">
+                <input
+                  type="text"
+                  value={draft()}
+                  onInput={(e) => setDraft(e.currentTarget.value)}
+                  onKeyDown={(e) => e.key === "Enter" && send()}
+                  placeholder={t().chat_placeholder}
+                />
+                <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
+                  <SendIcon />
+                </button>
+              </div>
             </Show>
           </div>
         </div>

@@ -2,6 +2,8 @@ import { createSignal, onCleanup } from "solid-js";
 import { connection, setConnection } from "../stores/connection";
 import { api } from "../api/tauri";
 import { addToast } from "../stores/toasts";
+import { t } from "../i18n";
+import { locale, setLocale, type Locale } from "../i18n";
 
 interface SettingsViewProps {
   theme: string;
@@ -22,6 +24,7 @@ export default function SettingsView(props: SettingsViewProps) {
     setConnection({ gatewayAddr: addr(), gatewayConnecting: true, gatewayError: null });
     try {
       await api.connectToGateway(addr());
+      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
     } finally {
@@ -46,9 +49,9 @@ export default function SettingsView(props: SettingsViewProps) {
   async function handleClearHistory() {
     try {
       await api.clearChatHistory();
-      addToast("Chat history cleared", "success");
+      addToast(t().toast_history_cleared, "success");
     } catch (e) {
-      addToast(`Failed to clear: ${e}`, "error");
+      addToast(t().toast_clear_failed(String(e)), "error");
     }
     setConfirmClear(false);
   }
@@ -67,65 +70,83 @@ export default function SettingsView(props: SettingsViewProps) {
 
   return (
     <div class="settings-view">
-      <h2>Settings</h2>
+      <h2>{t().settings_title}</h2>
 
       {props.nickname && (
         <div class="settings-group">
-          <label>Identity</label>
+          <label>{t().settings_identity}</label>
           <div class="about-info">
-            <p>Nickname: <strong>{props.nickname}</strong></p>
+            <p>{t().settings_nickname} <strong>{props.nickname}</strong></p>
             <p style={{ "font-size": "12px", "opacity": "0.7" }}>
-              PeerId: {connection.peerId?.slice(0, 12)}...
+              {t().settings_peerid} {connection.peerId?.slice(0, 12)}...
             </p>
           </div>
         </div>
       )}
 
       <div class="settings-group">
-        <label>Gateway Server</label>
+        <label>{t().settings_gateway}</label>
         <div class="settings-row">
           <input
             type="text"
             value={addr()}
             onInput={(e) => setAddr(e.currentTarget.value)}
-            placeholder="host:port"
+            placeholder={t().home_host_port}
           />
           <button class="btn-secondary" onClick={handleReconnect} disabled={reconnecting()}>
-            {reconnecting() ? "Connecting..." : "Reconnect"}
+            {reconnecting() ? t().settings_reconnecting : t().settings_reconnect}
           </button>
         </div>
       </div>
 
       <div class="settings-group">
-        <label>Theme</label>
+        <label>{t().settings_theme}</label>
         <div class="theme-options">
           <button
             class={`theme-option ${props.theme === "dark" ? "active" : ""}`}
             onClick={() => props.setTheme("dark")}
           >
-            Dark
+            {t().settings_dark}
           </button>
           <button
             class={`theme-option ${props.theme === "light" ? "active" : ""}`}
             onClick={() => props.setTheme("light")}
           >
-            Light
+            {t().settings_light}
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <label>{t().settings_language}</label>
+        <div class="theme-options">
+          <button
+            class={`theme-option ${locale() === "en" ? "active" : ""}`}
+            onClick={() => setLocale("en")}
+          >
+            English
+          </button>
+          <button
+            class={`theme-option ${locale() === "ru" ? "active" : ""}`}
+            onClick={() => setLocale("ru")}
+          >
+            Русский
           </button>
         </div>
       </div>
 
       {props.nickname && (
         <div class="settings-group">
-          <label>Export Seed (Backup)</label>
+          <label>{t().settings_export}</label>
           <div class="settings-row">
             <input
               type="password"
               value={exportPass()}
               onInput={(e: InputEvent & { currentTarget: HTMLInputElement }) => setExportPass(e.currentTarget.value)}
-              placeholder="Enter passphrase to export"
+              placeholder={t().settings_export_placeholder}
             />
             <button class="btn-secondary" onClick={handleExportSeed} disabled={!exportPass()}>
-              Export
+              {t().settings_export_btn}
             </button>
           </div>
           {seedHex() && (
@@ -135,10 +156,10 @@ export default function SettingsView(props: SettingsViewProps) {
                 class="btn-sm btn-secondary"
                 onClick={() => {
                   navigator.clipboard.writeText(seedHex()!);
-                  addToast("Seed copied!", "success");
+                  addToast(t().toast_seed_copied, "success");
                 }}
               >
-                Copy
+                {t().settings_copy}
               </button>
             </div>
           )}
@@ -147,29 +168,25 @@ export default function SettingsView(props: SettingsViewProps) {
 
       {props.nickname && (
         <div class="settings-group">
-          <label>Data</label>
+          <label>{t().settings_data}</label>
           {!confirmClear() ? (
             <button class="btn-danger" onClick={startClearConfirmation}>
-              Clear chat history
+              {t().settings_clear}
             </button>
           ) : (
             <div class="clear-confirm">
               <p class="clear-warning">
-                All messages and chat history will be permanently deleted.
-                Ratchet sessions will be reset — reconnecting to peers will
-                require a new key exchange.
+                {t().settings_clear_warning}
               </p>
               <button
                 class="btn-danger"
                 onClick={handleClearHistory}
                 disabled={clearCountdown() > 0}
               >
-                {clearCountdown() > 0
-                  ? `Confirm (${clearCountdown()}s)`
-                  : "Confirm delete"}
+                {t().settings_clear_confirm(clearCountdown())}
               </button>
               <button class="btn-secondary" onClick={() => setConfirmClear(false)}>
-                Cancel
+                {t().settings_cancel}
               </button>
             </div>
           )}
@@ -177,11 +194,11 @@ export default function SettingsView(props: SettingsViewProps) {
       )}
 
       <div class="settings-group">
-        <label>About</label>
+        <label>{t().settings_about}</label>
         <div class="about-info">
-          <p>Cypher v0.1.1</p>
-          <p>Anonymous, end-to-end encrypted messenger.</p>
-          <p>No accounts. No tracking. No logs.</p>
+          <p>{t().settings_version}</p>
+          <p>{t().settings_about_desc}</p>
+          <p>{t().settings_about_motto}</p>
         </div>
       </div>
     </div>

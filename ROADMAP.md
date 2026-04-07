@@ -21,6 +21,7 @@
 | **10 · Mobile** | Android: Tauri 2.0 mobile (Kotlin/JNI, 4 ABI), iOS: PWA (SolidJS + WebSocket gateway на :9101) — Add to Home Screen, offline-capable |
 | **11 · Desktop UX** | Тёмная тема (dark/light + prefers-color-scheme), file browser dialog, notifications, QR-коды |
 | **12 · Identity & Persistence** | BIP39 persistent identity, encrypted SQLite/IndexedDB storage, JSX→TSX migration, security hardening (36 fixes) |
+| **13 · Anonymous Inbox Transport** | Relay bootstrap via signaling, typed anonymous transport config, persisted relay/signaling key stores, signed inbox responses, two-phase fetch recovery, modularized client/signaling architecture |
 
 **Тесты:** 63 теста, 0 failures. `cargo clippy --workspace` — 0 warnings.
 **Fuzz targets:** 5 (proto dispatch/decode, crypto aead/ratchet, nat stun) — CI runs 60s each.

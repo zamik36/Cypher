@@ -72,7 +72,7 @@ const ru: TranslationKeys = {
   chat_say_hello: "Сообщений пока нет. Скажите привет!",
   chat_me: "Я",
   chat_peer: "С",
-  chat_offline_hint: "Собеседник не в сети. Подключитесь для отправки.",
+  chat_offline_hint: "Собеседник не в сети. Сообщения будут доставлены при подключении.",
   chat_placeholder: "Введите сообщение...",
 
   // -- Files --

@@ -32,6 +32,9 @@ pub struct Conversation {
     pub nickname: Option<String>,
     pub created_at: u64,
     pub last_message_at: u64,
+    /// Peer's blind inbox ID for offline message delivery.
+    #[serde(default)]
+    pub inbox_id: Option<Vec<u8>>,
 }
 
 /// Abstraction over platform-specific message stores (SQLite, IndexedDB, etc.).
@@ -57,6 +60,11 @@ pub trait MessageStore: Send + Sync {
     fn save_conversation(&self, peer_id: &PeerId, nickname: Option<&str>) -> Result<()>;
     fn list_conversations(&self) -> Result<Vec<Conversation>>;
     fn delete_conversation(&self, peer_id: &PeerId) -> Result<()>;
+
+    /// Save a peer's blind inbox ID for offline message delivery.
+    fn save_peer_inbox_id(&self, peer_id: &PeerId, inbox_id: &[u8]) -> Result<()>;
+    /// Load a peer's blind inbox ID.
+    fn load_peer_inbox_id(&self, peer_id: &PeerId) -> Result<Option<Vec<u8>>>;
 
     /// Delete all messages, conversations, and ratchet states. Reclaims disk space.
     fn clear_all(&self) -> Result<()>;

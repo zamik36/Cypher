@@ -5,7 +5,7 @@
 import {
   encodeSessionInit, encodeSignalRequestPeer, encodeChatSend,
   encodeFileOffer, encodeFileChunk, encodeFileComplete,
-  encodeFileChunkAck, dispatch as protoDispatch,
+  encodeFileChunkAck, encodeInboxFetch, dispatch as protoDispatch,
   hexEncode, hexDecode, randomBytes,
 } from "./proto";
 
@@ -62,7 +62,15 @@ export function setPeerId(newPeerId: Uint8Array) {
   peerId = newPeerId;
   peerIdHex = hexEncode(peerId);
 }
+
+/** Set the blind inbox ID (called after identity unlock). */
+export function setInboxId(id: Uint8Array) {
+  inboxId = id;
+}
 let activePeerForTransfer: string | null = null;
+
+/** Blind inbox ID for offline message delivery (set from identity). */
+let inboxId: Uint8Array = new Uint8Array(0);
 
 let pendingLinkResolve: ((v: string) => void) | null = null;
 let pendingLinkReject: ((e: Error) => void) | null = null;
@@ -175,6 +183,27 @@ function handleMessage(data: ArrayBuffer) {
       }
       break;
     }
+    case "InboxMessages": {
+      // Process queued offline messages: each is length-prefixed [u32 len][bytes]...
+      const blob = msg.msg.messages;
+      let off = 0;
+      while (off + 4 <= blob.length) {
+        const len = new DataView(blob.buffer, blob.byteOffset + off, 4).getUint32(0, true);
+        off += 4;
+        if (off + len > blob.length) break;
+        const inner = blob.slice(off, off + len);
+        off += len;
+        const innerMsg = protoDispatch(inner);
+        if (innerMsg.type === "ChatSend") {
+          const from = hexEncode(innerMsg.msg.peerId);
+          const raw = new TextDecoder().decode(innerMsg.msg.ciphertext);
+          const MAX_MSG_LEN = 50_000;
+          const text = raw.length > MAX_MSG_LEN ? raw.slice(0, MAX_MSG_LEN) + "… [truncated]" : raw;
+          emit("message", { from, text, timestamp: Date.now() });
+        }
+      }
+      break;
+    }
     case "Unknown": {
       // Could be a JSON response from signaling (e.g., link created, peer found).
       try {
@@ -233,6 +262,10 @@ export const api = {
             if (msg.type === "SessionAck") {
               settled = true;
               resolve();
+              // Fetch blind inbox after connection established.
+              if (inboxId.length > 0) {
+                send(encodeInboxFetch(inboxId));
+              }
             }
           }
           handleMessage(e.data);

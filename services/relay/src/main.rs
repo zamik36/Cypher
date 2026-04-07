@@ -4,6 +4,7 @@
 //! encrypted bytes between peers. The relay never decrypts traffic.
 //! Includes per-session bandwidth limiting and auto-teardown.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use redis::AsyncCommands;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
@@ -20,9 +22,14 @@ use tracing::{debug, info, warn};
 use prometheus::{IntCounter, IntGauge};
 use std::sync::LazyLock;
 
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
 use cypher_transport::codec::FrameCodec;
 use cypher_transport::frame::{Frame, FrameFlags};
 use cypher_transport::session::AsyncReadWrite;
+
+mod identity;
+mod onion;
 
 static RELAY_SESSIONS: LazyLock<IntGauge> = LazyLock::new(|| {
     let g = IntGauge::new("relay_active_sessions", "Number of active relay sessions").unwrap();
@@ -78,15 +85,38 @@ struct RelayService {
     pending: Arc<DashMap<String, PendingPeer>>,
     /// Maximum bandwidth per session in bytes/second.
     max_bandwidth_per_session: u64,
+    /// Static X25519 keypair for onion circuit key derivation.
+    onion_secret: StaticSecret,
+    /// NATS client for forwarding onion requests to signaling.
+    nats: Option<async_nats::Client>,
 }
 
 impl RelayService {
-    fn new() -> Self {
+    fn new(onion_secret: StaticSecret) -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
             pending: Arc::new(DashMap::new()),
             max_bandwidth_per_session: MAX_BANDWIDTH_PER_SESSION,
+            onion_secret,
+            nats: None,
         }
+    }
+
+    async fn connect_nats(
+        &mut self,
+        nats_url: &str,
+        nats_token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let nats = match nats_token {
+            Some(token) if !token.is_empty() => {
+                async_nats::ConnectOptions::with_token(token.to_string())
+                    .connect(nats_url)
+                    .await?
+            }
+            _ => async_nats::connect(nats_url).await?,
+        };
+        self.nats = Some(nats);
+        Ok(())
     }
 
     /// The first frame must contain the relay session key (UTF-8).
@@ -127,6 +157,26 @@ impl RelayService {
 
         if session_key.is_empty() {
             warn!("relay peer sent empty session key");
+            writer_handle.abort();
+            return Ok(());
+        }
+
+        // Onion mode: client sends "ONION" as the session key.
+        if session_key == "ONION" {
+            info!("relay: onion mode connection");
+            if let Some(nats) = &self.nats {
+                let mut seq_counter = 0u32;
+                onion::handle_onion_connection(
+                    &self.onion_secret,
+                    nats,
+                    &frame_tx,
+                    &mut reader,
+                    &mut seq_counter,
+                )
+                .await;
+            } else {
+                warn!("relay: onion mode requested but NATS not connected");
+            }
             writer_handle.abort();
             return Ok(());
         }
@@ -327,7 +377,42 @@ async fn main() -> anyhow::Result<()> {
 
     cypher_common::metrics::spawn_metrics_server(9092);
 
-    let service = Arc::new(RelayService::new());
+    let onion_secret =
+        identity::load_or_create_onion_identity(Path::new("data/relay/onion_identity.bin"))?;
+    let onion_pk = X25519PublicKey::from(&onion_secret);
+    info!(
+        "Relay onion public key: {}",
+        onion_pk
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    );
+
+    let redis_client = redis::Client::open(config.redis_url.clone())?;
+    let mut redis = redis_client.get_connection_manager().await?;
+    let relay_bootstrap = serde_json::json!({
+        "relay_addr": config.relay_addr.clone(),
+        "relay_public_key": onion_pk.as_bytes().to_vec(),
+    });
+    let _: () = redis
+        .set("transport:relay:bootstrap", relay_bootstrap.to_string())
+        .await?;
+
+    let mut service = RelayService::new(onion_secret);
+
+    // Connect to NATS for onion relay forwarding.
+    let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
+    if let Err(e) = service
+        .connect_nats(&config.nats_url, nats_token.as_deref())
+        .await
+    {
+        warn!("Failed to connect to NATS (onion relay disabled): {}", e);
+    } else {
+        info!("Relay connected to NATS at {}", config.nats_url);
+    }
+
+    let service = Arc::new(service);
 
     {
         let svc = service.clone();

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[features]
+default = []
+tor = ["dep:arti-client", "dep:tor-rtcompat"]
+
 [dependencies]
 cypher-common.workspace = true
 cypher-proto.workspace = true
@@ -13,6 +17,7 @@ cypher-transport.workspace = true
 cypher-nat.workspace = true
 cypher-transfer.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 bytes.workspace = true
@@ -29,7 +34,12 @@ rusqlite.workspace = true
 zstd.workspace = true
 zeroize.workspace = true
 serde.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
 postcard.workspace = true
+ed25519-dalek.workspace = true
+arti-client = { workspace = true, optional = true, features = ["bridge-client", "pt-client"] }
+tor-rtcompat = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
