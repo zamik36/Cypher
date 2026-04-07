@@ -18,6 +18,7 @@ mod network;
 mod runtime;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -95,6 +96,7 @@ pub struct ClientApi {
 }
 
 impl ClientApi {
+    const CONNECT_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
     /// Create a new client with an ephemeral (random) identity.
     pub fn new() -> Self {
         let session = Arc::new(ClientSession::new());
@@ -216,16 +218,44 @@ impl ClientApi {
         let bundle = self.keys.key_bundle();
         let raw = bundle.to_bytes();
         info!("do_connect: uploading prekeys...");
-        signaling
-            .upload_prekeys(
+        match tokio::time::timeout(
+            Self::CONNECT_PHASE_TIMEOUT,
+            signaling.upload_prekeys(
                 raw[32..64].to_vec(),
                 raw[64..96].to_vec(),
                 self.inbox_id.clone(),
-            )
-            .await?;
+            ),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!("do_connect: prekey upload failed: {error}");
+                return Err(error);
+            }
+            Err(_) => {
+                warn!("do_connect: prekey upload timed out after 10s");
+                return Err(Error::Transport("prekey upload timed out".into()));
+            }
+        }
         info!("do_connect: prekeys uploaded");
 
-        let bootstrap = TransportBootstrap::from_proto(signaling.get_transport_bootstrap().await?)?;
+        let bootstrap = match tokio::time::timeout(
+            Self::CONNECT_PHASE_TIMEOUT,
+            signaling.get_transport_bootstrap(),
+        )
+        .await
+        {
+            Ok(Ok(info)) => TransportBootstrap::from_proto(info)?,
+            Ok(Err(error)) => {
+                warn!("do_connect: transport bootstrap failed: {error}");
+                return Err(error);
+            }
+            Err(_) => {
+                warn!("do_connect: transport bootstrap timed out after 10s");
+                return Err(Error::Transport("transport bootstrap timed out".into()));
+            }
+        };
         let anonymous_config = self.anonymous_config.lock().await.clone();
         let anonymous_service = Arc::new(AnonymousTransportService::new(
             addr.to_string(),
@@ -254,7 +284,17 @@ impl ClientApi {
             .await;
 
         if !self.inbox_id.is_empty() {
-            self.fetch_inbox().await?;
+            match tokio::time::timeout(Self::CONNECT_PHASE_TIMEOUT, self.fetch_inbox()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!("do_connect: blind inbox fetch failed: {error}");
+                    return Err(error);
+                }
+                Err(_) => {
+                    warn!("do_connect: blind inbox fetch timed out after 10s");
+                    return Err(Error::Transport("blind inbox fetch timed out".into()));
+                }
+            }
             info!("do_connect: fetched blind inbox");
         }
 

@@ -1,6 +1,33 @@
 # Monitoring overlay — use with:
 # docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
 services:
+  loki:
+    image: grafana/loki:3.0.0
+    volumes:
+      - ./deploy/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "127.0.0.1:3100:3100"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  alloy:
+    image: grafana/alloy:v1.14.2
+    volumes:
+      - ./deploy/alloy.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+    networks:
+      - internal
+
   prometheus:
     image: prom/prometheus:v2.51.0
     volumes:
@@ -19,6 +46,8 @@ services:
     image: grafana/grafana:11.0.0
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
       GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
@@ -26,10 +55,12 @@ services:
       - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
+      - loki
     restart: unless-stopped
     networks:
       - internal
 
 volumes:
+  loki-data:
   prometheus-data:
   grafana-data:

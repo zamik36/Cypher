@@ -78,7 +78,27 @@ impl ServerConnection {
     ///
     /// Propagates transport-level errors from the underlying session.
     pub async fn recv_frame(&mut self) -> Result<Frame> {
-        self.session.recv_frame().await
+        loop {
+            let frame = self.session.recv_frame().await?;
+
+            if frame.flags.contains(FrameFlags::PING) {
+                tracing::debug!("received transport PING from gateway, replying with PONG");
+                self.session.send_pong().await?;
+                continue;
+            }
+
+            if frame.flags.contains(FrameFlags::PONG) || frame.flags.contains(FrameFlags::ACK_ONLY)
+            {
+                tracing::debug!("received transport control frame from gateway");
+                continue;
+            }
+
+            if frame.flags.contains(FrameFlags::SESSION_CLOSE) {
+                return Err(Error::ConnectionClosed);
+            }
+
+            return Ok(frame);
+        }
     }
 
     /// Gracefully close the session by sending a `SESSION_CLOSE` frame and

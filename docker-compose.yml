@@ -37,6 +37,7 @@ services:
       - "9100:9100"
       - "9101:9101"
     environment:
+      LOG_FORMAT: json
       P2P_GATEWAY_ADDR: "0.0.0.0:9100"
       P2P_WS_ADDR: "0.0.0.0:9101"
       P2P_NATS_URL: "nats://nats:4222"
@@ -59,6 +60,7 @@ services:
       - "9200:9200"
       - "3478:3478/udp"
     environment:
+      LOG_FORMAT: json
       P2P_SIGNALING_ADDR: "0.0.0.0:9200"
       P2P_STUN_ADDR: "0.0.0.0:3478"
       P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
@@ -81,6 +83,7 @@ services:
     ports:
       - "9300:9300"
     environment:
+      LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
       P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
     restart: unless-stopped

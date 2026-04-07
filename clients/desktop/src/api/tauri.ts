@@ -12,8 +12,19 @@ export interface TransferInfo {
   status: "active" | "complete" | "error";
 }
 
-export interface ConversationEntry { peer_id: string; display_name: string | null; last_ts: number; }
+export interface ConversationEntry {
+  peer_id: string;
+  display_name: string | null;
+  created_at: number;
+  last_message_at: number;
+  inbox_id: string | null;
+}
 export interface HistoryMessage { direction: "sent" | "received"; text: string; timestamp: number; }
+export interface AnonymityLevelPayload {
+  level: number;
+  label: string;
+  description: string;
+}
 
 type TauriListenerCleanup = () => void;
 
@@ -68,8 +79,11 @@ export const api = {
   importMnemonic: (mnemonic: string, nickname: string, passphrase: string) => invokeCommand<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
   // Chat history
   getConversations: () => invokeCommand<ConversationEntry[]>("get_conversations"),
+  getConversation: (peerId: string) => invokeCommand<ConversationEntry | null>("get_conversation", { peerId }),
   getHistory: (peerId: string, limit: number) => invokeCommand<HistoryMessage[]>("get_history", { peerId, limit }),
   clearChatHistory: () => invokeCommand<void>("clear_chat_history"),
+  applyAnonymousSettings: (enabled: boolean, bridgeLines: string[]) =>
+    invokeCommand<void>("apply_anonymous_settings", { enabled, bridgeLines }),
 };
 
 
@@ -103,4 +117,8 @@ export function onFileComplete(cb: (fileId: string) => void) {
 
 export function onError(cb: (msg: string) => void) {
   return listenToEvent<string>("cypher://error", cb);
+}
+
+export function onAnonymityLevel(cb: (payload: AnonymityLevelPayload) => void) {
+  return listenToEvent<AnonymityLevelPayload>("cypher://anonymity_level", cb);
 }

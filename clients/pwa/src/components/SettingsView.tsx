@@ -5,6 +5,7 @@ import { clearAll as clearMessageStore } from "../storage/messages";
 import { clearAllMessages } from "../stores/chat";
 import { exportSeed, clearSession } from "../storage/identity";
 import { addToast } from "../stores/toasts";
+import { anonymousSettings, anonymityStatus, setAnonymousSettings } from "../stores/anonymity";
 import {
   notificationsSupported,
   notificationsEnabled,
@@ -30,6 +31,8 @@ export default function SettingsView(props: SettingsViewProps) {
   const [seedHex, setSeedHex] = createSignal<string | null>(null);
   const [notifEnabled, setNotifEnabled] = createSignal(notificationsEnabled());
   const [prevEnabled, setPrevEnabled] = createSignal(previewEnabled());
+  const [anonymousEnabled, setAnonymousEnabled] = createSignal(anonymousSettings.enabled);
+  const [bridgeLines, setBridgeLines] = createSignal(anonymousSettings.bridgeLines.join("\n"));
 
   async function handleToggleNotifications() {
     if (!notifEnabled()) {
@@ -95,6 +98,17 @@ export default function SettingsView(props: SettingsViewProps) {
       addToast(String(e), "error");
     }
     setExportPass("");
+  }
+
+  function handleSaveAnonymousSettings() {
+    setAnonymousSettings({
+      enabled: anonymousEnabled(),
+      bridgeLines: bridgeLines()
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean),
+    });
+    addToast(t().toast_anonymous_saved_local, "success");
   }
 
   return (
@@ -168,6 +182,42 @@ export default function SettingsView(props: SettingsViewProps) {
             Русский
           </button>
         </div>
+      </div>
+
+      <div class="settings-group">
+        <label>{t().settings_anonymous_title}</label>
+        <div class="anonymous-status-card">
+          <div>
+            <strong>{anonymityStatus.label}</strong>
+            <p>{anonymityStatus.description}</p>
+          </div>
+          <span class="status-chip disabled">{t().settings_anonymous_web_only}</span>
+        </div>
+        <div class="theme-options" style={{ "margin-top": "12px" }}>
+          <button
+            class={`theme-option ${anonymousEnabled() ? "active" : ""}`}
+            onClick={() => setAnonymousEnabled(true)}
+          >
+            {t().settings_anonymous_enabled}
+          </button>
+          <button
+            class={`theme-option ${!anonymousEnabled() ? "active" : ""}`}
+            onClick={() => setAnonymousEnabled(false)}
+          >
+            {t().settings_anonymous_disabled}
+          </button>
+        </div>
+        <p class="settings-help">{t().settings_anonymous_pwa_help}</p>
+        <label class="settings-subtitle">{t().settings_bridges_label}</label>
+        <textarea
+          value={bridgeLines()}
+          onInput={(e) => setBridgeLines(e.currentTarget.value)}
+          placeholder={t().settings_bridges_placeholder}
+        />
+        <p class="settings-help">{t().settings_bridges_help}</p>
+        <button class="btn-secondary" style={{ "margin-top": "10px" }} onClick={handleSaveAnonymousSettings}>
+          {t().settings_anonymous_save_local}
+        </button>
       </div>
 
       <Show when={notificationsSupported()}>

@@ -14,7 +14,7 @@ import {
   onMessage, onMessageSent, onFileOffered, onFileProgress, onFileComplete, onError,
   api, setPeerId as apiSetPeerId, setInboxId as apiSetInboxId,
 } from "./api";
-import { connection, setConnection, addPeer, shortName } from "./stores/connection";
+import { connection, setConnection, addPeer, shortName, markAllPeersOffline } from "./stores/connection";
 import { addMessage } from "./stores/chat";
 import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
@@ -36,6 +36,7 @@ export default function App() {
   const SESSION_SEK_KEY = "cypher-session-sek";
   const SESSION_PEERID_KEY = "cypher-session-peerId";
   const SESSION_NICKNAME_KEY = "cypher-session-nickname";
+  const SESSION_INBOX_KEY = "cypher-session-inboxId";
 
   function bytesToBase64(bytes: Uint8Array): string {
     let binary = "";
@@ -82,6 +83,7 @@ export default function App() {
     try {
       const inbox = await deriveInboxId(data.seed);
       apiSetInboxId(inbox);
+      sessionStorage.setItem(SESSION_INBOX_KEY, hexEncode(inbox));
     } catch (e) {
       console.warn("Failed to derive inbox ID:", e);
     }
@@ -109,6 +111,7 @@ export default function App() {
           role: "guest",
           displayName: conv.nickname || shortName(conv.peerId),
           online: false,
+          inboxId: conv.inboxId ?? null,
         });
       }
     } catch (e) {
@@ -129,6 +132,7 @@ export default function App() {
       }),
       onDisconnected(() => {
         setConnection({ connected: false, peerId: null, status: "disconnected" });
+        markAllPeersOffline();
       }),
       onPeerConnected((remotePeerId) => {
         const room = pendingRoom || { code: "direct", role: "guest" as const };
@@ -203,6 +207,7 @@ export default function App() {
     const sekB64 = sessionStorage.getItem(SESSION_SEK_KEY);
     const peerIdHex = sessionStorage.getItem(SESSION_PEERID_KEY);
     const nickname = sessionStorage.getItem(SESSION_NICKNAME_KEY);
+    const inboxIdHex = sessionStorage.getItem(SESSION_INBOX_KEY);
 
     if (sekB64 && peerIdHex && nickname) {
       try {
@@ -215,6 +220,12 @@ export default function App() {
         }
 
         apiSetPeerId(peerId);
+        if (inboxIdHex) {
+          const inboxId = hexToBytes(inboxIdHex);
+          if (inboxId.length === 32) {
+            apiSetInboxId(inboxId);
+          }
+        }
         setIdentityNickname(nickname);
         await openMessageStore(sek);
 
@@ -228,6 +239,7 @@ export default function App() {
               role: "guest",
               displayName: conv.nickname || shortName(conv.peerId),
               online: false,
+              inboxId: conv.inboxId ?? null,
             });
           }
         } catch (e) {
@@ -242,6 +254,7 @@ export default function App() {
         sessionStorage.removeItem(SESSION_SEK_KEY);
         sessionStorage.removeItem(SESSION_PEERID_KEY);
         sessionStorage.removeItem(SESSION_NICKNAME_KEY);
+        sessionStorage.removeItem(SESSION_INBOX_KEY);
       }
     }
     // Otherwise show identity/unlock screen (handled by Show fallback).

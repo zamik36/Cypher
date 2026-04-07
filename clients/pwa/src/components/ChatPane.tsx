@@ -1,8 +1,8 @@
 import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
 import { api } from "../api";
 import { chatsByPeer, addMessage, getMessages, setMessages } from "../stores/chat";
-import { connection, setActivePeer, shortName } from "../stores/connection";
-import { loadMessages } from "../storage/messages";
+import { connection, setActivePeer, setPeerInboxId, shortName } from "../stores/connection";
+import { loadMessages, saveConversation } from "../storage/messages";
 import { SendIcon, ChatIcon } from "./Icons";
 import type { Page } from "./Sidebar";
 import { t } from "../i18n";
@@ -24,6 +24,12 @@ export default function ChatPane(props: ChatPaneProps) {
   const activePeer = () => connection.activePeerId;
   const activeMessages = () => activePeer() ? getMessages(activePeer()!) : [];
   const activePeerInfo = () => connection.peers.find((p) => p.peerId === activePeer());
+  const activeDelivery = () => {
+    const peer = activePeerInfo();
+    if (!peer) return "offline_unavailable" as const;
+    if (peer.online) return "online" as const;
+    return peer.inboxId ? "offline_available" as const : "offline_unavailable" as const;
+  };
 
   // Load message history from IndexedDB when selecting a peer with no in-memory messages.
   // Track the target peer to avoid race conditions on rapid switching.
@@ -47,6 +53,19 @@ export default function ChatPane(props: ChatPaneProps) {
       }
     }).catch((e) => console.warn("Failed to load history:", e))
       .finally(() => { if (loadingForPeer === peer) setLoadingHistory(false); });
+  });
+
+  createEffect(() => {
+    const peer = activePeerInfo();
+    if (!peer || peer.inboxId || !connection.connected) return;
+
+    api.fetchPeerInboxId(peer.peerId)
+      .then((inboxId) => {
+        if (!inboxId) return;
+        setPeerInboxId(peer.peerId, inboxId);
+        return saveConversation(peer.peerId, peer.displayName, inboxId);
+      })
+      .catch((e) => console.warn("Failed to refresh peer inbox metadata:", e));
   });
 
   createEffect(() => {
@@ -75,9 +94,14 @@ export default function ChatPane(props: ChatPaneProps) {
   async function send() {
     const text = draft().trim();
     const peer = activePeer();
-    if (!text || !peer) return;
+    const peerInfo = activePeerInfo();
+    if (!text || !peer || !peerInfo || activeDelivery() === "offline_unavailable") return;
     try {
-      await api.sendMessage(peer, text);
+      if (peerInfo.online) {
+        await api.sendMessage(peer, text);
+      } else {
+        await api.sendOfflineMessage(peer, peerInfo.inboxId!, text);
+      }
       addMessage(peer, { from: "me", text, timestamp: Date.now() });
       setDraft("");
     } catch (e) {
@@ -181,7 +205,11 @@ export default function ChatPane(props: ChatPaneProps) {
               </div>
 
               <Show when={activePeerInfo() && !activePeerInfo()!.online}>
-                <div class="offline-banner">{t().chat_offline_hint}</div>
+                <div class="offline-banner">
+                  {activeDelivery() === "offline_available"
+                    ? t().chat_offline_hint_ready
+                    : t().chat_offline_hint_unavailable}
+                </div>
               </Show>
               <div class="input-row">
                 <input
@@ -189,9 +217,16 @@ export default function ChatPane(props: ChatPaneProps) {
                   value={draft()}
                   onInput={(e) => setDraft(e.currentTarget.value)}
                   onKeyDown={(e) => e.key === "Enter" && send()}
-                  placeholder={t().chat_placeholder}
+                  placeholder={activeDelivery() === "offline_unavailable"
+                    ? t().chat_placeholder_offline_unavailable
+                    : t().chat_placeholder}
+                  disabled={activeDelivery() === "offline_unavailable"}
                 />
-                <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
+                <button
+                  class="btn-icon"
+                  onClick={send}
+                  disabled={!draft().trim() || activeDelivery() === "offline_unavailable"}
+                >
                   <SendIcon />
                 </button>
               </div>

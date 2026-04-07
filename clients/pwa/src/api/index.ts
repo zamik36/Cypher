@@ -5,7 +5,7 @@
 import {
   encodeSessionInit, encodeSignalRequestPeer, encodeChatSend,
   encodeFileOffer, encodeFileChunk, encodeFileComplete,
-  encodeFileChunkAck, encodeInboxFetch, dispatch as protoDispatch,
+  encodeFileChunkAck, encodeInboxFetch, encodeInboxStore, encodeKeysGetPrekeys, dispatch as protoDispatch,
   hexEncode, hexDecode, randomBytes,
 } from "./proto";
 
@@ -74,6 +74,8 @@ let inboxId: Uint8Array = new Uint8Array(0);
 
 let pendingLinkResolve: ((v: string) => void) | null = null;
 let pendingLinkReject: ((e: Error) => void) | null = null;
+let pendingPrekeysResolve: ((inboxId: string | null) => void) | null = null;
+let pendingPrekeysReject: ((e: Error) => void) | null = null;
 
 // File receive buffers: fileId hex → chunks[] + creation timestamp for timeout.
 const FILE_TRANSFER_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -213,12 +215,24 @@ function handleMessage(data: ArrayBuffer) {
           pendingLinkResolve(json.link_id);
           pendingLinkResolve = null;
           pendingLinkReject = null;
+          return;
         }
         if (json.found === true && json.peer_id) {
           emit("peer_connected", json.peer_id as string);
+          return;
         }
         if (json.peer_joined === true && json.peer_id) {
           emit("peer_connected", json.peer_id as string);
+          return;
+        }
+        const isPrekeysResponse =
+          json.identity_key !== undefined ||
+          json.signed_prekey !== undefined ||
+          (json.found === false && typeof json.error === "string" && json.error.includes("prekeys"));
+        if (isPrekeysResponse && pendingPrekeysResolve) {
+          pendingPrekeysResolve(typeof json.inbox_id === "string" ? json.inbox_id : null);
+          pendingPrekeysResolve = null;
+          pendingPrekeysReject = null;
         }
       } catch {
         // Not JSON, ignore.
@@ -327,6 +341,33 @@ export const api = {
     // Notify listeners so App.tsx can persist the sent message.
     emit("message_sent", { to: targetPeerId, text, timestamp: Date.now() });
     return Promise.resolve();
+  },
+
+  sendOfflineMessage(targetPeerId: string, inboxIdHex: string, text: string): Promise<void> {
+    const ciphertext = new TextEncoder().encode(text);
+    const payload = encodeChatSend(peerId, ciphertext, new Uint8Array(0), 0);
+    send(encodeInboxStore(hexDecode(inboxIdHex), payload));
+    emit("message_sent", { to: targetPeerId, text, timestamp: Date.now() });
+    return Promise.resolve();
+  },
+
+  fetchPeerInboxId(targetPeerId: string): Promise<string | null> {
+    if (pendingPrekeysReject) {
+      pendingPrekeysReject(new Error("previous prekey request superseded"));
+    }
+
+    return new Promise((resolve, reject) => {
+      pendingPrekeysResolve = resolve;
+      pendingPrekeysReject = reject;
+      send(encodeKeysGetPrekeys(hexDecode(targetPeerId)));
+      setTimeout(() => {
+        if (pendingPrekeysReject === reject) {
+          pendingPrekeysReject(new Error("get_prekeys timeout"));
+          pendingPrekeysResolve = null;
+          pendingPrekeysReject = null;
+        }
+      }, 10000);
+    });
   },
 
   getMessages(): Promise<ChatMessage[]> {

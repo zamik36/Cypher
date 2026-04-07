@@ -10,14 +10,18 @@ import ToastContainer from "./components/ToastContainer";
 import IdentityView from "./components/IdentityView";
 import {
   onConnected, onDisconnected, onPeerConnected,
-  onMessage, onFileOffered, onFileProgress, onFileComplete, onError,
+  onMessage, onFileOffered, onFileProgress, onFileComplete, onError, onAnonymityLevel,
   api,
 } from "./api/tauri";
-import { connection, setConnection, addPeer, shortName } from "./stores/connection";
+import {
+  connection, setConnection, addPeer, shortName, setPeerInboxId, markAllPeersOffline,
+} from "./stores/connection";
 import { addMessage } from "./stores/chat";
 import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
+import { anonymousSettings, setAnonymityStatus } from "./stores/anonymity";
 import { t } from "./i18n";
+import { notifyMessage } from "./utils/notifications";
 
 export default function App() {
   const [page, setPage] = createSignal<Page>("home");
@@ -41,6 +45,7 @@ export default function App() {
           role: "guest",
           displayName: conv.display_name || shortName(conv.peer_id),
           online: false,
+          inboxId: conv.inbox_id,
         });
       }
     } catch (e) {
@@ -83,6 +88,12 @@ export default function App() {
       }),
       onDisconnected(() => {
         setConnection({ connected: false, peerId: null, status: "disconnected" });
+        markAllPeersOffline();
+        setAnonymityStatus({
+          supported: true,
+          label: "Disconnected",
+          description: "Reconnect to resume anonymous inbox routing.",
+        });
       }),
       onPeerConnected((remotePeerId) => {
         const room = pendingRoom || { code: "direct", role: "guest" as const };
@@ -93,6 +104,9 @@ export default function App() {
           displayName: shortName(remotePeerId),
           online: true,
         });
+        void api.getConversation(remotePeerId)
+          .then((conv) => setPeerInboxId(remotePeerId, conv?.inbox_id ?? null))
+          .catch((e) => console.warn("Failed to refresh conversation metadata:", e));
         pendingRoom = null;
         setConnection({ status: "peer connected" });
         addToast(t().toast_peer_connected, "success");
@@ -101,6 +115,7 @@ export default function App() {
       onMessage((msg) => {
         const peerId = msg.from;
         addMessage(peerId, msg);
+        void notifyMessage(shortName(peerId), msg.text);
         if (page() !== "chat") {
           setUnread((n) => n + 1);
         }
@@ -135,6 +150,13 @@ export default function App() {
       onError((msg) => {
         addToast(msg, "error");
       }),
+      onAnonymityLevel((payload) => {
+        setAnonymityStatus({
+          supported: true,
+          label: payload.label,
+          description: payload.description,
+        });
+      }),
     ]);
 
     cleanupFns = unlisten;
@@ -142,10 +164,19 @@ export default function App() {
     // Auto-connect to gateway.
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
+      await api.applyAnonymousSettings(
+        anonymousSettings.enabled,
+        anonymousSettings.bridgeLines,
+      );
       await api.connectToGateway(connection.gatewayAddr);
       setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
+      setAnonymityStatus({
+        supported: true,
+        label: "Unavailable",
+        description: "Anonymous inbox routing could not be initialized.",
+      });
     }
   }
 
