@@ -66,8 +66,10 @@ pub fn run() {
             commands::identity::export_mnemonic,
             commands::identity::import_mnemonic,
             commands::identity::get_conversations,
+            commands::identity::get_conversation,
             commands::identity::get_history,
             commands::identity::clear_chat_history,
+            commands::settings::apply_anonymous_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");

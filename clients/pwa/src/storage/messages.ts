@@ -7,7 +7,7 @@
 import { encrypt, decrypt, importAesKey } from "./crypto";
 
 const DB_NAME = "cypher-messages";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_MESSAGES = "messages";
 const STORE_CONVERSATIONS = "conversations";
@@ -26,6 +26,7 @@ export interface Conversation {
   nickname: string | null;
   createdAt: number;
   lastMessageAt: number;
+  inboxId?: string | null;
 }
 
 export interface DecryptedMessage {
@@ -46,6 +47,7 @@ export async function openMessageStore(sek: Uint8Array): Promise<void> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const d = req.result;
+      const oldVersion = req.transaction?.db.version ?? 0;
       if (!d.objectStoreNames.contains(STORE_MESSAGES)) {
         const ms = d.createObjectStore(STORE_MESSAGES, {
           keyPath: "id",
@@ -55,6 +57,11 @@ export async function openMessageStore(sek: Uint8Array): Promise<void> {
       }
       if (!d.objectStoreNames.contains(STORE_CONVERSATIONS)) {
         d.createObjectStore(STORE_CONVERSATIONS, { keyPath: "peerId" });
+      }
+      // IndexedDB conversation records are schemaless. Version 2 reserves the
+      // optional inboxId field while keeping existing records readable.
+      if (oldVersion < 2 && d.objectStoreNames.contains(STORE_CONVERSATIONS)) {
+        // No structural migration required.
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -98,6 +105,7 @@ export async function saveMessage(
       nickname: null,
       createdAt: timestamp,
       lastMessageAt: timestamp,
+      inboxId: null,
     } satisfies Conversation);
   }
 }
@@ -163,6 +171,7 @@ export async function listConversations(): Promise<Conversation[]> {
 export async function saveConversation(
   peerId: string,
   nickname: string | null,
+  inboxId?: string | null,
 ): Promise<void> {
   if (!db) return;
   const tx = db.transaction(STORE_CONVERSATIONS, "readwrite");
@@ -170,6 +179,7 @@ export async function saveConversation(
   const existing: Conversation | undefined = await idbGet(store, peerId);
   if (existing) {
     if (nickname !== null) existing.nickname = nickname;
+    if (inboxId !== undefined) existing.inboxId = inboxId;
     store.put(existing);
   } else {
     const now = Date.now();
@@ -178,8 +188,17 @@ export async function saveConversation(
       nickname,
       createdAt: now,
       lastMessageAt: now,
+      inboxId: inboxId ?? null,
     } satisfies Conversation);
   }
+}
+
+export async function getConversation(peerId: string): Promise<Conversation | undefined> {
+  if (!db) return undefined;
+  return idbGet<Conversation>(
+    db.transaction(STORE_CONVERSATIONS, "readonly").objectStore(STORE_CONVERSATIONS),
+    peerId,
+  );
 }
 
 /** Delete all messages, conversations. */

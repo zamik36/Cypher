@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import { api } from "../api/tauri";
-import { connection, setConnection, addPeer, shortName } from "../stores/connection";
+import { connection, setConnection, addPeer, shortName, setGatewayAddr } from "../stores/connection";
 import Spinner from "./Spinner";
 import { UsersIcon, LinkIcon, CopyIcon, CheckIcon } from "./Icons";
 import type { Page } from "./Sidebar";
@@ -73,10 +73,12 @@ export default function HomeView(props: HomeViewProps) {
   }
 
   async function handleRetry() {
+    const normalizedAddr = setGatewayAddr(advancedAddr());
+    setAdvancedAddr(normalizedAddr);
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
-      await api.connectToGateway(advancedAddr());
-      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected", gatewayAddr: advancedAddr() });
+      await api.connectToGateway(normalizedAddr);
+      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
     }

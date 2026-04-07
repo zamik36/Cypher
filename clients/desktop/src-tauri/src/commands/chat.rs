@@ -30,7 +30,39 @@ pub async fn send_message(
         cypher_common::PeerId::from_bytes(&peer_id_bytes).ok_or("peer_id must be 32 bytes")?;
 
     let api = current_api(&state).await;
-    api.send_message(&pid, text.as_bytes())
+    let is_online = state.peers.lock().await.contains(&pid);
+
+    if is_online {
+        if !api.keys().has_session(pid.as_bytes()) {
+            api.initiate_session(&pid)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        return api
+            .send_message(&pid, text.as_bytes())
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    let store = api
+        .message_store()
+        .ok_or_else(|| "message store unavailable".to_string())?;
+    let inbox_id = store
+        .load_peer_inbox_id(&pid)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "Offline delivery is unavailable for this chat until the peer reconnects and completes a new key exchange.".to_string()
+        })?;
+
+    if !api.keys().has_session(pid.as_bytes()) {
+        return Err(
+            "Offline delivery is unavailable because this chat has no restored secure session yet."
+                .to_string(),
+        );
+    }
+
+    api.send_message_offline(&pid, &inbox_id, text.as_bytes())
         .await
         .map_err(|e| e.to_string())
 }

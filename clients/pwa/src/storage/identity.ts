@@ -90,6 +90,7 @@ export function deleteIdentity(): void {
   sessionStorage.removeItem("cypher-session-sek");
   sessionStorage.removeItem("cypher-session-peerId");
   sessionStorage.removeItem("cypher-session-nickname");
+  sessionStorage.removeItem("cypher-session-inboxId");
 }
 
 /** Clear the cached session (forces re-authentication on next load). */
@@ -97,6 +98,7 @@ export function clearSession(): void {
   sessionStorage.removeItem("cypher-session-sek");
   sessionStorage.removeItem("cypher-session-peerId");
   sessionStorage.removeItem("cypher-session-nickname");
+  sessionStorage.removeItem("cypher-session-inboxId");
 }
 
 /** Derive peerId from seed (must match Rust HKDF derivation). */

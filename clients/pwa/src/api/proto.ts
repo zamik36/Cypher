@@ -160,6 +160,13 @@ export function encodeSignalRequestPeer(linkId: string): Uint8Array {
   return w.build();
 }
 
+export function encodeKeysGetPrekeys(peerId: Uint8Array): Uint8Array {
+  const w = new Writer();
+  w.u32(CID.KeysGetPrekeys);
+  w.bytes(peerId);
+  return w.build();
+}
+
 export function encodeChatSend(peerId: Uint8Array, ciphertext: Uint8Array, ratchetKey: Uint8Array, msgNo: number): Uint8Array {
   const w = new Writer();
   w.u32(CID.ChatSend);

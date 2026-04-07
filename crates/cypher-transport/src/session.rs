@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tokio_util::codec::Framed;
 use tracing::{debug, instrument};
@@ -41,11 +43,16 @@ impl TransportSession {
 
     #[instrument(skip(tls_config))]
     pub async fn connect(addr: &str, tls_config: Arc<rustls::ClientConfig>) -> Result<Self> {
+        const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+        const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+
         let addr = addr
             .strip_prefix("wss://")
             .or_else(|| addr.strip_prefix("ws://"))
             .unwrap_or(addr);
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(addr))
+            .await
+            .map_err(|_| Error::Transport(format!("TCP connect to {addr} timed out")))??;
         let connector = TlsConnector::from(tls_config);
 
         // Derive a ServerName from the address (strip port).
@@ -54,7 +61,9 @@ impl TransportSession {
         let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
             .map_err(|e| Error::Transport(format!("invalid server name: {e}")))?;
 
-        let tls_stream = connector.connect(server_name, tcp).await?;
+        let tls_stream = timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp))
+            .await
+            .map_err(|_| Error::Transport(format!("TLS handshake to {addr} timed out")))??;
 
         debug!("TLS connection established to {addr}");
 

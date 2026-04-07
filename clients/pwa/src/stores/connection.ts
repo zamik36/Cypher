@@ -7,6 +7,7 @@ export interface PeerInfo {
   role: "host" | "guest";
   displayName: string;
   online: boolean;
+  inboxId?: string | null;
 }
 
 interface ConnectionState {
@@ -38,7 +39,12 @@ export function addPeer(peer: PeerInfo) {
     const idx = prev.findIndex((p) => p.peerId === peer.peerId);
     if (idx >= 0) {
       const updated = [...prev];
-      updated[idx] = { ...updated[idx], online: peer.online, displayName: peer.displayName };
+      updated[idx] = {
+        ...updated[idx],
+        online: peer.online,
+        displayName: peer.displayName,
+        inboxId: peer.inboxId ?? updated[idx].inboxId ?? null,
+      };
       return updated;
     }
     return [...prev, peer];
@@ -53,6 +59,16 @@ export function setPeerOnline(peerId: string, online: boolean) {
   setConnection("peers", (prev) =>
     prev.map((p) => p.peerId === peerId ? { ...p, online } : p),
   );
+}
+
+export function setPeerInboxId(peerId: string, inboxId: string | null) {
+  setConnection("peers", (prev) =>
+    prev.map((p) => p.peerId === peerId ? { ...p, inboxId } : p),
+  );
+}
+
+export function markAllPeersOffline() {
+  setConnection("peers", (prev) => prev.map((p) => ({ ...p, online: false })));
 }
 
 export function removePeer(peerId: string) {

@@ -93,12 +93,40 @@ pub async fn get_conversations(
         .map(|c| {
             Ok(serde_json::json!({
                 "peer_id": hex_encode(&c.peer_id),
-                "nickname": c.nickname,
+                "display_name": c.nickname,
                 "created_at": c.created_at,
                 "last_message_at": c.last_message_at,
+                "inbox_id": c.inbox_id.as_deref().map(hex_encode),
             }))
         })
         .collect()
+}
+
+#[tauri::command]
+pub async fn get_conversation(
+    state: tauri::State<'_, AppState>,
+    peer_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let api = current_api(&state).await;
+    let Some(store) = api.message_store() else {
+        return Ok(None);
+    };
+    let pid = parse_peer_id(&peer_id)?;
+    let convo = store
+        .list_conversations()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|c| c.peer_id == pid.as_bytes());
+
+    Ok(convo.map(|c| {
+        serde_json::json!({
+            "peer_id": hex_encode(&c.peer_id),
+            "display_name": c.nickname,
+            "created_at": c.created_at,
+            "last_message_at": c.last_message_at,
+            "inbox_id": c.inbox_id.as_deref().map(hex_encode),
+        })
+    }))
 }
 
 #[tauri::command]

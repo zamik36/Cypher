@@ -56,7 +56,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\".+\"} | json | level = \"ERROR\" [1m]))",
+          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\".+\", level=\"ERROR\"}[1m]))",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -88,7 +88,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\".+\"} | json | level = \"WARN\" [1m]))",
+          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\".+\", level=\"WARN\"}[1m]))",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -126,7 +126,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\", service=~\"${service:regex}\"} | json | level =~ \"${level}\"",
+          "expr": "{job=\"docker\", service=~\"${service:regex}\", level=~\"${level}\"}",
           "refId": "A"
         }
       ],
@@ -154,7 +154,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\", service=\"gateway\"} | json",
+          "expr": "{job=\"docker\", service=\"gateway\"}",
           "refId": "A"
         }
       ],
@@ -175,7 +175,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\", service=\"signaling\"} | json",
+          "expr": "{job=\"docker\", service=\"signaling\"}",
           "refId": "A"
         }
       ],
@@ -196,7 +196,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\", service=\"relay\"} | json",
+          "expr": "{job=\"docker\", service=\"relay\"}",
           "refId": "A"
         }
       ],

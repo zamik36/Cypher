@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
@@ -187,6 +188,31 @@ impl ClientApi {
         Ok(())
     }
 
+    /// Encrypt and store a message in a peer's blind inbox for offline delivery.
+    pub async fn send_message_offline(
+        &self,
+        peer_id: &PeerId,
+        inbox_id: &[u8],
+        plaintext: &[u8],
+    ) -> Result<()> {
+        let (ciphertext, ratchet_key_bytes, msg_no) =
+            self.keys.encrypt_for_peer(peer_id.as_bytes(), plaintext)?;
+
+        // Blind-inbox delivery bypasses signaling's online rewrite step, so the
+        // inner ChatSend must already identify the sender.
+        let msg = cypher_proto::ChatSend {
+            peer_id: self.session.peer_id().to_vec(),
+            ciphertext,
+            ratchet_key: ratchet_key_bytes,
+            msg_no,
+        };
+        self.send_to_inbox(inbox_id, &msg.serialize()).await?;
+        debug!(peer_id = %peer_id, msg_no, "stored encrypted message in peer inbox");
+
+        self.persist_sent_message(peer_id, plaintext);
+        Ok(())
+    }
+
     /// Encrypt and send a message to `peer_id`.
     pub async fn send_message(&self, peer_id: &PeerId, plaintext: &[u8]) -> Result<()> {
         let (ciphertext, ratchet_key_bytes, msg_no) =
@@ -202,23 +228,29 @@ impl ClientApi {
             .await?;
         debug!(peer_id = %peer_id, msg_no, "sent encrypted message");
 
-        if let Some(store) = &self.message_store {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            if let Err(e) =
-                store.save_message(peer_id, crate::persistence::Direction::Sent, plaintext, now)
-            {
-                warn!(peer_id = %peer_id, error = %e, "failed to persist sent message; message was sent but may not appear in history after restart");
-            }
-            if let Some(state) = self.keys.get_ratchet_state(peer_id.as_bytes()) {
-                if let Err(e) = store.save_ratchet_state(peer_id, &state) {
-                    warn!(peer_id = %peer_id, error = %e, "failed to persist ratchet state; session may break after restart");
-                }
-            }
-        }
+        self.persist_sent_message(peer_id, plaintext);
 
         Ok(())
+    }
+
+    fn persist_sent_message(&self, peer_id: &PeerId, plaintext: &[u8]) {
+        let Some(store) = &self.message_store else {
+            return;
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Err(e) =
+            store.save_message(peer_id, crate::persistence::Direction::Sent, plaintext, now)
+        {
+            warn!(peer_id = %peer_id, error = %e, "failed to persist sent message; message was sent but may not appear in history after restart");
+        }
+        if let Some(state) = self.keys.get_ratchet_state(peer_id.as_bytes()) {
+            if let Err(e) = store.save_ratchet_state(peer_id, &state) {
+                warn!(peer_id = %peer_id, error = %e, "failed to persist ratchet state; session may break after restart");
+            }
+        }
     }
 }

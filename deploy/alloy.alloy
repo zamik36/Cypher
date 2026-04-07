@@ -19,17 +19,49 @@ discovery.relabel "docker_logs" {
     target_label  = "container"
   }
 
-  // Extract service type (gateway, signaling, relay)
+  // Prefer the stable Docker Compose service label.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "(.+)"
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "(.+)"
+    target_label  = "compose_project"
+  }
+
+  // Fallback for non-compose containers or older labels.
   rule {
     source_labels = ["__meta_docker_container_name"]
     regex         = ".*[-_](gateway|signaling|relay)[-_].*"
     target_label  = "service"
   }
 
-  // Drop infra containers
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(gateway|signaling|relay)(?:[-_].*)?"
+    target_label  = "service"
+  }
+
+  // Drop infra containers using Compose service labels.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "(loki|alloy|prometheus|grafana|caddy|redis|nats|pwa)"
+    action        = "drop"
+  }
+
+  // Fallback infra drop for plain Docker container names.
   rule {
     source_labels = ["__meta_docker_container_name"]
     regex         = ".*[-_](loki|alloy|prometheus|grafana|caddy|redis|nats|pwa)[-_].*"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(loki|alloy|prometheus|grafana|caddy|redis|nats|pwa)(?:[-_].*)?"
     action        = "drop"
   }
 }
@@ -46,6 +78,10 @@ loki.process "json_logs" {
 
   stage.json {
     expressions = { "level" = "level" }
+  }
+
+  stage.regex {
+    expression = ".*\\b(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\\b.*"
   }
 
   stage.labels {

@@ -500,7 +500,23 @@ pub(super) async fn run_io_loop(
                 }
             },
             result = session.recv_frame() => match result {
-                Ok(frame) => context.dispatch_inbound(frame.payload).await,
+                Ok(frame) => {
+                    if frame.flags.contains(FrameFlags::PING) {
+                        if let Err(error) = session.send_pong().await {
+                            warn!("failed to reply with PONG: {}", error);
+                            break;
+                        }
+                        continue;
+                    }
+                    if frame.flags.contains(FrameFlags::PONG) || frame.flags.contains(FrameFlags::ACK_ONLY) {
+                        continue;
+                    }
+                    if frame.flags.contains(FrameFlags::SESSION_CLOSE) {
+                        info!("gateway requested session close");
+                        break;
+                    }
+                    context.dispatch_inbound(frame.payload).await
+                },
                 Err(cypher_common::Error::ConnectionClosed) => {
                     info!("gateway connection closed");
                     break;
