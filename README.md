@@ -36,6 +36,7 @@ Peer A                       Серверный кластер                  
 ## Возможности
 
 - **E2EE**: X3DH key agreement (с SPK для forward secrecy) + Double Ratchet + AES-256-GCM
+- **Anonymous inbox transport**: signed inbox responses, two-phase fetch with ACK recovery, relay bootstrap from signaling, typed runtime config for anonymous transport
 - **Persistent identity**: BIP39 мнемоника (24 слова), детерминистичная деривация ключей через HKDF
 - **Encrypted storage**: SQLite + AES-256-GCM + zstd (desktop), IndexedDB + Web Crypto API (PWA) — сообщения и ratchet-состояния шифруются at rest
 - **P2P**: STUN/ICE, UDP hole punching, DTLS-like secure framing
@@ -72,6 +73,24 @@ clients/
 tools/
   load-test/           — нагрузочное тестирование Gateway (clap CLI)
 ```
+
+## Anonymous Transport Status
+
+Текущая реализация anonymous inbox transport синхронизирована с production-подходом:
+
+- клиент получает transport bootstrap от signaling
+- Tor bridges задаются через runtime settings приложения
+- signaling подписывает inbox responses, клиент проверяет подпись до `InboxAck`
+- unacked inbox claims восстанавливаются recovery worker'ом
+- relay и signaling используют persisted local key material вместо process-level fallback secrets
+
+Production key files:
+
+- `data/relay/onion_identity.bin`
+- `data/signaling/inbox_signing.bin`
+- `data/signaling/inbox_hmac.bin`
+
+Важно: эти файлы должны храниться на persistent volume и входить в стратегию backup/restore. Они являются частью криптографической идентичности сервисов.
 
 ## Быстрый старт
 

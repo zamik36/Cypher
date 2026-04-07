@@ -2,6 +2,7 @@ pub mod api;
 pub mod connection;
 pub mod crypto;
 pub mod identity_store;
+pub mod onion;
 pub mod p2p;
 pub mod persistence;
 pub mod session;

@@ -1,5 +1,35 @@
 # Onion Routing for Inbox Anonymity — Production Plan
 
+## Implementation Status — 2026-04-07
+
+This document started as a design plan. The current codebase now implements the core production-safe parts of the plan with a few scope adjustments:
+
+- transport bootstrap is discovered from signaling, not from new client env variables
+- relay and signaling keys are persisted locally on disk, not generated from env seeds
+- Tor bridge configuration is a runtime app setting, not an env contract
+- inbox responses are signed by signaling and verified by the client before `InboxAck`
+- inbox fetch uses a two-phase claim/ack flow with Redis-backed recovery for missed ACKs
+- anonymous transport code was decomposed into focused client and service modules
+
+Implemented key paths:
+
+- `crates/cypher-client-core/src/onion/*`
+- `crates/cypher-client-core/src/api/*`
+- `services/signaling/src/{bootstrap,inbox,peer,delivery,signing,key_store,stun}.rs`
+- `services/relay/src/{main,onion,identity}.rs`
+
+Production key files:
+
+- `data/relay/onion_identity.bin`
+- `data/signaling/inbox_signing.bin`
+- `data/signaling/inbox_hmac.bin`
+
+Out of current scope or intentionally deferred:
+
+- automatic bridge-provider HTTP flows
+- broader organic relay / DHT architecture
+- full end-to-end NAT/Redis/NATS integration testbed for anonymous transport
+
 ## Problem
 
 Even with per-peer inbox IDs and E2EE inbox exchange, the server learns the

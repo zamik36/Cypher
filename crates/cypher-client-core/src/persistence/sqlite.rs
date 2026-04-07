@@ -67,9 +67,9 @@ impl SqliteMessageStore {
             .execute_batch(SCHEMA)
             .map_err(|e| Error::Crypto(format!("schema init: {e}")))?;
         // Migration: add inbox_id column if missing (existing databases).
-        let _ = store.conn()?.execute_batch(
-            "ALTER TABLE conversations ADD COLUMN inbox_id BLOB;",
-        );
+        let _ = store
+            .conn()?
+            .execute_batch("ALTER TABLE conversations ADD COLUMN inbox_id BLOB;");
         Ok(store)
     }
 

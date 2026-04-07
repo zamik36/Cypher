@@ -39,6 +39,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
@@ -60,6 +61,8 @@ webpki-roots = "0.26"
 rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.24"
+arti-client = "0.20"
+tor-rtcompat = "0.20"
 
 # Internal crates
 cypher-common = { path = "crates/cypher-common" }

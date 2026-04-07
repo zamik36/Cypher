@@ -29,3 +29,8 @@
 @0xC2000001 inbox.store inbox_id:Bytes ciphertext:Bytes = inbox.Ok;
 @0xC2000002 inbox.fetch inbox_id:Bytes = inbox.Messages;
 @0xC2000003 inbox.messages messages:Bytes count:Int = inbox.Ok;
+@0xC2000005 inbox.ack inbox_id:Bytes claim_token:Bytes = inbox.Ok;
+
+// Anonymous transport bootstrap
+@0xC3000001 transport.bootstrap = transport.Info;
+@0xC3000002 transport.bootstrapInfo relay_addr:String relay_public_key:Bytes inbox_verifying_key:Bytes capabilities:Int = transport.Ok;

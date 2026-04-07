@@ -46,6 +46,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=builder /app/target/release/relay /usr/local/bin/relay
 EXPOSE 9300 9092
-ENV P2P_RELAY_ADDR=0.0.0.0:9300
 USER app
 CMD ["relay"]

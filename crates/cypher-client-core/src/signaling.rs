@@ -8,7 +8,7 @@
 
 use bytes::Bytes;
 use cypher_common::{Error, LinkId, PeerId, Result};
-use cypher_proto::Serializable;
+use cypher_proto::{Message, Serializable};
 use cypher_transport::FrameFlags;
 use tracing::debug;
 
@@ -139,6 +139,28 @@ impl SignalingClient {
         let ik = json_bytes_field(&resp, "identity_key")?;
         let spk = json_bytes_field(&resp, "signed_prekey")?;
         Ok((ik, spk))
+    }
+
+    pub async fn get_transport_bootstrap(
+        &mut self,
+    ) -> Result<cypher_proto::TransportBootstrapInfo> {
+        let msg = cypher_proto::TransportBootstrap {};
+        self.conn
+            .send_payload(Bytes::from(msg.serialize()), FrameFlags::NONE)
+            .await?;
+        debug!("sent TransportBootstrap");
+
+        match self.recv_server_frame().await? {
+            ServerFrame::Proto(payload) => match cypher_proto::dispatch(&payload)? {
+                Message::TransportBootstrapInfo(info) => Ok(info),
+                other => Err(Error::Protocol(format!(
+                    "TransportBootstrap: unexpected proto response: {other:?}"
+                ))),
+            },
+            ServerFrame::Signaling(_) => Err(Error::Protocol(
+                "TransportBootstrap: expected proto response but got JSON".into(),
+            )),
+        }
     }
 
     // -----------------------------------------------------------------------
