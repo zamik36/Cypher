@@ -3,6 +3,8 @@ ignore = [
     "RUSTSEC-2026-0049",  # rustls-webpki 0.102.8: CRL distribution point (async-nats dep, can't upgrade)
     "RUSTSEC-2025-0134",  # rustls-pemfile: unmaintained (migrating later)
     "RUSTSEC-2024-0437",  # protobuf v2: recursion crash (prometheus 0.13 dep, no upgrade path)
+    "RUSTSEC-2024-0436",  # paste: unmaintained via optional arti-client Tor stack, no safe replacement upstream yet
+    "RUSTSEC-2023-0071",  # rsa Marvin timing advisory via optional arti-client Tor stack, no safe upgrade available yet
 ]
 
 [licenses]
@@ -17,6 +19,8 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    "Unlicense",
+    "MPL-2.0",
 ]
 confidence-threshold = 0.8
 
