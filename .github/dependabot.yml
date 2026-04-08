@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    reviewers:
+      - zamik36
+    labels:
+      - dependencies
+      - docker
+
+  - package-ecosystem: docker
+    directory: /clients/pwa
+    schedule:
+      interval: weekly
+      day: monday
+    reviewers:
+      - zamik36
+    labels:
+      - dependencies
+      - docker
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    reviewers:
+      - zamik36
+    labels:
+      - dependencies
+      - rust
+
+  - package-ecosystem: npm
+    directory: /clients/pwa
+    schedule:
+      interval: weekly
+      day: monday
+    reviewers:
+      - zamik36
+    labels:
+      - dependencies
+      - npm
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    reviewers:
+      - zamik36
+    labels:
+      - dependencies
+      - ci

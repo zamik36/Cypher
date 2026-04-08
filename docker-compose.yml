@@ -1,11 +1,13 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:-changeme}"
+    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -15,10 +17,14 @@ services:
       - internal
 
   nats:
-    image: nats:2-alpine
+    image: nats:2-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "127.0.0.1:4222:4222"
-    command: ["--jetstream", "-m", "8222", "--auth", "${NATS_AUTH_TOKEN:-changeme}"]
+    command: ["--jetstream", "-m", "8222", "--auth", "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"]
     # -m 8222 enables monitoring; healthcheck uses the monitoring endpoint
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
@@ -33,6 +39,11 @@ services:
       context: .
       dockerfile: Dockerfile
       target: gateway
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "9100:9100"
       - "9101:9101"
@@ -41,7 +52,7 @@ services:
       P2P_GATEWAY_ADDR: "0.0.0.0:9100"
       P2P_WS_ADDR: "0.0.0.0:9101"
       P2P_NATS_URL: "nats://nats:4222"
-      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:-changeme}"
+      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
       P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
     depends_on:
@@ -56,6 +67,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: signaling
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - signaling-data:/data/signaling
     ports:
       - "9200:9200"
       - "3478:3478/udp"
@@ -63,9 +81,9 @@ services:
       LOG_FORMAT: json
       P2P_SIGNALING_ADDR: "0.0.0.0:9200"
       P2P_STUN_ADDR: "0.0.0.0:3478"
-      P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
+      P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379"
       P2P_NATS_URL: "nats://nats:4222"
-      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:-changeme}"
+      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
     depends_on:
       redis:
         condition: service_healthy
@@ -80,6 +98,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: relay
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - relay-data:/data/relay
     ports:
       - "9300:9300"
     environment:
@@ -92,8 +117,8 @@ services:
 
   pwa:
     build:
-      context: ./clients/pwa
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: clients/pwa/Dockerfile
     ports:
       - "8080:80"
     restart: unless-stopped
@@ -106,3 +131,5 @@ networks:
 
 volumes:
   redis-data:
+  signaling-data:
+  relay-data:

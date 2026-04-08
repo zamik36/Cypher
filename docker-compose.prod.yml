@@ -4,7 +4,14 @@
 # Falls back to local build if image is not available.
 services:
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     ports:
       - "80:80"
       - "443:443"
@@ -13,6 +20,8 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    tmpfs:
+      - /tmp
     environment:
       DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
     depends_on:
@@ -24,7 +33,11 @@ services:
       - internal
 
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./deploy/loki.yml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
@@ -39,7 +52,11 @@ services:
       - internal
 
   alloy:
-    image: grafana/alloy:v1.14.2
+    image: grafana/alloy@sha256:eadfe35ea52b26cbec4d4d780fbcc31edb31108c1c9e537ca59557a5a102c712
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./deploy/alloy.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -59,7 +76,11 @@ services:
       - internal
 
   prometheus:
-    image: prom/prometheus:v2.51.0
+    image: prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -71,7 +92,11 @@ services:
       - internal
 
   grafana:
-    image: grafana/grafana:11.0.0
+    image: grafana/grafana@sha256:0dc5a246ab16bb2c38a349fb588174e832b4c6c2db0981d0c3e6cd774ba66a54
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -79,7 +104,7 @@ services:
     environment:
       GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD in .env}"
     depends_on:
       - prometheus
       - loki
@@ -89,9 +114,16 @@ services:
 
   # Override: use ghcr.io images, remove external port bindings.
   # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
+  # NOTE: user "0:0" is required to read TLS certs from caddy-data volume;
+  # root is heavily constrained via cap_drop, read_only, and no-new-privileges.
   gateway:
     image: ${GHCR_REPO}/cypher-gateway:latest
     user: "0:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
@@ -109,6 +141,13 @@ services:
 
   signaling:
     image: ${GHCR_REPO}/cypher-signaling:latest
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - signaling-data:/data/signaling
     environment:
       LOG_FORMAT: json
     ports:
@@ -123,12 +162,18 @@ services:
   relay:
     image: ${GHCR_REPO}/cypher-relay:latest
     user: "0:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - caddy-data:/data:ro
+      - relay-data:/data/relay
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
-    volumes:
-      - caddy-data:/data:ro
     ports:
       - "9300:9300"
       - "127.0.0.1:9092:9092"
@@ -151,6 +196,8 @@ services:
 volumes:
   caddy-data:
   caddy-config:
+  signaling-data:
+  relay-data:
   prometheus-data:
   grafana-data:
   loki-data:

@@ -33,3 +33,7 @@ result
 
 *.apk
 *.aab
+.aidesigner/*
+.mcp.json
+.agents/*
+
