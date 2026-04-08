@@ -123,7 +123,7 @@ jobs:
           echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
       - name: Build & push gateway
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
           target: gateway
@@ -135,7 +135,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build & push signaling
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
           target: signaling
@@ -147,7 +147,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build & push relay
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
           target: relay
@@ -159,7 +159,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build & push PWA
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
           file: ./clients/pwa/Dockerfile
