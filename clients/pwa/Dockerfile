@@ -1,5 +1,5 @@
 # ── Build stage ────────────────────────────────────────────────────────
-FROM node:20-alpine@sha256:f598378b5240225e6beab68fa9f356db1fb8efe55173e6d4d8153113bb8f333c AS build
+FROM node:25-alpine@sha256:ad82ecad30371c43f4057aaa4800a8ed88f9446553a2d21323710c7b937177fc AS build
 
 WORKDIR /app/clients/pwa
 COPY clients/pwa/package.json clients/pwa/package-lock.json* ./
