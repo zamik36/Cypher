@@ -120,9 +120,9 @@ services:
     image: ${GHCR_REPO}/cypher-gateway:latest
     user: "0:0"
     read_only: true
-    security_opt:
+    security_opt: !override
       - no-new-privileges:true
-    cap_drop:
+    cap_drop: !override
       - ALL
     environment:
       LOG_FORMAT: json
@@ -130,7 +130,7 @@ services:
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     volumes:
       - caddy-data:/data:ro
-    ports:
+    ports: !override
       - "9100:9100"
       - "127.0.0.1:9090:9090"
     deploy:
@@ -142,15 +142,15 @@ services:
   signaling:
     image: ${GHCR_REPO}/cypher-signaling:latest
     read_only: true
-    security_opt:
+    security_opt: !override
       - no-new-privileges:true
-    cap_drop:
+    cap_drop: !override
       - ALL
     volumes:
       - signaling-data:/data/signaling
     environment:
       LOG_FORMAT: json
-    ports:
+    ports: !override
       - "3478:3478/udp"
       - "127.0.0.1:9091:9091"
     deploy:
@@ -163,9 +163,9 @@ services:
     image: ${GHCR_REPO}/cypher-relay:latest
     user: "0:0"
     read_only: true
-    security_opt:
+    security_opt: !override
       - no-new-privileges:true
-    cap_drop:
+    cap_drop: !override
       - ALL
     volumes:
       - caddy-data:/data:ro
@@ -174,7 +174,7 @@ services:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
       P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
-    ports:
+    ports: !override
       - "9300:9300"
       - "127.0.0.1:9092:9092"
     deploy:
@@ -185,13 +185,13 @@ services:
 
   pwa:
     image: ${GHCR_REPO}/cypher-pwa:latest
-    ports: []
+    ports: !override []
 
   redis:
-    ports: []
+    ports: !override []
 
   nats:
-    ports: []
+    ports: !override []
 
 volumes:
   caddy-data:
