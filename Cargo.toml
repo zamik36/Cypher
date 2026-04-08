@@ -41,7 +41,7 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.13"
 sha2 = "0.10"
-rand = "0.8"
+rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
 bip39 = { version = "2", features = ["std"] }
