@@ -57,7 +57,7 @@ zstd = "0.13"
 prometheus = "0.13"
 clap = { version = "4", features = ["derive"] }
 rcgen = { version = "0.14", features = ["pem"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.24"
