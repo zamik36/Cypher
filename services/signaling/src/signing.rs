@@ -37,8 +37,8 @@ impl ServerSigner {
 
     pub fn load_or_create_default() -> anyhow::Result<Self> {
         Self::load_or_create(
-            Path::new("data/signaling/inbox_signing.bin"),
-            Path::new("data/signaling/inbox_hmac.bin"),
+            Path::new("/data/signaling/inbox_signing.bin"),
+            Path::new("/data/signaling/inbox_hmac.bin"),
         )
     }
 

@@ -378,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
     cypher_common::metrics::spawn_metrics_server(9092);
 
     let onion_secret =
-        identity::load_or_create_onion_identity(Path::new("data/relay/onion_identity.bin"))?;
+        identity::load_or_create_onion_identity(Path::new("/data/relay/onion_identity.bin"))?;
     let onion_pk = X25519PublicKey::from(&onion_secret);
     info!(
         "Relay onion public key: {}",

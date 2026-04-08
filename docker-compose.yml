@@ -109,8 +109,16 @@ services:
       - "9300:9300"
     environment:
       LOG_FORMAT: json
+      P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379"
+      P2P_NATS_URL: "nats://nats:4222"
+      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
       P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - internal
@@ -119,8 +127,15 @@ services:
     build:
       context: .
       dockerfile: clients/pwa/Dockerfile
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     ports:
-      - "8080:80"
+      - "8080:8080"
     restart: unless-stopped
     networks:
       - internal

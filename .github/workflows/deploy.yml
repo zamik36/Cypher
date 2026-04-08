@@ -66,7 +66,9 @@ jobs:
             echo "Waiting for services..."
             for i in 1 2 3 4 5 6; do
               sleep 5
-              if curl -sf http://localhost:9090/metrics > /dev/null 2>&1; then
+              if curl -sf http://localhost:9090/metrics > /dev/null 2>&1 \
+                && curl -sf http://localhost:9091/metrics > /dev/null 2>&1 \
+                && curl -sf http://localhost:9092/metrics > /dev/null 2>&1; then
                 break
               fi
               if [ "$i" = "6" ]; then
@@ -79,6 +81,7 @@ jobs:
 
             curl -sf http://localhost:9090/metrics > /dev/null && echo "gateway: OK"
             curl -sf http://localhost:9091/metrics > /dev/null && echo "signaling: OK"
+            curl -sf http://localhost:9092/metrics > /dev/null && echo "relay: OK"
 
             echo "$PREV_SHA" > .prev-deploy-sha
             docker logout ghcr.io

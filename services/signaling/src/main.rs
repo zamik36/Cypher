@@ -199,6 +199,47 @@ fn hex_decode_bytes(hex: &str) -> Vec<u8> {
         .collect()
 }
 
+fn redact_secret_url(raw: &str) -> String {
+    let Some(scheme_sep) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let authority_start = scheme_sep + 3;
+    let Some(authority_end) = raw[authority_start..].find('@') else {
+        return raw.to_string();
+    };
+    let authority_end = authority_start + authority_end;
+    let userinfo = &raw[authority_start..authority_end];
+
+    if let Some(password_sep) = userinfo.find(':') {
+        let username = &userinfo[..password_sep];
+        let mut redacted = String::with_capacity(raw.len());
+        redacted.push_str(&raw[..authority_start]);
+        redacted.push_str(username);
+        redacted.push_str(":***");
+        redacted.push_str(&raw[authority_end..]);
+        return redacted;
+    }
+
+    raw.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_secret_url;
+
+    #[test]
+    fn redacts_password_in_authority() {
+        let raw = "redis://:super-secret@redis:6379";
+        assert_eq!(redact_secret_url(raw), "redis://:***@redis:6379");
+    }
+
+    #[test]
+    fn leaves_passwordless_urls_unchanged() {
+        let raw = "nats://nats:4222";
+        assert_eq!(redact_secret_url(raw), raw);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cypher_common::init_tracing();
@@ -207,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     cypher_common::metrics::spawn_metrics_server(9091);
 
     info!("Signaling service starting");
-    info!("  Redis: {}", config.redis_url);
+    info!("  Redis: {}", redact_secret_url(&config.redis_url));
     info!("  NATS:  {}", config.nats_url);
     info!("  STUN:  {}", config.stun_addr);
 

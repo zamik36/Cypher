@@ -9,11 +9,17 @@ COPY clients/pwa/ .
 RUN npm run build
 
 # ── Serve stage ───────────────────────────────────────────────────────
-# Note: Caddy alpine image requires root to bind port 80.
-# Static files are read-only; Caddy itself has minimal attack surface.
 FROM caddy:2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
 
-COPY --from=build /app/clients/pwa/dist /srv
-COPY clients/pwa/Caddyfile /etc/caddy/Caddyfile
+RUN setcap -r /usr/bin/caddy \
+    && addgroup -S app \
+    && adduser -S -D -H -G app app
 
-EXPOSE 80
+COPY --from=build --chown=app:app /app/clients/pwa/dist /srv
+COPY --chown=app:app clients/pwa/Caddyfile /etc/caddy/Caddyfile
+
+ENV XDG_CONFIG_HOME=/tmp/caddy-config \
+    XDG_DATA_HOME=/tmp/caddy-data
+
+USER app
+EXPOSE 8080
