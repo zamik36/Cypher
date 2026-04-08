@@ -67,21 +67,14 @@ discovery.relabel "docker_logs" {
 }
 
 loki.source.docker "containers" {
-  host          = "unix:///var/run/docker.sock"
-  targets       = discovery.relabel.docker_logs.targets
-  relabel_rules = discovery.relabel.docker_logs.rules
-  forward_to    = [loki.process.json_logs.receiver]
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.docker_logs.output
+  forward_to = [loki.process.json_logs.receiver]
 }
 
 loki.process "json_logs" {
-  stage.docker {}
-
   stage.json {
     expressions = { "level" = "level" }
-  }
-
-  stage.regex {
-    expression = ".*\\b(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\\b.*"
   }
 
   stage.labels {
