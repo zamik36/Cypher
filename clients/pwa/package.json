@@ -9,7 +9,7 @@
     "generate-icons": "node scripts/generate-icons.js"
   },
   "dependencies": {
-    "solid-js": "^1.8"
+    "solid-js": "^1.9"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
