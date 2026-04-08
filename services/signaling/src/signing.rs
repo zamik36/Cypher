@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::key_store::load_or_create_secret;

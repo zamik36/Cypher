@@ -38,9 +38,9 @@ anyhow = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 aes-gcm = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 hmac = "0.13"
-sha2 = "0.10"
+sha2 = "0.11"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
