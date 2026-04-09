@@ -223,23 +223,6 @@ fn redact_secret_url(raw: &str) -> String {
     raw.to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::redact_secret_url;
-
-    #[test]
-    fn redacts_password_in_authority() {
-        let raw = "redis://:super-secret@redis:6379";
-        assert_eq!(redact_secret_url(raw), "redis://:***@redis:6379");
-    }
-
-    #[test]
-    fn leaves_passwordless_urls_unchanged() {
-        let raw = "nats://nats:4222";
-        assert_eq!(redact_secret_url(raw), raw);
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cypher_common::init_tracing();
@@ -274,4 +257,21 @@ async fn main() -> anyhow::Result<()> {
     info!("Signaling service running");
     service.run().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_secret_url;
+
+    #[test]
+    fn redacts_password_in_authority() {
+        let raw = "redis://:super-secret@redis:6379";
+        assert_eq!(redact_secret_url(raw), "redis://:***@redis:6379");
+    }
+
+    #[test]
+    fn leaves_passwordless_urls_unchanged() {
+        let raw = "nats://nats:4222";
+        assert_eq!(redact_secret_url(raw), raw);
+    }
 }
