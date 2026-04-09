@@ -1,4 +1,6 @@
 {
+	admin off
+	persist_config off
 	acme_ca https://acme-v02.api.letsencrypt.org/directory
 }
 
@@ -20,6 +22,6 @@
 	}
 
 	handle {
-		reverse_proxy pwa:80
+		reverse_proxy pwa:8080
 	}
 }

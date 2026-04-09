@@ -114,7 +114,7 @@ services:
 
   # Override: use ghcr.io images, remove external port bindings.
   # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
-  # NOTE: user "0:0" is required to read TLS certs from caddy-data volume;
+  # NOTE: user "0:0" is required to read TLS certs from the shared caddy-data volume;
   # root is heavily constrained via cap_drop, read_only, and no-new-privileges.
   gateway:
     image: ${GHCR_REPO}/cypher-gateway:latest
@@ -126,10 +126,10 @@ services:
       - ALL
     environment:
       LOG_FORMAT: json
-      P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
-      P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
+      P2P_TLS_CERT_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
+      P2P_TLS_KEY_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     volumes:
-      - caddy-data:/data:ro
+      - caddy-data:/caddy-data:ro
     ports: !override
       - "9100:9100"
       - "127.0.0.1:9090:9090"
@@ -167,13 +167,20 @@ services:
       - no-new-privileges:true
     cap_drop: !override
       - ALL
+    cap_add:
+      - CHOWN
     volumes:
-      - caddy-data:/data:ro
+      - caddy-data:/caddy-data:ro
       - relay-data:/data/relay
+    entrypoint:
+      - /bin/sh
+      - -lc
+    command:
+      - chown -R 0:0 /data/relay && exec relay
     environment:
       LOG_FORMAT: json
-      P2P_TLS_CERT_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
-      P2P_TLS_KEY_PATH: "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
+      P2P_TLS_CERT_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
+      P2P_TLS_KEY_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
     ports: !override
       - "9300:9300"
       - "127.0.0.1:9092:9092"
