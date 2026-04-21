@@ -48,7 +48,7 @@ bip39 = { version = "2", features = ["std"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 crc32fast = "1"
-nom = "7"
+nom = "8"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 nats = "0.25"
 async-nats = { version = "0.47", default-features = false, features = ["server_2_10", "ring"] }
