@@ -10,6 +10,9 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+
 use futures::StreamExt;
 use prometheus::{IntCounter, IntGauge};
 use serde::Deserialize;
@@ -101,6 +104,7 @@ impl SignalingService {
     async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         let subjects = [
             "signaling.session.register",
+            "signaling.session.deregister",
             "signaling.request_peer",
             "signaling.ice_candidate",
             "signaling.offer",
@@ -159,6 +163,7 @@ impl SignalingService {
     async fn handle_message(&self, subject: &str, msg: &async_nats::Message) -> anyhow::Result<()> {
         match subject {
             "signaling.session.register" => self.handle_session_register(msg).await,
+            "signaling.session.deregister" => self.handle_session_deregister(msg).await,
             "signaling.request_peer" => self.handle_request_peer(msg).await,
             "signaling.ice_candidate" => self.handle_ice_candidate(msg).await,
             "signaling.offer" => self.handle_offer(msg).await,
@@ -197,6 +202,22 @@ fn hex_decode_bytes(hex: &str) -> Vec<u8> {
         .step_by(2)
         .filter_map(|offset| u8::from_str_radix(&hex[offset..offset + 2], 16).ok())
         .collect()
+}
+
+static LOG_SALT: LazyLock<[u8; 16]> = LazyLock::new(|| {
+    let mut salt = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
+    salt
+});
+
+fn short_id(raw: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(&*LOG_SALT).expect("HMAC accepts any key size");
+    mac.update(raw.as_bytes());
+    let result = mac.finalize().into_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        result[0], result[1], result[2], result[3]
+    )
 }
 
 fn redact_secret_url(raw: &str) -> String {
@@ -261,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_secret_url;
+    use super::{redact_secret_url, short_id};
 
     #[test]
     fn redacts_password_in_authority() {
@@ -273,5 +294,22 @@ mod tests {
     fn leaves_passwordless_urls_unchanged() {
         let raw = "nats://nats:4222";
         assert_eq!(redact_secret_url(raw), raw);
+    }
+
+    #[test]
+    fn pseudonym_is_deterministic_within_session_and_hides_original() {
+        let id = "abcdef1234567890abcdef1234567890";
+        let p1 = short_id(id);
+        let p2 = short_id(id);
+        assert_eq!(p1, p2);
+        assert_eq!(p1.len(), 8);
+        assert!(!id.contains(&p1));
+    }
+
+    #[test]
+    fn different_ids_produce_different_pseudonyms() {
+        let a = short_id("aaaa1111bbbb2222cccc3333dddd4444");
+        let b = short_id("eeee5555ffff6666777788889999aaaa");
+        assert_ne!(a, b);
     }
 }

@@ -7,8 +7,9 @@ use cypher_common::LinkId;
 use cypher_proto::{dispatch, Message, Serializable};
 
 use super::{
-    hex_decode_bytes, hex_encode, GatewayEnvelope, PeerSession, PrekeyBundle, SignalingService,
-    ICE_TTL_SECS, LINKS_CREATED, LINK_TTL_SECS, PEER_SESSIONS, PREKEY_TTL_SECS, SESSION_TTL_SECS,
+    hex_decode_bytes, hex_encode, short_id, GatewayEnvelope, PeerSession, PrekeyBundle,
+    SignalingService, ICE_TTL_SECS, LINKS_CREATED, LINK_TTL_SECS, PEER_SESSIONS, PREKEY_TTL_SECS,
+    SESSION_TTL_SECS,
 };
 
 impl SignalingService {
@@ -29,19 +30,104 @@ impl SignalingService {
             session_id: reg.session_id,
         };
         let value = serde_json::to_string(&session)?;
-
         let mut redis = self.redis.clone();
-        redis
-            .set_ex::<_, _, ()>(&key, &value, SESSION_TTL_SECS)
-            .await?;
-
         let reverse_key = format!("session:{}:peer", reg.session_id);
-        redis
-            .set_ex::<_, _, ()>(&reverse_key, &reg.peer_id, SESSION_TTL_SECS)
+
+        // Atomic register: set session + reverse mapping, clean old reverse key
+        // if a previous session existed for this peer. Returns:
+        //   0 = new session, 1 = refreshed (same session_id), 2 = replaced old session
+        let script = redis::Script::new(
+            r#"
+            local old_json = redis.call('GET', KEYS[1])
+            local result = 0
+            if old_json then
+                local ok, old = pcall(cjson.decode, old_json)
+                if ok and old.session_id then
+                    if old.session_id == tonumber(ARGV[3]) then
+                        result = 1
+                    else
+                        redis.call('DEL', 'session:' .. old.session_id .. ':peer')
+                        result = 2
+                    end
+                end
+            end
+            redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
+            redis.call('SETEX', KEYS[2], ARGV[1], ARGV[4])
+            return result
+            "#,
+        );
+        let result: i32 = script
+            .key(&key)
+            .key(&reverse_key)
+            .arg(SESSION_TTL_SECS)
+            .arg(&value)
+            .arg(reg.session_id)
+            .arg(&reg.peer_id)
+            .invoke_async(&mut redis)
             .await?;
 
-        PEER_SESSIONS.inc();
-        info!(peer_id = %reg.peer_id, session_id = reg.session_id, "registered peer session");
+        match result {
+            0 => {
+                PEER_SESSIONS.inc();
+                info!(session_id = reg.session_id, "registered peer session");
+            }
+            1 => info!(session_id = reg.session_id, "refreshed peer session"),
+            _ => info!(session_id = reg.session_id, "replaced peer session"),
+        }
+        Ok(())
+    }
+
+    pub(super) async fn handle_session_deregister(
+        &self,
+        msg: &async_nats::Message,
+    ) -> anyhow::Result<()> {
+        #[derive(Deserialize)]
+        struct DeregisterMsg {
+            session_id: u64,
+        }
+
+        let dereg: DeregisterMsg = serde_json::from_slice(&msg.payload)?;
+        let mut redis = self.redis.clone();
+        let reverse_key = format!("session:{}:peer", dereg.session_id);
+
+        let peer_id: Option<String> = redis.get(&reverse_key).await?;
+        let Some(peer_id) = peer_id else {
+            return Ok(());
+        };
+
+        let session_key = format!("peer:{peer_id}:session");
+
+        let script = redis::Script::new(
+            r#"
+            local json = redis.call('GET', KEYS[1])
+            if json then
+                local session = cjson.decode(json)
+                if session.session_id == tonumber(ARGV[1]) then
+                    redis.call('DEL', KEYS[1], KEYS[2])
+                    return 1
+                end
+            end
+            redis.call('DEL', KEYS[2])
+            return 0
+            "#,
+        );
+        let deleted: i32 = script
+            .key(&session_key)
+            .key(&reverse_key)
+            .arg(dereg.session_id)
+            .invoke_async(&mut redis)
+            .await?;
+
+        if deleted == 1 {
+            PEER_SESSIONS.dec();
+            info!(session_id = dereg.session_id, "deregistered peer session");
+        } else {
+            debug!(
+                stale_session_id = dereg.session_id,
+                "ignored stale session deregister for reconnected peer"
+            );
+        }
+
         Ok(())
     }
 
@@ -87,7 +173,7 @@ impl SignalingService {
                         }
                     }
 
-                    info!(link_id = %req.link_id, "peer found for link");
+                    info!("peer found for link");
                 }
                 None => {
                     let response = serde_json::json!({
@@ -99,7 +185,7 @@ impl SignalingService {
                         .publish(reply_subject, Bytes::from(response.to_string()))
                         .await?;
 
-                    debug!(link_id = %req.link_id, "link not found");
+                    debug!(link_id = %short_id(&req.link_id), "link not found");
                 }
             }
         }
@@ -125,7 +211,7 @@ impl SignalingService {
 
             self.forward_to_peer(&target_peer_hex, &envelope.payload)
                 .await?;
-            debug!(target_peer = %target_peer_hex, "forwarded ICE candidate");
+            debug!(target_peer = %short_id(&target_peer_hex), "forwarded ICE candidate");
         }
 
         Ok(())
@@ -139,7 +225,7 @@ impl SignalingService {
             let target_peer_hex = hex_encode(&offer.peer_id);
             self.forward_to_peer(&target_peer_hex, &envelope.payload)
                 .await?;
-            debug!(target_peer = %target_peer_hex, "forwarded SDP offer");
+            debug!(target_peer = %short_id(&target_peer_hex), "forwarded SDP offer");
         }
 
         Ok(())
@@ -153,7 +239,7 @@ impl SignalingService {
             let target_peer_hex = hex_encode(&answer.peer_id);
             self.forward_to_peer(&target_peer_hex, &envelope.payload)
                 .await?;
-            debug!(target_peer = %target_peer_hex, "forwarded SDP answer");
+            debug!(target_peer = %short_id(&target_peer_hex), "forwarded SDP answer");
         }
 
         Ok(())
@@ -188,7 +274,7 @@ impl SignalingService {
                 .set_ex::<_, _, ()>(&key, &value, PREKEY_TTL_SECS)
                 .await?;
 
-            info!(peer = %peer_hex, "stored prekeys");
+            info!("stored prekeys");
         }
 
         Ok(())
@@ -228,7 +314,7 @@ impl SignalingService {
                 .publish(reply_subject, Bytes::from(response.to_string()))
                 .await?;
 
-            debug!(target_peer = %target_peer_hex, "returned prekeys");
+            debug!(target_peer = %short_id(&target_peer_hex), "returned prekeys");
         }
 
         Ok(())
@@ -248,9 +334,17 @@ impl SignalingService {
                 .try_forward_or_inbox(&target_peer_hex, &rewritten)
                 .await?
             {
-                debug!(target_peer = %target_peer_hex, sender = %sender_hex, "forwarded chat message");
+                debug!(
+                    target_peer = %short_id(&target_peer_hex),
+                    sender = %short_id(&sender_hex),
+                    "forwarded chat message"
+                );
             } else {
-                debug!(target_peer = %target_peer_hex, sender = %sender_hex, "peer offline, stored in blind inbox");
+                debug!(
+                    target_peer = %short_id(&target_peer_hex),
+                    sender = %short_id(&sender_hex),
+                    "peer offline, stored in blind inbox"
+                );
             }
         }
 
@@ -280,7 +374,11 @@ impl SignalingService {
         };
         self.forward_to_peer(&target_peer_hex, &envelope.payload)
             .await?;
-        debug!(target_peer = %target_peer_hex, kind = msg_kind, "forwarded file message");
+        debug!(
+            target_peer = %short_id(&target_peer_hex),
+            kind = msg_kind,
+            "forwarded file message"
+        );
         Ok(())
     }
 
@@ -307,7 +405,7 @@ impl SignalingService {
             .await?;
 
         LINKS_CREATED.inc();
-        info!(link_id = %link_id.as_str(), peer = %req.peer_id, "created link");
+        info!("created share link");
         Ok(())
     }
 }

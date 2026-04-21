@@ -52,7 +52,7 @@ impl Eq for Candidate {}
 
 /// Sort candidates by priority in descending order (host > srflx > relay).
 pub fn sort_candidates(candidates: &mut [Candidate]) {
-    candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.priority));
 }
 
 #[cfg(test)]

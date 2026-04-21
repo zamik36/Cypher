@@ -192,7 +192,7 @@ impl Gateway {
         let result = self.read_loop(session_id, &mut inbound_rx, &frame_tx).await;
 
         // Cleanup on disconnect.
-        self.remove_connection(session_id);
+        self.remove_connection(session_id).await;
         session_handle.abort();
         nats_handle.abort();
 
@@ -424,7 +424,6 @@ impl Gateway {
                     session_id,
                     action,
                     subject,
-                    peer_id = %peer_id_hex,
                     conn_found = conn_entry.is_some(),
                     peer_id_len = conn_entry.as_ref().map(|c| c.peer_id.len()).unwrap_or(0),
                     "routing JSON message"
@@ -569,12 +568,29 @@ impl Gateway {
     }
 
     /// Remove a connection and clean up the associated peer mapping.
-    fn remove_connection(&self, session_id: u64) {
+    async fn remove_connection(&self, session_id: u64) {
         if let Some((_, conn)) = self.connections.remove(&session_id) {
             ACTIVE_CONNECTIONS.dec();
             info!(session_id, %conn.addr, "removing connection");
             if !conn.peer_id.is_empty() {
-                self.peers.remove(&conn.peer_id);
+                self.peers
+                    .remove_if(&conn.peer_id, |_, sid| *sid == session_id);
+                let dereg = serde_json::json!({
+                    "session_id": session_id,
+                });
+                if let Err(error) = self
+                    .nats
+                    .publish(
+                        "signaling.session.deregister".to_string(),
+                        Bytes::from(dereg.to_string()),
+                    )
+                    .await
+                {
+                    warn!(
+                        session_id,
+                        "failed to publish session deregister: {}", error
+                    );
+                }
             }
         }
     }
@@ -714,7 +730,7 @@ impl Gateway {
         let result = self.read_loop(session_id, &mut inbound_rx, &frame_tx).await;
 
         // Cleanup.
-        self.remove_connection(session_id);
+        self.remove_connection(session_id).await;
         reader_handle.abort();
         writer_handle.abort();
         nats_handle.abort();
@@ -759,7 +775,7 @@ impl Gateway {
             }
 
             for session_id in stale {
-                self.remove_connection(session_id);
+                self.remove_connection(session_id).await;
             }
         }
     }

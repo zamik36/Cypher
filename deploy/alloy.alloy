@@ -73,8 +73,14 @@ loki.source.docker "containers" {
 }
 
 loki.process "json_logs" {
+  stage.docker {}
+
   stage.json {
     expressions = { "level" = "level" }
+  }
+
+  stage.regex {
+    expression = ".*\\b(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\\b.*"
   }
 
   stage.labels {

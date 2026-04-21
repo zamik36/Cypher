@@ -37,3 +37,7 @@ result
 .mcp.json
 .agents/*
 
+# Added by code-review-graph
+.code-review-graph/
+
+CLAUDE.md

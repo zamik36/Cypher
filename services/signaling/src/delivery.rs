@@ -3,7 +3,7 @@ use redis::AsyncCommands;
 use tracing::warn;
 
 use super::inbox::store_inbox_payload;
-use super::{PeerSession, PrekeyBundle, SignalingService};
+use super::{short_id, PeerSession, PrekeyBundle, SignalingService};
 
 impl SignalingService {
     /// Try to forward a message to a peer. If offline, store in their blind
@@ -37,7 +37,10 @@ impl SignalingService {
             }
         }
 
-        warn!(peer = %peer_id_hex, "peer offline, no inbox_id available; message dropped");
+        warn!(
+            peer = %short_id(peer_id_hex),
+            "peer offline, no inbox_id available; message dropped"
+        );
         Ok(false)
     }
 
@@ -61,7 +64,10 @@ impl SignalingService {
                 Ok(())
             }
             None => {
-                warn!(peer = %peer_id_hex, "peer session not found, cannot forward");
+                warn!(
+                    peer = %short_id(peer_id_hex),
+                    "peer session not found, cannot forward"
+                );
                 Ok(())
             }
         }
