@@ -54,7 +54,7 @@ nats = "0.25"
 async-nats = { version = "0.47", default-features = false, features = ["server_2_10", "ring"] }
 futures = "0.3"
 zstd = "0.13"
-prometheus = "0.13"
+prometheus = "0.14"
 clap = { version = "4", features = ["derive"] }
 rcgen = { version = "0.14", features = ["pem"] }
 webpki-roots = "1.0"
