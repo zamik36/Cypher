@@ -62,7 +62,7 @@ rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.24"
 arti-client = "0.20"
-tor-rtcompat = "0.20"
+tor-rtcompat = "0.41"
 
 # Internal crates
 cypher-common = { path = "crates/cypher-common" }
