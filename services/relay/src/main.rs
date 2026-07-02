@@ -438,22 +438,31 @@ async fn main() -> anyhow::Result<()> {
     info!("Relay service listening on {} (TLS)", config.relay_addr);
 
     loop {
-        let (tcp_stream, addr) = listener.accept().await?;
-        debug!(%addr, "new relay connection");
-        let svc = service.clone();
-        let acceptor = acceptor.clone();
-        tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(tcp_stream).await {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!(%addr, "TLS handshake failed: {}", e);
-                    return;
-                }
-            };
-            let boxed: BoxedStream = Box::new(tls_stream);
-            if let Err(e) = svc.handle_connection(boxed).await {
-                warn!(%addr, "relay connection error: {}", e);
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (tcp_stream, addr) = accepted?;
+                debug!(%addr, "new relay connection");
+                let svc = service.clone();
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(tcp_stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            debug!(%addr, "TLS handshake failed: {}", e);
+                            return;
+                        }
+                    };
+                    let boxed: BoxedStream = Box::new(tls_stream);
+                    if let Err(e) = svc.handle_connection(boxed).await {
+                        warn!(%addr, "relay connection error: {}", e);
+                    }
+                });
             }
-        });
+            _ = cypher_common::shutdown_signal() => {
+                info!("shutdown signal received; relay stopping accept loop");
+                break;
+            }
+        }
     }
+    Ok(())
 }

@@ -283,7 +283,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("Signaling service running");
-    service.run().await?;
+    tokio::select! {
+        result = service.run() => { result?; }
+        _ = cypher_common::shutdown_signal() => {
+            info!("shutdown signal received; signaling stopping");
+        }
+    }
     Ok(())
 }
 

@@ -670,6 +670,17 @@ impl Gateway {
         Ok(())
     }
 
+    /// Gracefully drain all active sessions on shutdown: deregister each peer
+    /// from signaling and close its socket, so no phantom sessions linger in
+    /// Redis until TTL and peers see the disconnect promptly.
+    async fn drain_sessions(&self) {
+        let session_ids: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
+        info!(count = session_ids.len(), "draining active sessions");
+        for session_id in session_ids {
+            self.remove_connection(session_id).await;
+        }
+    }
+
     /// Remove a connection and clean up the associated peer mapping.
     async fn remove_connection(&self, session_id: u64) {
         if let Some((_, conn)) = self.connections.remove(&session_id) {
@@ -956,7 +967,14 @@ async fn main() -> anyhow::Result<()> {
     let listener = TransportListener::bind(&config.gateway_addr, tls_config).await?;
     info!("Gateway (TLS) listening on {}", config.gateway_addr);
 
-    gateway.accept_loop(listener).await;
+    tokio::select! {
+        _ = gateway.clone().accept_loop(listener) => {}
+        _ = cypher_common::shutdown_signal() => {
+            info!("shutdown signal received; draining sessions");
+            gateway.drain_sessions().await;
+            info!("gateway shutdown complete");
+        }
+    }
 
     Ok(())
 }

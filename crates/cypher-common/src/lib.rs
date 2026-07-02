@@ -13,6 +13,32 @@ pub use types::*;
 /// a signature can never be repurposed for a different context.
 pub const SESSION_AUTH_CONTEXT: &[u8] = b"cypher-session-auth-v1";
 
+/// Resolve when the process receives a termination signal (Ctrl-C / SIGINT, or
+/// SIGTERM on Unix). Services `select!` on this to run graceful shutdown instead
+/// of being killed mid-request.
+pub async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
 
