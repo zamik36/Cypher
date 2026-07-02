@@ -19,7 +19,8 @@ impl SignalingService {
 
         if let Some(json) = session_json {
             let session: PeerSession = serde_json::from_str(&json)?;
-            let target_subject = format!("gateway.session.{}", session.session_id);
+            let target_subject =
+                cypher_common::gateway_session_subject(&session.gateway_node, session.session_id);
             self.nats
                 .publish(target_subject, Bytes::from(payload.to_vec()))
                 .await?;
@@ -57,7 +58,10 @@ impl SignalingService {
         match session_json {
             Some(json) => {
                 let session: PeerSession = serde_json::from_str(&json)?;
-                let target_subject = format!("gateway.session.{}", session.session_id);
+                let target_subject = cypher_common::gateway_session_subject(
+                    &session.gateway_node,
+                    session.session_id,
+                );
                 self.nats
                     .publish(target_subject, Bytes::from(payload.to_vec()))
                     .await?;

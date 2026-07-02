@@ -104,7 +104,9 @@ impl SignalingService {
                 .reply
                 .as_ref()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("gateway.session.{}", envelope.session_id));
+                .unwrap_or_else(|| {
+                    cypher_common::gateway_session_subject(&envelope.node_id, envelope.session_id)
+                });
             self.nats
                 .publish(reply_subject, Bytes::from(payload))
                 .await?;
@@ -152,7 +154,9 @@ impl SignalingService {
                 .reply
                 .as_ref()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("gateway.session.{}", envelope.session_id));
+                .unwrap_or_else(|| {
+                    cypher_common::gateway_session_subject(&envelope.node_id, envelope.session_id)
+                });
             let ok = cypher_proto::InboxMessages {
                 messages: Vec::new(),
                 count: 0,

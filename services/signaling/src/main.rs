@@ -74,7 +74,6 @@ struct PrekeyBundle {
 struct SignalingService {
     redis: redis::aio::ConnectionManager,
     nats: async_nats::Client,
-    node_id: String,
     signer: ServerSigner,
 }
 
@@ -98,7 +97,6 @@ impl SignalingService {
         Ok(Self {
             redis,
             nats,
-            node_id: std::env::var("P2P_NODE_ID").unwrap_or_else(|_| "gateway-0".to_string()),
             signer: ServerSigner::load_or_create_default()?,
         })
     }
@@ -129,9 +127,15 @@ impl SignalingService {
             "signaling.raw",
         ];
 
+        // Queue subscription: NATS load-balances each subject across all signaling
+        // replicas in the "signaling-workers" group, so every message is handled
+        // exactly once instead of N times (once per replica).
         let mut subscribers = Vec::new();
         for subject in &subjects {
-            let subscription = self.nats.subscribe(subject.to_string()).await?;
+            let subscription = self
+                .nats
+                .queue_subscribe(subject.to_string(), "signaling-workers".to_string())
+                .await?;
             subscribers.push((*subject, subscription));
         }
 

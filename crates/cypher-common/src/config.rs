@@ -26,6 +26,11 @@ pub struct AppConfig {
     /// New connections beyond this are dropped to bound memory under load/DoS.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Unique identifier for this gateway node. Namespaces NATS session subjects
+    /// so multiple gateway replicas never collide on locally-allocated session
+    /// ids. Must be distinct per replica (e.g. "gateway-eu-1"). No dots/spaces.
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
 }
 
 impl AppConfig {
@@ -51,12 +56,17 @@ impl Default for AppConfig {
             tls_cert_path: None,
             tls_key_path: None,
             max_connections: default_max_connections(),
+            node_id: default_node_id(),
         }
     }
 }
 
 fn default_max_connections() -> usize {
     50_000
+}
+
+fn default_node_id() -> String {
+    "gateway-0".into()
 }
 
 fn default_gateway_addr() -> String {

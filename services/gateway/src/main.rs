@@ -100,6 +100,9 @@ struct Gateway {
     nats: async_nats::Client,
     /// Maximum number of concurrent connections; excess are dropped at accept.
     max_connections: usize,
+    /// This gateway's unique node id; namespaces NATS session subjects so
+    /// session ids never collide across replicas.
+    node_id: String,
 }
 
 impl Gateway {
@@ -107,6 +110,7 @@ impl Gateway {
         nats_url: &str,
         nats_token: Option<&str>,
         max_connections: usize,
+        node_id: String,
     ) -> anyhow::Result<Self> {
         let nats = match nats_token {
             Some(token) if !token.is_empty() => {
@@ -122,6 +126,7 @@ impl Gateway {
             next_session_id: AtomicU64::new(1),
             nats,
             max_connections,
+            node_id,
         })
     }
 
@@ -214,7 +219,7 @@ impl Gateway {
         let session_handle = Self::spawn_session_task(session, frame_rx, inbound_tx);
 
         // NATS → peer forwarding task.
-        let nats_subject = format!("gateway.session.{}", session_id);
+        let nats_subject = cypher_common::gateway_session_subject(&self.node_id, session_id);
         let mut nats_sub = self.nats.subscribe(nats_subject).await?;
         let nats_frame_tx = frame_tx.clone();
         let nats_handle = tokio::spawn(async move {
@@ -452,6 +457,7 @@ impl Gateway {
                 let session_info = serde_json::json!({
                     "session_id": session_id,
                     "peer_id": hex_encode(&pending_peer_id),
+                    "gateway_node": self.node_id,
                 });
                 self.nats
                     .publish(
@@ -536,6 +542,7 @@ impl Gateway {
                 let envelope = serde_json::json!({
                     "session_id": session_id,
                     "peer_id": peer_id_hex,
+                    "gateway_node": self.node_id,
                 });
                 self.nats
                     .publish(subject.to_string(), Bytes::from(envelope.to_string()))
@@ -635,15 +642,24 @@ impl Gateway {
                 // forward the raw frame here — doing so double-delivered those
                 // messages (and with an un-rewritten peer_id).
                 //
-                // Binary envelope (session_id prefix + raw payload) avoids the
-                // ~4-6x bloat of JSON-encoding the payload as an array of numbers.
-                let envelope = cypher_common::GatewayEnvelope::encode(session_id, &frame.payload);
+                // Binary envelope (node_id + session_id prefix + raw payload)
+                // avoids the ~4-6x bloat of JSON-encoding the payload as an array
+                // of numbers, and carries our node so signaling can reply to us.
+                let envelope = cypher_common::GatewayEnvelope::encode(
+                    &self.node_id,
+                    session_id,
+                    &frame.payload,
+                );
                 self.nats.publish(subject, Bytes::from(envelope)).await?;
             }
             Err(e) => {
                 debug!(session_id, "could not dispatch frame payload: {}", e);
                 // Forward raw payload to signaling so nothing is silently dropped.
-                let envelope = cypher_common::GatewayEnvelope::encode(session_id, &frame.payload);
+                let envelope = cypher_common::GatewayEnvelope::encode(
+                    &self.node_id,
+                    session_id,
+                    &frame.payload,
+                );
                 self.nats
                     .publish("signaling.raw".to_string(), Bytes::from(envelope))
                     .await?;
@@ -770,7 +786,7 @@ impl Gateway {
         );
 
         // NATS → WS forwarding task.
-        let nats_subject = format!("gateway.session.{}", session_id);
+        let nats_subject = cypher_common::gateway_session_subject(&self.node_id, session_id);
         let mut nats_sub = self.nats.subscribe(nats_subject).await?;
         let nats_frame_tx = frame_tx.clone();
         let nats_handle = tokio::spawn(async move {
@@ -920,14 +936,16 @@ async fn main() -> anyhow::Result<()> {
 
     let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
     info!(
+        node_id = %config.node_id,
         max_connections = config.max_connections,
-        "connection cap configured"
+        "gateway node configured"
     );
     let gateway = Arc::new(
         Gateway::new(
             &config.nats_url,
             nats_token.as_deref(),
             config.max_connections,
+            config.node_id.clone(),
         )
         .await?,
     );

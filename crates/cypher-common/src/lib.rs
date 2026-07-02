@@ -6,7 +6,7 @@ pub mod ratelimit;
 pub mod types;
 
 pub use config::AppConfig;
-pub use envelope::GatewayEnvelope;
+pub use envelope::{gateway_session_subject, GatewayEnvelope};
 pub use error::{Error, Result};
 pub use types::*;
 

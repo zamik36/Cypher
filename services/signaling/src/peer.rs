@@ -21,12 +21,14 @@ impl SignalingService {
         struct RegisterMsg {
             session_id: u64,
             peer_id: String,
+            #[serde(default)]
+            gateway_node: String,
         }
 
         let reg: RegisterMsg = serde_json::from_slice(&msg.payload)?;
         let key = format!("peer:{}:session", reg.peer_id);
         let session = PeerSession {
-            gateway_node: self.node_id.clone(),
+            gateway_node: reg.gateway_node,
             session_id: reg.session_id,
         };
         let value = serde_json::to_string(&session)?;
@@ -154,7 +156,10 @@ impl SignalingService {
                         "session": session_json.and_then(|json| serde_json::from_str::<PeerSession>(&json).ok()),
                     });
 
-                    let reply_subject = format!("gateway.session.{}", envelope.session_id);
+                    let reply_subject = cypher_common::gateway_session_subject(
+                        &envelope.node_id,
+                        envelope.session_id,
+                    );
                     self.nats
                         .publish(reply_subject, Bytes::from(response.to_string()))
                         .await?;
@@ -180,7 +185,10 @@ impl SignalingService {
                         "found": false,
                         "error": "link not found or expired",
                     });
-                    let reply_subject = format!("gateway.session.{}", envelope.session_id);
+                    let reply_subject = cypher_common::gateway_session_subject(
+                        &envelope.node_id,
+                        envelope.session_id,
+                    );
                     self.nats
                         .publish(reply_subject, Bytes::from(response.to_string()))
                         .await?;
@@ -313,7 +321,8 @@ impl SignalingService {
                 }
             };
 
-            let reply_subject = format!("gateway.session.{}", envelope.session_id);
+            let reply_subject =
+                cypher_common::gateway_session_subject(&envelope.node_id, envelope.session_id);
             self.nats
                 .publish(reply_subject, Bytes::from(response.to_string()))
                 .await?;
@@ -391,6 +400,8 @@ impl SignalingService {
         struct CreateLinkRequest {
             session_id: u64,
             peer_id: String,
+            #[serde(default)]
+            gateway_node: String,
         }
 
         let req: CreateLinkRequest = serde_json::from_slice(&msg.payload)?;
@@ -403,7 +414,8 @@ impl SignalingService {
             .await?;
 
         let response = serde_json::json!({ "link_id": link_id.as_str() });
-        let reply_subject = format!("gateway.session.{}", req.session_id);
+        let reply_subject =
+            cypher_common::gateway_session_subject(&req.gateway_node, req.session_id);
         self.nats
             .publish(reply_subject, Bytes::from(response.to_string()))
             .await?;

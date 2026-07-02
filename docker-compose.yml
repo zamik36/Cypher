@@ -51,6 +51,9 @@ services:
       LOG_FORMAT: json
       P2P_GATEWAY_ADDR: "0.0.0.0:9100"
       P2P_WS_ADDR: "0.0.0.0:9101"
+      # Unique per gateway replica — namespaces NATS session subjects so session
+      # ids never collide across replicas. Override per instance when scaling out.
+      P2P_NODE_ID: "${GATEWAY_NODE_ID:-gateway-0}"
       P2P_NATS_URL: "nats://nats:4222"
       P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"

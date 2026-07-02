@@ -38,7 +38,8 @@ impl SignalingService {
                 inbox_verifying_key: self.signer.verifying_key().to_bytes().to_vec(),
                 capabilities,
             };
-            let reply_subject = format!("gateway.session.{}", envelope.session_id);
+            let reply_subject =
+                cypher_common::gateway_session_subject(&envelope.node_id, envelope.session_id);
             self.nats
                 .publish(reply_subject, Bytes::from(response.serialize()))
                 .await?;
