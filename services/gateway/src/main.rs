@@ -634,26 +634,18 @@ impl Gateway {
                 // the peer_id rewrite for ICE/offer/answer, so we must NOT also
                 // forward the raw frame here — doing so double-delivered those
                 // messages (and with an un-rewritten peer_id).
-                let envelope = serde_json::json!({
-                    "session_id": session_id,
-                    "payload": frame.payload.to_vec(),
-                });
-                self.nats
-                    .publish(subject, Bytes::from(envelope.to_string()))
-                    .await?;
+                //
+                // Binary envelope (session_id prefix + raw payload) avoids the
+                // ~4-6x bloat of JSON-encoding the payload as an array of numbers.
+                let envelope = cypher_common::GatewayEnvelope::encode(session_id, &frame.payload);
+                self.nats.publish(subject, Bytes::from(envelope)).await?;
             }
             Err(e) => {
                 debug!(session_id, "could not dispatch frame payload: {}", e);
                 // Forward raw payload to signaling so nothing is silently dropped.
-                let envelope = serde_json::json!({
-                    "session_id": session_id,
-                    "payload": frame.payload.to_vec(),
-                });
+                let envelope = cypher_common::GatewayEnvelope::encode(session_id, &frame.payload);
                 self.nats
-                    .publish(
-                        "signaling.raw".to_string(),
-                        Bytes::from(envelope.to_string()),
-                    )
+                    .publish("signaling.raw".to_string(), Bytes::from(envelope))
                     .await?;
             }
         }

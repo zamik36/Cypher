@@ -19,7 +19,7 @@ impl SignalingService {
         &self,
         msg: &async_nats::Message,
     ) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::TransportBootstrap(_) = proto_msg {

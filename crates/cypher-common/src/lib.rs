@@ -1,10 +1,12 @@
 pub mod config;
+pub mod envelope;
 pub mod error;
 pub mod metrics;
 pub mod ratelimit;
 pub mod types;
 
 pub use config::AppConfig;
+pub use envelope::GatewayEnvelope;
 pub use error::{Error, Result};
 pub use types::*;
 

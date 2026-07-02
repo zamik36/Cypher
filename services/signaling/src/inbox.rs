@@ -26,7 +26,7 @@ pub(super) async fn store_inbox_payload(
 
 impl SignalingService {
     pub(super) async fn handle_inbox_store(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::InboxStore(store) = proto_msg {
@@ -41,7 +41,7 @@ impl SignalingService {
     }
 
     pub(super) async fn handle_inbox_fetch(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::InboxFetch(fetch) = proto_msg {
@@ -116,7 +116,7 @@ impl SignalingService {
     }
 
     pub(super) async fn handle_inbox_ack(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::InboxAck(ack) = proto_msg {

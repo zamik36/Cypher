@@ -135,7 +135,7 @@ impl SignalingService {
         &self,
         msg: &async_nats::Message,
     ) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::SignalRequestPeer(req) = proto_msg {
@@ -197,7 +197,7 @@ impl SignalingService {
         &self,
         msg: &async_nats::Message,
     ) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::SignalIceCandidate(ice) = proto_msg {
@@ -218,7 +218,7 @@ impl SignalingService {
     }
 
     pub(super) async fn handle_offer(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::SignalOffer(offer) = proto_msg {
@@ -232,7 +232,7 @@ impl SignalingService {
     }
 
     pub(super) async fn handle_answer(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::SignalAnswer(answer) = proto_msg {
@@ -249,7 +249,7 @@ impl SignalingService {
         &self,
         msg: &async_nats::Message,
     ) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::KeysUploadPrekeys(upload) = proto_msg {
@@ -283,7 +283,7 @@ impl SignalingService {
     }
 
     pub(super) async fn handle_get_prekeys(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::KeysGetPrekeys(req) = proto_msg {
@@ -325,7 +325,7 @@ impl SignalingService {
     }
 
     pub(super) async fn handle_chat_send(&self, msg: &async_nats::Message) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let proto_msg = dispatch(&envelope.payload)?;
 
         if let Message::ChatSend(mut chat) = proto_msg {
@@ -360,7 +360,7 @@ impl SignalingService {
         msg: &async_nats::Message,
         msg_kind: &str,
     ) -> anyhow::Result<()> {
-        let envelope: GatewayEnvelope = serde_json::from_slice(&msg.payload)?;
+        let envelope = GatewayEnvelope::decode(&msg.payload)?;
         let target_peer_hex = match dispatch(&envelope.payload)? {
             Message::FileOffer(message) => hex_encode(&message.peer_id),
             Message::FileAccept(message) => hex_encode(&message.peer_id),

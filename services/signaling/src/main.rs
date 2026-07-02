@@ -15,7 +15,6 @@ use sha2::Sha256;
 
 use futures::StreamExt;
 use prometheus::{IntCounter, IntGauge};
-use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 mod bootstrap;
@@ -49,11 +48,7 @@ const SESSION_TTL_SECS: u64 = 2 * 60 * 60;
 const ICE_TTL_SECS: u64 = 5 * 60;
 const PREKEY_TTL_SECS: u64 = 2 * 60 * 60;
 
-#[derive(Debug, Deserialize)]
-struct GatewayEnvelope {
-    session_id: u64,
-    payload: Vec<u8>,
-}
+use cypher_common::GatewayEnvelope;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PeerSession {
