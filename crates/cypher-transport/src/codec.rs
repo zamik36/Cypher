@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::frame::{Frame, FrameFlags};
@@ -73,10 +73,10 @@ impl Decoder for FrameCodec {
         let ack = src.get_u32();
         let flags = FrameFlags::from_bits(src.get_u8());
 
-        // Read payload.
+        // Read payload without copying: split_to + freeze hands out a Bytes that
+        // shares the underlying buffer instead of memcpying every frame body.
         let payload_len = length - HEADER_SIZE;
-        let payload = Bytes::copy_from_slice(&src[..payload_len]);
-        src.advance(payload_len);
+        let payload = src.split_to(payload_len).freeze();
 
         Ok(Some(Frame {
             seq_no,
@@ -115,6 +115,7 @@ impl Encoder<Frame> for FrameCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn roundtrip() {

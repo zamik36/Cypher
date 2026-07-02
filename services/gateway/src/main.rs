@@ -548,7 +548,7 @@ impl Gateway {
 
         match dispatch(&frame.payload) {
             Ok(ref msg) => {
-                let (subject, target_peer) = match msg {
+                let (subject, _target_peer) = match msg {
                     Message::SignalRequestPeer(_) => ("signaling.request_peer".to_string(), None),
                     Message::SignalIceCandidate(ice) => (
                         "signaling.ice_candidate".to_string(),
@@ -629,7 +629,11 @@ impl Gateway {
                     return Ok(());
                 }
 
-                // Wrap the payload in an envelope carrying the source session_id.
+                // Route via signaling. Local direct-delivery is handled inline by
+                // the ChatSend / try_direct_or_subject arms above; signaling owns
+                // the peer_id rewrite for ICE/offer/answer, so we must NOT also
+                // forward the raw frame here — doing so double-delivered those
+                // messages (and with an un-rewritten peer_id).
                 let envelope = serde_json::json!({
                     "session_id": session_id,
                     "payload": frame.payload.to_vec(),
@@ -637,19 +641,6 @@ impl Gateway {
                 self.nats
                     .publish(subject, Bytes::from(envelope.to_string()))
                     .await?;
-
-                // If the target peer is also on this gateway, also forward
-                // directly to avoid an unnecessary NATS round-trip.
-                if let Some(target_peer_id) = target_peer {
-                    if let Some(target_session) = self.peers.get(&target_peer_id) {
-                        if let Some(conn) = self.connections.get(target_session.value()) {
-                            let _ = conn
-                                .writer
-                                .send((frame.payload.clone(), FrameFlags::NONE))
-                                .await;
-                        }
-                    }
-                }
             }
             Err(e) => {
                 debug!(session_id, "could not dispatch frame payload: {}", e);
