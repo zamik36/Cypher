@@ -12,6 +12,7 @@
 export const CID = {
   SessionInit:        0xA1000001,
   SessionAck:         0xA1000002,
+  SessionAuth:        0xA1000003,
   SignalRequestPeer:  0xB1000001,
   SignalIceCandidate: 0xB1000002,
   SignalOffer:        0xB1000003,
@@ -150,6 +151,13 @@ export function encodeSessionInit(clientId: Uint8Array, nonce: Uint8Array): Uint
   w.u32(CID.SessionInit);
   w.bytes(clientId);
   w.bytes(nonce);
+  return w.build();
+}
+
+export function encodeSessionAuth(signature: Uint8Array): Uint8Array {
+  const w = new Writer();
+  w.u32(CID.SessionAuth);
+  w.bytes(signature);
   return w.build();
 }
 

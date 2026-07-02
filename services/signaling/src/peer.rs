@@ -264,7 +264,9 @@ impl SignalingService {
 
             let bundle = PrekeyBundle {
                 identity_key: upload.identity_key,
+                identity_ed25519: upload.identity_ed25519,
                 signed_prekey: upload.signed_prekey,
+                prekey_signature: upload.prekey_signature,
                 inbox_id: inbox_id_hex,
             };
             let value = serde_json::to_string(&bundle)?;
@@ -297,7 +299,9 @@ impl SignalingService {
                     serde_json::json!({
                         "found": true,
                         "identity_key": bundle.identity_key,
+                        "identity_ed25519": bundle.identity_ed25519,
                         "signed_prekey": bundle.signed_prekey,
+                        "prekey_signature": bundle.prekey_signature,
                         "inbox_id": bundle.inbox_id,
                     })
                 }

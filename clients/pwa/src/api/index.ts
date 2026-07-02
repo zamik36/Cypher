@@ -3,11 +3,14 @@
  * same binary protocol as the desktop Tauri client.
  */
 import {
-  encodeSessionInit, encodeSignalRequestPeer, encodeChatSend,
+  encodeSessionInit, encodeSessionAuth, encodeSignalRequestPeer, encodeChatSend,
   encodeFileOffer, encodeFileChunk, encodeFileComplete,
   encodeFileChunkAck, encodeInboxFetch, encodeInboxStore, encodeKeysGetPrekeys, dispatch as protoDispatch,
   hexEncode, hexDecode, randomBytes,
 } from "./proto";
+
+/** Domain-separation prefix signed with the server_nonce (matches Rust SESSION_AUTH_CONTEXT). */
+const SESSION_AUTH_CONTEXT = new TextEncoder().encode("cypher-session-auth-v1");
 
 
 export interface LinkInfo { link_id: string }
@@ -61,6 +64,21 @@ let peerIdHex = hexEncode(peerId);
 export function setPeerId(newPeerId: Uint8Array) {
   peerId = newPeerId;
   peerIdHex = hexEncode(peerId);
+}
+
+/**
+ * Signs the gateway's session challenge with our identity key.
+ *
+ * Must be set (via [`setIdentitySigner`]) before connecting, otherwise the
+ * gateway rejects the session: it requires proof-of-possession of the peerId.
+ */
+let identitySigner: ((message: Uint8Array) => Promise<Uint8Array>) | null = null;
+
+/** Provide the identity signer used to answer the SESSION_INIT challenge. */
+export function setIdentitySigner(
+  signer: ((message: Uint8Array) => Promise<Uint8Array>) | null,
+) {
+  identitySigner = signer;
 }
 
 /** Set the blind inbox ID (called after identity unlock). */
@@ -263,23 +281,47 @@ export const api = {
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
-        // Send SESSION_INIT — don't resolve until SessionAck arrives.
+        // Begin the authenticated handshake with SESSION_INIT.
         const nonce = randomBytes(32);
         send(encodeSessionInit(peerId, nonce));
       };
 
       ws.onmessage = (e: MessageEvent) => {
         if (e.data instanceof ArrayBuffer) {
-          // Resolve on first SessionAck (gateway confirmed our session).
           if (!settled) {
             const msg = protoDispatch(new Uint8Array(e.data));
             if (msg.type === "SessionAck") {
+              if (msg.msg.serverNonce.length > 0) {
+                // First ack = challenge. Prove possession of our identity key.
+                if (!identitySigner) {
+                  settled = true;
+                  reject(new Error("No identity signer set; unlock identity first"));
+                  try { ws?.close(); } catch { /* ignore */ }
+                  return;
+                }
+                const challenge = new Uint8Array(
+                  SESSION_AUTH_CONTEXT.length + msg.msg.serverNonce.length,
+                );
+                challenge.set(SESSION_AUTH_CONTEXT, 0);
+                challenge.set(msg.msg.serverNonce, SESSION_AUTH_CONTEXT.length);
+                identitySigner(challenge)
+                  .then((sig) => send(encodeSessionAuth(sig)))
+                  .catch((err) => {
+                    if (!settled) {
+                      settled = true;
+                      reject(err instanceof Error ? err : new Error(String(err)));
+                      try { ws?.close(); } catch { /* ignore */ }
+                    }
+                  });
+                return; // Not connected until the auth confirmation arrives.
+              }
+              // Second ack (empty nonce) = auth confirmed.
               settled = true;
               resolve();
-              // Fetch blind inbox after connection established.
               if (inboxId.length > 0) {
                 send(encodeInboxFetch(inboxId));
               }
+              return;
             }
           }
           handleMessage(e.data);

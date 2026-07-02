@@ -64,7 +64,14 @@ struct PeerSession {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PrekeyBundle {
     identity_key: Vec<u8>,
+    /// Ed25519 identity public key (== peer_id). The server never verifies this;
+    /// the fetching peer binds it to the requested peer_id and checks the signature.
+    #[serde(default)]
+    identity_ed25519: Vec<u8>,
     signed_prekey: Vec<u8>,
+    /// Ed25519 signature over `signed_prekey` by `identity_ed25519`.
+    #[serde(default)]
+    prekey_signature: Vec<u8>,
     #[serde(default)]
     inbox_id: Option<String>,
 }

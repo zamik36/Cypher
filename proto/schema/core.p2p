@@ -1,6 +1,9 @@
 // Session
 @0xA1000001 session.init client_id:Bytes nonce:Bytes = session.InitReq;
 @0xA1000002 session.ack server_nonce:Bytes timestamp:Long = session.InitAck;
+// Proof-of-possession: client signs the ack's server_nonce with the Ed25519 key
+// whose public half is client_id. Gateway registers the peer_id only after this.
+@0xA1000003 session.auth signature:Bytes = session.AuthAck;
 
 // Signaling
 @0xB1000001 signal.requestPeer link_id:String = signal.PeerInfo;
@@ -9,7 +12,9 @@
 @0xB1000004 signal.answer sdp:Bytes peer_id:Bytes = signal.Ok;
 
 // Key exchange
-@0xB2000001 keys.uploadPrekeys identity_key:Bytes signed_prekey:Bytes inbox_id:Bytes = keys.Ok;
+// identity_ed25519 is the Ed25519 identity public key (== peer_id); prekey_signature
+// is that key's signature over signed_prekey. Peers MUST verify both before X3DH.
+@0xB2000001 keys.uploadPrekeys identity_key:Bytes identity_ed25519:Bytes signed_prekey:Bytes prekey_signature:Bytes inbox_id:Bytes = keys.Ok;
 @0xB2000002 keys.getPrekeys peer_id:Bytes = keys.PrekeyBundle;
 
 // Chat (E2EE)

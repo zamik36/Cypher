@@ -9,6 +9,7 @@
  * The seed deterministically derives the peerId via HKDF, matching
  * the Rust `IdentitySeed` derivation.
  */
+import * as ed25519 from "@noble/ed25519";
 import { deriveKeyFromPassphrase, encrypt, decrypt, hkdfDerive } from "./crypto";
 import { randomBytes, hexEncode } from "../api/proto";
 
@@ -20,6 +21,8 @@ export interface IdentityData {
   nickname: string;
   peerId: Uint8Array;
   peerIdHex: string;
+  /** Ed25519 secret scalar seed (private). Used to sign the session challenge. */
+  signingSeed: Uint8Array;
 }
 
 /** Check whether a saved identity exists. */
@@ -87,10 +90,7 @@ export async function exportSeed(passphrase: string): Promise<string> {
 /** Delete the stored identity. */
 export function deleteIdentity(): void {
   localStorage.removeItem(STORAGE_KEY);
-  sessionStorage.removeItem("cypher-session-sek");
-  sessionStorage.removeItem("cypher-session-peerId");
-  sessionStorage.removeItem("cypher-session-nickname");
-  sessionStorage.removeItem("cypher-session-inboxId");
+  clearSession();
 }
 
 /** Clear the cached session (forces re-authentication on next load). */
@@ -99,25 +99,34 @@ export function clearSession(): void {
   sessionStorage.removeItem("cypher-session-peerId");
   sessionStorage.removeItem("cypher-session-nickname");
   sessionStorage.removeItem("cypher-session-inboxId");
+  sessionStorage.removeItem("cypher-session-edseed");
 }
 
-/** Derive peerId from seed (must match Rust HKDF derivation). */
+/** Derive the Ed25519 identity from seed (must match Rust `IdentityKeyPair::from_seed`). */
 async function deriveIdentity(
   seed: Uint8Array,
   nickname: string,
 ): Promise<IdentityData> {
-  // Derive Ed25519-equivalent bytes via HKDF (same info string as Rust).
-  const edBytes = await hkdfDerive(seed, "cypher-ed25519");
-  // PeerId = Ed25519 public key, but we use the raw HKDF output as a
-  // deterministic 32-byte identifier. This matches the wire format.
-  // Note: for full compatibility, we'd need Ed25519 key derivation,
-  // but for PWA-to-PWA this deterministic ID is sufficient.
+  // Rust derives the Ed25519 *secret* scalar via HKDF(seed, "cypher-ed25519"),
+  // then the peerId is the corresponding *public* key. We must do the same so
+  // the peerId matches across platforms and we can sign the session challenge.
+  const signingSeed = await hkdfDerive(seed, "cypher-ed25519");
+  const publicKey = await ed25519.getPublicKeyAsync(signingSeed);
   return {
     seed,
     nickname,
-    peerId: edBytes,
-    peerIdHex: hexEncode(edBytes),
+    peerId: publicKey,
+    peerIdHex: hexEncode(publicKey),
+    signingSeed,
   };
+}
+
+/** Sign a message with an Ed25519 secret scalar seed (RFC 8032, matches Rust). */
+export async function signWithSeed(
+  signingSeed: Uint8Array,
+  message: Uint8Array,
+): Promise<Uint8Array> {
+  return ed25519.signAsync(message, signingSeed);
 }
 
 /** Derive the Storage Encryption Key from seed (matches Rust). */

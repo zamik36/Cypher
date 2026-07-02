@@ -65,7 +65,13 @@ use cypher_transport::{TransportListener, TransportSession};
 /// inject PING frames without constructing a frame directly.
 struct ConnectionState {
     session_id: u64,
+    /// Authenticated peer identity. Empty until the client proves possession of
+    /// the private key via SESSION_AUTH; routing only ever uses this field.
     peer_id: Vec<u8>,
+    /// Peer identity claimed in SESSION_INIT but not yet proven (challenge issued).
+    pending_peer_id: Vec<u8>,
+    /// The `server_nonce` challenge issued in SESSION_INIT, awaiting a signature.
+    server_nonce: Vec<u8>,
     addr: SocketAddr,
     /// Channel for enqueueing outbound frames to this peer's session task.
     writer: mpsc::Sender<(Bytes, FrameFlags)>,
@@ -161,6 +167,8 @@ impl Gateway {
             ConnectionState {
                 session_id,
                 peer_id: Vec::new(),
+                pending_peer_id: Vec::new(),
+                server_nonce: Vec::new(),
                 addr,
                 writer: frame_tx.clone(),
                 last_activity: Instant::now(),
@@ -318,35 +326,98 @@ impl Gateway {
         Ok(())
     }
 
-    /// Process a SESSION_INIT frame: extract the peer_id, register it, and
-    /// reply with a SessionAck.
+    /// Process a SESSION_INIT-flagged frame.
+    ///
+    /// Two-step, mutually-authenticated handshake:
+    /// 1. `SessionInit` — the client *claims* a peer_id. We issue a random
+    ///    `server_nonce` challenge and reply with a `SessionAck`, but register
+    ///    nothing yet.
+    /// 2. `SessionAuth` — the client returns an Ed25519 signature over
+    ///    `SESSION_AUTH_CONTEXT || server_nonce`. Only after verifying it against
+    ///    the claimed peer_id (which *is* the Ed25519 public key) do we register
+    ///    the peer for routing. This proves possession of the private key and
+    ///    stops anyone from claiming another user's identity (C2).
     async fn handle_session_init(
         &self,
         session_id: u64,
         payload: &[u8],
         frame_tx: &mpsc::Sender<(Bytes, FrameFlags)>,
     ) -> anyhow::Result<()> {
+        let now_secs = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        };
+
         match dispatch(payload) {
             Ok(Message::SessionInit(init)) => {
                 let peer_id = init.client_id.clone();
-                info!(
-                    session_id,
-                    peer_id_len = peer_id.len(),
-                    "session init from peer"
-                );
+                if peer_id.len() != 32 {
+                    warn!(session_id, len = peer_id.len(), "SESSION_INIT bad peer_id");
+                    anyhow::bail!("session init: peer_id must be 32 bytes");
+                }
+                info!(session_id, "session init: issuing auth challenge");
 
-                // Update connection state with the resolved peer_id.
+                // Issue the challenge; stash it as *pending* — no routing identity yet.
+                let mut server_nonce = vec![0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut server_nonce);
                 if let Some(mut conn) = self.connections.get_mut(&session_id) {
-                    conn.peer_id = peer_id.clone();
+                    conn.pending_peer_id = peer_id;
+                    conn.server_nonce = server_nonce.clone();
                 }
 
-                // Map peer_id → session_id for fast routing.
-                self.peers.insert(peer_id.clone(), session_id);
+                let ack = cypher_proto::SessionAck {
+                    server_nonce,
+                    timestamp: now_secs(),
+                };
+                let _ = frame_tx
+                    .send((Bytes::from(ack.serialize()), FrameFlags::SESSION_INIT))
+                    .await;
+            }
+            Ok(Message::SessionAuth(auth)) => {
+                // Pull the pending challenge without holding the map guard across await.
+                let (pending_peer_id, server_nonce) = match self.connections.get(&session_id) {
+                    Some(conn) => (conn.pending_peer_id.clone(), conn.server_nonce.clone()),
+                    None => anyhow::bail!("session auth: unknown session"),
+                };
+                if pending_peer_id.is_empty() || server_nonce.is_empty() {
+                    warn!(session_id, "SESSION_AUTH before SESSION_INIT");
+                    anyhow::bail!("session auth: no pending challenge");
+                }
 
-                // Notify the signaling service.
+                // Verify the proof-of-possession.
+                let vk_bytes: [u8; 32] = pending_peer_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("session auth: bad peer_id length"))?;
+                let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&vk_bytes)
+                    .map_err(|e| anyhow::anyhow!("session auth: invalid peer_id key: {e}"))?;
+                let sig_bytes: [u8; 64] = auth
+                    .signature
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("session auth: signature must be 64 bytes"))?;
+                let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+
+                let mut signed = cypher_common::SESSION_AUTH_CONTEXT.to_vec();
+                signed.extend_from_slice(&server_nonce);
+                if ed25519_dalek::Verifier::verify(&verifying_key, &signed, &signature).is_err() {
+                    warn!(session_id, "SESSION_AUTH signature verification failed");
+                    anyhow::bail!("session auth: signature verification failed");
+                }
+
+                // Authenticated — promote the pending identity to the routing map.
+                if let Some(mut conn) = self.connections.get_mut(&session_id) {
+                    conn.peer_id = pending_peer_id.clone();
+                    conn.pending_peer_id = Vec::new();
+                    conn.server_nonce = Vec::new();
+                }
+                self.peers.insert(pending_peer_id.clone(), session_id);
+
                 let session_info = serde_json::json!({
                     "session_id": session_id,
-                    "peer_id": hex_encode(&peer_id),
+                    "peer_id": hex_encode(&pending_peer_id),
                 });
                 self.nats
                     .publish(
@@ -354,22 +425,20 @@ impl Gateway {
                         Bytes::from(session_info.to_string()),
                     )
                     .await?;
+                info!(session_id, "session authenticated and registered");
 
-                // Reply to the client with a SessionAck.
-                let mut server_nonce = vec![0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut server_nonce);
+                // Confirm with an empty-nonce ack so the client can proceed.
                 let ack = cypher_proto::SessionAck {
-                    server_nonce,
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
+                    server_nonce: Vec::new(),
+                    timestamp: now_secs(),
                 };
-                let ack_payload = Bytes::from(ack.serialize());
-                let _ = frame_tx.send((ack_payload, FrameFlags::SESSION_INIT)).await;
+                let _ = frame_tx
+                    .send((Bytes::from(ack.serialize()), FrameFlags::SESSION_INIT))
+                    .await;
             }
             _ => {
                 warn!(session_id, "invalid SESSION_INIT payload");
+                anyhow::bail!("invalid SESSION_INIT payload");
             }
         }
         Ok(())
@@ -654,6 +723,8 @@ impl Gateway {
             ConnectionState {
                 session_id,
                 peer_id: Vec::new(),
+                pending_peer_id: Vec::new(),
+                server_nonce: Vec::new(),
                 addr,
                 writer: frame_tx.clone(),
                 last_activity: Instant::now(),
@@ -702,8 +773,10 @@ impl Gateway {
                         };
                         if data.len() >= 4 {
                             let cid = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                            if cid == 0xA1000001 {
-                                // SESSION_INIT
+                            // SESSION_INIT (0xA1000001) and SESSION_AUTH (0xA1000003)
+                            // both drive the handshake and must carry the flag so the
+                            // read loop routes them to handle_session_init.
+                            if cid == 0xA1000001 || cid == 0xA1000003 {
                                 let mut init_frame = frame.clone();
                                 init_frame.flags = FrameFlags::SESSION_INIT;
                                 if inbound_tx.send(init_frame).await.is_err() {

@@ -54,6 +54,7 @@ const MAX_SKIP: u32 = 256;
 const MAX_TOTAL_SKIPPED: usize = 2048;
 
 /// The Double Ratchet state for a single session.
+#[derive(Clone)]
 pub struct RatchetState {
     /// Current root key.
     pub root_key: [u8; 32],
@@ -201,16 +202,38 @@ impl RatchetState {
         ratchet_pubkey: &X25519PublicKey,
         msg_no: u32,
     ) -> Result<Vec<u8>> {
-        // Check if this is a skipped message key.
+        // Check if this is a skipped message key. Look it up without removing:
+        // only consume the key once the frame is authenticated, so a replayed or
+        // forged frame cannot drain a valid skipped key.
         let skip_key = (ratchet_pubkey.to_bytes(), msg_no);
-        if let Some(message_key) = self.skipped_keys.remove(&skip_key) {
+        if let Some(message_key) = self.skipped_keys.get(&skip_key).copied() {
             let mut nonce_material = Vec::with_capacity(36);
             nonce_material.extend_from_slice(&message_key);
             nonce_material.extend_from_slice(&msg_no.to_be_bytes());
             let aad = ratchet_pubkey.as_bytes();
-            return aead_decrypt(&message_key, &nonce_material, ciphertext, aad);
+            let plaintext = aead_decrypt(&message_key, &nonce_material, ciphertext, aad)?;
+            self.skipped_keys.remove(&skip_key);
+            return Ok(plaintext);
         }
 
+        // Ratchet advancement (DH ratchet, chain-key steps, skipped-key inserts)
+        // mutates state irreversibly. Stage it on a clone and commit only after AEAD
+        // authentication succeeds — otherwise a replayed or tampered frame would
+        // desynchronise the live session permanently (C3).
+        let mut staged = self.clone();
+        let plaintext = staged.decrypt_advancing(ciphertext, ratchet_pubkey, msg_no)?;
+        *self = staged;
+        Ok(plaintext)
+    }
+
+    /// Advance the receiving ratchet and decrypt. Mutates `self`; callers must run
+    /// this on a staging copy so a decryption failure leaves the live state intact.
+    fn decrypt_advancing(
+        &mut self,
+        ciphertext: &[u8],
+        ratchet_pubkey: &X25519PublicKey,
+        msg_no: u32,
+    ) -> Result<Vec<u8>> {
         // Check if we need a DH ratchet step (new ratchet key from peer).
         let need_dh_ratchet = match &self.recv_ratchet_key {
             None => true,
@@ -412,6 +435,58 @@ mod tests {
         let (ct3, rk3, mn3) = restored.encrypt(b"after restore").unwrap();
         let pt3 = bob.decrypt(&ct3, &rk3, mn3).unwrap();
         assert_eq!(pt3, b"after restore");
+    }
+
+    #[test]
+    fn tampered_frame_does_not_desync_session() {
+        // C3 regression: a forged/replayed frame that fails AEAD must not advance
+        // the receiver's ratchet, so a subsequent valid frame still decrypts.
+        let shared_secret = SharedSecret([7u8; 32]);
+        let bob_ratchet_secret = X25519StaticSecret::random_from_rng(OsRng);
+        let bob_ratchet_public = X25519PublicKey::from(&bob_ratchet_secret);
+
+        let mut alice = RatchetState::init_sender(&shared_secret, &bob_ratchet_public);
+        let mut bob = RatchetState::init_receiver(&shared_secret, bob_ratchet_secret);
+
+        let (ct0, rk0, mn0) = alice.encrypt(b"msg 0").unwrap();
+        assert_eq!(bob.decrypt(&ct0, &rk0, mn0).unwrap(), b"msg 0");
+
+        let (ct1, rk1, mn1) = alice.encrypt(b"msg 1").unwrap();
+
+        // Corrupt the ciphertext: AEAD must reject it.
+        let mut bad = ct1.clone();
+        bad[0] ^= 0xFF;
+        assert!(bob.decrypt(&bad, &rk1, mn1).is_err());
+
+        // The genuine frame must still decrypt — proving state was not mutated.
+        assert_eq!(bob.decrypt(&ct1, &rk1, mn1).unwrap(), b"msg 1");
+    }
+
+    #[test]
+    fn replayed_frame_across_ratchet_is_rejected_cleanly() {
+        // A replay of an old frame with a stale ratchet key must fail without
+        // corrupting the live receiving chain.
+        let shared_secret = SharedSecret([11u8; 32]);
+        let bob_ratchet_secret = X25519StaticSecret::random_from_rng(OsRng);
+        let bob_ratchet_public = X25519PublicKey::from(&bob_ratchet_secret);
+
+        let mut alice = RatchetState::init_sender(&shared_secret, &bob_ratchet_public);
+        let mut bob = RatchetState::init_receiver(&shared_secret, bob_ratchet_secret);
+
+        let (ct0, rk0, mn0) = alice.encrypt(b"first").unwrap();
+        bob.decrypt(&ct0, &rk0, mn0).unwrap();
+
+        // Bob replies, forcing a DH ratchet on Alice's side.
+        let (rct, rrk, rmn) = bob.encrypt(b"reply").unwrap();
+        alice.decrypt(&rct, &rrk, rmn).unwrap();
+        let (ct1, rk1, mn1) = alice.encrypt(b"second").unwrap();
+        bob.decrypt(&ct1, &rk1, mn1).unwrap();
+
+        // Replay of the very first frame must not decrypt again (message key gone)
+        // and must not desync: a fresh frame still works.
+        assert!(bob.decrypt(&ct0, &rk0, mn0).is_err());
+        let (ct2, rk2, mn2) = alice.encrypt(b"third").unwrap();
+        assert_eq!(bob.decrypt(&ct2, &rk2, mn2).unwrap(), b"third");
     }
 
     #[test]

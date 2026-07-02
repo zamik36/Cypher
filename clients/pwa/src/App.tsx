@@ -13,13 +13,14 @@ import {
   onConnected, onDisconnected, onPeerConnected,
   onMessage, onMessageSent, onFileOffered, onFileProgress, onFileComplete, onError,
   api, setPeerId as apiSetPeerId, setInboxId as apiSetInboxId,
+  setIdentitySigner as apiSetIdentitySigner,
 } from "./api";
 import { connection, setConnection, addPeer, shortName, markAllPeersOffline } from "./stores/connection";
 import { addMessage } from "./stores/chat";
 import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
 import type { IdentityData } from "./storage/identity";
-import { deriveStorageKey, deriveInboxId } from "./storage/identity";
+import { deriveStorageKey, deriveInboxId, signWithSeed } from "./storage/identity";
 import { openMessageStore, saveMessage, saveConversation, listConversations } from "./storage/messages";
 import { hexEncode } from "./api/proto";
 import { notifyMessage } from "./utils/notifications";
@@ -37,6 +38,9 @@ export default function App() {
   const SESSION_PEERID_KEY = "cypher-session-peerId";
   const SESSION_NICKNAME_KEY = "cypher-session-nickname";
   const SESSION_INBOX_KEY = "cypher-session-inboxId";
+  // Ed25519 signing seed cached so the session can re-authenticate on refresh.
+  // TODO(M2): move off sessionStorage together with the SEK when hardening XSS.
+  const SESSION_EDSEED_KEY = "cypher-session-edseed";
 
   function bytesToBase64(bytes: Uint8Array): string {
     let binary = "";
@@ -77,6 +81,10 @@ export default function App() {
   async function handleIdentityUnlocked(data: IdentityData) {
     // Set the API's peerId to the persistent one.
     apiSetPeerId(data.peerId);
+    // Wire the identity signer so the gateway handshake can be authenticated.
+    const signingSeed = data.signingSeed;
+    apiSetIdentitySigner((msg) => signWithSeed(signingSeed, msg));
+    sessionStorage.setItem(SESSION_EDSEED_KEY, bytesToBase64(signingSeed));
     setIdentityNickname(data.nickname);
 
     // Derive and set blind inbox ID for offline message delivery.
@@ -208,18 +216,26 @@ export default function App() {
     const peerIdHex = sessionStorage.getItem(SESSION_PEERID_KEY);
     const nickname = sessionStorage.getItem(SESSION_NICKNAME_KEY);
     const inboxIdHex = sessionStorage.getItem(SESSION_INBOX_KEY);
+    const edSeedB64 = sessionStorage.getItem(SESSION_EDSEED_KEY);
 
-    if (sekB64 && peerIdHex && nickname) {
+    if (sekB64 && peerIdHex && nickname && edSeedB64) {
       try {
         const sek = base64ToBytes(sekB64);
         const peerId = hexToBytes(peerIdHex);
+        const edSeed = base64ToBytes(edSeedB64);
 
         // Validate restored data integrity.
-        if (sek.length !== 32 || peerId.length !== 32 || peerId.some((b) => Number.isNaN(b))) {
+        if (
+          sek.length !== 32 ||
+          peerId.length !== 32 ||
+          edSeed.length !== 32 ||
+          peerId.some((b) => Number.isNaN(b))
+        ) {
           throw new Error("Corrupted session cache");
         }
 
         apiSetPeerId(peerId);
+        apiSetIdentitySigner((msg) => signWithSeed(edSeed, msg));
         if (inboxIdHex) {
           const inboxId = hexToBytes(inboxIdHex);
           if (inboxId.length === 32) {
@@ -255,6 +271,7 @@ export default function App() {
         sessionStorage.removeItem(SESSION_PEERID_KEY);
         sessionStorage.removeItem(SESSION_NICKNAME_KEY);
         sessionStorage.removeItem(SESSION_INBOX_KEY);
+        sessionStorage.removeItem(SESSION_EDSEED_KEY);
       }
     }
     // Otherwise show identity/unlock screen (handled by Show fallback).

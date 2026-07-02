@@ -95,9 +95,18 @@ pub fn x3dh_responder(
 /// shared secret regardless of which side calls it, because the cross-DH
 /// outputs are sorted before concatenation.
 ///
-/// Including both IK and SPK in the derivation provides forward secrecy:
-/// compromising the long-term identity key alone does not reveal past sessions
-/// (as long as the SPK was rotated).
+/// # Forward secrecy limitation
+///
+/// This construction is **not** forward-secret: the `DH_ik = IK_A × IK_B` term
+/// depends only on long-term identity keys, so an attacker who later compromises
+/// both identity keys can recompute the initial shared secret and decrypt the
+/// pre-ratchet messages. The Double Ratchet provides forward secrecy for
+/// messages *after* the first DH-ratchet step, but not for the handshake itself.
+///
+/// True X3DH forward secrecy requires a per-handshake ephemeral key (see
+/// [`x3dh_initiator`]/[`x3dh_responder`]) and one-time prekeys. Wiring those into
+/// the live session path (carrying the initiator's ephemeral public key and
+/// consuming one-time prekeys server-side) is tracked as roadmap item H1.
 ///
 /// Computes:
 ///   DH_ik  = X25519(our_ik_dh, their_ik_dh)           — symmetric

@@ -99,10 +99,13 @@ impl ClientApi {
     const CONNECT_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
     /// Create a new client with an ephemeral (random) identity.
     pub fn new() -> Self {
-        let session = Arc::new(ClientSession::new());
-        let keys = Arc::new(KeyManager::new(
-            cypher_crypto::identity::IdentityKeyPair::generate(),
-        ));
+        // Session and key-manager identities MUST match: the peer_id advertised in
+        // SESSION_INIT (session identity) is the same Ed25519 key that signs our
+        // prekey bundle (keys identity), so peers can bind the bundle to the peer_id.
+        // Derive both from one random seed to keep them identical.
+        let seed = cypher_crypto::IdentitySeed::generate();
+        let session = Arc::new(ClientSession::from_identity(seed.derive_identity()));
+        let keys = Arc::new(KeyManager::new(seed.derive_identity()));
         Self::build(session, keys, None, Vec::new())
     }
 
@@ -198,13 +201,16 @@ impl ClientApi {
         let mut signaling = SignalingClient::new(conn);
         let nonce: [u8; 32] = rand::random();
         info!("do_connect: sending SESSION_INIT...");
-        match tokio::time::timeout(
+        let server_nonce = match tokio::time::timeout(
             std::time::Duration::from_secs(10),
             signaling.session_init(self.session.peer_id().to_vec(), nonce.to_vec()),
         )
         .await
         {
-            Ok(Ok(_)) => info!("do_connect: SESSION_INIT completed"),
+            Ok(Ok(server_nonce)) => {
+                info!("do_connect: SESSION_INIT completed");
+                server_nonce
+            }
             Ok(Err(error)) => {
                 warn!("do_connect: SESSION_INIT failed: {error}");
                 return Err(error);
@@ -213,16 +219,41 @@ impl ClientApi {
                 warn!("do_connect: SESSION_INIT timed out after 10s");
                 return Err(Error::Transport("SESSION_INIT timed out".into()));
             }
+        };
+
+        // Prove possession of our identity key over the gateway's challenge (C2).
+        let mut signed = cypher_common::SESSION_AUTH_CONTEXT.to_vec();
+        signed.extend_from_slice(&server_nonce);
+        let signature = self.session.identity.sign(&signed).to_bytes().to_vec();
+        match tokio::time::timeout(
+            Self::CONNECT_PHASE_TIMEOUT,
+            signaling.session_auth(signature),
+        )
+        .await
+        {
+            Ok(Ok(())) => info!("do_connect: SESSION_AUTH completed"),
+            Ok(Err(error)) => {
+                warn!("do_connect: SESSION_AUTH failed: {error}");
+                return Err(error);
+            }
+            Err(_) => {
+                warn!("do_connect: SESSION_AUTH timed out");
+                return Err(Error::Transport("SESSION_AUTH timed out".into()));
+            }
         }
 
         let bundle = self.keys.key_bundle();
         let raw = bundle.to_bytes();
+        // KeyBundle layout: identity_ed25519(0..32) | identity_dh(32..64)
+        //                 | signed_prekey(64..96)  | prekey_signature(96..160)
         info!("do_connect: uploading prekeys...");
         match tokio::time::timeout(
             Self::CONNECT_PHASE_TIMEOUT,
             signaling.upload_prekeys(
                 raw[32..64].to_vec(),
+                raw[0..32].to_vec(),
                 raw[64..96].to_vec(),
+                raw[96..160].to_vec(),
                 self.inbox_id.clone(),
             ),
         )

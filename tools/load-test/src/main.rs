@@ -73,13 +73,50 @@ async fn run_client(gateway_addr: String, client_id: u64, stats: Arc<Stats>, dea
     stats.latencies_us.lock().await.push(connect_us);
     stats.connected.fetch_add(1, Ordering::Relaxed);
 
+    // Full authenticated handshake: SESSION_INIT → challenge → signed SESSION_AUTH.
+    let identity = cypher_crypto::identity::IdentityKeyPair::generate();
     let init = cypher_proto::SessionInit {
-        client_id: client_id.to_le_bytes().to_vec(),
+        client_id: identity.peer_id().as_bytes().to_vec(),
         nonce: vec![0u8; 32],
     };
-    let payload = Bytes::from(init.serialize());
-    if let Err(e) = session.send_frame(payload, FrameFlags::SESSION_INIT).await {
-        error!(client_id, "send_frame error: {}", e);
+    if let Err(e) = session
+        .send_frame(Bytes::from(init.serialize()), FrameFlags::SESSION_INIT)
+        .await
+    {
+        error!(client_id, "session init error: {}", e);
+        stats.errors.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let server_nonce = match session.recv_frame().await {
+        Ok(frame) => match cypher_proto::SessionAck::deserialize(&frame.payload) {
+            Ok(ack) => ack.server_nonce,
+            Err(e) => {
+                error!(client_id, "bad session ack: {}", e);
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        },
+        Err(e) => {
+            error!(client_id, "session ack recv error: {}", e);
+            stats.errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    let mut signed = cypher_common::SESSION_AUTH_CONTEXT.to_vec();
+    signed.extend_from_slice(&server_nonce);
+    let auth = cypher_proto::SessionAuth {
+        signature: identity.sign(&signed).to_bytes().to_vec(),
+    };
+    if let Err(e) = session
+        .send_frame(Bytes::from(auth.serialize()), FrameFlags::SESSION_INIT)
+        .await
+    {
+        error!(client_id, "session auth error: {}", e);
+        stats.errors.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if let Err(e) = session.recv_frame().await {
+        error!(client_id, "session auth ack recv error: {}", e);
         stats.errors.fetch_add(1, Ordering::Relaxed);
         return;
     }

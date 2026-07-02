@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
+use cypher_crypto::identity::IdentityKeyPair;
 use cypher_proto::{Serializable, SessionAck};
 use cypher_transport::{FrameFlags, TransportSession};
 use rand::RngCore;
@@ -19,11 +20,13 @@ struct TestClient {
 }
 
 impl TestClient {
-    async fn connect(peer_id: &[u8]) -> anyhow::Result<Self> {
+    /// Connect and complete the authenticated handshake using `identity`. The
+    /// registered peer_id is `identity.peer_id()`.
+    async fn connect(identity: &IdentityKeyPair) -> anyhow::Result<Self> {
         let tls_config = cypher_tls::make_client_config_insecure();
         let mut session = TransportSession::connect(&gateway_addr(), tls_config).await?;
         let init = cypher_proto::SessionInit {
-            client_id: peer_id.to_vec(),
+            client_id: identity.peer_id().as_bytes().to_vec(),
             nonce: vec![0u8; 32],
         };
         session
@@ -31,16 +34,36 @@ impl TestClient {
             .await?;
 
         let ack = session.recv_frame().await?;
-        SessionAck::deserialize(&ack.payload)
+        let ack = SessionAck::deserialize(&ack.payload)
             .map_err(|error| anyhow!("invalid SESSION_ACK: {error}"))?;
+
+        // Prove possession of the identity key over the challenge.
+        let mut signed = cypher_common::SESSION_AUTH_CONTEXT.to_vec();
+        signed.extend_from_slice(&ack.server_nonce);
+        let auth = cypher_proto::SessionAuth {
+            signature: identity.sign(&signed).to_bytes().to_vec(),
+        };
+        session
+            .send_frame(Bytes::from(auth.serialize()), FrameFlags::SESSION_INIT)
+            .await?;
+        let auth_ack = session.recv_frame().await?;
+        SessionAck::deserialize(&auth_ack.payload)
+            .map_err(|error| anyhow!("invalid SESSION_AUTH ack: {error}"))?;
 
         Ok(Self { session })
     }
 
-    async fn upload_prekeys(&mut self, inbox_id: &[u8]) -> anyhow::Result<()> {
+    async fn upload_prekeys(
+        &mut self,
+        identity: &IdentityKeyPair,
+        inbox_id: &[u8],
+    ) -> anyhow::Result<()> {
+        let signed_prekey = vec![0x22; 32];
         let msg = cypher_proto::KeysUploadPrekeys {
             identity_key: vec![0x11; 32],
-            signed_prekey: vec![0x22; 32],
+            identity_ed25519: identity.peer_id().as_bytes().to_vec(),
+            signed_prekey: signed_prekey.clone(),
+            prekey_signature: identity.sign(&signed_prekey).to_bytes().to_vec(),
             inbox_id: inbox_id.to_vec(),
         };
         self.session
@@ -141,8 +164,10 @@ where
 #[tokio::test]
 #[ignore = "manual compose regression against local docker stack"]
 async fn reconnect_cleanup_and_offline_inbox_flow() -> anyhow::Result<()> {
-    let peer_a = random_bytes();
-    let peer_b = random_bytes();
+    let id_a = IdentityKeyPair::generate();
+    let id_b = IdentityKeyPair::generate();
+    let peer_a = id_a.peer_id().as_bytes().to_vec();
+    let peer_b = id_b.peer_id().as_bytes().to_vec();
     let inbox_b = random_bytes();
 
     let peer_a_hex = hex_encode(&peer_a);
@@ -153,8 +178,8 @@ async fn reconnect_cleanup_and_offline_inbox_flow() -> anyhow::Result<()> {
     delete_key(&format!("peer:{peer_b_hex}:session")).await?;
     delete_key(&format!("inbox:{inbox_b_hex}")).await?;
 
-    let mut b1 = TestClient::connect(&peer_b).await?;
-    b1.upload_prekeys(&inbox_b).await?;
+    let mut b1 = TestClient::connect(&id_b).await?;
+    b1.upload_prekeys(&id_b, &inbox_b).await?;
 
     wait_until("initial peer session", Duration::from_secs(5), || async {
         Ok(load_session(&peer_b_hex).await?.is_some())
@@ -170,8 +195,8 @@ async fn reconnect_cleanup_and_offline_inbox_flow() -> anyhow::Result<()> {
         Some(peer_b_hex.clone())
     );
 
-    let mut b2 = TestClient::connect(&peer_b).await?;
-    b2.upload_prekeys(&inbox_b).await?;
+    let mut b2 = TestClient::connect(&id_b).await?;
+    b2.upload_prekeys(&id_b, &inbox_b).await?;
 
     wait_until(
         "replacement peer session",
@@ -216,7 +241,7 @@ async fn reconnect_cleanup_and_offline_inbox_flow() -> anyhow::Result<()> {
     )
     .await?;
 
-    let mut a = TestClient::connect(&peer_a).await?;
+    let mut a = TestClient::connect(&id_a).await?;
 
     b2.close().await?;
 

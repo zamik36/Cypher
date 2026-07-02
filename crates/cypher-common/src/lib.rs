@@ -8,6 +8,11 @@ pub use config::AppConfig;
 pub use error::{Error, Result};
 pub use types::*;
 
+/// Domain-separation prefix signed together with the gateway's `server_nonce`
+/// during SESSION_INIT proof-of-possession. Shared by clients and the gateway so
+/// a signature can never be repurposed for a different context.
+pub const SESSION_AUTH_CONTEXT: &[u8] = b"cypher-session-auth-v1";
+
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
 

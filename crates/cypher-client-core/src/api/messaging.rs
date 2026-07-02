@@ -115,6 +115,37 @@ impl ClientApi {
                 .map_err(|_| Error::Crypto("signed_prekey must be 32 bytes".into()))?,
         );
 
+        // Authenticate the prekey bundle before using it (C1). Without this the
+        // signaling server (or any MITM) could substitute its own X25519 keys and
+        // transparently decrypt/re-encrypt the whole session.
+        let ik_ed_bytes = json_bytes_field(&resp, "identity_ed25519")?;
+        let sig_bytes = json_bytes_field(&resp, "prekey_signature")?;
+
+        // Bind the identity to the peer_id we asked for: peer_id *is* the Ed25519
+        // identity public key, so a forged bundle would need a signature under the
+        // victim's private key.
+        if ik_ed_bytes.as_slice() != peer_id.as_bytes() {
+            return Err(Error::Crypto(
+                "prekey bundle identity does not match requested peer_id".into(),
+            ));
+        }
+
+        let ik_ed_arr = <[u8; 32]>::try_from(ik_ed_bytes.as_slice())
+            .map_err(|_| Error::Crypto("identity_ed25519 must be 32 bytes".into()))?;
+        let sig_arr = <[u8; 64]>::try_from(sig_bytes.as_slice())
+            .map_err(|_| Error::Crypto("prekey_signature must be 64 bytes".into()))?;
+        let identity_verifying = ed25519_dalek::VerifyingKey::from_bytes(&ik_ed_arr)
+            .map_err(|e| Error::Crypto(format!("invalid identity key: {e}")))?;
+        let bundle = cypher_crypto::identity::KeyBundle {
+            identity_key: identity_verifying,
+            identity_dh_key: their_ik_dh,
+            signed_prekey: their_spk,
+            prekey_signature: ed25519_dalek::Signature::from_bytes(&sig_arr),
+        };
+        bundle
+            .verify()
+            .map_err(|_| Error::Crypto("prekey signature verification failed".into()))?;
+
         let shared_secret = cypher_crypto::x3dh::x3dh_mutual(
             self.keys.identity(),
             &self.keys.spk_secret(),

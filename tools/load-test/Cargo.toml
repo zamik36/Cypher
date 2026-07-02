@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 cypher-common.workspace = true
+cypher-crypto.workspace = true
 cypher-proto.workspace = true
 cypher-tls.workspace = true
 cypher-transport.workspace = true

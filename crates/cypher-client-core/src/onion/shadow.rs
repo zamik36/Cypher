@@ -45,17 +45,34 @@ impl ShadowSession {
         let mut signaling = SignalingClient::new(conn);
 
         let nonce: [u8; 32] = rand::random();
-        match tokio::time::timeout(
+        let server_nonce = match tokio::time::timeout(
             INIT_TIMEOUT,
             signaling.session_init(peer_id.to_vec(), nonce.to_vec()),
         )
         .await
         {
-            Ok(Ok(_)) => info!(%peer_id, "shadow session: SESSION_INIT completed"),
+            Ok(Ok(server_nonce)) => {
+                info!(%peer_id, "shadow session: SESSION_INIT completed");
+                server_nonce
+            }
             Ok(Err(e)) => return Err(e),
             Err(_) => {
                 return Err(Error::Transport(
                     "shadow session: SESSION_INIT timed out".into(),
+                ))
+            }
+        };
+
+        // Prove possession of the ephemeral identity over the challenge (C2).
+        let mut signed = cypher_common::SESSION_AUTH_CONTEXT.to_vec();
+        signed.extend_from_slice(&server_nonce);
+        let signature = identity.sign(&signed).to_bytes().to_vec();
+        match tokio::time::timeout(INIT_TIMEOUT, signaling.session_auth(signature)).await {
+            Ok(Ok(())) => info!(%peer_id, "shadow session: SESSION_AUTH completed"),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(Error::Transport(
+                    "shadow session: SESSION_AUTH timed out".into(),
                 ))
             }
         }

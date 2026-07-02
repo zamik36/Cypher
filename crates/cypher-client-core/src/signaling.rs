@@ -89,6 +89,24 @@ impl SignalingClient {
         Ok(ack.server_nonce)
     }
 
+    /// Complete SESSION_INIT by proving possession of our identity key.
+    ///
+    /// `signature` is Ed25519 over `SESSION_AUTH_CONTEXT || server_nonce`. The
+    /// gateway registers our peer_id for routing only after verifying it.
+    pub async fn session_auth(&mut self, signature: Vec<u8>) -> Result<()> {
+        let msg = cypher_proto::SessionAuth { signature };
+        self.conn
+            .send_payload(Bytes::from(msg.serialize()), FrameFlags::SESSION_INIT)
+            .await?;
+        debug!("sent SESSION_AUTH");
+
+        let frame = self.conn.recv_frame().await?;
+        cypher_proto::SessionAck::deserialize(&frame.payload)
+            .map_err(|e| Error::Protocol(format!("invalid SESSION_AUTH ack: {e}")))?;
+        debug!("received SESSION_AUTH ack");
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Key exchange
     // -----------------------------------------------------------------------
@@ -99,12 +117,16 @@ impl SignalingClient {
     pub async fn upload_prekeys(
         &mut self,
         identity_key: Vec<u8>,
+        identity_ed25519: Vec<u8>,
         signed_prekey: Vec<u8>,
+        prekey_signature: Vec<u8>,
         inbox_id: Vec<u8>,
     ) -> Result<()> {
         let msg = cypher_proto::KeysUploadPrekeys {
             identity_key,
+            identity_ed25519,
             signed_prekey,
+            prekey_signature,
             inbox_id,
         };
         self.conn
