@@ -53,6 +53,15 @@ static BYTES_RELAYED: LazyLock<IntCounter> = LazyLock::new(|| {
     let _ = prometheus::register(Box::new(c.clone()));
     c
 });
+static CONNECTIONS_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let c = IntCounter::new(
+        "gateway_connections_rejected_total",
+        "Connections dropped because the connection cap was reached",
+    )
+    .unwrap();
+    let _ = prometheus::register(Box::new(c.clone()));
+    c
+});
 use cypher_proto::{dispatch, Message, Serializable};
 use cypher_transport::frame::{Frame, FrameFlags};
 use cypher_transport::{TransportListener, TransportSession};
@@ -89,10 +98,16 @@ struct Gateway {
     next_session_id: AtomicU64,
     /// NATS client for communicating with the signaling service.
     nats: async_nats::Client,
+    /// Maximum number of concurrent connections; excess are dropped at accept.
+    max_connections: usize,
 }
 
 impl Gateway {
-    async fn new(nats_url: &str, nats_token: Option<&str>) -> anyhow::Result<Self> {
+    async fn new(
+        nats_url: &str,
+        nats_token: Option<&str>,
+        max_connections: usize,
+    ) -> anyhow::Result<Self> {
         let nats = match nats_token {
             Some(token) if !token.is_empty() => {
                 async_nats::ConnectOptions::with_token(token.to_string())
@@ -106,7 +121,15 @@ impl Gateway {
             peers: Arc::new(DashMap::new()),
             next_session_id: AtomicU64::new(1),
             nats,
+            max_connections,
         })
+    }
+
+    /// Whether the connection cap has been reached. Uses the active-connections
+    /// gauge as a coarse (racy but safe) bound to prevent unbounded task/memory
+    /// growth under connection floods.
+    fn at_capacity(&self) -> bool {
+        ACTIVE_CONNECTIONS.get() as usize >= self.max_connections
     }
 
     /// Allocate a new unique session ID.
@@ -120,6 +143,17 @@ impl Gateway {
         loop {
             match listener.accept().await {
                 Ok(session) => {
+                    // Shed load past the connection cap: drop the freshly accepted
+                    // session instead of spawning unbounded tasks/memory.
+                    if self.at_capacity() {
+                        CONNECTIONS_REJECTED.inc();
+                        warn!(
+                            max = self.max_connections,
+                            "connection cap reached, dropping new TLS session"
+                        );
+                        drop(session);
+                        continue;
+                    }
                     // TransportListener does not expose the peer address after
                     // the TLS handshake; use a zeroed placeholder.  Session IDs
                     // are the primary identifier at this layer.
@@ -687,6 +721,16 @@ impl Gateway {
                     continue;
                 }
             };
+            // Shed load past the connection cap before the WS handshake cost.
+            if self.at_capacity() {
+                CONNECTIONS_REJECTED.inc();
+                warn!(
+                    max = self.max_connections,
+                    %peer_addr, "connection cap reached, dropping new WS session"
+                );
+                drop(stream);
+                continue;
+            }
             let gw = self.clone();
             tokio::spawn(async move {
                 match tokio_tungstenite::accept_async(stream).await {
@@ -881,7 +925,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
-    let gateway = Arc::new(Gateway::new(&config.nats_url, nats_token.as_deref()).await?);
+    info!(
+        max_connections = config.max_connections,
+        "connection cap configured"
+    );
+    let gateway = Arc::new(
+        Gateway::new(
+            &config.nats_url,
+            nats_token.as_deref(),
+            config.max_connections,
+        )
+        .await?,
+    );
 
     {
         let gw = gateway.clone();

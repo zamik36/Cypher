@@ -22,6 +22,10 @@ pub struct AppConfig {
     /// Path to TLS private key file (PEM). If unset, a self-signed cert is generated.
     #[serde(default)]
     pub tls_key_path: Option<String>,
+    /// Maximum number of concurrent client connections the gateway will accept.
+    /// New connections beyond this are dropped to bound memory under load/DoS.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
 }
 
 impl AppConfig {
@@ -46,8 +50,13 @@ impl Default for AppConfig {
             nats_url: default_nats_url(),
             tls_cert_path: None,
             tls_key_path: None,
+            max_connections: default_max_connections(),
         }
     }
+}
+
+fn default_max_connections() -> usize {
+    50_000
 }
 
 fn default_gateway_addr() -> String {
