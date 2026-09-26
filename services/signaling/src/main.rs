@@ -31,9 +31,8 @@ const MAX_IN_FLIGHT: usize = 4096;
 struct Config {
     #[serde(default = "default_redis_url")]
     redis_url: String,
-    #[serde(default = "default_nats_url")]
-    nats_url: String,
-    nats_token: Option<String>,
+    #[serde(flatten)]
+    nats: cypher_server_kit::NatsConfig,
     #[serde(default = "default_stun_addr")]
     stun_addr: SocketAddr,
     #[serde(default = "default_metrics_addr")]
@@ -46,9 +45,6 @@ struct Config {
 
 fn default_redis_url() -> String {
     "redis://127.0.0.1:6379".into()
-}
-fn default_nats_url() -> String {
-    "nats://127.0.0.1:4222".into()
 }
 fn default_stun_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 3478))
@@ -118,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         redis = %cypher_server_kit::redact_url(&config.redis_url),
-        nats = %config.nats_url,
+        nats = %config.nats.nats_url,
         "signaling starting"
     );
 
@@ -135,8 +131,7 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|a| cypher_wire::relay_addr_is_valid(a)),
         },
         onion_secret,
-        nats: cypher_server_kit::connect_nats(&config.nats_url, config.nats_token.as_deref())
-            .await?,
+        nats: cypher_server_kit::connect_nats(&config.nats).await?,
         permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         requests: metrics::counter("signaling_requests_total", "Session requests handled"),
         onion_requests: metrics::counter(

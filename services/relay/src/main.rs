@@ -29,9 +29,8 @@ const PIPELINE: usize = 8;
 struct Config {
     #[serde(default = "default_relay_addr")]
     relay_addr: SocketAddr,
-    #[serde(default = "default_nats_url")]
-    nats_url: String,
-    nats_token: Option<String>,
+    #[serde(flatten)]
+    nats: cypher_server_kit::NatsConfig,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     dev_cert_out: Option<PathBuf>,
@@ -43,9 +42,6 @@ struct Config {
 
 fn default_relay_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9300))
-}
-fn default_nats_url() -> String {
-    "nats://127.0.0.1:4222".into()
 }
 fn default_metrics_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9092))
@@ -75,8 +71,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let relay = Arc::new(Relay {
-        nats: cypher_server_kit::connect_nats(&config.nats_url, config.nats_token.as_deref())
-            .await?,
+        nats: cypher_server_kit::connect_nats(&config.nats).await?,
         connections: metrics::gauge("relay_connections", "Open onion connections"),
         forwarded: metrics::counter("relay_forwarded_total", "Onion requests forwarded"),
         dropped: metrics::counter("relay_dropped_total", "Onion requests dropped"),

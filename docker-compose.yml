@@ -24,8 +24,13 @@ services:
       - ALL
     ports:
       - "127.0.0.1:4222:4222"
-    command: ["--jetstream", "-m", "8222", "--auth", "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"]
-    # -m 8222 enables monitoring; healthcheck uses the monitoring endpoint
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./deploy/nats.conf:/etc/nats/nats.conf:ro
+    environment:
+      GATEWAY_NATS_PASSWORD: "${GATEWAY_NATS_PASSWORD:?Set GATEWAY_NATS_PASSWORD in .env}"
+      SIGNALING_NATS_PASSWORD: "${SIGNALING_NATS_PASSWORD:?Set SIGNALING_NATS_PASSWORD in .env}"
+      RELAY_NATS_PASSWORD: "${RELAY_NATS_PASSWORD:?Set RELAY_NATS_PASSWORD in .env}"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 10s
@@ -52,7 +57,8 @@ services:
       P2P_GATEWAY_ADDR: "0.0.0.0:9100"
       P2P_WS_ADDR: "0.0.0.0:9101"
       P2P_NATS_URL: "nats://nats:4222"
-      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
+      P2P_NATS_USER: gateway
+      P2P_NATS_PASSWORD: "${GATEWAY_NATS_PASSWORD}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
       P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
     depends_on:
@@ -83,7 +89,8 @@ services:
       P2P_RELAY_PUBLIC_ADDR: "${RELAY_PUBLIC_ADDR:-localhost:9300}"
       P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379"
       P2P_NATS_URL: "nats://nats:4222"
-      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
+      P2P_NATS_USER: signaling
+      P2P_NATS_PASSWORD: "${SIGNALING_NATS_PASSWORD}"
     depends_on:
       redis:
         condition: service_healthy
@@ -108,7 +115,8 @@ services:
     environment:
       LOG_FORMAT: json
       P2P_NATS_URL: "nats://nats:4222"
-      P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
+      P2P_NATS_USER: relay
+      P2P_NATS_PASSWORD: "${RELAY_NATS_PASSWORD}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
       P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
     depends_on:

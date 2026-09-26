@@ -35,9 +35,8 @@ struct Config {
     #[serde(default = "default_gateway_addr")]
     gateway_addr: SocketAddr,
     ws_addr: Option<SocketAddr>,
-    #[serde(default = "default_nats_url")]
-    nats_url: String,
-    nats_token: Option<String>,
+    #[serde(flatten)]
+    nats: cypher_server_kit::NatsConfig,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     /// Where to write the development certificate for local clients to pin.
@@ -54,9 +53,6 @@ struct Config {
 
 fn default_gateway_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9100))
-}
-fn default_nats_url() -> String {
-    "nats://127.0.0.1:4222".into()
 }
 fn default_metrics_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9090))
@@ -86,8 +82,7 @@ async fn main() -> anyhow::Result<()> {
         config.dev_cert_out.as_deref(),
     )
     .await?;
-    let nats =
-        cypher_server_kit::connect_nats(&config.nats_url, config.nats_token.as_deref()).await?;
+    let nats = cypher_server_kit::connect_nats(&config.nats).await?;
     let gateway = Arc::new(Gateway::new(
         nats,
         Limits {

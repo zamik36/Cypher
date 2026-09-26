@@ -34,12 +34,39 @@ pub fn load_config<T: DeserializeOwned>() -> anyhow::Result<T> {
         .try_deserialize()?)
 }
 
-pub async fn connect_nats(url: &str, token: Option<&str>) -> anyhow::Result<async_nats::Client> {
-    let options = match token.filter(|t| !t.is_empty()) {
-        Some(token) => async_nats::ConnectOptions::with_token(token.to_owned()),
-        None => async_nats::ConnectOptions::new(),
+/// NATS connection settings shared by every service config (`P2P_NATS_*`).
+/// Production uses per-service users with least-privilege subject
+/// permissions (`deploy/nats.conf`); a shared token is accepted for dev.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NatsConfig {
+    #[serde(default = "default_nats_url")]
+    pub nats_url: String,
+    pub nats_user: Option<String>,
+    pub nats_password: Option<String>,
+    pub nats_token: Option<String>,
+}
+
+fn default_nats_url() -> String {
+    "nats://127.0.0.1:4222".into()
+}
+
+pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Client> {
+    let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+    let options = match (
+        non_empty(&config.nats_user),
+        non_empty(&config.nats_password),
+        non_empty(&config.nats_token),
+    ) {
+        (Some(user), Some(password), _) => {
+            async_nats::ConnectOptions::with_user_and_password(user, password)
+        }
+        (_, _, Some(token)) => async_nats::ConnectOptions::with_token(token),
+        _ => async_nats::ConnectOptions::new(),
     };
-    Ok(options.retry_on_initial_connect().connect(url).await?)
+    Ok(options
+        .retry_on_initial_connect()
+        .connect(&config.nats_url)
+        .await?)
 }
 
 /// Resolves on Ctrl-C, or SIGTERM on Unix.
@@ -106,6 +133,30 @@ mod tests {
         assert_eq!(redact_url("nats://u:p@nats:4222"), "nats://***@nats:4222");
         assert_eq!(redact_url("nats://nats:4222"), "nats://nats:4222");
         assert_eq!(redact_url("plain"), "plain");
+    }
+
+    #[test]
+    fn flattened_nats_config_keeps_numeric_env_parsing() {
+        #[derive(serde::Deserialize)]
+        struct Svc {
+            #[serde(flatten)]
+            nats: NatsConfig,
+            limit: u64,
+        }
+        let cfg: Svc = config::Config::builder()
+            .add_source(config::Environment::with_prefix("CYTEST").source(Some(
+                std::collections::HashMap::from([
+                    ("CYTEST_LIMIT".to_owned(), "42".to_owned()),
+                    ("CYTEST_NATS_USER".to_owned(), "gateway".to_owned()),
+                ]),
+            )))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(cfg.limit, 42);
+        assert_eq!(cfg.nats.nats_user.as_deref(), Some("gateway"));
+        assert_eq!(cfg.nats.nats_url, "nats://127.0.0.1:4222");
     }
 
     #[test]
