@@ -57,15 +57,11 @@ const en = {
   chat_header: "Chats",
   chat_no_messages: "No messages yet",
   chat_select: "Select a chat from the list",
-  chat_offline_badge: "offline",
   chat_loading: "Loading history...",
   chat_say_hello: "No messages yet. Say hello!",
   chat_me: "Me",
   chat_peer: "P",
-  chat_offline_hint_ready: "Peer is offline. This chat can still send through the blind inbox.",
-  chat_offline_hint_unavailable: "Peer is offline. Offline delivery becomes available after a successful key exchange on the current version.",
   chat_placeholder: "Type a message...",
-  chat_placeholder_offline_unavailable: "Offline delivery is unavailable for this chat yet",
 
   // -- Files --
   files_title: "Transfers",
@@ -73,9 +69,8 @@ const en = {
   files_sending: "Sending",
   files_receiving: "Receiving",
   files_complete: " — Complete",
-  files_drop_desktop: "Drag & drop files here, or click to browse",
-  files_drop_mobile: "Tap to choose a file",
   files_choose: "Choose File",
+  files_accept: "Accept",
 
   // -- Settings --
   settings_title: "Settings",

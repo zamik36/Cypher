@@ -206,6 +206,7 @@ impl<R: CryptoRngCore> Core<R> {
             }
             Input::AnonymousChannel { up } => {
                 self.anon.set_relay_up(up);
+                self.emit(Event::Onion { up });
                 if up {
                     self.fetch_inbox();
                 }

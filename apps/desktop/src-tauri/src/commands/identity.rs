@@ -1,235 +1,116 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use cypher_client::{IdentityStore, Unlocked};
+use serde::Serialize;
+use tauri::{AppHandle, State};
 
-use tauri::Manager;
+use crate::dto::{self, UiMessage};
+use crate::session::{AppState, CmdResult, data_dir, err};
 
-use crate::{AppState, current_api, restart_event_loop};
-use cypher_client_core::ClientApi;
-use cypher_client_core::identity_store::IdentityStore;
-use cypher_client_core::persistence::MessageStore;
-use cypher_client_core::persistence::sqlite::SqliteMessageStore;
-use cypher_crypto::IdentitySeed;
+/// Argon2id is deliberately slow; keep it off the async runtime.
+async fn with_store<T: Send + 'static>(
+    app: &AppHandle,
+    f: impl FnOnce(IdentityStore) -> Result<T, cypher_client::ClientError> + Send + 'static,
+) -> CmdResult<T> {
+    let store = IdentityStore::new(&data_dir(app)?);
+    tokio::task::spawn_blocking(move || f(store))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
 
-// ---------------------------------------------------------------------------
-// Identity management
-// ---------------------------------------------------------------------------
+async fn activate(state: &AppState, unlocked: Unlocked) -> String {
+    let peer = unlocked.seed.derive_identity().peer_id().to_hex();
+    state.set_identity(unlocked.seed, unlocked.nickname).await;
+    peer
+}
 
 #[tauri::command]
-pub async fn has_identity(app: tauri::AppHandle) -> Result<bool, String> {
-    Ok(IdentityStore::new(data_dir(&app)?).has_identity())
+pub async fn has_identity(app: AppHandle) -> CmdResult<bool> {
+    Ok(IdentityStore::new(&data_dir(&app)?).exists())
 }
 
 #[tauri::command]
 pub async fn create_identity(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, AppState>,
     nickname: String,
     passphrase: String,
-) -> Result<String, String> {
-    let dir = data_dir(&app)?;
-    let seed = IdentityStore::new(&dir)
-        .create(&nickname, &passphrase)
-        .map_err(|e| e.to_string())?;
-    let peer_id = activate_identity(&app, &state, &seed, &dir).await?;
-    *state.nickname.lock().await = Some(nickname);
-    Ok(peer_id)
+) -> CmdResult<String> {
+    let unlocked = with_store(&app, move |s| s.create(&nickname, &passphrase)).await?;
+    Ok(activate(&state, unlocked).await)
 }
 
 #[tauri::command]
 pub async fn unlock_identity(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, AppState>,
     passphrase: String,
-) -> Result<(String, String), String> {
-    let dir = data_dir(&app)?;
-    let (seed, nickname) = IdentityStore::new(&dir)
-        .unlock(&passphrase)
-        .map_err(|e| e.to_string())?;
-    let peer_id = activate_identity(&app, &state, &seed, &dir).await?;
-    *state.nickname.lock().await = Some(nickname.clone());
-    Ok((peer_id, nickname))
-}
-
-#[tauri::command]
-pub async fn export_mnemonic(app: tauri::AppHandle, passphrase: String) -> Result<String, String> {
-    IdentityStore::new(data_dir(&app)?)
-        .export_mnemonic(&passphrase)
-        .map_err(|e| e.to_string())
+) -> CmdResult<(String, String)> {
+    let unlocked = with_store(&app, move |s| s.unlock(&passphrase)).await?;
+    let nickname = unlocked.nickname.clone();
+    Ok((activate(&state, unlocked).await, nickname))
 }
 
 #[tauri::command]
 pub async fn import_mnemonic(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, AppState>,
     mnemonic: String,
     nickname: String,
     passphrase: String,
-) -> Result<String, String> {
-    let dir = data_dir(&app)?;
-    let seed = IdentityStore::new(&dir)
-        .import_mnemonic(&mnemonic, &nickname, &passphrase)
-        .map_err(|e| e.to_string())?;
-    let peer_id = activate_identity(&app, &state, &seed, &dir).await?;
-    *state.nickname.lock().await = Some(nickname);
-    Ok(peer_id)
+) -> CmdResult<String> {
+    let unlocked = with_store(&app, move |s| s.import(&mnemonic, &nickname, &passphrase)).await?;
+    Ok(activate(&state, unlocked).await)
 }
 
-// ---------------------------------------------------------------------------
-// Chat history
-// ---------------------------------------------------------------------------
-
+/// Re-verifies the passphrase before revealing the recovery phrase.
 #[tauri::command]
-pub async fn get_conversations(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let api = current_api(&state).await;
-    let Some(store) = api.message_store() else {
-        return Ok(Vec::new());
-    };
-    store
-        .list_conversations()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|c| {
-            Ok(serde_json::json!({
-                "peer_id": hex_encode(&c.peer_id),
-                "display_name": c.nickname,
-                "created_at": c.created_at,
-                "last_message_at": c.last_message_at,
-                "inbox_id": c.inbox_id.as_deref().map(hex_encode),
-            }))
-        })
-        .collect()
+pub async fn export_mnemonic(app: AppHandle, passphrase: String) -> CmdResult<String> {
+    with_store(&app, move |s| {
+        s.unlock(&passphrase).map(|u| u.seed.to_mnemonic())
+    })
+    .await
 }
 
-#[tauri::command]
-pub async fn get_conversation(
-    state: tauri::State<'_, AppState>,
+#[derive(Serialize)]
+pub struct Conversation {
     peer_id: String,
-) -> Result<Option<serde_json::Value>, String> {
-    let api = current_api(&state).await;
-    let Some(store) = api.message_store() else {
-        return Ok(None);
-    };
-    let pid = parse_peer_id(&peer_id)?;
-    let convo = store
-        .list_conversations()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|c| c.peer_id == pid.as_bytes());
+    display_name: Option<String>,
+    last_message_at: u64,
+}
 
-    Ok(convo.map(|c| {
-        serde_json::json!({
-            "peer_id": hex_encode(&c.peer_id),
-            "display_name": c.nickname,
-            "created_at": c.created_at,
-            "last_message_at": c.last_message_at,
-            "inbox_id": c.inbox_id.as_deref().map(hex_encode),
-        })
-    }))
+#[tauri::command]
+pub async fn get_conversations(state: State<'_, AppState>) -> CmdResult<Vec<Conversation>> {
+    let client = state.client().await?;
+    let mut out = Vec::new();
+    for peer in client.contacts().await.map_err(err)? {
+        let last = client.history(peer, None, 1).await.map_err(err)?;
+        out.push(Conversation {
+            peer_id: peer.to_hex(),
+            display_name: None,
+            last_message_at: last.first().map_or(0, |m| m.sent_at_ms),
+        });
+    }
+    out.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
+    Ok(out)
 }
 
 #[tauri::command]
 pub async fn get_history(
-    state: tauri::State<'_, AppState>,
+    state: State<'_, AppState>,
     peer_id: String,
-    limit: u32,
-    before_id: Option<u64>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let api = current_api(&state).await;
-    let Some(store) = api.message_store() else {
-        return Ok(Vec::new());
-    };
-    let pid = parse_peer_id(&peer_id)?;
-    store
-        .load_messages(&pid, limit, before_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|m| {
-            Ok(serde_json::json!({
-                "id": m.id,
-                "peer_id": hex_encode(&m.peer_id),
-                "direction": match m.direction {
-                    cypher_client_core::persistence::Direction::Sent => "sent",
-                    cypher_client_core::persistence::Direction::Received => "received",
-                },
-                "text": String::from_utf8_lossy(&m.plaintext),
-                "timestamp": m.timestamp,
-            }))
-        })
-        .collect()
+    before: Option<u64>,
+    limit: usize,
+) -> CmdResult<Vec<UiMessage>> {
+    let peer = cypher_types::PeerId::from_hex(&peer_id).ok_or("invalid peer id")?;
+    let client = state.client().await?;
+    let history = client
+        .history(peer, before, limit.min(500))
+        .await
+        .map_err(err)?;
+    Ok(history.iter().map(dto::message).collect())
 }
 
 #[tauri::command]
-pub async fn clear_chat_history(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let api = current_api(&state).await;
-    if let Some(store) = api.message_store() {
-        store.clear_all().map_err(|e| e.to_string())?;
-    }
-    api.keys().clear_sessions();
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Initialize a ClientApi from a seed + open the message DB, replace in AppState.
-async fn activate_identity(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    seed: &IdentitySeed,
-    data_dir: &Path,
-) -> Result<String, String> {
-    let sek = seed.derive_storage_key();
-    let msg_store: Arc<dyn MessageStore> = Arc::new(
-        SqliteMessageStore::open(data_dir.join("messages.db"), sek).map_err(|e| e.to_string())?,
-    );
-
-    let api = Arc::new(ClientApi::with_seed(seed, Some(msg_store.clone())));
-
-    // Restore ratchet states for known conversations.
-    if let Ok(convos) = msg_store.list_conversations() {
-        for conv in convos {
-            if let Some(pid) = cypher_common::PeerId::from_bytes(&conv.peer_id)
-                && let Ok(Some(ratchet)) = msg_store.load_ratchet_state(&pid)
-            {
-                api.keys().restore_ratchet_state(pid.as_bytes(), ratchet);
-            }
-        }
-    }
-
-    let peer_id = hex_encode(api.peer_id().as_bytes());
-    {
-        let mut current = state.api.write().await;
-        *current = Arc::clone(&api);
-    }
-    state.peers.lock().await.clear();
-    restart_event_loop(state, app.clone()).await;
-    Ok(peer_id)
-}
-
-fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map_err(|e| format!("no data dir: {e}"))
-}
-
-fn parse_peer_id(hex: &str) -> Result<cypher_common::PeerId, String> {
-    let bytes = hex_decode(hex)?;
-    cypher_common::PeerId::from_bytes(&bytes).ok_or("peer_id must be 32 bytes".into())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("invalid hex: {e}")))
-        .collect()
+pub async fn clear_chat_history(state: State<'_, AppState>) -> CmdResult<()> {
+    state.client().await?.clear_history().await.map_err(err)
 }

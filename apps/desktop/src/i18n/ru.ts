@@ -67,15 +67,11 @@ const ru: TranslationKeys = {
   chat_header: "Чаты",
   chat_no_messages: "Нет сообщений",
   chat_select: "Выберите чат из списка",
-  chat_offline_badge: "не в сети",
   chat_loading: "Загрузка истории...",
   chat_say_hello: "Сообщений пока нет. Скажите привет!",
   chat_me: "Я",
   chat_peer: "С",
-  chat_offline_hint_ready: "Собеседник не в сети. Этот чат все еще может отправить сообщение через blind inbox.",
-  chat_offline_hint_unavailable: "Собеседник не в сети. Офлайн-доставка станет доступной после успешного обмена ключами на текущей версии.",
   chat_placeholder: "Введите сообщение...",
-  chat_placeholder_offline_unavailable: "Для этого чата офлайн-доставка пока недоступна",
 
   // -- Files --
   files_title: "Передачи",
@@ -83,9 +79,8 @@ const ru: TranslationKeys = {
   files_sending: "Отправка",
   files_receiving: "Получение",
   files_complete: " — Завершено",
-  files_drop_desktop: "Перетащите файлы сюда или нажмите для выбора",
-  files_drop_mobile: "Нажмите для выбора файла",
   files_choose: "Выбрать файл",
+  files_accept: "Принять",
 
   // -- Settings --
   settings_title: "Настройки",

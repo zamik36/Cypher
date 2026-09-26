@@ -1,142 +1,130 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use cypher_core::{Command, MediaKind};
+use cypher_types::FileId;
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{AppState, current_api};
+use super::chat::parse_peer;
+use crate::session::{AppState, CmdResult, err};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize)]
 pub struct TransferInfo {
-    pub file_id: String,
-    pub file_name: String,
-    pub total_size: u64,
-    pub progress: f64,
-    pub direction: String, // "send" or "receive"
-}
-
-/// Offer a file to the currently connected peer.
-///
-/// Progress is reported via `cypher://file_progress` and `cypher://file_complete`
-/// Tauri events.  Returns basic metadata so the UI can show the transfer
-/// immediately at 0 % before the first progress event arrives.
-#[tauri::command]
-pub async fn send_file(
-    state: tauri::State<'_, AppState>,
-    path: String,
-) -> Result<TransferInfo, String> {
-    let peer_id = state
-        .peers
-        .lock()
-        .await
-        .iter()
-        .next()
-        .cloned()
-        .ok_or_else(|| "no peer connected".to_string())?;
-
-    let api = current_api(&state).await;
-    let meta = api
-        .send_file(&peer_id, Path::new(&path))
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(TransferInfo {
-        file_id: bytes_to_hex(&meta.file_id.to_vec()),
-        file_name: meta.name,
-        total_size: meta.size as u64,
-        progress: 0.0,
-        direction: "send".to_string(),
-    })
-}
-
-/// Accept an incoming file offer (identified by its hex file_id).
-///
-/// `dest_path` is the local filesystem path where the file will be assembled.
-/// After this call chunks arrive and progress is reported via Tauri events.
-#[tauri::command]
-pub async fn accept_file(
-    state: tauri::State<'_, AppState>,
     file_id: String,
-    dest_path: String,
-) -> Result<(), String> {
-    let id_bytes = hex_decode(&file_id).map_err(|e| e.to_string())?;
-    let api = current_api(&state).await;
-    api.accept_file(&id_bytes, Path::new(&dest_path))
-        .await
-        .map_err(|e| e.to_string())
+    msg_id: String,
+    file_name: String,
+    total_size: u64,
+    progress: f64,
+    direction: &'static str,
+    status: &'static str,
 }
 
-/// Open a native file dialog and send the selected file(s).
+/// The backend owns path selection: the webview can never make the client
+/// read an arbitrary file.
 #[tauri::command]
 pub async fn browse_and_send(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<TransferInfo>, String> {
-    let files = app
-        .dialog()
-        .file()
-        .set_title("Select files to send")
-        .blocking_pick_files();
-
-    let paths = match files {
-        Some(paths) => paths,
-        None => return Ok(Vec::new()),
-    };
-
-    let peer_id = state
-        .peers
-        .lock()
-        .await
-        .iter()
-        .next()
-        .cloned()
-        .ok_or_else(|| "no peer connected".to_string())?;
-
-    let api = current_api(&state).await;
-    let mut result = Vec::new();
-    for path_buf in paths {
-        let path_str = path_buf.to_string();
-        let meta = api
-            .send_file(&peer_id, Path::new(&path_str))
+    app: AppHandle,
+    state: State<'_, AppState>,
+    peer_id: String,
+) -> CmdResult<Vec<TransferInfo>> {
+    let peer = parse_peer(&peer_id)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_files(move |files| {
+        let _ = tx.send(files.unwrap_or_default());
+    });
+    let picked = rx.await.map_err(err)?;
+    let client = state.client().await?;
+    let mut out = Vec::with_capacity(picked.len());
+    for file in picked {
+        let path = file.into_path().map_err(err)?;
+        let size = tokio::fs::metadata(&path).await.map_err(err)?.len();
+        let (msg_id, file_id) = client
+            .send_file(peer, &path, "application/octet-stream", MediaKind::File)
             .await
-            .map_err(|e| e.to_string())?;
-
-        result.push(TransferInfo {
-            file_id: bytes_to_hex(&meta.file_id.to_vec()),
-            file_name: meta.name,
-            total_size: meta.size as u64,
+            .map_err(err)?;
+        out.push(TransferInfo {
+            file_id: file_id.to_hex(),
+            msg_id: msg_id.to_hex(),
+            file_name: display_name(&path),
+            total_size: size,
             progress: 0.0,
-            direction: "send".to_string(),
+            direction: "send",
+            status: "active",
         });
     }
-
-    Ok(result)
+    Ok(out)
 }
 
-/// Returns an empty list — transfer state is tracked via Tauri events.
+/// Saves into the user's downloads folder under the (already sanitized)
+/// offered name, never overwriting an existing file.
 #[tauri::command]
-pub async fn get_transfers() -> Result<Vec<TransferInfo>, String> {
-    Ok(Vec::new())
+pub async fn accept_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+) -> CmdResult<()> {
+    let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
+    let name = state
+        .offers
+        .lock()
+        .map_err(err)?
+        .remove(&id)
+        .ok_or("unknown offer")?;
+    let dir = app.path().download_dir().map_err(err)?;
+    let dest = unique_path(&dir, &name);
+    state
+        .client()
+        .await?
+        .accept_file(id, dest)
+        .await
+        .map_err(err)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn bytes_to_hex(b: &[u8]) -> String {
-    b.iter().map(|byte| format!("{byte:02x}")).collect()
+#[tauri::command]
+pub async fn cancel_transfer(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
+    let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
+    state
+        .client()
+        .await?
+        .command(Command::CancelTransfer { file_id: id })
+        .await
+        .map_err(err)
 }
 
-fn hex_decode(hex: &str) -> cypher_common::Result<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(cypher_common::Error::Protocol(
-            "odd-length hex string".into(),
-        ));
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|_| cypher_common::Error::Protocol(format!("invalid hex at {i}")))
-        })
-        .collect()
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    (1..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .unwrap_or(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_path;
+
+    #[test]
+    fn never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("cypher-unique-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        std::fs::write(dir.join("a (1).txt"), b"x").unwrap();
+        assert_eq!(unique_path(&dir, "a.txt"), dir.join("a (2).txt"));
+        assert_eq!(unique_path(&dir, "b.txt"), dir.join("b.txt"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

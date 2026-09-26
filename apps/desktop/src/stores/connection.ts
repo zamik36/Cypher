@@ -7,7 +7,6 @@ export interface PeerInfo {
   /** Short display name derived from peerId */
   displayName: string;
   online: boolean;
-  inboxId?: string | null;
 }
 
 interface ConnectionState {
@@ -72,7 +71,6 @@ export function addPeer(peer: PeerInfo) {
         ...updated[idx],
         online: peer.online,
         displayName: peer.displayName,
-        inboxId: peer.inboxId ?? updated[idx].inboxId ?? null,
       };
       return updated;
     }
@@ -90,21 +88,8 @@ export function setPeerOnline(peerId: string, online: boolean) {
   );
 }
 
-export function setPeerInboxId(peerId: string, inboxId: string | null) {
-  setConnection("peers", (prev) =>
-    prev.map((p) => p.peerId === peerId ? { ...p, inboxId } : p),
-  );
-}
-
 export function markAllPeersOffline() {
   setConnection("peers", (prev) => prev.map((p) => ({ ...p, online: false })));
-}
-
-export function removePeer(peerId: string) {
-  setConnection("peers", (prev) => prev.filter((p) => p.peerId !== peerId));
-  if (connection.activePeerId === peerId) {
-    setConnection("activePeerId", connection.peers[0]?.peerId ?? null);
-  }
 }
 
 export function setActivePeer(peerId: string) {
@@ -121,10 +106,6 @@ export function setGatewayAddr(addr: string): string {
 /** Short name from hex peer id (first 6 chars) */
 export function shortName(peerId: string): string {
   return peerId.slice(0, 6);
-}
-
-export function resetRoom() {
-  setConnection({ peers: [], activePeerId: null });
 }
 
 export { connection, setConnection };

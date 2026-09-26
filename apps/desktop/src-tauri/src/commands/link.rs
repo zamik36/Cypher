@@ -1,45 +1,44 @@
-use serde::{Deserialize, Serialize};
+use cypher_core::{Command, Event};
+use serde::Serialize;
+use tauri::State;
 
-use crate::{AppState, current_api};
+use crate::session::{AppState, CmdResult, await_event, err};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct LinkInfo {
-    pub link_id: String,
-}
-
-/// Ask the signaling service to create a new share link.
-#[tauri::command]
-pub async fn create_link(state: tauri::State<'_, AppState>) -> Result<LinkInfo, String> {
-    let api = current_api(&state).await;
-    let link_id = api.create_link().await.map_err(|e| e.to_string())?;
-    Ok(LinkInfo { link_id })
-}
-
-/// Join an existing share link: resolves the remote peer, initiates E2EE, and
-/// stores the peer as the current conversation partner.
-#[tauri::command]
-pub async fn join_link(
-    state: tauri::State<'_, AppState>,
     link_id: String,
-) -> Result<String, String> {
-    let api = current_api(&state).await;
-    let peer_id = api.join_link(&link_id).await.map_err(|e| e.to_string())?;
+}
 
-    // Initiate the X3DH session as the joiner (we initiated the connection).
-    api.initiate_session(&peer_id)
+#[tauri::command]
+pub async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInfo> {
+    let (client, mut events) = state.client_and_events().await?;
+    client.command(Command::CreateLink).await.map_err(err)?;
+    await_event(&mut events, |e| match e {
+        Event::LinkCreated { link } => Some(Ok(LinkInfo {
+            link_id: link.clone(),
+        })),
+        Event::Warning { reason } => Some(Err(format!("{reason:?}"))),
+        _ => None,
+    })
+    .await
+}
+
+/// Resolves to the joined peer id once the session is established.
+#[tauri::command]
+pub async fn join_link(state: State<'_, AppState>, link_id: String) -> CmdResult<String> {
+    let (client, mut events) = state.client_and_events().await?;
+    let link = link_id.trim().to_owned();
+    client
+        .command(Command::JoinLink { link: link.clone() })
         .await
-        .map_err(|e| e.to_string())?;
-
-    // Add peer to the known peers set (O(1) dedup).
-    {
-        let mut set = state.peers.lock().await;
-        set.insert(peer_id);
-    }
-
-    let hex: String = peer_id
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    Ok(hex)
+        .map_err(err)?;
+    await_event(&mut events, |e| match e {
+        Event::PeerAdded {
+            peer,
+            initiated_by_us: true,
+        } => Some(Ok(peer.to_hex())),
+        Event::JoinFailed { link: l, reason } if *l == link => Some(Err(format!("{reason:?}"))),
+        _ => None,
+    })
+    .await
 }

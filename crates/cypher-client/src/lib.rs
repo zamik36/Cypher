@@ -250,6 +250,27 @@ impl Client {
         Ok(out)
     }
 
+    /// Peers with an established session.
+    pub async fn contacts(&self) -> Result<Vec<PeerId>, ClientError> {
+        Ok(self
+            .store
+            .scan(Table::Peers.name())
+            .await?
+            .into_iter()
+            .filter_map(|(k, _)| PeerId::from_bytes(&k))
+            .collect())
+    }
+
+    /// Deletes every stored message; sessions and contacts are kept.
+    pub async fn clear_history(&self) -> Result<(), ClientError> {
+        self.store
+            .apply(vec![
+                store::Op::Clear(Table::Messages.name()),
+                store::Op::Clear(Table::MessageStatus.name()),
+            ])
+            .await
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.tx.send(Request::Shutdown).await;
     }

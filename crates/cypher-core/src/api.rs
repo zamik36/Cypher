@@ -137,6 +137,10 @@ pub enum Event {
     Connected,
     Disconnected,
     Superseded,
+    /// The anonymous relay channel went up or down.
+    Onion {
+        up: bool,
+    },
     Bootstrap {
         relay_addr: String,
         onion_key: [u8; 32],

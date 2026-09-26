@@ -1,29 +1,35 @@
-use cypher_client_core::onion::config::{AnonymousTransportConfig, TorSettings};
-use cypher_client_core::onion::cover::PowerMode;
+use cypher_core::Command;
+use tauri::{AppHandle, State};
 
-use crate::{AppState, current_api};
+use crate::session::{AppState, CmdResult, err};
+
+/// Starts (or restarts) the client against `addr` and returns our peer id.
+#[tauri::command]
+pub async fn connect_to_gateway(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    addr: String,
+    require_onion: bool,
+) -> CmdResult<String> {
+    let addr = addr.trim();
+    cypher_transport::split_host_port(addr).map_err(err)?;
+    state.connect(&app, addr.to_owned(), require_onion).await
+}
 
 #[tauri::command]
 pub async fn apply_anonymous_settings(
-    state: tauri::State<'_, AppState>,
-    enabled: bool,
-    bridge_lines: Vec<String>,
-) -> Result<(), String> {
-    let api = current_api(&state).await;
-    let config = AnonymousTransportConfig {
-        power_mode: if enabled {
-            PowerMode::Desktop
-        } else {
-            PowerMode::BatterySaver
-        },
-        target_count: 3,
-        tor: TorSettings {
-            enabled,
-            bridge_lines,
-        },
-    };
-
-    api.set_anonymous_transport_config(config)
+    state: State<'_, AppState>,
+    require_onion: bool,
+) -> CmdResult<()> {
+    state
+        .client()
+        .await?
+        .command(Command::SetAnonymity { require_onion })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_nickname(state: State<'_, AppState>) -> CmdResult<Option<String>> {
+    Ok(state.nickname().await)
 }

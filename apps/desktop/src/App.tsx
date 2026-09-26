@@ -9,14 +9,14 @@ import StatusBar from "./components/StatusBar";
 import ToastContainer from "./components/ToastContainer";
 import IdentityView from "./components/IdentityView";
 import {
-  onConnected, onDisconnected, onPeerConnected,
-  onMessage, onFileOffered, onFileProgress, onFileComplete, onError, onAnonymityLevel,
+  onConnected, onDisconnected, onPeerConnected, onMessage, onMessageStatus,
+  onFileOffered, onFileProgress, onFileComplete, onFileFailed, onError, onAnonymityLevel,
   api,
 } from "./api/tauri";
 import {
-  connection, setConnection, addPeer, shortName, setPeerInboxId, markAllPeersOffline,
+  connection, setConnection, addPeer, shortName, setPeerOnline, markAllPeersOffline,
 } from "./stores/connection";
-import { addMessage } from "./stores/chat";
+import { addMessage, peerOf, setMessageStatus } from "./stores/chat";
 import { upsertTransfer } from "./stores/transfers";
 import { addToast } from "./stores/toasts";
 import { anonymousSettings, setAnonymityStatus } from "./stores/anonymity";
@@ -31,184 +31,134 @@ export default function App() {
   const [nickname, setNickname] = createSignal<string | null>(null);
   const [unlocked, setUnlocked] = createSignal(false);
 
-  async function handleIdentityUnlocked(peerId: string, nick: string) {
+  function handleIdentityUnlocked(peerId: string, nick: string) {
     setNickname(nick);
     setConnection({ peerId });
+    setUnlocked(true);
+    void startApp();
+  }
 
-    // Restore saved conversations from SQLite.
+  function applyTheme(next: "dark" | "light") {
+    setTheme(next);
+    document.documentElement.setAttribute("data-theme", next);
+  }
+
+  function navigateTo(p: Page) {
+    if (p === "chat") setUnread(0);
+    setPage(p);
+  }
+
+  let cleanupFns: Array<() => void> = [];
+  onCleanup(() => cleanupFns.forEach((fn) => fn()));
+
+  async function loadConversations() {
     try {
-      const conversations = await api.getConversations();
-      for (const conv of conversations) {
+      for (const conv of await api.getConversations()) {
         addPeer({
           peerId: conv.peer_id,
           roomCode: "saved",
           role: "guest",
           displayName: conv.display_name || shortName(conv.peer_id),
           online: false,
-          inboxId: conv.inbox_id,
         });
       }
     } catch (e) {
-      console.warn("Failed to load saved conversations:", e);
+      console.warn("Failed to load conversations:", e);
     }
-
-    setUnlocked(true);
-    startApp();
   }
-
-  // Track pending room info so we can associate the next PeerConnected with a room
-  let pendingRoom: { code: string; role: "host" | "guest" } | null = null;
-
-  /** Called from HomeView when a room is created or joined */
-  function setPendingRoom(code: string, role: "host" | "guest") {
-    pendingRoom = { code, role };
-  }
-
-  function toggleTheme() {
-    const next = theme() === "dark" ? "light" : "dark";
-    setTheme(next);
-    document.documentElement.setAttribute("data-theme", next);
-  }
-
-  // Reset unread when entering chat
-  function navigateTo(p: Page) {
-    if (p === "chat") setUnread(0);
-    setPage(p);
-  }
-
-  // Store unlisten functions for cleanup
-  let cleanupFns: Array<() => void> = [];
-  onCleanup(() => cleanupFns.forEach((fn) => fn()));
 
   async function startApp() {
-    // Register event listeners BEFORE connecting, so we don't miss the Connected event
-    const unlisten = await Promise.all([
-      onConnected((peerId) => {
-        setConnection({ connected: true, peerId, status: "connected", gatewayConnecting: false, gatewayError: null });
+    cleanupFns = await Promise.all([
+      onConnected(() => {
+        setConnection({ connected: true, status: "connected", gatewayConnecting: false, gatewayError: null });
       }),
       onDisconnected(() => {
-        setConnection({ connected: false, peerId: null, status: "disconnected" });
+        setConnection({ connected: false, status: "disconnected" });
         markAllPeersOffline();
-        setAnonymityStatus({
-          supported: true,
-          label: "Disconnected",
-          description: "Reconnect to resume anonymous inbox routing.",
-        });
       }),
-      onPeerConnected((remotePeerId) => {
-        const room = pendingRoom || { code: "direct", role: "guest" as const };
-        addPeer({
-          peerId: remotePeerId,
-          roomCode: room.code,
-          role: room.role,
-          displayName: shortName(remotePeerId),
-          online: true,
-        });
-        void api.getConversation(remotePeerId)
-          .then((conv) => setPeerInboxId(remotePeerId, conv?.inbox_id ?? null))
-          .catch((e) => console.warn("Failed to refresh conversation metadata:", e));
-        pendingRoom = null;
+      onPeerConnected((peerId) => {
+        addPeer({ peerId, roomCode: "direct", role: "guest", displayName: shortName(peerId), online: true });
         setConnection({ status: "peer connected" });
         addToast(t().toast_peer_connected, "success");
         navigateTo("chat");
       }),
       onMessage((msg) => {
-        const peerId = msg.from;
-        addMessage(peerId, msg);
-        void notifyMessage(shortName(peerId), msg.text);
-        if (page() !== "chat") {
-          setUnread((n) => n + 1);
+        addPeer({ peerId: msg.from, roomCode: "direct", role: "guest", displayName: shortName(msg.from), online: true });
+        addMessage(msg.from, msg);
+        void notifyMessage(shortName(msg.from), msg.text);
+        if (page() !== "chat") setUnread((n) => n + 1);
+      }),
+      onMessageStatus(({ msg_id, status }) => {
+        setMessageStatus(msg_id, status);
+        const peer = peerOf(msg_id);
+        if (peer && (status === "sent" || status === "queued")) {
+          setPeerOnline(peer, status === "sent");
         }
       }),
       onFileOffered((info) => {
-        api.acceptFile(info.file_id, info.name).catch((e) => console.error("accept_file failed:", e));
         upsertTransfer({
           file_id: info.file_id,
           file_name: info.name,
           total_size: info.size,
           progress: 0,
           direction: "receive",
-          status: "active",
+          status: "offered",
         });
         addToast(t().toast_receiving(info.name), "info");
-        navigateTo("files");
       }),
-      onFileProgress((info) => {
-        upsertTransfer({
-          file_id: info.file_id,
-          progress: info.progress,
-        });
-      }),
+      onFileProgress((info) => upsertTransfer({ file_id: info.file_id, progress: info.progress })),
       onFileComplete((fileId) => {
-        upsertTransfer({
-          file_id: fileId,
-          progress: 1.0,
-          status: "complete",
-        });
+        upsertTransfer({ file_id: fileId, progress: 1, status: "complete" });
         addToast(t().toast_transfer_complete, "success");
       }),
-      onError((msg) => {
-        addToast(msg, "error");
+      onFileFailed(({ file_id, reason }) => {
+        upsertTransfer({ file_id, status: "error" });
+        addToast(reason, "error");
       }),
+      onError((msg) => addToast(msg, "error")),
       onAnonymityLevel((payload) => {
-        setAnonymityStatus({
-          supported: true,
-          label: payload.label,
-          description: payload.description,
-        });
+        setAnonymityStatus({ supported: true, label: payload.label, description: payload.description });
       }),
     ]);
 
-    cleanupFns = unlisten;
-
-    // Auto-connect to gateway.
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
-      await api.applyAnonymousSettings(
-        anonymousSettings.enabled,
-        anonymousSettings.bridgeLines,
-      );
-      await api.connectToGateway(connection.gatewayAddr);
-      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
+      await api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled);
+      await loadConversations();
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
-      setAnonymityStatus({
-        supported: true,
-        label: "Unavailable",
-        description: "Anonymous inbox routing could not be initialized.",
-      });
     }
   }
 
   return (
     <Show when={unlocked()} fallback={<IdentityView onUnlocked={handleIdentityUnlocked} />}>
-    <div class="app">
-      <Sidebar
-        page={page()}
-        setPage={navigateTo}
-        theme={theme()}
-        toggleTheme={toggleTheme}
-        unread={unread()}
-        drawerOpen={drawerOpen()}
-        setDrawerOpen={setDrawerOpen}
-        nickname={nickname()}
-      />
+      <div class="app">
+        <Sidebar
+          page={page()}
+          setPage={navigateTo}
+          theme={theme()}
+          toggleTheme={() => applyTheme(theme() === "dark" ? "light" : "dark")}
+          unread={unread()}
+          drawerOpen={drawerOpen()}
+          setDrawerOpen={setDrawerOpen}
+          nickname={nickname()}
+        />
 
-      <main class="content">
-        <Show when={page() === "home"}>
-          <HomeView onNavigate={navigateTo} onPendingRoom={setPendingRoom} />
-        </Show>
-        <Show when={page() === "chat"}><ChatPane onNavigate={navigateTo} /></Show>
-        <Show when={page() === "files"}><FilesView /></Show>
-        <Show when={page() === "settings"}>
-          <SettingsView theme={theme()} setTheme={(t) => { setTheme(t); document.documentElement.setAttribute("data-theme", t); }} nickname={nickname()} />
-        </Show>
-      </main>
+        <main class="content">
+          <Show when={page() === "home"}>
+            <HomeView onNavigate={navigateTo} />
+          </Show>
+          <Show when={page() === "chat"}><ChatPane onNavigate={navigateTo} /></Show>
+          <Show when={page() === "files"}><FilesView /></Show>
+          <Show when={page() === "settings"}>
+            <SettingsView theme={theme()} setTheme={applyTheme} nickname={nickname()} />
+          </Show>
+        </main>
 
-      <StatusBar />
-      <BottomNav page={page()} setPage={navigateTo} unread={unread()} />
-      <ToastContainer />
-    </div>
+        <StatusBar />
+        <BottomNav page={page()} setPage={navigateTo} unread={unread()} />
+        <ToastContainer />
+      </div>
     </Show>
   );
 }

@@ -1,19 +1,34 @@
 import { For, Show } from "solid-js";
-import FileDropZone from "./FileDropZone";
-import { transfers } from "../stores/transfers";
+import { api } from "../api/tauri";
+import { transfers, upsertTransfer } from "../stores/transfers";
+import { addToast } from "../stores/toasts";
 import { FilesIcon } from "./Icons";
 import { t } from "../i18n";
 
 export default function FilesView() {
+  async function accept(fileId: string) {
+    try {
+      await api.acceptFile(fileId);
+      upsertTransfer({ file_id: fileId, status: "active" });
+    } catch (e) {
+      addToast(String(e), "error");
+    }
+  }
+
+  async function cancel(fileId: string) {
+    try {
+      await api.cancelTransfer(fileId);
+    } catch (e) {
+      addToast(String(e), "error");
+    }
+  }
+
   return (
     <div class="files-view">
-      <FileDropZone />
-
       <div class="transfer-list">
         <Show when={transfers.length > 0}>
           <h3>{t().files_title}</h3>
         </Show>
-
         <Show when={transfers.length === 0}>
           <div class="empty-state">
             <FilesIcon width="48" height="48" />
@@ -23,28 +38,28 @@ export default function FilesView() {
 
         <For each={transfers}>
           {(tr) => {
-            const pct = Math.round(tr.progress * 100);
+            const pct = () => Math.max(0, Math.min(100, Math.round(tr.progress * 100)));
             const isSend = tr.direction === "send";
-            const isComplete = tr.status === "complete" || tr.progress >= 1;
+            const done = () => tr.status === "complete";
             return (
               <div class="transfer-item">
-                <div class={`transfer-icon ${isSend ? "send" : "receive"}`}>
-                  {isSend ? "\u2191" : "\u2193"}
-                </div>
+                <div class={`transfer-icon ${isSend ? "send" : "receive"}`}>{isSend ? "↑" : "↓"}</div>
                 <div class="transfer-info">
                   <div class="transfer-name">{tr.file_name}</div>
                   <div class="transfer-meta">
                     {isSend ? t().files_sending : t().files_receiving}
-                    {isComplete ? t().files_complete : `... ${pct}%`}
+                    {done() ? t().files_complete : tr.status === "error" ? " ✕" : ` ${pct()}%`}
                   </div>
                 </div>
                 <div class="progress-bar">
-                  <div
-                    class={`progress-fill ${isComplete ? "complete" : ""}`}
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div class={`progress-fill ${done() ? "complete" : ""}`} style={{ width: `${pct()}%` }} />
                 </div>
-                <span class="transfer-percent">{pct}%</span>
+                <Show when={tr.status === "offered"}>
+                  <button class="btn-primary btn-sm" onClick={() => accept(tr.file_id)}>{t().files_accept}</button>
+                </Show>
+                <Show when={tr.status === "offered" || tr.status === "active"}>
+                  <button class="btn-secondary btn-sm" onClick={() => cancel(tr.file_id)}>{t().settings_cancel}</button>
+                </Show>
               </div>
             );
           }}

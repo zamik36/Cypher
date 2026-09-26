@@ -4,11 +4,11 @@ import { connection, setConnection, addPeer, shortName, setGatewayAddr } from ".
 import Spinner from "./Spinner";
 import { UsersIcon, LinkIcon, CopyIcon, CheckIcon } from "./Icons";
 import type { Page } from "./Sidebar";
+import { anonymousSettings } from "../stores/anonymity";
 import { t } from "../i18n";
 
 interface HomeViewProps {
   onNavigate: (p: Page) => void;
-  onPendingRoom: (code: string, role: "host" | "guest") => void;
 }
 
 export default function HomeView(props: HomeViewProps) {
@@ -26,17 +26,13 @@ export default function HomeView(props: HomeViewProps) {
     setBusy(true);
     setError(null);
     try {
-      console.log("[P2P] creating link...");
       const result = await api.createLink();
-      console.log("[P2P] link created:", result);
       setPendingCode(result.link_id);
-      props.onPendingRoom(result.link_id, "host");
       try {
         const qr = await api.generateQr(result.link_id);
         setQrDataUri(qr);
       } catch { /* QR is optional */ }
     } catch (e) {
-      console.error("[P2P] createLink error:", e);
       setError(String(e));
     } finally {
       setBusy(false);
@@ -50,10 +46,7 @@ export default function HomeView(props: HomeViewProps) {
     setBusy(true);
     setError(null);
     try {
-      console.log("[P2P] joining link:", code);
-      props.onPendingRoom(code, "guest");
       const remotePeerId = await api.joinLink(code);
-      console.log("[P2P] joined, remotePeer:", remotePeerId);
       addPeer({
         peerId: remotePeerId,
         roomCode: code,
@@ -65,7 +58,6 @@ export default function HomeView(props: HomeViewProps) {
       setJoinCode("");
       props.onNavigate("chat");
     } catch (e) {
-      console.error("[P2P] joinLink error:", e);
       setError(String(e));
     } finally {
       setBusy(false);
@@ -77,7 +69,7 @@ export default function HomeView(props: HomeViewProps) {
     setAdvancedAddr(normalizedAddr);
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
-      await api.connectToGateway(normalizedAddr);
+      await api.connectToGateway(normalizedAddr, anonymousSettings.enabled);
       setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });

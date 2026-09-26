@@ -1,8 +1,10 @@
 import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
-import { api } from "../api/tauri";
+import { api, type ChatMessage, type MessageStatus, type UiMessage } from "../api/tauri";
 import { chatsByPeer, addMessage, getMessages, setMessages } from "../stores/chat";
-import { connection, setActivePeer, setPeerInboxId, shortName } from "../stores/connection";
-import { SendIcon, ChatIcon } from "./Icons";
+import { connection, setActivePeer, shortName } from "../stores/connection";
+import { upsertTransfer } from "../stores/transfers";
+import { addToast } from "../stores/toasts";
+import { SendIcon, ChatIcon, UploadIcon } from "./Icons";
 import type { Page } from "./Sidebar";
 import { t } from "../i18n";
 
@@ -10,104 +12,121 @@ interface ChatPaneProps {
   onNavigate: (p: Page) => void;
 }
 
+const HISTORY_PAGE = 200;
+
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+const STATUS_MARK: Record<MessageStatus, string> = {
+  pending: "⏲",
+  sent: "✓",
+  queued: "✓",
+  delivered: "✓✓",
+  read: "✓✓",
+  failed: "!",
+};
+
+function fromHistory(peer: string, m: UiMessage): ChatMessage {
+  return {
+    msg_id: m.msg_id,
+    from: m.outgoing ? "me" : peer,
+    text: m.file ? `📎 ${m.text}` : m.text,
+    timestamp: m.timestamp,
+    status: m.status,
+    file: m.file,
+  };
+}
+
 export default function ChatPane(props: ChatPaneProps) {
   const [draft, setDraft] = createSignal("");
+  const [loadingHistory, setLoadingHistory] = createSignal(false);
   let messagesRef: HTMLDivElement | undefined;
   let chatAreaRef: HTMLDivElement | undefined;
 
-  const [loadingHistory, setLoadingHistory] = createSignal(false);
   const activePeer = () => connection.activePeerId;
-  const activeMessages = () => activePeer() ? getMessages(activePeer()!) : [];
+  const activeMessages = () => (activePeer() ? getMessages(activePeer()!) : []);
   const activePeerInfo = () => connection.peers.find((p) => p.peerId === activePeer());
-  const activeDelivery = () => {
-    const peer = activePeerInfo();
-    if (!peer) return "offline_unavailable" as const;
-    if (peer.online) return "online" as const;
-    return peer.inboxId ? "offline_available" as const : "offline_unavailable" as const;
-  };
 
-  // Load message history from SQLite when selecting a peer with no in-memory messages.
   let loadingForPeer: string | null = null;
   createEffect(() => {
     const peer = activePeer();
-    if (!peer) return;
-    if (getMessages(peer).length > 0) return;
+    if (!peer || getMessages(peer).length > 0) return;
     loadingForPeer = peer;
     setLoadingHistory(true);
-    api.getHistory(peer, 200).then((history) => {
-      if (loadingForPeer !== peer) return;
-      if (history.length > 0) {
-        const msgs = history.reverse().map((m) => ({
-          from: m.direction === "sent" ? "me" : peer,
-          text: m.text,
-          timestamp: m.timestamp,
-        }));
-        setMessages(peer, msgs);
-      }
-    }).catch((e) => console.warn("Failed to load history:", e))
+    api.getHistory(peer, HISTORY_PAGE)
+      .then((history) => {
+        if (loadingForPeer === peer && history.length > 0) {
+          setMessages(peer, history.reverse().map((m) => fromHistory(peer, m)));
+        }
+      })
+      .catch((e) => console.warn("Failed to load history:", e))
       .finally(() => { if (loadingForPeer === peer) setLoadingHistory(false); });
   });
 
   createEffect(() => {
-    const peer = activePeerInfo();
-    if (!peer || peer.inboxId || !peer.peerId) return;
-
-    api.getConversation(peer.peerId)
-      .then((conversation) => {
-        if (conversation?.inbox_id) {
-          setPeerInboxId(peer.peerId, conversation.inbox_id);
-        }
-      })
-      .catch((e) => console.warn("Failed to load conversation metadata:", e));
+    const peer = activePeer();
+    if (!peer) return;
+    const unread = getMessages(peer)
+      .filter((m) => m.from !== "me" && m.msg_id && m.status !== "read")
+      .map((m) => m.msg_id!);
+    if (unread.length > 0) {
+      void api.markRead(peer, unread).catch(() => {});
+    }
   });
 
-  // Auto-scroll to bottom when new messages arrive
   createEffect(() => {
     const peer = activePeer();
-    if (peer) void (chatsByPeer[peer]?.length);
-    if (messagesRef) {
-      setTimeout(() => messagesRef!.scrollTop = messagesRef!.scrollHeight, 10);
-    }
+    if (peer) void chatsByPeer[peer]?.length;
+    queueMicrotask(() => { if (messagesRef) messagesRef.scrollTop = messagesRef.scrollHeight; });
   });
 
-  // Handle virtual keyboard resize (keeps input visible above keyboard)
   onMount(() => {
-    if (window.visualViewport) {
-      const vv = window.visualViewport;
-      const onResize = () => {
-        if (chatAreaRef) {
-          const offset = window.innerHeight - vv.height;
-          chatAreaRef.style.paddingBottom = offset > 0 ? `${offset}px` : "";
-        }
-      };
-      vv.addEventListener("resize", onResize);
-      onCleanup(() => vv.removeEventListener("resize", onResize));
-    }
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onResize = () => {
+      if (!chatAreaRef) return;
+      const offset = window.innerHeight - vv.height;
+      chatAreaRef.style.paddingBottom = offset > 0 ? `${offset}px` : "";
+    };
+    vv.addEventListener("resize", onResize);
+    onCleanup(() => vv.removeEventListener("resize", onResize));
   });
 
   async function send() {
     const text = draft().trim();
     const peer = activePeer();
-    if (!text || !peer || activeDelivery() === "offline_unavailable") return;
+    if (!text || !peer) return;
     try {
-      await api.sendMessage(peer, text);
-      addMessage(peer, { from: "me", text, timestamp: Date.now() });
+      const msgId = await api.sendMessage(peer, text);
+      addMessage(peer, { msg_id: msgId, from: "me", text, timestamp: Date.now(), status: "pending" });
       setDraft("");
     } catch (e) {
-      console.error("send_message failed:", e);
+      addToast(String(e), "error");
     }
   }
 
-  // No peers at all
-  const noPeers = () => connection.peers.length === 0;
+  async function attach() {
+    const peer = activePeer();
+    if (!peer) return;
+    try {
+      for (const tr of await api.browseAndSend(peer)) {
+        upsertTransfer(tr);
+        addMessage(peer, {
+          from: "me",
+          text: `📎 ${tr.file_name}`,
+          timestamp: Date.now(),
+          status: "pending",
+        });
+      }
+    } catch (e) {
+      addToast(String(e), "error");
+    }
+  }
 
   return (
     <div class="chat-pane">
-      <Show when={noPeers()}>
+      <Show when={connection.peers.length === 0}>
         <div class="empty-state">
           <ChatIcon width="48" height="48" />
           <p>{t().chat_empty}</p>
@@ -115,21 +134,19 @@ export default function ChatPane(props: ChatPaneProps) {
         </div>
       </Show>
 
-      <Show when={!noPeers()}>
+      <Show when={connection.peers.length > 0}>
         <div class="chat-layout">
           <div class="peer-list">
             <div class="peer-list-header">{t().chat_header}</div>
             <For each={connection.peers}>
               {(peer) => {
-                const isActive = () => activePeer() === peer.peerId;
-                const peerMessages = () => chatsByPeer[peer.peerId] || [];
                 const lastMsg = () => {
-                  const msgs = peerMessages();
-                  return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+                  const msgs = chatsByPeer[peer.peerId] || [];
+                  return msgs[msgs.length - 1];
                 };
                 return (
                   <button
-                    class={`peer-item ${isActive() ? "active" : ""}`}
+                    class={`peer-item ${activePeer() === peer.peerId ? "active" : ""}`}
                     onClick={() => setActivePeer(peer.peerId)}
                   >
                     <div class="peer-avatar">
@@ -138,9 +155,7 @@ export default function ChatPane(props: ChatPaneProps) {
                     </div>
                     <div class="peer-info">
                       <span class="peer-name">{peer.displayName}</span>
-                      <span class="peer-last-msg">
-                        {lastMsg()?.text?.slice(0, 30) || t().chat_no_messages}
-                      </span>
+                      <span class="peer-last-msg">{lastMsg()?.text?.slice(0, 30) || t().chat_no_messages}</span>
                     </div>
                   </button>
                 );
@@ -161,17 +176,11 @@ export default function ChatPane(props: ChatPaneProps) {
                   <span class={`online-dot ${activePeerInfo()?.online ? "online" : "offline"}`} />
                 </div>
                 <span>{shortName(activePeer()!)}</span>
-                <Show when={activePeerInfo() && !activePeerInfo()!.online}>
-                  <span class="offline-badge">{t().chat_offline_badge}</span>
-                </Show>
               </div>
 
               <Show when={loadingHistory()}>
-                <div class="empty-state">
-                  <p>{t().chat_loading}</p>
-                </div>
+                <div class="empty-state"><p>{t().chat_loading}</p></div>
               </Show>
-
               <Show when={!loadingHistory() && activeMessages().length === 0}>
                 <div class="empty-state">
                   <ChatIcon width="48" height="48" />
@@ -190,7 +199,12 @@ export default function ChatPane(props: ChatPaneProps) {
                         </div>
                         <div class="message-content">
                           <div class="bubble">{msg.text}</div>
-                          <span class="message-time">{formatTime(msg.timestamp)}</span>
+                          <span class="message-time">
+                            {formatTime(msg.timestamp)}
+                            <Show when={isMine && msg.status}>
+                              {" "}<span class={`message-status ${msg.status}`}>{STATUS_MARK[msg.status!]}</span>
+                            </Show>
+                          </span>
                         </div>
                       </div>
                     );
@@ -198,29 +212,18 @@ export default function ChatPane(props: ChatPaneProps) {
                 </For>
               </div>
 
-              <Show when={activePeerInfo() && !activePeerInfo()!.online}>
-                <div class="offline-banner">
-                  {activeDelivery() === "offline_available"
-                    ? t().chat_offline_hint_ready
-                    : t().chat_offline_hint_unavailable}
-                </div>
-              </Show>
               <div class="input-row">
+                <button class="btn-icon" onClick={attach} title={t().files_choose}>
+                  <UploadIcon />
+                </button>
                 <input
                   type="text"
                   value={draft()}
                   onInput={(e) => setDraft(e.currentTarget.value)}
                   onKeyDown={(e) => e.key === "Enter" && send()}
-                  placeholder={activeDelivery() === "offline_unavailable"
-                    ? t().chat_placeholder_offline_unavailable
-                    : t().chat_placeholder}
-                  disabled={activeDelivery() === "offline_unavailable"}
+                  placeholder={t().chat_placeholder}
                 />
-                <button
-                  class="btn-icon"
-                  onClick={send}
-                  disabled={!draft().trim() || activeDelivery() === "offline_unavailable"}
-                >
+                <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
                   <SendIcon />
                 </button>
               </div>

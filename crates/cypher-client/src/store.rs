@@ -36,6 +36,7 @@ enum Job {
 pub enum Op {
     Put(&'static str, Vec<u8>, Vec<u8>),
     Delete(&'static str, Vec<u8>),
+    Clear(&'static str),
 }
 
 impl From<StoreOp> for Op {
@@ -169,6 +170,9 @@ fn apply(conn: &mut Connection, ops: &[Op]) -> Result<(), ClientError> {
             Op::Delete(table, k) => {
                 tx.prepare_cached(&format!("DELETE FROM {table} WHERE k = ?1"))?
                     .execute(params![k])?;
+            }
+            Op::Clear(table) => {
+                tx.execute(&format!("DELETE FROM {table}"), [])?;
             }
         }
     }
