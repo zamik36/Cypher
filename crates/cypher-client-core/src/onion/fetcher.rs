@@ -118,10 +118,10 @@ async fn pipeline_chunk(
                 signed.verify(&inbox_verifying_key, &job.inbox_id)?;
 
                 // Send ACK only after we have verified the server signature.
-                if let Some(token) = signed.claim_token.clone() {
-                    if let Err(e) = send_ack(&mut handle, &job.inbox_id, token).await {
-                        warn!("inbox ack failed: {e}");
-                    }
+                if let Some(token) = signed.claim_token.clone()
+                    && let Err(e) = send_ack(&mut handle, &job.inbox_id, token).await
+                {
+                    warn!("inbox ack failed: {e}");
                 }
 
                 if !job.is_dummy {

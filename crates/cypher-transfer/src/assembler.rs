@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use cypher_common::{FileId, FileMeta, Result, CHUNK_SIZE};
+use cypher_common::{CHUNK_SIZE, FileId, FileMeta, Result};
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};

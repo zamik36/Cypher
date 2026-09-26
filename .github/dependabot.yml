@@ -12,7 +12,7 @@ updates:
       - docker
 
   - package-ecosystem: docker
-    directory: /clients/pwa
+    directory: /apps/pwa
     schedule:
       interval: weekly
       day: monday
@@ -34,7 +34,7 @@ updates:
       - rust
 
   - package-ecosystem: npm
-    directory: /clients/pwa
+    directory: /apps/pwa
     schedule:
       interval: weekly
       day: monday

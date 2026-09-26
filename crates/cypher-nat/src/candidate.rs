@@ -65,7 +65,7 @@ mod tests {
         let srflx = Candidate::server_reflexive("1.2.3.4:5678".parse().unwrap());
         let relay = Candidate::relay("5.6.7.8:9012".parse().unwrap());
 
-        let mut candidates = vec![relay.clone(), host.clone(), srflx.clone()];
+        let mut candidates = vec![relay, host, srflx];
         sort_candidates(&mut candidates);
 
         assert_eq!(candidates[0].candidate_type, CandidateType::Host);

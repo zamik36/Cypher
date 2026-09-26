@@ -1,8 +1,9 @@
 [package]
 name = "cypher-transport"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 cypher-common.workspace = true
@@ -20,3 +21,6 @@ futures.workspace = true
 [dev-dependencies]
 cypher-tls.workspace = true
 tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

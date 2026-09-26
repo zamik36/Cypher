@@ -46,7 +46,7 @@ impl LinkId {
     pub fn generate() -> Self {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let bytes: [u8; 16] = rng.gen();
+        let bytes: [u8; 16] = rng.r#gen();
         Self(base32_encode(&bytes))
     }
 
@@ -66,7 +66,7 @@ pub struct FileId(pub [u8; 16]);
 impl FileId {
     pub fn generate() -> Self {
         use rand::Rng;
-        Self(rand::thread_rng().gen())
+        Self(rand::thread_rng().r#gen())
     }
 
     pub fn from_bytes(b: &[u8]) -> Option<Self> {

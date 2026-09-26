@@ -66,7 +66,7 @@ services/
   signaling/           — NATS subscriber, Redis (prekeys/links/ICE), STUN server
   relay/               — TLS TURN-like forwarder, bandwidth limiting
 
-clients/
+apps/
   desktop/             — Tauri 2.0 + SolidJS (TypeScript strict), identity management, encrypted history
   pwa/                 — SolidJS + Vite (TypeScript strict), PWA (installable, offline), identity management, encrypted IndexedDB
 
@@ -116,7 +116,7 @@ Gateway слушает на `:9100` (native TLS) и `:9101` (WebSocket).
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-Caddy автоматически получает TLS-сертификаты через Let's Encrypt. Подробнее — в [DEPLOY.md](DEPLOY.md).
+Caddy автоматически получает TLS-сертификаты через Let's Encrypt. Подробнее — в [docs/deploy.md](docs/deploy.md).
 
 ### Мониторинг
 
@@ -158,13 +158,13 @@ cargo run -p cypher-signaling
 cargo run -p cypher-relay
 
 # Клиент (PWA)
-cd clients/pwa && npm install && npm run dev
+cd apps/pwa && npm install && npm run dev
 
 # Клиент (Desktop)
-cd clients/desktop && npm install && npm run tauri dev
+cd apps/desktop && npm install && npm run tauri dev
 ```
 
-Полный список команд — в [COMMANDS.md](COMMANDS.md).
+Полный список команд — в [docs/commands.md](docs/commands.md).
 
 ## Клиенты
 
@@ -196,10 +196,10 @@ Fuzz targets (5): proto dispatch/decode, crypto aead/ratchet, nat stun — CI п
 
 ## Документация
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — детальное описание архитектуры и реализации
-- [DEPLOY.md](DEPLOY.md) — руководство по развёртыванию
-- [COMMANDS.md](COMMANDS.md) — справочник команд
-- [ROADMAP.md](ROADMAP.md) — план развития
+- [docs/architecture.md](docs/architecture.md) — детальное описание архитектуры и реализации
+- [docs/deploy.md](docs/deploy.md) — руководство по развёртыванию
+- [docs/commands.md](docs/commands.md) — справочник команд
+- [docs/roadmap.md](docs/roadmap.md) — план развития
 
 ## Лицензия
 

@@ -1,5 +1,5 @@
 use cypher_common::{FileMeta, Result};
-use cypher_transfer::{is_compressible, FileAssembler, FileChunker};
+use cypher_transfer::{FileAssembler, FileChunker, is_compressible};
 use std::path::Path;
 use tracing::debug;
 

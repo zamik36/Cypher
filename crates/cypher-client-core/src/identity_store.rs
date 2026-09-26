@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use argon2::Argon2;
 use cypher_common::{Error, Result};
 use cypher_crypto::IdentitySeed;
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use zeroize::Zeroize;
 
 use crate::persistence::encryption;

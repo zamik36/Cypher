@@ -1,8 +1,9 @@
 [package]
 name = "cypher-client-core"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [features]
 default = []
@@ -43,3 +44,6 @@ tor-rtcompat = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

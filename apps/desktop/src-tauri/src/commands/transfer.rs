@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{current_api, AppState};
+use crate::{AppState, current_api};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransferInfo {

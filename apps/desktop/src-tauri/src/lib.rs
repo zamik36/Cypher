@@ -7,7 +7,7 @@ use cypher_client_core::api::{ClientApi, ClientEvent};
 use cypher_common::PeerId;
 use tauri::Emitter;
 use tauri_plugin_notification::NotificationExt;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 /// Shared application state injected into every Tauri command via `State<AppState>`.
 pub struct AppState {

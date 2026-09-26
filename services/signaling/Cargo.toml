@@ -1,8 +1,9 @@
 [package]
 name = "signaling"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 cypher-common.workspace = true
@@ -31,3 +32,6 @@ cypher-crypto.workspace = true
 cypher-nat.workspace = true
 cypher-tls = { workspace = true, features = ["insecure-tls"] }
 tempfile = "3"
+
+[lints]
+workspace = true

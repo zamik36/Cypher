@@ -4,12 +4,12 @@ use serde::Deserialize;
 use tracing::{debug, info};
 
 use cypher_common::LinkId;
-use cypher_proto::{dispatch, Message, Serializable};
+use cypher_proto::{Message, Serializable, dispatch};
 
 use super::{
-    hex_decode_bytes, hex_encode, short_id, GatewayEnvelope, PeerSession, PrekeyBundle,
-    SignalingService, ICE_TTL_SECS, LINKS_CREATED, LINK_TTL_SECS, PEER_SESSIONS, PREKEY_TTL_SECS,
-    SESSION_TTL_SECS,
+    GatewayEnvelope, ICE_TTL_SECS, LINK_TTL_SECS, LINKS_CREATED, PEER_SESSIONS, PREKEY_TTL_SECS,
+    PeerSession, PrekeyBundle, SESSION_TTL_SECS, SignalingService, hex_decode_bytes, hex_encode,
+    short_id,
 };
 
 impl SignalingService {

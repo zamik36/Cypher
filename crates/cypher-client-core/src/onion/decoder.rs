@@ -3,7 +3,7 @@ use cypher_crypto::aead_decrypt;
 use x25519_dalek::PublicKey as X25519PublicKey;
 
 use super::encoder::{
-    response_nonce_material, ONION_PREFIX, SUBTYPE_RELAY_REQUEST, SUBTYPE_RELAY_RESPONSE,
+    ONION_PREFIX, SUBTYPE_RELAY_REQUEST, SUBTYPE_RELAY_RESPONSE, response_nonce_material,
 };
 
 /// Extract the ephemeral public key, circuit_id, and seq_no from a raw onion request.

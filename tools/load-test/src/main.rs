@@ -3,8 +3,8 @@
 //! Opens N concurrent TLS connections, sends SESSION_INIT + heartbeat PINGs,
 //! and reports connection rate, latency percentiles, and error counts.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,8 +14,8 @@ use tokio::sync::Semaphore;
 use tracing::{error, info};
 
 use cypher_proto::Serializable;
-use cypher_transport::frame::FrameFlags;
 use cypher_transport::TransportSession;
+use cypher_transport::frame::FrameFlags;
 
 #[derive(Parser, Debug)]
 #[command(name = "load-test", about = "P2P Gateway load testing tool")]

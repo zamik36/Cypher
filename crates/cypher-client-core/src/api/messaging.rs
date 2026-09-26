@@ -165,10 +165,10 @@ impl ClientApi {
             info!(peer_id = %peer_id, role = "receiver", "mutual key agreement session initialised");
         }
 
-        if let (Some(inbox), Some(store)) = (&peer_inbox_id, &self.message_store) {
-            if let Err(e) = store.save_peer_inbox_id(peer_id, inbox) {
-                warn!(peer_id = %peer_id, error = %e, "failed to persist peer inbox_id");
-            }
+        if let (Some(inbox), Some(store)) = (&peer_inbox_id, &self.message_store)
+            && let Err(e) = store.save_peer_inbox_id(peer_id, inbox)
+        {
+            warn!(peer_id = %peer_id, error = %e, "failed to persist peer inbox_id");
         }
 
         Ok(())
@@ -278,10 +278,10 @@ impl ClientApi {
         {
             warn!(peer_id = %peer_id, error = %e, "failed to persist sent message; message was sent but may not appear in history after restart");
         }
-        if let Some(state) = self.keys.get_ratchet_state(peer_id.as_bytes()) {
-            if let Err(e) = store.save_ratchet_state(peer_id, &state) {
-                warn!(peer_id = %peer_id, error = %e, "failed to persist ratchet state; session may break after restart");
-            }
+        if let Some(state) = self.keys.get_ratchet_state(peer_id.as_bytes())
+            && let Err(e) = store.save_ratchet_state(peer_id, &state)
+        {
+            warn!(peer_id = %peer_id, error = %e, "failed to persist ratchet state; session may break after restart");
         }
     }
 }

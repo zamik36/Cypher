@@ -1,8 +1,9 @@
 [package]
 name = "cypher-crypto"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 cypher-common.workspace = true
@@ -19,3 +20,6 @@ zeroize.workspace = true
 argon2.workspace = true
 bip39.workspace = true
 postcard.workspace = true
+
+[lints]
+workspace = true

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "tor")]
 use arti_client::{
-    config::{BoolOrAuto, BridgeConfigBuilder, TorClientConfigBuilder},
     TorClient, TorClientConfig,
+    config::{BoolOrAuto, BridgeConfigBuilder, TorClientConfigBuilder},
 };
 #[cfg(feature = "tor")]
 use cypher_common::{Error, Result};

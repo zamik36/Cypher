@@ -6,8 +6,8 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use cypher_common::{Error, Result};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 
 /// AES-256-GCM nonce length in bytes.
 pub const NONCE_LEN: usize = 12;

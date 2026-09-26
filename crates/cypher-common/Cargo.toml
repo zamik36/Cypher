@@ -1,8 +1,9 @@
 [package]
 name = "cypher-common"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
@@ -16,3 +17,6 @@ bytes.workspace = true
 rand.workspace = true
 prometheus.workspace = true
 tokio.workspace = true
+
+[lints]
+workspace = true

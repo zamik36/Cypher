@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{current_api, AppState};
+use crate::{AppState, current_api};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LinkInfo {

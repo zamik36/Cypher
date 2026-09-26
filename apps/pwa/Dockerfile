@@ -1,11 +1,11 @@
 # ── Build stage ────────────────────────────────────────────────────────
 FROM node:20-alpine@sha256:f598378b5240225e6beab68fa9f356db1fb8efe55173e6d4d8153113bb8f333c AS build
 
-WORKDIR /app/clients/pwa
-COPY clients/pwa/package.json clients/pwa/package-lock.json* ./
+WORKDIR /app/apps/pwa
+COPY apps/pwa/package.json apps/pwa/package-lock.json* ./
 RUN npm ci --ignore-scripts
-COPY clients/desktop/src/index.css /app/clients/desktop/src/index.css
-COPY clients/pwa/ .
+COPY apps/desktop/src/index.css /app/apps/desktop/src/index.css
+COPY apps/pwa/ .
 RUN npm run build
 
 # ── Serve stage ───────────────────────────────────────────────────────
@@ -15,8 +15,8 @@ RUN setcap -r /usr/bin/caddy \
     && addgroup -S app \
     && adduser -S -D -H -G app app
 
-COPY --from=build --chown=app:app /app/clients/pwa/dist /srv
-COPY --chown=app:app clients/pwa/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build --chown=app:app /app/apps/pwa/dist /srv
+COPY --chown=app:app apps/pwa/Caddyfile /etc/caddy/Caddyfile
 
 ENV XDG_CONFIG_HOME=/tmp/caddy-config \
     XDG_DATA_HOME=/tmp/caddy-data

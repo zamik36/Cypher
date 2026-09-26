@@ -31,10 +31,7 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = std::io::Error;
 
-    fn decode(
-        &mut self,
-        src: &mut BytesMut,
-    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // Need at least 4 bytes for the length prefix.
         if src.len() < 4 {
             return Ok(None);
@@ -90,7 +87,7 @@ impl Decoder for FrameCodec {
 impl Encoder<Frame> for FrameCodec {
     type Error = std::io::Error;
 
-    fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> std::result::Result<(), Self::Error> {
+    fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let payload_len = item.payload.len();
         let body_len = HEADER_SIZE + payload_len;
 
@@ -123,7 +120,7 @@ mod tests {
         let frame = Frame::new(1, 0, FrameFlags::ENCRYPTED, Bytes::from_static(b"hello"));
 
         let mut buf = BytesMut::new();
-        codec.encode(frame.clone(), &mut buf).unwrap();
+        codec.encode(frame, &mut buf).unwrap();
 
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.seq_no, 1);

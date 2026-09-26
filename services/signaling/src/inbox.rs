@@ -1,9 +1,9 @@
 use bytes::Bytes;
-use cypher_proto::{dispatch, Message, Serializable};
+use cypher_proto::{Message, Serializable, dispatch};
 use redis::AsyncCommands;
 use tracing::{debug, warn};
 
-use super::{hex_decode_bytes, hex_encode, GatewayEnvelope, SignalingService};
+use super::{GatewayEnvelope, SignalingService, hex_decode_bytes, hex_encode};
 
 const INBOX_TTL_SECS: i64 = 24 * 60 * 60;
 const INBOX_MAX_MESSAGES: isize = 100;

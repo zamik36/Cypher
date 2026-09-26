@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cypher_proto::{dispatch, Message, Serializable};
+use cypher_proto::{Message, Serializable, dispatch};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 

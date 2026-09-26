@@ -1,7 +1,7 @@
 use std::env;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use cypher_crypto::identity::IdentityKeyPair;
 use cypher_proto::{Serializable, SessionAck};
@@ -147,7 +147,7 @@ async fn delete_key(key: &str) -> anyhow::Result<()> {
 async fn wait_until<F, Fut>(label: &str, timeout: Duration, mut check: F) -> anyhow::Result<()>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<bool>>,
+    Fut: Future<Output = anyhow::Result<bool>>,
 {
     let deadline = Instant::now() + timeout;
     loop {

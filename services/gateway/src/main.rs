@@ -5,8 +5,8 @@
 //! NATS.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -62,7 +62,7 @@ static CONNECTIONS_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     let _ = prometheus::register(Box::new(c.clone()));
     c
 });
-use cypher_proto::{dispatch, Message, Serializable};
+use cypher_proto::{Message, Serializable, dispatch};
 use cypher_transport::frame::{Frame, FrameFlags};
 use cypher_transport::{TransportListener, TransportSession};
 
@@ -493,15 +493,15 @@ impl Gateway {
         frame: &Frame,
         subject: &str,
     ) -> (String, Option<Vec<u8>>) {
-        if let Some(target_session) = self.peers.get(peer_id) {
-            if let Some(conn) = self.connections.get(target_session.value()) {
-                let _ = conn
-                    .writer
-                    .send((frame.payload.clone(), FrameFlags::NONE))
-                    .await;
-                // Signal caller that direct delivery was done; skip NATS publish.
-                return ("".to_string(), None);
-            }
+        if let Some(target_session) = self.peers.get(peer_id)
+            && let Some(conn) = self.connections.get(target_session.value())
+        {
+            let _ = conn
+                .writer
+                .send((frame.payload.clone(), FrameFlags::NONE))
+                .await;
+            // Signal caller that direct delivery was done; skip NATS publish.
+            return ("".to_string(), None);
         }
         (subject.to_string(), Some(peer_id.to_vec()))
     }
@@ -515,42 +515,42 @@ impl Gateway {
 
         // JSON messages (e.g. create_link) are not binary proto — route them
         // by the "action" field before attempting proto dispatch.
-        if frame.payload.first() == Some(&b'{') {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&frame.payload) {
-                let action = json.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                let subject = match action {
-                    "create_link" => "signaling.create_link",
-                    _ => "signaling.raw",
-                };
+        if frame.payload.first() == Some(&b'{')
+            && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&frame.payload)
+        {
+            let action = json.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let subject = match action {
+                "create_link" => "signaling.create_link",
+                _ => "signaling.raw",
+            };
 
-                let conn_entry = self.connections.get(&session_id);
-                let peer_id_hex = conn_entry
-                    .as_ref()
-                    .map(|c| hex_encode(&c.peer_id))
-                    .unwrap_or_default();
+            let conn_entry = self.connections.get(&session_id);
+            let peer_id_hex = conn_entry
+                .as_ref()
+                .map(|c| hex_encode(&c.peer_id))
+                .unwrap_or_default();
 
-                info!(
-                    session_id,
-                    action,
-                    subject,
-                    conn_found = conn_entry.is_some(),
-                    peer_id_len = conn_entry.as_ref().map(|c| c.peer_id.len()).unwrap_or(0),
-                    "routing JSON message"
-                );
-                drop(conn_entry);
+            info!(
+                session_id,
+                action,
+                subject,
+                conn_found = conn_entry.is_some(),
+                peer_id_len = conn_entry.as_ref().map(|c| c.peer_id.len()).unwrap_or(0),
+                "routing JSON message"
+            );
+            drop(conn_entry);
 
-                let envelope = serde_json::json!({
-                    "session_id": session_id,
-                    "peer_id": peer_id_hex,
-                    "gateway_node": self.node_id,
-                });
-                self.nats
-                    .publish(subject.to_string(), Bytes::from(envelope.to_string()))
-                    .await?;
+            let envelope = serde_json::json!({
+                "session_id": session_id,
+                "peer_id": peer_id_hex,
+                "gateway_node": self.node_id,
+            });
+            self.nats
+                .publish(subject.to_string(), Bytes::from(envelope.to_string()))
+                .await?;
 
-                MESSAGES_ROUTED.inc();
-                return Ok(());
-            }
+            MESSAGES_ROUTED.inc();
+            return Ok(());
         }
 
         match dispatch(&frame.payload) {
@@ -575,7 +575,7 @@ impl Gateway {
                     Message::InboxStore(_) => ("signaling.inbox_store".to_string(), None),
                     Message::InboxFetch(_) => ("signaling.inbox_fetch".to_string(), None),
                     Message::InboxAck(_) => ("signaling.inbox_ack".to_string(), None),
-                    Message::ChatSend(ref chat) => {
+                    Message::ChatSend(chat) => {
                         let target_peer_id = chat.peer_id.clone();
 
                         // Rewrite peer_id from target → sender so the receiver
@@ -594,11 +594,11 @@ impl Gateway {
                         let rewritten = Bytes::from(rewritten_chat.serialize());
 
                         // Attempt direct peer-to-peer routing within this gateway.
-                        if let Some(target_session) = self.peers.get(&target_peer_id) {
-                            if let Some(conn) = self.connections.get(target_session.value()) {
-                                let _ = conn.writer.send((rewritten, FrameFlags::NONE)).await;
-                                return Ok(());
-                            }
+                        if let Some(target_session) = self.peers.get(&target_peer_id)
+                            && let Some(conn) = self.connections.get(target_session.value())
+                        {
+                            let _ = conn.writer.send((rewritten, FrameFlags::NONE)).await;
+                            return Ok(());
                         }
                         ("signaling.chat_send".to_string(), Some(target_peer_id))
                     }
@@ -925,11 +925,12 @@ async fn main() -> anyhow::Result<()> {
     let tls_config = match (&config.tls_cert_path, &config.tls_key_path) {
         (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
             info!("Loading TLS certificate from {} / {}", cert, key);
-            cypher_tls::load_pem_with_retry(cert, key, 30, std::time::Duration::from_secs(2))
-                .await?
+            cypher_tls::load_pem_with_retry(cert, key, 30, Duration::from_secs(2)).await?
         }
         _ => {
-            warn!("No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production.");
+            warn!(
+                "No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production."
+            );
             cypher_tls::make_server_config(&["localhost"])?
         }
     };

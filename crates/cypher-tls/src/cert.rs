@@ -25,7 +25,7 @@ impl SelfSignedCert {
     /// ```
     pub fn generate(names: &[&str]) -> Result<Self> {
         let mut params =
-            CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            CertificateParams::new(names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>())
                 .map_err(|e| Error::Transport(format!("cert params error: {e}")))?;
 
         let mut dn = DistinguishedName::new();

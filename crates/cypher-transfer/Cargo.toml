@@ -1,8 +1,9 @@
 [package]
 name = "cypher-transfer"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 cypher-common.workspace = true
@@ -16,3 +17,6 @@ tracing.workspace = true
 sha2.workspace = true
 futures.workspace = true
 zstd.workspace = true
+
+[lints]
+workspace = true

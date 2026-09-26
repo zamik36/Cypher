@@ -168,7 +168,7 @@ cargo run --bin load-test -- --connections 10000 --duration 60s
 
 ### 10.1 Android (Tauri 2.0 Mobile) ✅
 
-- `clients/desktop/src-tauri/gen/android/` — полный Kotlin + Gradle проект
+- `apps/desktop/src-tauri/gen/android/` — полный Kotlin + Gradle проект
 - Package: `dev.p2p.app`, minSdk 24, targetSdk 36
 - 4 ABI: arm64-v8a, armeabi-v7a, x86, x86_64
 - JNI: `System.loadLibrary("desktop_lib")` → тот же Rust backend
@@ -176,7 +176,7 @@ cargo run --bin load-test -- --connections 10000 --duration 60s
 
 ### 10.2 iOS PWA ✅
 
-- `clients/pwa/` — standalone SolidJS + Vite PWA
+- `apps/pwa/` — standalone SolidJS + Vite PWA
 - WebSocket подключение к gateway (порт :9101, настраивается через `P2P_WS_ADDR`)
 - Бинарный протокол (TypeScript codec, `src/api/proto.ts`) идентичен Rust wire format
 - Offline-capable: Service Worker + cache-first стратегия
@@ -204,9 +204,9 @@ cargo run --bin load-test -- --connections 10000 --duration 60s
   - `crates/cypher-client-core/src/persistence/sqlite.rs` — encrypted message store
   - `crates/cypher-client-core/src/identity_store.rs` — Argon2id + AES-256-GCM для seed
 - PWA: IndexedDB + Web Crypto API (PBKDF2 600K iterations + AES-256-GCM)
-  - `clients/pwa/src/storage/messages.ts` — encrypted message history
-  - `clients/pwa/src/storage/identity.ts` — persistent identity в localStorage
-  - `clients/pwa/src/storage/crypto.ts` — PBKDF2/HKDF/AES-GCM helpers
+  - `apps/pwa/src/storage/messages.ts` — encrypted message history
+  - `apps/pwa/src/storage/identity.ts` — persistent identity в localStorage
+  - `apps/pwa/src/storage/crypto.ts` — PBKDF2/HKDF/AES-GCM helpers
 - Хранятся: сообщения, ratchet-состояния, conversations metadata
 - Автоматическое восстановление ratchet state при unlock identity
 

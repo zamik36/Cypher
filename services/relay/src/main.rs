@@ -5,8 +5,8 @@
 //! Includes per-session bandwidth limiting and auto-teardown.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -424,11 +424,12 @@ async fn main() -> anyhow::Result<()> {
     let tls_config = match (&config.tls_cert_path, &config.tls_key_path) {
         (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
             info!("Loading TLS certificate from {} / {}", cert, key);
-            cypher_tls::load_pem_with_retry(cert, key, 30, std::time::Duration::from_secs(2))
-                .await?
+            cypher_tls::load_pem_with_retry(cert, key, 30, Duration::from_secs(2)).await?
         }
         _ => {
-            warn!("No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production.");
+            warn!(
+                "No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production."
+            );
             cypher_tls::make_server_config(&["localhost"])?
         }
     };

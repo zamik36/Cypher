@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
-use crate::{current_api, restart_event_loop, AppState};
-use cypher_client_core::identity_store::IdentityStore;
-use cypher_client_core::persistence::sqlite::SqliteMessageStore;
-use cypher_client_core::persistence::MessageStore;
+use crate::{AppState, current_api, restart_event_loop};
 use cypher_client_core::ClientApi;
+use cypher_client_core::identity_store::IdentityStore;
+use cypher_client_core::persistence::MessageStore;
+use cypher_client_core::persistence::sqlite::SqliteMessageStore;
 use cypher_crypto::IdentitySeed;
 
 // ---------------------------------------------------------------------------
@@ -191,10 +191,10 @@ async fn activate_identity(
     // Restore ratchet states for known conversations.
     if let Ok(convos) = msg_store.list_conversations() {
         for conv in convos {
-            if let Some(pid) = cypher_common::PeerId::from_bytes(&conv.peer_id) {
-                if let Ok(Some(ratchet)) = msg_store.load_ratchet_state(&pid) {
-                    api.keys().restore_ratchet_state(pid.as_bytes(), ratchet);
-                }
+            if let Some(pid) = cypher_common::PeerId::from_bytes(&conv.peer_id)
+                && let Ok(Some(ratchet)) = msg_store.load_ratchet_state(&pid)
+            {
+                api.keys().restore_ratchet_state(pid.as_bytes(), ratchet);
             }
         }
     }

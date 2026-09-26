@@ -3,7 +3,7 @@ use redis::AsyncCommands;
 use tracing::warn;
 
 use super::inbox::store_inbox_payload;
-use super::{short_id, PeerSession, PrekeyBundle, SignalingService};
+use super::{PeerSession, PrekeyBundle, SignalingService, short_id};
 
 impl SignalingService {
     /// Try to forward a message to a peer. If offline, store in their blind
@@ -29,13 +29,12 @@ impl SignalingService {
 
         let prekey_key = format!("peer:{peer_id_hex}:prekeys");
         let bundle_json: Option<String> = redis.get(&prekey_key).await?;
-        if let Some(json) = bundle_json {
-            if let Ok(bundle) = serde_json::from_str::<PrekeyBundle>(&json) {
-                if let Some(inbox_hex) = &bundle.inbox_id {
-                    store_inbox_payload(&mut redis, inbox_hex, payload).await?;
-                    return Ok(false);
-                }
-            }
+        if let Some(json) = bundle_json
+            && let Ok(bundle) = serde_json::from_str::<PrekeyBundle>(&json)
+            && let Some(inbox_hex) = &bundle.inbox_id
+        {
+            store_inbox_payload(&mut redis, inbox_hex, payload).await?;
+            return Ok(false);
         }
 
         warn!(

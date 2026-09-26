@@ -8,7 +8,7 @@ use cypher_common::{Error, Result};
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 
-use crate::candidate::{sort_candidates, Candidate};
+use crate::candidate::{Candidate, sort_candidates};
 use crate::hole_punch::HolePuncher;
 use crate::stun::StunClient;
 

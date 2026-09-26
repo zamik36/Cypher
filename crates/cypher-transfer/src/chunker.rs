@@ -1,4 +1,4 @@
-use cypher_common::{FileId, FileMeta, CHUNK_SIZE};
+use cypher_common::{CHUNK_SIZE, FileId, FileMeta};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs::File;

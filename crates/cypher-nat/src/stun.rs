@@ -37,7 +37,7 @@ impl StunClient {
     /// Send a STUN Binding Request to `server_addr` and return our
     /// server-reflexive address from the response.
     pub async fn binding_request(&self, server_addr: SocketAddr) -> Result<SocketAddr> {
-        let transaction_id: [u8; 12] = rand::Rng::gen(&mut rand::thread_rng());
+        let transaction_id: [u8; 12] = rand::Rng::r#gen(&mut rand::thread_rng());
         let request = build_binding_request(transaction_id);
 
         // Send with up to 3 retries.

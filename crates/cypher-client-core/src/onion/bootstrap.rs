@@ -1,5 +1,5 @@
 use cypher_common::{Error, Result};
-use cypher_proto::{dispatch, Message};
+use cypher_proto::{Message, dispatch};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use x25519_dalek::PublicKey as X25519PublicKey;
 
@@ -113,7 +113,7 @@ impl SignedInboxResponse {
             _ => {
                 return Err(Error::Protocol(
                     "signed inbox response did not contain InboxMessages".into(),
-                ))
+                ));
             }
         };
 
@@ -179,7 +179,7 @@ mod tests {
         signed.extend_from_slice(inbox_id);
         signed.extend_from_slice(&timestamp.to_le_bytes());
 
-        let mut raw = proto_payload.clone();
+        let mut raw = proto_payload;
         let mut claim_token = Vec::from(timestamp.to_le_bytes());
         claim_token.extend_from_slice(&[9u8; 32]);
         raw.extend_from_slice(&claim_token);

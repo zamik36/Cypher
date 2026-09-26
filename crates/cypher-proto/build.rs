@@ -1,11 +1,11 @@
 use nom::{
+    IResult,
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{char, multispace0, space0, space1},
     combinator::value,
     multi::many0,
     sequence::preceded,
-    IResult,
 };
 use std::env;
 use std::fs;

@@ -67,37 +67,37 @@ check: test lint
 
 # Install desktop frontend dependencies
 desktop-deps:
-    cd clients/desktop && npm install
+    cd apps/desktop && npm install
 
 # Run desktop app in dev mode (hot-reload)
 desktop-dev:
-    cd clients/desktop && cargo tauri dev
+    cd apps/desktop && cargo tauri dev
 
 # Build desktop app (release)
 desktop-build:
-    cd clients/desktop && cargo tauri build
+    cd apps/desktop && cargo tauri build
 
 # ─── Android ─────────────────────────────────────────────────────────────────
 
 # Run Android app in dev mode (needs connected device/emulator)
 android-dev:
-    cd clients/desktop && cargo tauri android dev
+    cd apps/desktop && cargo tauri android dev
 
 # Build Android debug APK
 android-debug:
-    cd clients/desktop && cargo tauri android build --apk
+    cd apps/desktop && cargo tauri android build --apk
 
 # Build Android release APK (unsigned)
 android-release:
-    cd clients/desktop && cargo tauri android build --apk --release
+    cd apps/desktop && cargo tauri android build --apk --release
 
 # Build Android release APK and sign it
 android-sign: android-release
     #!/usr/bin/env bash
     set -e
     export ANDROID_HOME="C:/Users/Ilya/AppData/Local/Android/Sdk"
-    KEYSTORE="clients/desktop/src-tauri/gen/android/release.keystore"
-    APK_DIR="clients/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release"
+    KEYSTORE="apps/desktop/src-tauri/gen/android/release.keystore"
+    APK_DIR="apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release"
     APK_UNSIGNED="$APK_DIR/app-universal-release-unsigned.apk"
     APK_SIGNED="$APK_DIR/cypher-release-signed.apk"
 
@@ -116,7 +116,7 @@ android-sign: android-release
     # Find the unsigned APK
     if [ ! -f "$APK_UNSIGNED" ]; then
         echo "Looking for APK..."
-        APK_UNSIGNED=$(find clients/desktop/src-tauri/gen/android/app/build/outputs/apk -name "*unsigned*.apk" | head -1)
+        APK_UNSIGNED=$(find apps/desktop/src-tauri/gen/android/app/build/outputs/apk -name "*unsigned*.apk" | head -1)
     fi
 
     echo "Signing $APK_UNSIGNED ..."
@@ -142,19 +142,19 @@ android-sign: android-release
 
 # Install PWA dependencies
 pwa-deps:
-    cd clients/pwa && npm install
+    cd apps/pwa && npm install
 
 # Run PWA dev server (accessible on LAN at http://<your-ip>:5174)
 pwa-dev:
-    cd clients/pwa && npm run dev
+    cd apps/pwa && npm run dev
 
 # Build PWA for production
 pwa-build:
-    cd clients/pwa && npm run build
+    cd apps/pwa && npm run build
 
 # Serve built PWA on LAN (for iOS testing via Add to Home Screen)
 pwa-serve port="5174":
-    cd clients/pwa && npx serve dist -l {{port}} --no-clipboard
+    cd apps/pwa && npx serve dist -l {{port}} --no-clipboard
 
 # ─── Full stack (for testing) ────────────────────────────────────────────────
 
@@ -175,7 +175,7 @@ test-local:
 
     echo ""
     echo "=== Starting PWA dev server ==="
-    cd clients/pwa && npm run dev &
+    cd apps/pwa && npm run dev &
 
     echo ""
     echo "========================================="

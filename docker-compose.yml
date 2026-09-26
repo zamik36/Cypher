@@ -129,7 +129,7 @@ services:
   pwa:
     build:
       context: .
-      dockerfile: clients/pwa/Dockerfile
+      dockerfile: apps/pwa/Dockerfile
     read_only: true
     security_opt:
       - no-new-privileges:true

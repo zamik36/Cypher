@@ -23,7 +23,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{info, warn};
 
 use cypher_common::{Error, FileMeta, PeerId, Result};
@@ -39,7 +39,7 @@ use crate::onion::service::AnonymousTransportService;
 use crate::persistence::MessageStore;
 use crate::session::ClientSession;
 use crate::signaling::SignalingClient;
-use runtime::{run_io_loop, RuntimeContext};
+use runtime::{RuntimeContext, run_io_loop};
 
 /// An event emitted by the P2P subsystem to the UI layer.
 #[derive(Debug, Clone)]
@@ -202,7 +202,7 @@ impl ClientApi {
         let nonce: [u8; 32] = rand::random();
         info!("do_connect: sending SESSION_INIT...");
         let server_nonce = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            Duration::from_secs(10),
             signaling.session_init(self.session.peer_id().to_vec(), nonce.to_vec()),
         )
         .await

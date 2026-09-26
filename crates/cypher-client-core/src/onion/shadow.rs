@@ -59,7 +59,7 @@ impl ShadowSession {
             Err(_) => {
                 return Err(Error::Transport(
                     "shadow session: SESSION_INIT timed out".into(),
-                ))
+                ));
             }
         };
 
@@ -73,7 +73,7 @@ impl ShadowSession {
             Err(_) => {
                 return Err(Error::Transport(
                     "shadow session: SESSION_AUTH timed out".into(),
-                ))
+                ));
             }
         }
 

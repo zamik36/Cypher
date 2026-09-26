@@ -1,4 +1,4 @@
-use crate::{current_api, AppState};
+use crate::{AppState, current_api};
 
 /// Connect to the P2P gateway over TLS.
 ///

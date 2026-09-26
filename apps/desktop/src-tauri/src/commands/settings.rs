@@ -1,7 +1,7 @@
 use cypher_client_core::onion::config::{AnonymousTransportConfig, TorSettings};
 use cypher_client_core::onion::cover::PowerMode;
 
-use crate::{current_api, AppState};
+use crate::{AppState, current_api};
 
 #[tauri::command]
 pub async fn apply_anonymous_settings(

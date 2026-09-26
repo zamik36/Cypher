@@ -10,11 +10,11 @@
 //! while Double Ratchet provides end-to-end confidentiality.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cypher_common::{Error, Result};
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
@@ -78,11 +78,11 @@ impl DtlsSession {
         loop {
             match tokio::time::timeout_at(deadline, session.socket.recv_from(&mut buf)).await {
                 Ok(Ok((n, from))) if from == remote => {
-                    if let Some(payload) = session.verify_and_strip(&buf[..n]) {
-                        if payload == HANDSHAKE_ACK {
-                            info!("DTLS handshake completed (client)");
-                            return Ok(session);
-                        }
+                    if let Some(payload) = session.verify_and_strip(&buf[..n])
+                        && payload == HANDSHAKE_ACK
+                    {
+                        info!("DTLS handshake completed (client)");
+                        return Ok(session);
                     }
                 }
                 Ok(Ok(_)) => continue, // wrong source
@@ -114,13 +114,13 @@ impl DtlsSession {
         loop {
             match tokio::time::timeout_at(deadline, session.socket.recv_from(&mut buf)).await {
                 Ok(Ok((n, from))) if from == remote => {
-                    if let Some(payload) = session.verify_and_strip(&buf[..n]) {
-                        if payload == HANDSHAKE_MAGIC {
-                            // Send ack.
-                            session.send_authenticated(HANDSHAKE_ACK).await?;
-                            info!("DTLS handshake completed (server)");
-                            return Ok(session);
-                        }
+                    if let Some(payload) = session.verify_and_strip(&buf[..n])
+                        && payload == HANDSHAKE_MAGIC
+                    {
+                        // Send ack.
+                        session.send_authenticated(HANDSHAKE_ACK).await?;
+                        info!("DTLS handshake completed (server)");
+                        return Ok(session);
                     }
                 }
                 Ok(Ok(_)) => continue,

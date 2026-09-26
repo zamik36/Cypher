@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use cypher_common::{Error, FileId, FileMeta, PeerId, Result, DEFAULT_WINDOW_SIZE};
+use cypher_common::{DEFAULT_WINDOW_SIZE, Error, FileId, FileMeta, PeerId, Result};
 use cypher_nat::Candidate;
-use cypher_proto::{dispatch, Message, Serializable};
+use cypher_proto::{Message, Serializable, dispatch};
 use cypher_transfer::{ChunkSendFn, FileChunker, TransferReceiver, TransferSender};
 use cypher_transport::{FrameFlags, TransportSession};
 
@@ -437,10 +437,10 @@ impl RuntimeContext {
         ) {
             warn!("failed to persist received message: {error}");
         }
-        if let Some(state) = self.keys.get_ratchet_state(peer_key) {
-            if let Err(error) = store.save_ratchet_state(from, &state) {
-                warn!("failed to persist ratchet state: {error}");
-            }
+        if let Some(state) = self.keys.get_ratchet_state(peer_key)
+            && let Err(error) = store.save_ratchet_state(from, &state)
+        {
+            warn!("failed to persist ratchet state: {error}");
         }
     }
 
@@ -450,15 +450,14 @@ impl RuntimeContext {
 
     async fn dispatch_json(&self, json: serde_json::Value) {
         if json.get("peer_joined").and_then(|value| value.as_bool()) == Some(true) {
-            if let Some(hex) = json.get("peer_id").and_then(|value| value.as_str()) {
-                if let Ok(bytes) = hex_decode(hex) {
-                    if let Some(peer_id) = PeerId::from_bytes(&bytes) {
-                        let _ = self
-                            .event_tx
-                            .send(ClientEvent::PeerConnected { peer_id })
-                            .await;
-                    }
-                }
+            if let Some(hex) = json.get("peer_id").and_then(|value| value.as_str())
+                && let Ok(bytes) = hex_decode(hex)
+                && let Some(peer_id) = PeerId::from_bytes(&bytes)
+            {
+                let _ = self
+                    .event_tx
+                    .send(ClientEvent::PeerConnected { peer_id })
+                    .await;
             }
             return;
         }
@@ -517,7 +516,7 @@ pub(super) async fn run_io_loop(
                     }
                     context.dispatch_inbound(frame.payload).await
                 },
-                Err(cypher_common::Error::ConnectionClosed) => {
+                Err(Error::ConnectionClosed) => {
                     info!("gateway connection closed");
                     break;
                 }

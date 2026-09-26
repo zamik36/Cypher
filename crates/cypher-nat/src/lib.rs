@@ -10,4 +10,4 @@ pub use dtls::DtlsSession;
 pub use hole_punch::HolePuncher;
 pub use ice::IceAgent;
 pub use relay_client::RelayClient;
-pub use stun::{parse_binding_response, StunClient, STUN_MAGIC_COOKIE};
+pub use stun::{STUN_MAGIC_COOKIE, StunClient, parse_binding_response};

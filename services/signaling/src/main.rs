@@ -10,7 +10,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use futures::StreamExt;
@@ -134,7 +134,7 @@ impl SignalingService {
         for subject in &subjects {
             let subscription = self
                 .nats
-                .queue_subscribe(subject.to_string(), "signaling-workers".to_string())
+                .queue_subscribe((*subject).to_string(), "signaling-workers".to_string())
                 .await?;
             subscribers.push((*subject, subscription));
         }

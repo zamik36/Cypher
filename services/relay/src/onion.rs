@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
-use cypher_proto::{dispatch, Message};
+use cypher_proto::{Message, dispatch};
 use cypher_transport::codec::FrameCodec;
 
 use crate::BoxedStream;

@@ -13,12 +13,47 @@ members = [
     "services/signaling",
     "services/relay",
     "tools/load-test",
+    "apps/desktop/src-tauri",
+]
+default-members = [
+    "crates/cypher-common",
+    "crates/cypher-proto",
+    "crates/cypher-crypto",
+    "crates/cypher-tls",
+    "crates/cypher-transport",
+    "crates/cypher-nat",
+    "crates/cypher-transfer",
+    "crates/cypher-client-core",
+    "services/gateway",
+    "services/signaling",
+    "services/relay",
+    "tools/load-test",
 ]
 exclude = [
     "crates/cypher-proto/fuzz",
     "crates/cypher-crypto/fuzz",
     "crates/cypher-nat/fuzz",
 ]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+redundant_clone = "warn"
+inefficient_to_string = "warn"
+needless_pass_by_ref_mut = "warn"
+large_futures = "warn"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -38,9 +73,9 @@ anyhow = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 aes-gcm = "0.10"
-hkdf = "0.13"
-hmac = "0.13"
-sha2 = "0.11"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
