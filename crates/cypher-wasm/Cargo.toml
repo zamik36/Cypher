@@ -1,0 +1,25 @@
+[package]
+name = "cypher-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cypher-core.workspace = true
+cypher-crypto.workspace = true
+cypher-types.workspace = true
+bytes.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2.129"
+js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+
+[lints]
+workspace = true

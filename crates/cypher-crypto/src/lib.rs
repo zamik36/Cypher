@@ -4,6 +4,7 @@ pub mod double_ratchet;
 mod error;
 pub mod handshake;
 pub mod identity;
+pub mod identity_file;
 mod kdf;
 pub mod onion;
 pub mod prekey;

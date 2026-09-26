@@ -9,22 +9,16 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use bytes::Bytes;
-use cypher_types::MAX_FRAME_SIZE;
-use futures::{SinkExt, StreamExt, future};
+use futures::future;
 use serde::Deserialize;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tracing::{info, warn};
+use tracing::info;
 
 use session::{Gateway, Limits};
 
@@ -67,7 +61,12 @@ fn default_bytes_per_sec() -> u64 {
     64 << 20
 }
 
-const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How accepted TCP connections are upgraded before serving.
+#[derive(Clone)]
+enum Upgrade {
+    Tls(TlsAcceptor),
+    WebSocket,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,9 +94,9 @@ async fn main() -> anyhow::Result<()> {
 
     let tls_listener = TcpListener::bind(config.gateway_addr).await?;
     info!(addr = %config.gateway_addr, "gateway TLS listening");
-    let tls_loop = accept_tls(
+    let tls_loop = accept_loop(
         tls_listener,
-        TlsAcceptor::from(tls),
+        Upgrade::Tls(TlsAcceptor::from(tls)),
         Arc::clone(&gateway),
         Arc::clone(&permits),
     );
@@ -106,93 +105,51 @@ async fn main() -> anyhow::Result<()> {
             Some(addr) => {
                 let listener = TcpListener::bind(addr).await?;
                 info!(%addr, "gateway WebSocket listening");
-                accept_ws(listener, Arc::clone(&gateway), Arc::clone(&permits)).await
+                accept_loop(
+                    listener,
+                    Upgrade::WebSocket,
+                    Arc::clone(&gateway),
+                    Arc::clone(&permits),
+                )
+                .await;
+                Ok(())
             }
-            None => future::pending().await,
+            None => future::pending::<anyhow::Result<()>>().await,
         }
     };
 
     tokio::select! {
-        r = tls_loop => r?,
+        () = tls_loop => {}
         r = ws_loop => r?,
         () = cypher_server_kit::shutdown_signal() => info!("shutdown signal received"),
     }
     Ok(())
 }
 
-async fn accept_tls(
+async fn accept_loop(
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    upgrade: Upgrade,
     gateway: Arc<NatsGateway>,
     permits: Arc<Semaphore>,
-) -> anyhow::Result<()> {
+) {
     loop {
-        let (tcp, _) = accept(&listener).await;
+        let tcp = cypher_transport::accept(&listener).await;
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
             gateway.metrics.rejected.inc();
             continue;
         };
-        let acceptor = acceptor.clone();
-        let gateway = Arc::clone(&gateway);
+        let (upgrade, gateway) = (upgrade.clone(), Arc::clone(&gateway));
         tokio::spawn(async move {
-            if let Ok(conn) = cypher_transport::accept_tls(&acceptor, tcp).await {
-                let (sink, stream) = conn.split();
-                let stream = stream.map(|r| r.map(bytes::BytesMut::freeze));
+            let halves = match upgrade {
+                Upgrade::Tls(acceptor) => cypher_transport::accept_tls(&acceptor, tcp)
+                    .await
+                    .map(cypher_transport::split),
+                Upgrade::WebSocket => cypher_transport::ws::accept_ws(tcp).await,
+            };
+            if let Ok((stream, sink)) = halves {
                 gateway.serve(stream, sink).await;
             }
             drop(permit);
         });
-    }
-}
-
-async fn accept_ws(
-    listener: TcpListener,
-    gateway: Arc<NatsGateway>,
-    permits: Arc<Semaphore>,
-) -> anyhow::Result<()> {
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_FRAME_SIZE))
-        .max_frame_size(Some(MAX_FRAME_SIZE));
-    loop {
-        let (tcp, _) = accept(&listener).await;
-        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-            gateway.metrics.rejected.inc();
-            continue;
-        };
-        let gateway = Arc::clone(&gateway);
-        tokio::spawn(async move {
-            let _ = tcp.set_nodelay(true);
-            let handshake = tokio_tungstenite::accept_async_with_config(tcp, Some(config));
-            if let Ok(Ok(ws)) = tokio::time::timeout(WS_HANDSHAKE_TIMEOUT, handshake).await {
-                let (sink, stream) = ws.split();
-                let stream = stream.filter_map(|m| {
-                    future::ready(match m {
-                        Ok(Message::Binary(b)) => Some(Ok(b)),
-                        Ok(Message::Close(_)) | Err(_) => {
-                            Some(Err(io::ErrorKind::ConnectionAborted.into()))
-                        }
-                        Ok(_) => None,
-                    })
-                });
-                let sink = sink
-                    .sink_map_err(|e| io::Error::other(e.to_string()))
-                    .with(|b: Bytes| future::ready(Ok::<_, io::Error>(Message::Binary(b))));
-                gateway.serve(Box::pin(stream), Box::pin(sink)).await;
-            }
-            drop(permit);
-        });
-    }
-}
-
-/// Accept errors (e.g. fd exhaustion) are transient: back off, never exit.
-async fn accept(listener: &TcpListener) -> (TcpStream, SocketAddr) {
-    loop {
-        match listener.accept().await {
-            Ok(pair) => return pair,
-            Err(e) => {
-                warn!("accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
     }
 }

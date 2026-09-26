@@ -45,3 +45,6 @@ CLAUDE.md
 **/fuzz/Cargo.lock
 **/fuzz/corpus/
 **/fuzz/artifacts/
+
+# Generated WebAssembly bindings
+apps/pwa/src/wasm/

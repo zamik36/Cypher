@@ -2,8 +2,8 @@ use cypher_client::{IdentityStore, Unlocked};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use crate::dto::{self, UiMessage};
 use crate::session::{AppState, CmdResult, data_dir, err};
+use cypher_core::ui::{self, UiMessage};
 
 /// Argon2id is deliberately slow; keep it off the async runtime.
 async fn with_store<T: Send + 'static>(
@@ -107,7 +107,7 @@ pub async fn get_history(
         .history(peer, before, limit.min(500))
         .await
         .map_err(err)?;
-    Ok(history.iter().map(dto::message).collect())
+    Ok(history.iter().map(ui::message).collect())
 }
 
 #[tauri::command]

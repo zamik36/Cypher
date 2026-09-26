@@ -10,6 +10,7 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use cypher_server_kit::ratelimit::ConnLimiter;
 use cypher_server_kit::{SIG_ONION_SUBJECT, metrics};
+use cypher_transport::{FrameSink, FrameStream};
 use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use prometheus::{IntCounter, IntGauge};
@@ -17,7 +18,7 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::info;
 
 const CORR_LEN: usize = 8;
 const MAX_REQUEST: usize = 128 * 1024;
@@ -29,6 +30,8 @@ const PIPELINE: usize = 8;
 struct Config {
     #[serde(default = "default_relay_addr")]
     relay_addr: SocketAddr,
+    /// WebSocket listener for browsers (put behind a TLS proxy).
+    ws_addr: Option<SocketAddr>,
     #[serde(flatten)]
     nats: cypher_server_kit::NatsConfig,
     tls_cert_path: Option<String>,
@@ -76,35 +79,69 @@ async fn main() -> anyhow::Result<()> {
         forwarded: metrics::counter("relay_forwarded_total", "Onion requests forwarded"),
         dropped: metrics::counter("relay_dropped_total", "Onion requests dropped"),
     });
+    let permits = Arc::new(Semaphore::new(config.max_connections));
     let listener = TcpListener::bind(config.relay_addr).await?;
-    info!(addr = %config.relay_addr, "relay listening");
+    info!(addr = %config.relay_addr, "relay TLS listening");
+    let tls_loop = accept_loop(
+        listener,
+        Upgrade::Tls(TlsAcceptor::from(tls)),
+        Arc::clone(&relay),
+        Arc::clone(&permits),
+    );
+    let ws_loop = async {
+        match config.ws_addr {
+            Some(addr) => {
+                let listener = TcpListener::bind(addr).await?;
+                info!(%addr, "relay WebSocket listening");
+                accept_loop(
+                    listener,
+                    Upgrade::WebSocket,
+                    Arc::clone(&relay),
+                    Arc::clone(&permits),
+                )
+                .await;
+                Ok(())
+            }
+            None => futures::future::pending::<anyhow::Result<()>>().await,
+        }
+    };
 
     tokio::select! {
-        () = accept_loop(listener, TlsAcceptor::from(tls), relay, config.max_connections) => {}
+        () = tls_loop => {}
+        r = ws_loop => r?,
         () = cypher_server_kit::shutdown_signal() => info!("shutdown signal received"),
     }
     Ok(())
 }
 
-async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, relay: Arc<Relay>, max: usize) {
-    let permits = Arc::new(Semaphore::new(max));
+#[derive(Clone)]
+enum Upgrade {
+    Tls(TlsAcceptor),
+    WebSocket,
+}
+
+async fn accept_loop(
+    listener: TcpListener,
+    upgrade: Upgrade,
+    relay: Arc<Relay>,
+    permits: Arc<Semaphore>,
+) {
     loop {
-        let tcp = match listener.accept().await {
-            Ok((tcp, _)) => tcp,
-            Err(e) => {
-                warn!("accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                continue;
-            }
-        };
+        let tcp = cypher_transport::accept(&listener).await;
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
             continue;
         };
-        let (acceptor, relay) = (acceptor.clone(), Arc::clone(&relay));
+        let (upgrade, relay) = (upgrade.clone(), Arc::clone(&relay));
         tokio::spawn(async move {
-            if let Ok(conn) = cypher_transport::accept_tls(&acceptor, tcp).await {
+            let halves = match upgrade {
+                Upgrade::Tls(acceptor) => cypher_transport::accept_tls(&acceptor, tcp)
+                    .await
+                    .map(cypher_transport::split),
+                Upgrade::WebSocket => cypher_transport::ws::accept_ws(tcp).await,
+            };
+            if let Ok((stream, sink)) = halves {
                 relay.connections.inc();
-                relay.serve(conn).await;
+                relay.serve(stream, sink).await;
                 relay.connections.dec();
             }
             drop(permit);
@@ -113,8 +150,7 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, relay: Arc<Re
 }
 
 impl Relay {
-    async fn serve(&self, conn: cypher_transport::ServerConn) {
-        let (mut sink, mut stream) = conn.split();
+    async fn serve(&self, mut stream: FrameStream, mut sink: FrameSink) {
         let mut limiter = ConnLimiter::new(20, 1 << 20);
         let mut in_flight = FuturesUnordered::new();
         loop {
@@ -125,7 +161,7 @@ impl Relay {
                         self.dropped.inc();
                         continue;
                     }
-                    in_flight.push(self.forward(frame.freeze()));
+                    in_flight.push(self.forward(frame));
                 }
                 Some(reply) = in_flight.next(), if !in_flight.is_empty() => {
                     if let Some(reply) = reply

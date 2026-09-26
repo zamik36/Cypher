@@ -100,3 +100,39 @@ mod tests {
         assert!(split_host_port("h:99999").is_err());
     }
 }
+
+/// Transport-agnostic halves of a frame connection (TLS or WebSocket).
+pub type FrameStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send>>;
+pub type FrameSink =
+    std::pin::Pin<Box<dyn futures::Sink<bytes::Bytes, Error = std::io::Error> + Send>>;
+
+/// Splits a framed connection into boxed halves.
+pub fn split<S>(conn: Conn<S>) -> (FrameStream, FrameSink)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    use futures::StreamExt;
+    let (sink, stream) = conn.split();
+    (
+        Box::pin(stream.map(|r| r.map(bytes::BytesMut::freeze))),
+        Box::pin(sink),
+    )
+}
+
+/// Accepts the next TCP connection; accept errors (e.g. fd exhaustion) are
+/// transient, so this backs off instead of failing the listener.
+pub async fn accept(listener: &tokio::net::TcpListener) -> TcpStream {
+    loop {
+        match listener.accept().await {
+            Ok((tcp, _)) => return tcp,
+            Err(e) => {
+                tracing::warn!("accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+pub mod ws;

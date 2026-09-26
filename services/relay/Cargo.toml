@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 cypher-tls.workspace = true
-cypher-transport.workspace = true
+cypher-transport = { workspace = true, features = ["ws"] }
 cypher-server-kit.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

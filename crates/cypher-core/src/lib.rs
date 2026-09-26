@@ -11,11 +11,12 @@ mod prekeys;
 pub mod relay;
 mod store;
 mod transfer;
+pub mod ui;
 
 pub use api::{
     Command, Content, Effect, Event, FailReason, Input, MediaKind, MessageStatus, StoredMessage,
 };
-pub use core::{Core, Snapshot};
+pub use core::{Core, Rows, Snapshot};
 pub use store::{StoreOp, Table, Vault, message_key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

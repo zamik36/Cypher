@@ -5,8 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+ws = ["dep:tokio-tungstenite"]
+
 [dependencies]
 cypher-types.workspace = true
+bytes.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-rustls.workspace = true
@@ -14,8 +21,6 @@ rustls.workspace = true
 
 [dev-dependencies]
 cypher-tls.workspace = true
-bytes.workspace = true
-futures.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

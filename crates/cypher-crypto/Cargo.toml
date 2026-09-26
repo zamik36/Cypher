@@ -19,6 +19,7 @@ thiserror.workspace = true
 serde.workspace = true
 zeroize.workspace = true
 bip39.workspace = true
+argon2.workspace = true
 postcard.workspace = true
 
 [dev-dependencies]

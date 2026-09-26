@@ -14,7 +14,7 @@ use crate::ClientError;
 /// Driver-owned table: file id → local path of a transfer.
 pub const FILES_TABLE: &str = "driver_files";
 
-type Pairs = Vec<(Vec<u8>, Vec<u8>)>;
+use cypher_core::Rows as Pairs;
 
 enum Job {
     Apply(Vec<Op>, oneshot::Sender<Result<(), ClientError>>),

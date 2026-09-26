@@ -64,11 +64,14 @@ enum Pending {
 /// pairs read from the corresponding [`Table`]s.
 #[derive(Debug, Default)]
 pub struct Snapshot {
-    pub meta: Vec<(Vec<u8>, Vec<u8>)>,
-    pub peers: Vec<(Vec<u8>, Vec<u8>)>,
-    pub outbox: Vec<(Vec<u8>, Vec<u8>)>,
-    pub transfers: Vec<(Vec<u8>, Vec<u8>)>,
+    pub meta: Rows,
+    pub peers: Rows,
+    pub outbox: Rows,
+    pub transfers: Rows,
 }
+
+/// `(key, value)` rows as read from one storage table.
+pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// The sans-IO client state machine. Drivers own sockets, disks and clocks;
 /// the core owns every protocol and cryptographic decision.
