@@ -55,8 +55,8 @@ impl FileAssembler {
         }
         let data = tokio::fs::read(&sf).await?;
         let mut received = HashSet::new();
-        for chunk in data.chunks_exact(4) {
-            let idx = u32::from_le_bytes(chunk.try_into().unwrap());
+        for chunk in data.as_chunks::<4>().0 {
+            let idx = u32::from_le_bytes(*chunk);
             if idx < meta.chunk_count {
                 received.insert(idx);
             }

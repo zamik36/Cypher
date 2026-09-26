@@ -1,0 +1,598 @@
+mod files;
+mod messaging;
+
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+use bytes::Bytes;
+use cypher_crypto::{IdentityKeyPair, IdentitySeed};
+use cypher_types::{FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
+use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
+
+use crate::CoreError;
+use crate::api::{Command, Effect, Event, FailReason, Input};
+use crate::peer::{Peer, PeerRecord};
+use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
+use crate::store::{META_PREKEYS, StoreOp, Table, Vault};
+use crate::transfer::{Incoming, Outgoing, TransferRecord};
+
+use messaging::OutboxItem;
+
+const REQUEST_TIMEOUT_MS: u64 = 15_000;
+const PING_INTERVAL_MS: u64 = 20_000;
+const DEAD_AFTER_MS: u64 = 50_000;
+const INBOX_POLL_MS: u64 = 5 * 60_000;
+const RECENT_IDS: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Conn {
+    Offline,
+    Authenticating,
+    Ready,
+}
+
+#[derive(Debug)]
+enum Pending {
+    CreateLink,
+    Resolve {
+        link: String,
+    },
+    FetchKeys {
+        link: String,
+        peer: PeerId,
+    },
+    Publish {
+        batch: bool,
+    },
+    Send {
+        msg_id: MsgId,
+        peer: PeerId,
+        body: Bytes,
+    },
+    InboxPut {
+        msg_id: MsgId,
+    },
+    InboxFetch,
+    InboxAck,
+    Bootstrap,
+}
+
+/// Encrypted state restored by the driver at startup: raw `(key, value)`
+/// pairs read from the corresponding [`Table`]s.
+#[derive(Debug, Default)]
+pub struct Snapshot {
+    pub meta: Vec<(Vec<u8>, Vec<u8>)>,
+    pub peers: Vec<(Vec<u8>, Vec<u8>)>,
+    pub outbox: Vec<(Vec<u8>, Vec<u8>)>,
+    pub transfers: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// The sans-IO client state machine. Drivers own sockets, disks and clocks;
+/// the core owns every protocol and cryptographic decision.
+pub struct Core<R> {
+    rng: R,
+    now: u64,
+    identity: IdentityKeyPair,
+    peer_id: PeerId,
+    inbox_secret: Zeroizing<[u8; 32]>,
+    inbox_id: [u8; 32],
+    vault: Vault,
+    prekeys: Prekeys,
+    peers: HashMap<PeerId, Peer>,
+    outbox: BTreeMap<MsgId, OutboxItem>,
+    outgoing: HashMap<FileId, Outgoing>,
+    incoming: HashMap<FileId, Incoming>,
+    pending: HashMap<u32, (Pending, u64)>,
+    next_req: u32,
+    conn: Conn,
+    last_rx: u64,
+    last_ping: u64,
+    last_inbox_fetch: u64,
+    recent: RecentIds,
+    progress_at: HashMap<FileId, u64>,
+    effects: Vec<Effect>,
+}
+
+impl<R: CryptoRngCore> Core<R> {
+    /// Builds the core from the identity seed and previously persisted state.
+    /// Returns persistence effects when fresh prekeys had to be generated.
+    pub fn restore(
+        seed: &IdentitySeed,
+        snapshot: Snapshot,
+        now_ms: u64,
+        mut rng: R,
+    ) -> Result<(Self, Vec<Effect>), CoreError> {
+        let identity = seed.derive_identity();
+        let vault = Vault::new(seed.derive_storage_key());
+        let inbox_secret = seed.derive_inbox_secret();
+
+        let mut fresh_prekeys = false;
+        let prekeys = match snapshot.meta.iter().find(|(k, _)| k == META_PREKEYS) {
+            Some((k, v)) => {
+                Prekeys::from_record(&vault.open::<PrekeysRecord>(Table::Meta, k, v)?)?
+            }
+            None => {
+                fresh_prekeys = true;
+                Prekeys::generate(now_ms, &mut rng)
+            }
+        };
+
+        let mut peers = HashMap::new();
+        for (k, v) in &snapshot.peers {
+            let id = PeerId::from_bytes(k).ok_or(CoreError::Storage)?;
+            peers.insert(
+                id,
+                Peer::from_record(&vault.open::<PeerRecord>(Table::Peers, k, v)?)?,
+            );
+        }
+        let mut outbox = BTreeMap::new();
+        for (k, v) in &snapshot.outbox {
+            let item: OutboxItem = vault.open(Table::Outbox, k, v)?;
+            outbox.insert(item.msg_id, item);
+        }
+        let mut outgoing = HashMap::new();
+        let mut incoming = HashMap::new();
+        for (k, v) in &snapshot.transfers {
+            let rec: TransferRecord = vault.open(Table::Transfers, k, v)?;
+            let id = rec.desc.file_id;
+            if rec.outgoing {
+                outgoing.insert(id, Outgoing::from_record(rec));
+            } else {
+                incoming.insert(id, Incoming::from_record(rec));
+            }
+        }
+
+        let mut core = Self {
+            rng,
+            now: now_ms,
+            peer_id: identity.peer_id(),
+            identity,
+            inbox_id: cypher_wire::inbox_id(&inbox_secret),
+            inbox_secret,
+            vault,
+            prekeys,
+            peers,
+            outbox,
+            outgoing,
+            incoming,
+            pending: HashMap::new(),
+            next_req: 0,
+            conn: Conn::Offline,
+            last_rx: now_ms,
+            last_ping: now_ms,
+            last_inbox_fetch: 0,
+            recent: RecentIds::default(),
+            progress_at: HashMap::new(),
+            effects: Vec::new(),
+        };
+        if fresh_prekeys {
+            core.persist_prekeys();
+        }
+        let effects = std::mem::take(&mut core.effects);
+        Ok((core, effects))
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        self.peer_id
+    }
+
+    pub fn inbox_id(&self) -> [u8; 32] {
+        self.inbox_id
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.conn == Conn::Ready
+    }
+
+    pub fn peers(&self) -> impl Iterator<Item = &PeerId> {
+        self.peers.keys()
+    }
+
+    pub fn handle(&mut self, input: Input, now_ms: u64) -> Vec<Effect> {
+        self.now = now_ms;
+        match input {
+            Input::Connected => self.on_connected(),
+            Input::Disconnected => self.on_disconnected(),
+            Input::Frame(bytes) => self.on_frame(bytes),
+            Input::Command(cmd) => self.on_command(cmd),
+            Input::ChunkRead {
+                file_id,
+                index,
+                buf,
+            } => self.on_chunk_read(file_id, index, buf),
+            Input::ChunkUnavailable { file_id } => {
+                self.fail_outgoing(&file_id, FailReason::SourceUnavailable);
+            }
+            Input::Tick => self.on_tick(),
+        }
+        std::mem::take(&mut self.effects)
+    }
+
+    fn on_connected(&mut self) {
+        self.conn = Conn::Authenticating;
+        self.last_rx = self.now;
+        self.transmit(
+            0,
+            ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                peer: self.peer_id,
+            },
+        );
+    }
+
+    fn on_disconnected(&mut self) {
+        if self.conn == Conn::Offline {
+            return;
+        }
+        self.conn = Conn::Offline;
+        let pending: Vec<_> = self.pending.drain().map(|(_, (p, _))| p).collect();
+        for p in pending {
+            self.fail_request(p, FailReason::Offline);
+        }
+        self.pause_transfers();
+        self.emit(Event::Disconnected);
+    }
+
+    fn on_ready(&mut self) {
+        self.conn = Conn::Ready;
+        self.emit(Event::Connected);
+        self.publish_keys(false);
+        self.request(ClientMsg::Bootstrap, Pending::Bootstrap, false);
+        self.fetch_inbox();
+        self.flush_outbox();
+        self.resume_transfers();
+    }
+
+    fn on_frame(&mut self, bytes: Bytes) {
+        let Ok(Frame { req_id, msg }) = Frame::<ServerMsg>::decode(bytes) else {
+            self.effects.push(Effect::Disconnect { reconnect: true });
+            return;
+        };
+        self.last_rx = self.now;
+        match msg {
+            ServerMsg::Challenge { nonce } => self.on_challenge(&nonce),
+            ServerMsg::Ready => self.on_ready(),
+            ServerMsg::Pong => {}
+            ServerMsg::Superseded => {
+                self.conn = Conn::Offline;
+                self.emit(Event::Superseded);
+                self.effects.push(Effect::Disconnect { reconnect: false });
+            }
+            ServerMsg::Recv { from, body } => self.on_relay(from, body, false),
+            msg => match self.pending.remove(&req_id) {
+                Some((pending, _)) => self.on_response(pending, msg),
+                None if matches!(
+                    msg,
+                    ServerMsg::Error {
+                        code: ErrorCode::Unauthorized
+                    }
+                ) =>
+                {
+                    self.effects.push(Effect::Disconnect { reconnect: false });
+                }
+                None => {}
+            },
+        }
+    }
+
+    fn on_challenge(&mut self, nonce: &[u8; 32]) {
+        if self.conn != Conn::Authenticating {
+            return;
+        }
+        let mut signed = Vec::with_capacity(SESSION_AUTH_CONTEXT.len() + 32);
+        signed.extend_from_slice(SESSION_AUTH_CONTEXT);
+        signed.extend_from_slice(nonce);
+        let signature = self.identity.sign(&signed).to_bytes();
+        self.transmit(0, ClientMsg::Auth { signature });
+    }
+
+    fn on_response(&mut self, pending: Pending, msg: ServerMsg) {
+        if let ServerMsg::Error { code } = msg {
+            let reason = match code {
+                ErrorCode::NotFound => FailReason::NotFound,
+                ErrorCode::Unauthorized => FailReason::Unauthorized,
+                ErrorCode::RateLimited | ErrorCode::Unavailable => FailReason::Offline,
+                _ => FailReason::ServerError,
+            };
+            self.fail_request(pending, reason);
+            return;
+        }
+        match (pending, msg) {
+            (Pending::CreateLink, ServerMsg::LinkCreated { link }) => {
+                self.emit(Event::LinkCreated {
+                    link: link.to_string(),
+                });
+            }
+            (Pending::Resolve { link }, ServerMsg::LinkResolved { peer }) => {
+                self.on_link_resolved(link, peer);
+            }
+            (Pending::FetchKeys { link, peer }, ServerMsg::Keys { base, opk }) => {
+                self.on_keys(link, peer, &base, opk);
+            }
+            (Pending::Publish { batch }, ServerMsg::KeysAck { opks_left }) => {
+                if !batch && opks_left < OPK_LOW_WATER {
+                    self.publish_keys(true);
+                }
+            }
+            (Pending::Send { msg_id, peer, body }, ServerMsg::SendAck { status }) => {
+                self.on_send_ack(msg_id, peer, body, status);
+            }
+            (Pending::InboxPut { msg_id }, ServerMsg::Done) => self.on_inbox_queued(msg_id),
+            (Pending::InboxFetch, ServerMsg::InboxBatch { claim, items }) => {
+                self.on_inbox_batch(claim, items);
+            }
+            (Pending::InboxAck, ServerMsg::Done) => {}
+            (
+                Pending::Bootstrap,
+                ServerMsg::BootstrapInfo {
+                    relay_addr,
+                    relay_key,
+                    ..
+                },
+            ) => {
+                self.emit(Event::Bootstrap {
+                    relay_addr,
+                    relay_key,
+                });
+            }
+            (pending, _) => self.fail_request(pending, FailReason::ServerError),
+        }
+    }
+
+    fn fail_request(&mut self, pending: Pending, reason: FailReason) {
+        match pending {
+            Pending::Resolve { link } | Pending::FetchKeys { link, .. } => {
+                self.emit(Event::JoinFailed { link, reason });
+            }
+            Pending::CreateLink | Pending::InboxFetch | Pending::Bootstrap => {
+                self.emit(Event::Warning { reason });
+            }
+            Pending::Send { msg_id, .. } | Pending::InboxPut { msg_id } => {
+                self.on_send_failed(msg_id);
+            }
+            Pending::Publish { .. } | Pending::InboxAck => {}
+        }
+    }
+
+    fn on_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::CreateLink => self.request(ClientMsg::CreateLink, Pending::CreateLink, false),
+            Command::JoinLink { link } => self.join_link(link),
+            Command::SendText {
+                peer,
+                msg_id,
+                text,
+                reply_to,
+            } => {
+                self.send_text(peer, msg_id, text, reply_to);
+            }
+            Command::SendFile {
+                peer,
+                msg_id,
+                file_id,
+                name,
+                mime,
+                size,
+                kind,
+                inline,
+            } => {
+                self.send_file(peer, msg_id, file_id, name, mime, size, kind, inline);
+            }
+            Command::AcceptFile { file_id } => self.accept_file(&file_id),
+            Command::CancelTransfer { file_id } => self.cancel_transfer(&file_id),
+            Command::MarkRead { peer, ids } => self.mark_read(peer, ids),
+            Command::FetchInbox => self.fetch_inbox(),
+            Command::RemovePeer { peer } => self.remove_peer(&peer),
+        }
+    }
+
+    fn on_tick(&mut self) {
+        let expired: Vec<u32> = self
+            .pending
+            .iter()
+            .filter(|(_, (_, deadline))| *deadline <= self.now)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in expired {
+            if let Some((p, _)) = self.pending.remove(&id) {
+                self.fail_request(p, FailReason::Timeout);
+            }
+        }
+
+        if self.conn == Conn::Offline {
+            return;
+        }
+        if self.now.saturating_sub(self.last_rx) >= DEAD_AFTER_MS {
+            self.effects.push(Effect::Disconnect { reconnect: true });
+            self.on_disconnected();
+            return;
+        }
+        if self.conn != Conn::Ready {
+            return;
+        }
+        if self.now.saturating_sub(self.last_ping) >= PING_INTERVAL_MS {
+            self.last_ping = self.now;
+            self.transmit(0, ClientMsg::Ping);
+        }
+        if self.now.saturating_sub(self.last_inbox_fetch) >= INBOX_POLL_MS {
+            self.fetch_inbox();
+        }
+        if self.prekeys.rotate_if_due(self.now, &mut self.rng) {
+            self.persist_prekeys();
+            self.publish_keys(false);
+        }
+        self.retransmit_expired();
+        self.flush_outbox();
+    }
+
+    fn publish_keys(&mut self, batch: bool) {
+        let opks = if batch {
+            let opks = self.prekeys.new_batch(&mut self.rng);
+            self.persist_prekeys();
+            opks
+        } else {
+            Vec::new()
+        };
+        let base = Bytes::from(self.prekeys.base_bundle(&self.identity));
+        self.request(
+            ClientMsg::PublishKeys {
+                base,
+                opks,
+                replace_opks: batch,
+            },
+            Pending::Publish { batch },
+            false,
+        );
+    }
+
+    fn fetch_inbox(&mut self) {
+        if self.conn != Conn::Ready
+            || self
+                .pending
+                .values()
+                .any(|(p, _)| matches!(p, Pending::InboxFetch))
+        {
+            return;
+        }
+        self.last_inbox_fetch = self.now;
+        self.request(
+            ClientMsg::InboxFetch {
+                secret: *self.inbox_secret,
+            },
+            Pending::InboxFetch,
+            true,
+        );
+    }
+
+    fn on_inbox_batch(&mut self, claim: [u8; 16], items: Vec<Bytes>) {
+        let full = items.len() >= cypher_wire::MAX_INBOX_BATCH;
+        for item in items {
+            let Ok(plain) = cypher_crypto::sealed::open(&self.identity.dh_secret, &item) else {
+                continue;
+            };
+            if plain.len() < 32 {
+                continue;
+            }
+            let from = PeerId::from_bytes(&plain[..32]).expect("length checked");
+            self.on_relay(from, Bytes::copy_from_slice(&plain[32..]), true);
+        }
+        self.request(
+            ClientMsg::InboxAck {
+                secret: *self.inbox_secret,
+                claim,
+            },
+            Pending::InboxAck,
+            true,
+        );
+        if full {
+            self.last_inbox_fetch = 0;
+        }
+    }
+
+    fn join_link(&mut self, link: String) {
+        match LinkId::parse(link.trim()) {
+            Some(id) => self.request(
+                ClientMsg::ResolveLink { link: id },
+                Pending::Resolve { link },
+                false,
+            ),
+            None => self.emit(Event::JoinFailed {
+                link,
+                reason: FailReason::InvalidLink,
+            }),
+        }
+    }
+
+    fn on_link_resolved(&mut self, link: String, peer: PeerId) {
+        if peer == self.peer_id {
+            self.emit(Event::JoinFailed {
+                link,
+                reason: FailReason::SelfLink,
+            });
+            return;
+        }
+        self.request(
+            ClientMsg::FetchKeys { peer },
+            Pending::FetchKeys { link, peer },
+            false,
+        );
+    }
+
+    /// Sends a request and tracks it for correlation and timeout. Anonymous
+    /// requests go through the anonymity layer instead of the session.
+    fn request(&mut self, msg: ClientMsg, pending: Pending, anonymous: bool) {
+        if self.conn != Conn::Ready {
+            self.fail_request(pending, FailReason::Offline);
+            return;
+        }
+        let req_id = self.alloc_req();
+        self.pending
+            .insert(req_id, (pending, self.now + REQUEST_TIMEOUT_MS));
+        let frame = Frame::new(req_id, msg).encode();
+        self.effects.push(if anonymous {
+            Effect::Anonymous(frame)
+        } else {
+            Effect::Transmit(frame)
+        });
+    }
+
+    fn alloc_req(&mut self) -> u32 {
+        self.next_req = self.next_req.wrapping_add(1).max(1);
+        self.next_req
+    }
+
+    fn transmit(&mut self, req_id: u32, msg: ClientMsg) {
+        self.effects
+            .push(Effect::Transmit(Frame::new(req_id, msg).encode()));
+    }
+
+    fn emit(&mut self, event: Event) {
+        self.effects.push(Effect::Emit(event));
+    }
+
+    fn persist(&mut self, op: StoreOp) {
+        self.effects.push(Effect::Persist(op));
+    }
+
+    fn persist_prekeys(&mut self) {
+        let op = self.vault.put(
+            Table::Meta,
+            META_PREKEYS.to_vec(),
+            &self.prekeys.to_record(),
+            &mut self.rng,
+        );
+        self.persist(op);
+    }
+
+    fn persist_peer(&mut self, peer: &PeerId) {
+        if let Some(p) = self.peers.get(peer) {
+            let op = self
+                .vault
+                .put(Table::Peers, peer.to_vec(), &p.to_record(), &mut self.rng);
+            self.effects.push(Effect::Persist(op));
+        }
+    }
+}
+
+#[derive(Default)]
+struct RecentIds {
+    set: HashSet<MsgId>,
+    order: VecDeque<MsgId>,
+}
+
+impl RecentIds {
+    /// Returns false when `id` was already seen.
+    fn insert(&mut self, id: MsgId) -> bool {
+        if !self.set.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > RECENT_IDS
+            && let Some(old) = self.order.pop_front()
+        {
+            self.set.remove(&old);
+        }
+        true
+    }
+}

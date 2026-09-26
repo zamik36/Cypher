@@ -85,8 +85,10 @@ impl RuntimeContext {
             Message::FileResume(resume) => {
                 let missing = resume
                     .missing
-                    .chunks_exact(4)
-                    .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| u32::from_le_bytes(*chunk))
                     .collect();
                 self.handle_file_accept(
                     cypher_proto::FileAccept {

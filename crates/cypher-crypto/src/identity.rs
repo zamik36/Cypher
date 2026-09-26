@@ -71,6 +71,12 @@ impl IdentitySeed {
         inbox
     }
 
+    /// Bearer secret for the owner's blind inbox. Peers only ever see
+    /// `cypher_wire::inbox_id(secret)`, which grants write but not read access.
+    pub fn derive_inbox_secret(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        crate::kdf::hkdf::<32>(None, &self.0, b"cypher/v2/inbox-secret")
+    }
+
     /// Return the raw seed bytes (for encryption/storage purposes).
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

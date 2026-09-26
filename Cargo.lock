@@ -1427,6 +1427,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cypher-core"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "cypher-crypto",
+ "cypher-types",
+ "cypher-wire",
+ "ed25519-dalek",
+ "postcard",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "serde",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
 name = "cypher-crypto"
 version = "0.2.0"
 dependencies = [
@@ -1564,6 +1582,17 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cypher-wire"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "cypher-types",
+ "proptest",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

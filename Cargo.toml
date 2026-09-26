@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/cypher-types",
+    "crates/cypher-wire",
+    "crates/cypher-core",
     "crates/cypher-common",
     "crates/cypher-proto",
     "crates/cypher-crypto",
@@ -18,6 +20,8 @@ members = [
 ]
 default-members = [
     "crates/cypher-types",
+    "crates/cypher-wire",
+    "crates/cypher-core",
     "crates/cypher-common",
     "crates/cypher-proto",
     "crates/cypher-crypto",
@@ -107,6 +111,8 @@ tor-rtcompat = "0.20"
 
 # Internal crates
 cypher-types = { path = "crates/cypher-types" }
+cypher-wire = { path = "crates/cypher-wire" }
+cypher-core = { path = "crates/cypher-core" }
 cypher-common = { path = "crates/cypher-common" }
 cypher-proto = { path = "crates/cypher-proto" }
 cypher-crypto = { path = "crates/cypher-crypto" }

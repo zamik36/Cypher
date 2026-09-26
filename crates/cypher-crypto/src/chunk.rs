@@ -5,11 +5,16 @@
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use cypher_types::FileId;
+use hmac::{Hmac, Mac};
 use rand_core::CryptoRngCore;
+use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::aead::TAG_LEN;
 use crate::error::CryptoError;
+use crate::kdf::hkdf;
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub const CHUNK_TAG_LEN: usize = TAG_LEN;
 
@@ -44,14 +49,20 @@ impl std::fmt::Debug for FileKey {
 #[derive(Clone)]
 pub struct ChunkCipher {
     aes: Aes256Gcm,
+    ack_mac: HmacSha256,
     file_id: FileId,
     chunk_count: u32,
 }
 
+pub const ACK_TAG_LEN: usize = 16;
+
 impl ChunkCipher {
     pub fn new(key: &FileKey, file_id: FileId, chunk_count: u32) -> Self {
+        let ack_key = hkdf::<32>(None, key.as_bytes(), b"cypher/v2/ack");
         Self {
             aes: Aes256Gcm::new(key.as_bytes().into()),
+            ack_mac: <HmacSha256 as Mac>::new_from_slice(ack_key.as_ref())
+                .expect("HMAC accepts any key"),
             file_id,
             chunk_count,
         }
@@ -61,11 +72,51 @@ impl ChunkCipher {
         self.chunk_count
     }
 
+    /// Authenticates a receiver acknowledgement so an intermediary cannot
+    /// forge progress and make the sender skip chunks.
+    pub fn ack_tag(&self, next: u32, sack: u64) -> [u8; ACK_TAG_LEN] {
+        let mut tag = [0u8; ACK_TAG_LEN];
+        tag.copy_from_slice(&self.ack_digest(next, sack)[..ACK_TAG_LEN]);
+        tag
+    }
+
+    pub fn verify_ack(&self, next: u32, sack: u64, tag: &[u8; ACK_TAG_LEN]) -> bool {
+        let mut mac = self.ack_mac.clone();
+        Self::ack_input(&mut mac, self.file_id, next, sack);
+        mac.verify_truncated_left(tag).is_ok()
+    }
+
+    fn ack_digest(&self, next: u32, sack: u64) -> [u8; 32] {
+        let mut mac = self.ack_mac.clone();
+        Self::ack_input(&mut mac, self.file_id, next, sack);
+        mac.finalize().into_bytes().into()
+    }
+
+    fn ack_input(mac: &mut HmacSha256, file_id: FileId, next: u32, sack: u64) {
+        mac.update(file_id.as_bytes());
+        mac.update(&next.to_le_bytes());
+        mac.update(&sack.to_le_bytes());
+    }
+
     /// Encrypts `buf` in place, appending the 16-byte tag.
     pub fn seal(&self, index: u32, buf: &mut Vec<u8>) -> Result<(), CryptoError> {
         let (nonce, aad) = self.params(index)?;
         self.aes
             .encrypt_in_place(Nonce::from_slice(&nonce), &aad, buf)
+            .map_err(|_| CryptoError::Malformed)
+    }
+
+    /// Encrypts `buf` in place and returns the detached tag, letting callers
+    /// seal a chunk inside a larger frame buffer without copying it.
+    pub fn seal_detached(
+        &self,
+        index: u32,
+        buf: &mut [u8],
+    ) -> Result<[u8; CHUNK_TAG_LEN], CryptoError> {
+        let (nonce, aad) = self.params(index)?;
+        self.aes
+            .encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, buf)
+            .map(Into::into)
             .map_err(|_| CryptoError::Malformed)
     }
 
@@ -130,6 +181,16 @@ mod tests {
         let mut buf = b"middle".to_vec();
         full.seal(1, &mut buf).unwrap();
         assert_eq!(truncated.open(1, &mut buf), Err(CryptoError::Aead));
+    }
+
+    #[test]
+    fn ack_tags_authenticate_progress() {
+        let c = cipher(10);
+        let tag = c.ack_tag(4, 0b101);
+        assert!(c.verify_ack(4, 0b101, &tag));
+        assert!(!c.verify_ack(5, 0b101, &tag));
+        assert!(!c.verify_ack(4, 0b111, &tag));
+        assert!(!cipher(10).verify_ack(4, 0b101, &tag));
     }
 
     #[test]

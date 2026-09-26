@@ -1,0 +1,60 @@
+//! Cypher wire protocol v2: the only messages the server infrastructure
+//! understands. Everything end-to-end lives inside opaque `body` fields.
+//!
+//! Layout: `[kind u8][req_id u32 LE][fields...]`, little-endian integers,
+//! `u32`-prefixed byte strings. Decoding is zero-copy for payload fields.
+
+mod codec;
+mod message;
+
+pub use message::{
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg, encode_recv, peek_send,
+    relay_addr_is_valid,
+};
+
+/// Bumped on any incompatible change; the gateway rejects other versions.
+pub const PROTOCOL_VERSION: u16 = 2;
+
+/// Size of the fixed frame prefix (`kind` + `req_id`).
+pub const FRAME_HEADER_LEN: usize = 5;
+
+/// Encoded prekey bundle without the one-time prekey part:
+/// identity(32) ‖ identity_dh(32) ‖ spk_id(4) ‖ spk(32) ‖ signature(64).
+pub const BUNDLE_BASE_LEN: usize = 164;
+
+pub const MAX_BODY_LEN: usize = cypher_types::MAX_FRAME_SIZE - FRAME_HEADER_LEN - 64;
+pub const MAX_INBOX_ITEM_LEN: usize = 72 * 1024;
+pub const MAX_INBOX_BATCH: usize = 64;
+pub const MAX_OPKS_PER_PUBLISH: usize = 200;
+pub const MAX_RELAY_ADDR_LEN: usize = 255;
+
+/// Public inbox address derived from the owner's secret. Writers need only
+/// the id; fetching or acknowledging requires the preimage.
+pub fn inbox_id(secret: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::new()
+        .chain_update(b"cypher/v2/inbox")
+        .chain_update(secret)
+        .finalize()
+        .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WireError {
+    #[error("truncated frame")]
+    Truncated,
+    #[error("unknown message kind {0:#04x}")]
+    UnknownKind(u8),
+    #[error("field too large")]
+    TooLarge,
+    #[error("trailing bytes")]
+    TrailingBytes,
+    #[error("malformed field")]
+    Malformed,
+}
+
+impl From<WireError> for cypher_types::Error {
+    fn from(e: WireError) -> Self {
+        Self::Protocol(e.to_string())
+    }
+}
