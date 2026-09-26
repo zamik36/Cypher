@@ -51,9 +51,6 @@ services:
       LOG_FORMAT: json
       P2P_GATEWAY_ADDR: "0.0.0.0:9100"
       P2P_WS_ADDR: "0.0.0.0:9101"
-      # Unique per gateway replica — namespaces NATS session subjects so session
-      # ids never collide across replicas. Override per instance when scaling out.
-      P2P_NODE_ID: "${GATEWAY_NODE_ID:-gateway-0}"
       P2P_NATS_URL: "nats://nats:4222"
       P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
@@ -78,12 +75,12 @@ services:
     volumes:
       - signaling-data:/data/signaling
     ports:
-      - "9200:9200"
       - "3478:3478/udp"
     environment:
       LOG_FORMAT: json
-      P2P_SIGNALING_ADDR: "0.0.0.0:9200"
       P2P_STUN_ADDR: "0.0.0.0:3478"
+      P2P_ONION_KEY_PATH: /data/signaling/onion_key.bin
+      P2P_RELAY_PUBLIC_ADDR: "${RELAY_PUBLIC_ADDR:-localhost:9300}"
       P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379"
       P2P_NATS_URL: "nats://nats:4222"
       P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
@@ -106,20 +103,15 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    volumes:
-      - relay-data:/data/relay
     ports:
       - "9300:9300"
     environment:
       LOG_FORMAT: json
-      P2P_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379"
       P2P_NATS_URL: "nats://nats:4222"
       P2P_NATS_TOKEN: "${NATS_AUTH_TOKEN:?Set NATS_AUTH_TOKEN in .env}"
       P2P_TLS_CERT_PATH: "${TLS_CERT_PATH:-}"
       P2P_TLS_KEY_PATH: "${TLS_KEY_PATH:-}"
     depends_on:
-      redis:
-        condition: service_healthy
       nats:
         condition: service_healthy
     restart: unless-stopped
@@ -150,4 +142,3 @@ networks:
 volumes:
   redis-data:
   signaling-data:
-  relay-data:

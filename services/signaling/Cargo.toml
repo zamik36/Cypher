@@ -6,32 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cypher-common.workspace = true
-cypher-proto.workspace = true
-cypher-transport.workspace = true
+cypher-types.workspace = true
+cypher-wire.workspace = true
+cypher-crypto.workspace = true
+cypher-server-kit.workspace = true
 tokio.workspace = true
 bytes.workspace = true
-dashmap.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 anyhow.workspace = true
 redis.workspace = true
 async-nats.workspace = true
 rand.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 prometheus.workspace = true
-ed25519-dalek.workspace = true
-hmac.workspace = true
-sha2.workspace = true
-
-[dev-dependencies]
-cypher-crypto.workspace = true
-cypher-nat.workspace = true
-cypher-tls = { workspace = true, features = ["insecure-tls"] }
-tempfile = "3"
+hex.workspace = true
+x25519-dalek.workspace = true
 
 [lints]
 workspace = true

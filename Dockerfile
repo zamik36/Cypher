@@ -2,7 +2,6 @@ FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-COPY proto/ proto/
 COPY crates/ crates/
 COPY services/ services/
 COPY tools/ tools/
@@ -45,8 +44,6 @@ CMD ["signaling"]
 FROM runtime-base AS relay
 
 COPY --from=builder /app/target/release/relay /usr/local/bin/relay
-RUN mkdir -p /data/relay && chown app:app /data/relay
 EXPOSE 9300 9092
-WORKDIR /
 USER app
 CMD ["relay"]

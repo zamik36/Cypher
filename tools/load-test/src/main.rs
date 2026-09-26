@@ -1,229 +1,203 @@
-//! Load testing tool for the P2P gateway.
-//!
-//! Opens N concurrent TLS connections, sends SESSION_INIT + heartbeat PINGs,
-//! and reports connection rate, latency percentiles, and error counts.
+//! Gateway load generator: pairs of authenticated clients exchanging relayed
+//! frames; reports connection success and Send→SendAck latency percentiles.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use clap::Parser;
-use tokio::sync::Semaphore;
-use tracing::{error, info};
-
-use cypher_proto::Serializable;
-use cypher_transport::TransportSession;
-use cypher_transport::frame::FrameFlags;
+use cypher_crypto::IdentityKeyPair;
+use cypher_transport::ClientConn;
+use cypher_types::{PeerId, SESSION_AUTH_CONTEXT};
+use cypher_wire::{ClientMsg, Frame, PROTOCOL_VERSION, ServerMsg};
+use futures::{SinkExt, StreamExt};
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
-#[command(name = "load-test", about = "P2P Gateway load testing tool")]
+#[command(name = "load-test", about = "Cypher gateway load generator")]
 struct Args {
-    /// Number of concurrent connections to open.
-    #[arg(long, default_value = "100")]
+    /// Number of client connections (rounded up to an even number).
+    #[arg(long, default_value_t = 100)]
     connections: usize,
-
-    /// Duration to run the test in seconds.
-    #[arg(long, default_value = "30")]
+    /// Test duration in seconds.
+    #[arg(long, default_value_t = 30)]
     duration: u64,
-
-    /// Gateway address (host:port).
-    #[arg(long, default_value = "127.0.0.1:9400")]
+    #[arg(long, default_value = "localhost:9100")]
     gateway_addr: String,
-
-    /// Maximum connections to open per second.
-    #[arg(long, default_value = "50")]
-    rate: usize,
+    /// PEM certificate to pin (development gateways).
+    #[arg(long)]
+    ca_cert: Option<std::path::PathBuf>,
+    /// New connections per second.
+    #[arg(long, default_value_t = 200)]
+    rate: u32,
+    /// Relayed messages per second per client.
+    #[arg(long, default_value_t = 5)]
+    msg_rate: u32,
+    #[arg(long, default_value_t = 256)]
+    payload: usize,
 }
 
+#[derive(Default)]
 struct Stats {
     connected: AtomicU64,
     errors: AtomicU64,
-    pongs_received: AtomicU64,
-    latencies_us: tokio::sync::Mutex<Vec<u64>>,
-}
-
-impl Stats {
-    fn new() -> Self {
-        Self {
-            connected: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-            pongs_received: AtomicU64::new(0),
-            latencies_us: tokio::sync::Mutex::new(Vec::new()),
-        }
-    }
-}
-
-async fn run_client(gateway_addr: String, client_id: u64, stats: Arc<Stats>, deadline: Instant) {
-    let connect_start = Instant::now();
-
-    let tls_config = cypher_tls::make_client_config();
-
-    let mut session = match TransportSession::connect(&gateway_addr, tls_config).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!(client_id, "connect error: {}", e);
-            stats.errors.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    };
-
-    let connect_us = connect_start.elapsed().as_micros() as u64;
-    stats.latencies_us.lock().await.push(connect_us);
-    stats.connected.fetch_add(1, Ordering::Relaxed);
-
-    // Full authenticated handshake: SESSION_INIT → challenge → signed SESSION_AUTH.
-    let identity = cypher_crypto::identity::IdentityKeyPair::generate();
-    let init = cypher_proto::SessionInit {
-        client_id: identity.peer_id().as_bytes().to_vec(),
-        nonce: vec![0u8; 32],
-    };
-    if let Err(e) = session
-        .send_frame(Bytes::from(init.serialize()), FrameFlags::SESSION_INIT)
-        .await
-    {
-        error!(client_id, "session init error: {}", e);
-        stats.errors.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    let server_nonce = match session.recv_frame().await {
-        Ok(frame) => match cypher_proto::SessionAck::deserialize(&frame.payload) {
-            Ok(ack) => ack.server_nonce,
-            Err(e) => {
-                error!(client_id, "bad session ack: {}", e);
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        },
-        Err(e) => {
-            error!(client_id, "session ack recv error: {}", e);
-            stats.errors.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    };
-    let mut signed = cypher_common::SESSION_AUTH_CONTEXT.to_vec();
-    signed.extend_from_slice(&server_nonce);
-    let auth = cypher_proto::SessionAuth {
-        signature: identity.sign(&signed).to_bytes().to_vec(),
-    };
-    if let Err(e) = session
-        .send_frame(Bytes::from(auth.serialize()), FrameFlags::SESSION_INIT)
-        .await
-    {
-        error!(client_id, "session auth error: {}", e);
-        stats.errors.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    if let Err(e) = session.recv_frame().await {
-        error!(client_id, "session auth ack recv error: {}", e);
-        stats.errors.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    // Keep connection alive with PINGs until deadline.
-    while Instant::now() < deadline {
-        let ping_start = Instant::now();
-        if let Err(e) = session.send_frame(Bytes::new(), FrameFlags::PING).await {
-            error!(client_id, "ping send error: {}", e);
-            stats.errors.fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-
-        match tokio::time::timeout(Duration::from_secs(5), session.recv_frame()).await {
-            Ok(Ok(frame)) => {
-                if frame.flags.contains(FrameFlags::PONG) {
-                    let latency = ping_start.elapsed().as_micros() as u64;
-                    stats.latencies_us.lock().await.push(latency);
-                    stats.pongs_received.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Ok(Err(e)) => {
-                error!(client_id, "recv error: {}", e);
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-            Err(_) => {
-                error!(client_id, "ping timeout");
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    // Graceful close.
-    let _ = session.close().await;
+    sent: AtomicU64,
+    latencies_us: Mutex<Vec<u64>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    cypher_common::init_tracing();
     let args = Args::parse();
-
-    info!(
-        connections = args.connections,
-        duration_secs = args.duration,
-        gateway = %args.gateway_addr,
-        rate = args.rate,
-        "Starting load test"
-    );
-
-    let stats = Arc::new(Stats::new());
+    let tls = match &args.ca_cert {
+        Some(path) => cypher_tls::make_client_config_with_pem(&std::fs::read_to_string(path)?)?,
+        None => cypher_tls::make_client_config(),
+    };
+    let stats = Arc::new(Stats::default());
     let deadline = Instant::now() + Duration::from_secs(args.duration);
+    let pairs = args.connections.div_ceil(2);
+    let spacing = Duration::from_secs_f64(2.0 / f64::from(args.rate.max(1)));
+    let payload = Bytes::from(vec![0xA5u8; args.payload]);
 
-    // Rate-limit connection creation.
-    let semaphore = Arc::new(Semaphore::new(args.rate));
-    let mut handles = Vec::new();
-
-    for i in 0..args.connections {
-        let permit = semaphore.clone().acquire_owned().await?;
-        let stats = stats.clone();
-        let addr = args.gateway_addr.clone();
-
-        let handle = tokio::spawn(async move {
-            run_client(addr, i as u64, stats, deadline).await;
-            // Release permit after a short delay to enforce rate.
-            tokio::time::sleep(Duration::from_millis(1000 / 50)).await;
-            drop(permit);
-        });
-        handles.push(handle);
-
-        if Instant::now() >= deadline {
-            break;
-        }
+    let mut tasks = Vec::with_capacity(pairs);
+    for _ in 0..pairs {
+        let (tls, stats, addr, payload) = (
+            tls.clone(),
+            stats.clone(),
+            args.gateway_addr.clone(),
+            payload.clone(),
+        );
+        let msg_rate = args.msg_rate;
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = run_pair(&addr, tls, &stats, deadline, msg_rate, payload).await {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!("pair failed: {e:#}");
+            }
+        }));
+        tokio::time::sleep(spacing).await;
     }
-
-    // Wait for all clients to finish.
-    for h in handles {
-        let _ = h.await;
+    for t in tasks {
+        let _ = t.await;
     }
-
-    // Print results.
-    let connected = stats.connected.load(Ordering::Relaxed);
-    let errors = stats.errors.load(Ordering::Relaxed);
-    let pongs = stats.pongs_received.load(Ordering::Relaxed);
-    let mut latencies = stats.latencies_us.lock().await;
-    latencies.sort();
-
-    println!("\n=== Load Test Results ===");
-    println!("Connections attempted: {}", args.connections);
-    println!("Connections succeeded: {}", connected);
-    println!("Errors:               {}", errors);
-    println!("Pongs received:       {}", pongs);
-
-    if !latencies.is_empty() {
-        let p50 = latencies[latencies.len() / 2];
-        let p95 = latencies[latencies.len() * 95 / 100];
-        let p99 = latencies[latencies.len() * 99 / 100];
-        println!("Latency p50:          {} µs", p50);
-        println!("Latency p95:          {} µs", p95);
-        println!("Latency p99:          {} µs", p99);
-    }
-
-    let rate = connected as f64 / args.duration as f64;
-    println!("Connections/sec:      {:.1}", rate);
-
+    report(&stats, args.duration).await;
     Ok(())
+}
+
+async fn run_pair(
+    addr: &str,
+    tls: Arc<rustls::ClientConfig>,
+    stats: &Stats,
+    deadline: Instant,
+    msg_rate: u32,
+    payload: Bytes,
+) -> Result<()> {
+    let (a_id, b_id) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+    let mut a = connect(addr, tls.clone(), &a_id).await?;
+    let b = connect(addr, tls, &b_id).await?;
+    stats.connected.fetch_add(2, Ordering::Relaxed);
+    let b_peer = b_id.peer_id();
+    let sink_task = tokio::spawn(drain(b));
+
+    let interval = Duration::from_secs_f64(1.0 / f64::from(msg_rate.max(1)));
+    let mut req_id = 0u32;
+    while Instant::now() < deadline {
+        req_id += 1;
+        let started = Instant::now();
+        a.send(Frame::new(req_id, send(b_peer, payload.clone())).encode())
+            .await?;
+        loop {
+            let raw = a.next().await.context("gateway closed")??;
+            if let Ok(Frame {
+                req_id: id,
+                msg: ServerMsg::SendAck { .. },
+            }) = Frame::<ServerMsg>::decode(raw.freeze())
+                && id == req_id
+            {
+                break;
+            }
+        }
+        stats.sent.fetch_add(1, Ordering::Relaxed);
+        stats
+            .latencies_us
+            .lock()
+            .await
+            .push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+        tokio::time::sleep(interval.saturating_sub(started.elapsed())).await;
+    }
+    sink_task.abort();
+    Ok(())
+}
+
+fn send(to: PeerId, body: Bytes) -> ClientMsg {
+    ClientMsg::Send {
+        to,
+        want_ack: true,
+        body,
+    }
+}
+
+async fn drain(mut conn: ClientConn) {
+    while let Some(Ok(_)) = conn.next().await {}
+}
+
+async fn connect(
+    addr: &str,
+    tls: Arc<rustls::ClientConfig>,
+    id: &IdentityKeyPair,
+) -> Result<ClientConn> {
+    let mut conn = cypher_transport::connect_tls(addr, tls).await?;
+    conn.send(
+        Frame::new(
+            0,
+            ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                peer: id.peer_id(),
+            },
+        )
+        .encode(),
+    )
+    .await?;
+    let nonce = match next(&mut conn).await? {
+        ServerMsg::Challenge { nonce } => nonce,
+        other => bail!("expected challenge, got {other:?}"),
+    };
+    let mut signed = SESSION_AUTH_CONTEXT.to_vec();
+    signed.extend_from_slice(&nonce);
+    let signature = id.sign(&signed).to_bytes();
+    conn.send(Frame::new(0, ClientMsg::Auth { signature }).encode())
+        .await?;
+    match next(&mut conn).await? {
+        ServerMsg::Ready => Ok(conn),
+        other => bail!("expected ready, got {other:?}"),
+    }
+}
+
+async fn next(conn: &mut ClientConn) -> Result<ServerMsg> {
+    let raw = conn.next().await.context("gateway closed")??;
+    Ok(Frame::<ServerMsg>::decode(raw.freeze())?.msg)
+}
+
+async fn report(stats: &Stats, secs: u64) {
+    let mut lat = stats.latencies_us.lock().await;
+    lat.sort_unstable();
+    let pct = |p: f64| {
+        lat.get(((lat.len() as f64 * p) as usize).min(lat.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    };
+    let sent = stats.sent.load(Ordering::Relaxed);
+    println!("connected:   {}", stats.connected.load(Ordering::Relaxed));
+    println!("errors:      {}", stats.errors.load(Ordering::Relaxed));
+    println!(
+        "relayed:     {sent} ({:.0}/s)",
+        sent as f64 / secs.max(1) as f64
+    );
+    println!(
+        "latency µs:  p50={} p90={} p99={} max={}",
+        pct(0.50),
+        pct(0.90),
+        pct(0.99),
+        lat.last().copied().unwrap_or(0)
+    );
 }

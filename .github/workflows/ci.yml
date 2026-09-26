@@ -46,8 +46,8 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - { crate: cypher-proto, name: fuzz_dispatch }
-          - { crate: cypher-proto, name: fuzz_decode_bytes }
+          - { crate: cypher-wire, name: fuzz_frames }
+          - { crate: cypher-wire, name: fuzz_bodies }
           - { crate: cypher-crypto, name: fuzz_aead }
           - { crate: cypher-crypto, name: fuzz_ratchet }
           - { crate: cypher-crypto, name: fuzz_decoders }

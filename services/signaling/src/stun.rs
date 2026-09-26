@@ -118,50 +118,78 @@ pub(crate) fn build_binding_response(transaction_id: &[u8], peer: SocketAddr) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
-    const TEST_TXN_ID: [u8; 12] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
-    ];
+    const TXN: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
-    #[test]
-    fn test_build_binding_response_ipv4() {
-        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 12345));
-        let resp = build_binding_response(&TEST_TXN_ID, peer).expect("should produce response");
-        let addr = cypher_nat::parse_binding_response(&resp, &TEST_TXN_ID)
-            .expect("should parse binding response");
-        assert_eq!(addr, peer);
+    fn decode_xor_mapped(resp: &[u8], txn: &[u8; 12]) -> SocketAddr {
+        assert_eq!(
+            u16::from_be_bytes([resp[0], resp[1]]),
+            STUN_BINDING_RESPONSE
+        );
+        assert_eq!(&resp[8..20], txn);
+        let attr = &resp[STUN_HEADER_SIZE..];
+        assert_eq!(
+            u16::from_be_bytes([attr[0], attr[1]]),
+            STUN_ATTR_XOR_MAPPED_ADDRESS
+        );
+        let value = &attr[4..];
+        let port = u16::from_be_bytes([value[2], value[3]]) ^ (STUN_MAGIC_COOKIE >> 16) as u16;
+        let ip = match value[1] {
+            0x01 => {
+                let x = u32::from_be_bytes(value[4..8].try_into().unwrap()) ^ STUN_MAGIC_COOKIE;
+                IpAddr::V4(Ipv4Addr::from(x))
+            }
+            _ => {
+                let mut key = [0u8; 16];
+                key[..4].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+                key[4..].copy_from_slice(txn);
+                let mut octets = [0u8; 16];
+                for i in 0..16 {
+                    octets[i] = value[4 + i] ^ key[i];
+                }
+                IpAddr::V6(Ipv6Addr::from(octets))
+            }
+        };
+        SocketAddr::new(ip, port)
     }
 
     #[test]
-    fn test_build_binding_response_ipv6() {
+    fn ipv4_response_roundtrip() {
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 12345));
+        let resp = build_binding_response(&TXN, peer).unwrap();
+        assert_eq!(decode_xor_mapped(&resp, &TXN), peer);
+    }
+
+    #[test]
+    fn ipv6_response_roundtrip() {
         let ip = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0, 0, 0x8a2e, 0x0370, 0x7334);
         let peer = SocketAddr::V6(SocketAddrV6::new(ip, 54321, 0, 0));
-        let resp = build_binding_response(&TEST_TXN_ID, peer).expect("should produce response");
-        let addr = cypher_nat::parse_binding_response(&resp, &TEST_TXN_ID)
-            .expect("should parse IPv6 binding response");
-        assert_eq!(addr.ip(), peer.ip());
-        assert_eq!(addr.port(), peer.port());
+        let resp = build_binding_response(&TXN, peer).unwrap();
+        assert_eq!(decode_xor_mapped(&resp, &TXN), peer);
     }
 
     #[tokio::test]
-    async fn test_stun_server_binding_roundtrip() {
+    async fn server_answers_binding_requests() {
         let server = StunServer::bind("127.0.0.1:0".parse().unwrap())
             .await
-            .expect("bind STUN server");
+            .unwrap();
         let server_addr = server.socket.local_addr().unwrap();
-
         tokio::spawn(async move { server.run().await });
 
-        let client = cypher_nat::StunClient::new()
-            .await
-            .expect("create STUN client");
-        let reflexive = client
-            .binding_request(server_addr)
-            .await
-            .expect("binding request");
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut req = Vec::with_capacity(STUN_HEADER_SIZE);
+        req.extend_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
+        req.extend_from_slice(&0u16.to_be_bytes());
+        req.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+        req.extend_from_slice(&TXN);
+        client.send_to(&req, server_addr).await.unwrap();
 
-        assert_eq!(reflexive.ip(), Ipv4Addr::new(127, 0, 0, 1));
-        assert_ne!(reflexive.port(), 0);
+        let mut buf = [0u8; 128];
+        let (n, _) = client.recv_from(&mut buf).await.unwrap();
+        assert_eq!(
+            decode_xor_mapped(&buf[..n], &TXN),
+            client.local_addr().unwrap()
+        );
     }
 }

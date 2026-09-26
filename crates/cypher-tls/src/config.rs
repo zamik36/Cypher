@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use cypher_common::{Error, Result};
+use cypher_types::{Error, Result};
 use rustls::crypto::ring::default_provider;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tracing::debug;
@@ -136,8 +136,9 @@ pub fn make_server_config(hostnames: &[&str]) -> Result<Arc<ServerConfig>> {
     make_server_config_from_cert(cert)
 }
 
-/// Build a TLS [`ClientConfig`] that accepts any certificate issued by a
-/// specific self-signed CA cert (for dev/test scenarios).
+/// Build a TLS [`ClientConfig`] that trusts exactly one certificate: used to
+/// pin a development server's self-signed certificate instead of disabling
+/// verification.
 ///
 /// In production, use [`make_client_config`] which validates against the
 /// system's trusted roots.
@@ -190,66 +191,39 @@ pub fn make_client_config() -> Arc<ClientConfig> {
     Arc::new(config)
 }
 
-/// Build a TLS [`ClientConfig`] that accepts **any** server certificate.
-///
-/// **Development/testing only** — disables all certificate verification.
-/// Use [`make_client_config`] in production.
-///
-/// Compile-time guarded: only available with `insecure-tls` feature AND debug builds.
-#[cfg(feature = "insecure-tls")]
-#[cfg(debug_assertions)]
-pub fn make_client_config_insecure() -> Arc<ClientConfig> {
-    ensure_crypto_provider();
-
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
-        .with_no_client_auth();
-
-    Arc::new(config)
+/// Client config pinning the PEM-encoded development certificate.
+pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
+    let cert = rustls_pemfile::certs(&mut pem.as_bytes())
+        .next()
+        .ok_or_else(|| Error::Transport("no certificate in PEM".into()))?
+        .map_err(|e| Error::Transport(format!("invalid certificate PEM: {e}")))?;
+    make_client_config_with_cert(cert)
 }
 
-/// Certificate verifier that accepts everything (dev only).
-#[cfg(feature = "insecure-tls")]
-#[cfg(debug_assertions)]
-#[derive(Debug)]
-struct NoCertVerifier;
-
-#[cfg(feature = "insecure-tls")]
-#[cfg(debug_assertions)]
-impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+/// Server config for a service: CA-issued PEM files in production, or a
+/// fresh self-signed certificate in development whose PEM is written to
+/// `dev_cert_out` so local clients can pin it.
+pub async fn load_server_config(
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+    dev_hostnames: &[&str],
+    dev_cert_out: Option<&std::path::Path>,
+) -> Result<Arc<ServerConfig>> {
+    let non_empty = |p: Option<&'_ str>| p.filter(|p| !p.is_empty());
+    match (non_empty(cert_path), non_empty(key_path)) {
+        (Some(cert), Some(key)) => {
+            load_pem_with_retry(cert, key, 30, std::time::Duration::from_secs(2)).await
+        }
+        (None, None) => {
+            let cert = SelfSignedCert::generate(dev_hostnames)?;
+            if let Some(out) = dev_cert_out {
+                std::fs::write(out, &cert.cert_pem)?;
+            }
+            tracing::warn!("using a self-signed development certificate");
+            make_server_config_from_cert(cert)
+        }
+        _ => Err(Error::Config(
+            "tls_cert_path and tls_key_path must be set together".into(),
+        )),
     }
 }

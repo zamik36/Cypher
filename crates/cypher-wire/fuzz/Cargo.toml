@@ -1,0 +1,26 @@
+[workspace]
+
+[package]
+name = "cypher-wire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+cypher-wire = { path = ".." }
+cypher-core = { path = "../../cypher-core" }
+
+[[bin]]
+name = "fuzz_frames"
+path = "fuzz_targets/fuzz_frames.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_bodies"
+path = "fuzz_targets/fuzz_bodies.rs"
+doc = false

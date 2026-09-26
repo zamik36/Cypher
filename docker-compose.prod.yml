@@ -150,6 +150,7 @@ services:
       - signaling-data:/data/signaling
     environment:
       LOG_FORMAT: json
+      P2P_RELAY_PUBLIC_ADDR: "${DOMAIN}:9300"
     ports: !override
       - "3478:3478/udp"
       - "127.0.0.1:9091:9091"
@@ -167,16 +168,8 @@ services:
       - no-new-privileges:true
     cap_drop: !override
       - ALL
-    cap_add:
-      - CHOWN
     volumes:
       - caddy-data:/caddy-data:ro
-      - relay-data:/data/relay
-    entrypoint:
-      - /bin/sh
-      - -lc
-    command:
-      - chown -R 0:0 /data/relay && exec relay
     environment:
       LOG_FORMAT: json
       P2P_TLS_CERT_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
@@ -204,7 +197,6 @@ volumes:
   caddy-data:
   caddy-config:
   signaling-data:
-  relay-data:
   prometheus-data:
   grafana-data:
   loki-data:

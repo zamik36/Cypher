@@ -6,37 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cypher-common.workspace = true
-cypher-crypto.workspace = true
-cypher-proto.workspace = true
 cypher-tls.workspace = true
 cypher-transport.workspace = true
+cypher-server-kit.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
 bytes.workspace = true
-dashmap.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 anyhow.workspace = true
 futures.workspace = true
-tokio-util.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 prometheus.workspace = true
-x25519-dalek.workspace = true
-hkdf.workspace = true
-sha2.workspace = true
-aes-gcm.workspace = true
 async-nats.workspace = true
-redis.workspace = true
-rand.workspace = true
-zeroize.workspace = true
-
-[dev-dependencies]
-tempfile = "3"
 
 [lints]
 workspace = true

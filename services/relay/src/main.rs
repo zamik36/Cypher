@@ -1,469 +1,164 @@
-//! Relay Service - TURN-like relay for when P2P fails.
-//!
-//! Accepts TCP connections, pairs them into relay sessions, and forwards
-//! encrypted bytes between peers. The relay never decrypts traffic.
-//! Includes per-session bandwidth limiting and auto-teardown.
+//! Onion relay: forwards sealed anonymous requests to signaling. It learns
+//! client addresses but can neither read nor forge requests or replies, and
+//! keeps no state beyond open connections.
 
-use std::path::Path;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use bytes::Bytes;
-use dashmap::DashMap;
+use bytes::{BufMut, Bytes, BytesMut};
+use cypher_server_kit::ratelimit::ConnLimiter;
+use cypher_server_kit::{SIG_ONION_SUBJECT, metrics};
+use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
-use redis::AsyncCommands;
-use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio_rustls::TlsAcceptor;
-use tokio_util::codec::Framed;
-use tracing::{debug, info, warn};
-
 use prometheus::{IntCounter, IntGauge};
-use std::sync::LazyLock;
+use serde::Deserialize;
+use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio_rustls::TlsAcceptor;
+use tracing::{info, warn};
 
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+const CORR_LEN: usize = 8;
+const MAX_REQUEST: usize = 128 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const PIPELINE: usize = 8;
 
-use cypher_transport::codec::FrameCodec;
-use cypher_transport::frame::{Frame, FrameFlags};
-use cypher_transport::session::AsyncReadWrite;
-
-mod identity;
-mod onion;
-
-static RELAY_SESSIONS: LazyLock<IntGauge> = LazyLock::new(|| {
-    let g = IntGauge::new("relay_active_sessions", "Number of active relay sessions").unwrap();
-    let _ = prometheus::register(Box::new(g.clone()));
-    g
-});
-static RELAY_BYTES: LazyLock<IntCounter> = LazyLock::new(|| {
-    let c = IntCounter::new("relay_bytes_total", "Total bytes relayed").unwrap();
-    let _ = prometheus::register(Box::new(c.clone()));
-    c
-});
-
-/// Type alias for a boxed async stream (works with both TLS and plain TCP).
-type BoxedStream = Box<dyn AsyncReadWrite>;
-
-/// Maximum bandwidth per relay session (bytes per second).
-/// 10 MB/s default; can be made configurable.
-const MAX_BANDWIDTH_PER_SESSION: u64 = 10 * 1024 * 1024;
-
-/// Maximum lifetime for a relay session (1 hour).
-const MAX_SESSION_LIFETIME_SECS: u64 = 60 * 60;
-
-/// How often to check for expired sessions.
-const CLEANUP_INTERVAL_SECS: u64 = 30;
-
-/// One side of a relay session.
-struct RelayPeer {
-    /// Channel for sending frames to this peer's writer task.
-    writer: mpsc::Sender<Frame>,
+#[derive(Debug, Deserialize)]
+struct Config {
+    #[serde(default = "default_relay_addr")]
+    relay_addr: SocketAddr,
+    #[serde(default = "default_nats_url")]
+    nats_url: String,
+    nats_token: Option<String>,
+    tls_cert_path: Option<String>,
+    tls_key_path: Option<String>,
+    dev_cert_out: Option<PathBuf>,
+    #[serde(default = "default_metrics_addr")]
+    metrics_addr: SocketAddr,
+    #[serde(default = "default_max_connections")]
+    max_connections: usize,
 }
 
-/// A relay session pairing two peers.
-struct RelaySession {
-    peer_a: RelayPeer,
-    peer_b: RelayPeer,
-    created_at: Instant,
-    bytes_relayed: AtomicU64,
+fn default_relay_addr() -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], 9300))
+}
+fn default_nats_url() -> String {
+    "nats://127.0.0.1:4222".into()
+}
+fn default_metrics_addr() -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], 9092))
+}
+fn default_max_connections() -> usize {
+    20_000
 }
 
-/// A peer waiting to be paired with another peer for a relay session.
-struct PendingPeer {
-    #[allow(dead_code)]
-    session_key: String,
-    writer: mpsc::Sender<Frame>,
-    reader: futures::stream::SplitStream<Framed<BoxedStream, FrameCodec>>,
-}
-
-/// The relay service managing all active and pending sessions.
-struct RelayService {
-    /// session_key -> active relay session
-    sessions: Arc<DashMap<String, Arc<RelaySession>>>,
-    /// session_key -> pending peer waiting for a partner
-    pending: Arc<DashMap<String, PendingPeer>>,
-    /// Maximum bandwidth per session in bytes/second.
-    max_bandwidth_per_session: u64,
-    /// Static X25519 keypair for onion circuit key derivation.
-    onion_secret: StaticSecret,
-    /// NATS client for forwarding onion requests to signaling.
-    nats: Option<async_nats::Client>,
-}
-
-impl RelayService {
-    fn new(onion_secret: StaticSecret) -> Self {
-        Self {
-            sessions: Arc::new(DashMap::new()),
-            pending: Arc::new(DashMap::new()),
-            max_bandwidth_per_session: MAX_BANDWIDTH_PER_SESSION,
-            onion_secret,
-            nats: None,
-        }
-    }
-
-    async fn connect_nats(
-        &mut self,
-        nats_url: &str,
-        nats_token: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let nats = match nats_token {
-            Some(token) if !token.is_empty() => {
-                async_nats::ConnectOptions::with_token(token.to_string())
-                    .connect(nats_url)
-                    .await?
-            }
-            _ => async_nats::connect(nats_url).await?,
-        };
-        self.nats = Some(nats);
-        Ok(())
-    }
-
-    /// The first frame must contain the relay session key (UTF-8).
-    /// If a peer is already waiting with the same key, both are paired.
-    async fn handle_connection(self: &Arc<Self>, stream: BoxedStream) -> anyhow::Result<()> {
-        let framed = Framed::new(stream, FrameCodec::new());
-        let (writer_sink, mut reader) = framed.split();
-
-        // Channel for sending frames to this peer's writer task.
-        let (frame_tx, mut frame_rx) = mpsc::channel::<Frame>(256);
-
-        let writer_handle = tokio::spawn(async move {
-            let mut writer_sink = writer_sink;
-            while let Some(frame) = frame_rx.recv().await {
-                if let Err(e) = writer_sink.send(frame).await {
-                    debug!("relay writer error: {}", e);
-                    break;
-                }
-            }
-        });
-
-        let first_frame = match reader.next().await {
-            Some(Ok(frame)) => frame,
-            Some(Err(e)) => {
-                writer_handle.abort();
-                return Err(e.into());
-            }
-            None => {
-                writer_handle.abort();
-                return Ok(());
-            }
-        };
-
-        let session_key = String::from_utf8(first_frame.payload.to_vec())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-
-        if session_key.is_empty() {
-            warn!("relay peer sent empty session key");
-            writer_handle.abort();
-            return Ok(());
-        }
-
-        // Onion mode: client sends "ONION" as the session key.
-        if session_key == "ONION" {
-            info!("relay: onion mode connection");
-            if let Some(nats) = &self.nats {
-                let mut seq_counter = 0u32;
-                onion::handle_onion_connection(
-                    &self.onion_secret,
-                    nats,
-                    &frame_tx,
-                    &mut reader,
-                    &mut seq_counter,
-                )
-                .await;
-            } else {
-                warn!("relay: onion mode requested but NATS not connected");
-            }
-            writer_handle.abort();
-            return Ok(());
-        }
-
-        debug!(session_key = %session_key, "relay peer connected");
-
-        // Check if there is already a pending peer for this session key.
-        if let Some((_, pending)) = self.pending.remove(&session_key) {
-            // We have a partner -- create the relay session.
-            let relay = Arc::new(RelaySession {
-                peer_a: RelayPeer {
-                    writer: pending.writer,
-                },
-                peer_b: RelayPeer { writer: frame_tx },
-                created_at: Instant::now(),
-                bytes_relayed: AtomicU64::new(0),
-            });
-
-            self.sessions.insert(session_key.clone(), relay.clone());
-            RELAY_SESSIONS.inc();
-            info!(session_key = %session_key, "relay session established");
-
-            let max_bw = self.max_bandwidth_per_session;
-            let sessions = self.sessions.clone();
-            let key_a = session_key.clone();
-            let key_b = session_key.clone();
-
-            // Forward: peer_a reader -> peer_b writer
-            let relay_a = relay.clone();
-            let sessions_a = sessions.clone();
-            let a_to_b = tokio::spawn(async move {
-                let mut reader_a = pending.reader;
-                Self::forward_loop(
-                    &mut reader_a,
-                    &relay_a.peer_b.writer,
-                    &relay_a.bytes_relayed,
-                    max_bw,
-                )
-                .await;
-                // When one side disconnects, tear down the session.
-                sessions_a.remove(&key_a);
-            });
-
-            // Forward: peer_b reader (current connection) -> peer_a writer
-            let relay_b = relay.clone();
-            let sessions_b = sessions.clone();
-            let b_to_a = tokio::spawn(async move {
-                let mut reader_b = reader;
-                Self::forward_loop(
-                    &mut reader_b,
-                    &relay_b.peer_a.writer,
-                    &relay_b.bytes_relayed,
-                    max_bw,
-                )
-                .await;
-                sessions_b.remove(&key_b);
-            });
-
-            // Wait for both forwarding tasks to finish.
-            let _ = tokio::join!(a_to_b, b_to_a);
-            RELAY_SESSIONS.dec();
-            RELAY_BYTES.inc_by(relay.bytes_relayed.load(Ordering::Relaxed));
-            info!(
-                session_key = %session_key,
-                bytes_relayed = relay.bytes_relayed.load(Ordering::Relaxed),
-                "relay session ended"
-            );
-        } else {
-            // No partner yet -- register as pending and wait.
-            info!(session_key = %session_key, "relay peer waiting for partner");
-            self.pending.insert(
-                session_key.clone(),
-                PendingPeer {
-                    session_key: session_key.clone(),
-                    writer: frame_tx,
-                    reader,
-                },
-            );
-
-            // The pending peer's writer task stays alive. When paired, the
-            // relay session takes ownership of the channel. If the peer
-            // disconnects before being paired, the writer task will end
-            // naturally when the channel is dropped.
-            //
-            // We keep the writer_handle running; it will terminate when
-            // frame_rx is dropped (which happens when PendingPeer is consumed
-            // or dropped).
-        }
-
-        Ok(())
-    }
-
-    /// Forward frames from a reader to a writer with bandwidth limiting.
-    async fn forward_loop(
-        reader: &mut (impl StreamExt<Item = Result<Frame, std::io::Error>> + Unpin),
-        writer: &mpsc::Sender<Frame>,
-        bytes_relayed: &AtomicU64,
-        max_bandwidth: u64,
-    ) {
-        let start = Instant::now();
-
-        while let Some(result) = reader.next().await {
-            let frame = match result {
-                Ok(f) => f,
-                Err(e) => {
-                    debug!("relay reader error: {}", e);
-                    break;
-                }
-            };
-
-            if frame.flags.contains(FrameFlags::PING) {
-                let pong = Frame::new(0, frame.seq_no, FrameFlags::PONG, Bytes::new());
-                if writer.send(pong).await.is_err() {
-                    break;
-                }
-                continue;
-            }
-
-            if frame.flags.contains(FrameFlags::PONG) {
-                continue;
-            }
-
-            if frame.flags.contains(FrameFlags::SESSION_CLOSE) {
-                debug!("relay peer sent SESSION_CLOSE");
-                break;
-            }
-
-            let payload_len = frame.payload.len() as u64;
-
-            // Bandwidth limiting: check if we have exceeded the allowed rate.
-            let total = bytes_relayed.fetch_add(payload_len, Ordering::Relaxed) + payload_len;
-            let elapsed = start.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                let rate = total as f64 / elapsed;
-                if rate > max_bandwidth as f64 {
-                    // Throttle by sleeping proportionally.
-                    let excess = rate - max_bandwidth as f64;
-                    let delay_ms = (excess / max_bandwidth as f64 * 100.0).min(1000.0);
-                    tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
-                }
-            }
-
-            // Forward the frame to the other peer.
-            if writer.send(frame).await.is_err() {
-                debug!("relay writer channel closed");
-                break;
-            }
-        }
-    }
-
-    /// Background task that periodically cleans up expired relay sessions
-    /// and stale pending peers.
-    async fn cleanup_task(self: Arc<Self>) {
-        let max_lifetime = Duration::from_secs(MAX_SESSION_LIFETIME_SECS);
-
-        loop {
-            tokio::time::sleep(Duration::from_secs(CLEANUP_INTERVAL_SECS)).await;
-
-            let now = Instant::now();
-
-            // Remove expired active sessions.
-            let mut expired_keys = Vec::new();
-            for entry in self.sessions.iter() {
-                if now.duration_since(entry.value().created_at) > max_lifetime {
-                    expired_keys.push(entry.key().clone());
-                }
-            }
-            for key in &expired_keys {
-                self.sessions.remove(key);
-                info!(session_key = %key, "relay session expired, removed");
-            }
-
-            // Remove stale pending peers (we track creation time via the key
-            // being present; a more robust solution would timestamp the pending
-            // entry, but for simplicity we just remove pending entries that
-            // have been waiting too long).
-            //
-            // Note: PendingPeer does not carry a timestamp. In a production
-            // system we would add one. For now, we skip pending cleanup and
-            // rely on natural connection drops.
-            let active = self.sessions.len();
-            let pending = self.pending.len();
-            if active > 0 || pending > 0 {
-                debug!(
-                    active_sessions = active,
-                    pending_peers = pending,
-                    "relay cleanup tick"
-                );
-            }
-        }
-    }
+struct Relay {
+    nats: async_nats::Client,
+    connections: IntGauge,
+    forwarded: IntCounter,
+    dropped: IntCounter,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    cypher_common::init_tracing();
-    let config = cypher_common::AppConfig::load()?;
+    cypher_server_kit::init_tracing();
+    let config: Config = cypher_server_kit::load_config()?;
+    metrics::spawn_metrics_server(config.metrics_addr);
 
-    cypher_common::metrics::spawn_metrics_server(9092);
-
-    let onion_secret =
-        identity::load_or_create_onion_identity(Path::new("/data/relay/onion_identity.bin"))?;
-    let onion_pk = X25519PublicKey::from(&onion_secret);
-    info!(
-        "Relay onion public key: {}",
-        onion_pk
-            .as_bytes()
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>()
-    );
-
-    let redis_client = redis::Client::open(config.redis_url.clone())?;
-    let mut redis = redis_client.get_connection_manager().await?;
-    let relay_bootstrap = serde_json::json!({
-        "relay_addr": config.relay_addr.clone(),
-        "relay_public_key": onion_pk.as_bytes().to_vec(),
+    let tls = cypher_tls::load_server_config(
+        config.tls_cert_path.as_deref(),
+        config.tls_key_path.as_deref(),
+        &["localhost", "127.0.0.1"],
+        config.dev_cert_out.as_deref(),
+    )
+    .await?;
+    let relay = Arc::new(Relay {
+        nats: cypher_server_kit::connect_nats(&config.nats_url, config.nats_token.as_deref())
+            .await?,
+        connections: metrics::gauge("relay_connections", "Open onion connections"),
+        forwarded: metrics::counter("relay_forwarded_total", "Onion requests forwarded"),
+        dropped: metrics::counter("relay_dropped_total", "Onion requests dropped"),
     });
-    let _: () = redis
-        .set("transport:relay:bootstrap", relay_bootstrap.to_string())
-        .await?;
+    let listener = TcpListener::bind(config.relay_addr).await?;
+    info!(addr = %config.relay_addr, "relay listening");
 
-    let mut service = RelayService::new(onion_secret);
-
-    // Connect to NATS for onion relay forwarding.
-    let nats_token = std::env::var("P2P_NATS_TOKEN").ok();
-    if let Err(e) = service
-        .connect_nats(&config.nats_url, nats_token.as_deref())
-        .await
-    {
-        warn!("Failed to connect to NATS (onion relay disabled): {}", e);
-    } else {
-        info!("Relay connected to NATS at {}", config.nats_url);
-    }
-
-    let service = Arc::new(service);
-
-    {
-        let svc = service.clone();
-        tokio::spawn(async move {
-            svc.cleanup_task().await;
-        });
-    }
-
-    let tls_config = match (&config.tls_cert_path, &config.tls_key_path) {
-        (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
-            info!("Loading TLS certificate from {} / {}", cert, key);
-            cypher_tls::load_pem_with_retry(cert, key, 30, Duration::from_secs(2)).await?
-        }
-        _ => {
-            warn!(
-                "No TLS cert configured — using self-signed certificate for localhost. Clients will not be able to verify this certificate. Set P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH for production."
-            );
-            cypher_tls::make_server_config(&["localhost"])?
-        }
-    };
-    let acceptor = TlsAcceptor::from(tls_config);
-
-    let listener = TcpListener::bind(&config.relay_addr).await?;
-    info!("Relay service listening on {} (TLS)", config.relay_addr);
-
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (tcp_stream, addr) = accepted?;
-                debug!(%addr, "new relay connection");
-                let svc = service.clone();
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let tls_stream = match acceptor.accept(tcp_stream).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            debug!(%addr, "TLS handshake failed: {}", e);
-                            return;
-                        }
-                    };
-                    let boxed: BoxedStream = Box::new(tls_stream);
-                    if let Err(e) = svc.handle_connection(boxed).await {
-                        warn!(%addr, "relay connection error: {}", e);
-                    }
-                });
-            }
-            _ = cypher_common::shutdown_signal() => {
-                info!("shutdown signal received; relay stopping accept loop");
-                break;
-            }
-        }
+    tokio::select! {
+        () = accept_loop(listener, TlsAcceptor::from(tls), relay, config.max_connections) => {}
+        () = cypher_server_kit::shutdown_signal() => info!("shutdown signal received"),
     }
     Ok(())
+}
+
+async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, relay: Arc<Relay>, max: usize) {
+    let permits = Arc::new(Semaphore::new(max));
+    loop {
+        let tcp = match listener.accept().await {
+            Ok((tcp, _)) => tcp,
+            Err(e) => {
+                warn!("accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            continue;
+        };
+        let (acceptor, relay) = (acceptor.clone(), Arc::clone(&relay));
+        tokio::spawn(async move {
+            if let Ok(conn) = cypher_transport::accept_tls(&acceptor, tcp).await {
+                relay.connections.inc();
+                relay.serve(conn).await;
+                relay.connections.dec();
+            }
+            drop(permit);
+        });
+    }
+}
+
+impl Relay {
+    async fn serve(&self, conn: cypher_transport::ServerConn) {
+        let (mut sink, mut stream) = conn.split();
+        let mut limiter = ConnLimiter::new(20, 1 << 20);
+        let mut in_flight = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                frame = tokio::time::timeout(IDLE_TIMEOUT, stream.next()), if in_flight.len() < PIPELINE => {
+                    let Ok(Some(Ok(frame))) = frame else { break };
+                    if frame.len() <= CORR_LEN || frame.len() > MAX_REQUEST || !limiter.admit(frame.len()) {
+                        self.dropped.inc();
+                        continue;
+                    }
+                    in_flight.push(self.forward(frame.freeze()));
+                }
+                Some(reply) = in_flight.next(), if !in_flight.is_empty() => {
+                    if let Some(reply) = reply
+                        && sink.send(reply).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn forward(&self, frame: Bytes) -> Option<Bytes> {
+        let corr = &frame[..CORR_LEN];
+        let request = self
+            .nats
+            .request(SIG_ONION_SUBJECT, frame.slice(CORR_LEN..));
+        let reply = match tokio::time::timeout(REQUEST_TIMEOUT, request).await {
+            Ok(Ok(msg)) => msg.payload,
+            _ => {
+                self.dropped.inc();
+                return None;
+            }
+        };
+        self.forwarded.inc();
+        let mut out = BytesMut::with_capacity(CORR_LEN + reply.len());
+        out.put_slice(corr);
+        out.put_slice(&reply);
+        Some(out.freeze())
+    }
 }

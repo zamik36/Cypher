@@ -6,21 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cypher-common.workspace = true
-cypher-proto.workspace = true
-cypher-crypto.workspace = true
+cypher-types.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
-bytes.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-futures.workspace = true
 
 [dev-dependencies]
 cypher-tls.workspace = true
-tokio = { version = "1", features = ["full"] }
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

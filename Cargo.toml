@@ -3,42 +3,37 @@ resolver = "2"
 members = [
     "crates/cypher-types",
     "crates/cypher-wire",
-    "crates/cypher-core",
-    "crates/cypher-common",
-    "crates/cypher-proto",
     "crates/cypher-crypto",
+    "crates/cypher-core",
     "crates/cypher-tls",
     "crates/cypher-transport",
-    "crates/cypher-nat",
-    "crates/cypher-transfer",
-    "crates/cypher-client-core",
+    "crates/cypher-server-kit",
     "services/gateway",
     "services/signaling",
     "services/relay",
     "tools/load-test",
-    "apps/desktop/src-tauri",
 ]
 default-members = [
     "crates/cypher-types",
     "crates/cypher-wire",
-    "crates/cypher-core",
-    "crates/cypher-common",
-    "crates/cypher-proto",
     "crates/cypher-crypto",
+    "crates/cypher-core",
     "crates/cypher-tls",
     "crates/cypher-transport",
-    "crates/cypher-nat",
-    "crates/cypher-transfer",
-    "crates/cypher-client-core",
+    "crates/cypher-server-kit",
     "services/gateway",
     "services/signaling",
     "services/relay",
     "tools/load-test",
 ]
 exclude = [
-    "crates/cypher-proto/fuzz",
     "crates/cypher-crypto/fuzz",
-    "crates/cypher-nat/fuzz",
+    "crates/cypher-wire/fuzz",
+    "crates/cypher-proto",
+    "crates/cypher-transfer",
+    "crates/cypher-nat",
+    "crates/cypher-client-core",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -105,7 +100,7 @@ rcgen = { version = "0.14", features = ["pem"] }
 webpki-roots = "1.0"
 rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.28"
 arti-client = "0.20"
 tor-rtcompat = "0.20"
 
@@ -113,10 +108,10 @@ tor-rtcompat = "0.20"
 cypher-types = { path = "crates/cypher-types" }
 cypher-wire = { path = "crates/cypher-wire" }
 cypher-core = { path = "crates/cypher-core" }
-cypher-common = { path = "crates/cypher-common" }
+cypher-server-kit = { path = "crates/cypher-server-kit" }
 cypher-proto = { path = "crates/cypher-proto" }
 cypher-crypto = { path = "crates/cypher-crypto" }
-cypher-tls = { path = "crates/cypher-tls", default-features = false }
+cypher-tls = { path = "crates/cypher-tls" }
 cypher-transport = { path = "crates/cypher-transport" }
 cypher-nat = { path = "crates/cypher-nat" }
 cypher-transfer = { path = "crates/cypher-transfer" }
