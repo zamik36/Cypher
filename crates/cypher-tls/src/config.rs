@@ -209,7 +209,9 @@ pub async fn load_server_config(
     dev_hostnames: &[&str],
     dev_cert_out: Option<&std::path::Path>,
 ) -> Result<Arc<ServerConfig>> {
-    let non_empty = |p: Option<&'_ str>| p.filter(|p| !p.is_empty());
+    fn non_empty(p: Option<&str>) -> Option<&str> {
+        p.filter(|p| !p.is_empty())
+    }
     match (non_empty(cert_path), non_empty(key_path)) {
         (Some(cert), Some(key)) => {
             load_pem_with_retry(cert, key, 30, std::time::Duration::from_secs(2)).await
