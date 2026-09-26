@@ -6,20 +6,24 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cypher-common.workspace = true
+cypher-types.workspace = true
 x25519-dalek.workspace = true
 ed25519-dalek.workspace = true
 aes-gcm.workspace = true
 hkdf.workspace = true
+hmac.workspace = true
 sha2.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
-bytes.workspace = true
 serde.workspace = true
 zeroize.workspace = true
-argon2.workspace = true
 bip39.workspace = true
 postcard.workspace = true
+
+[dev-dependencies]
+rand_chacha.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

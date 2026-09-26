@@ -42,7 +42,7 @@ impl FileChunker {
             file_size.div_ceil(CHUNK_SIZE as u64) as u32
         };
 
-        let file_id = FileId::generate();
+        let file_id = FileId::random(&mut rand::rngs::OsRng);
 
         Ok(Self {
             file,
@@ -56,7 +56,7 @@ impl FileChunker {
     /// Build a `FileMeta` describing this file.
     pub fn meta(&self, name: String, compressed: bool) -> FileMeta {
         FileMeta {
-            file_id: self.file_id.clone(),
+            file_id: self.file_id,
             name,
             size: self.file_size,
             chunk_count: self.chunk_count,

@@ -145,7 +145,8 @@ impl RuntimeContext {
             return;
         };
         let meta = FileMeta {
-            file_id: FileId::from_bytes(&offer.file_id).unwrap_or_else(FileId::generate),
+            file_id: FileId::from_bytes(&offer.file_id)
+                .unwrap_or_else(|| FileId::random(&mut rand::rngs::OsRng)),
             name: offer.name,
             size: offer.size,
             chunk_count: offer.chunks,
@@ -153,7 +154,7 @@ impl RuntimeContext {
             compressed: offer.compressed != 0,
         };
         self.pending_metas
-            .insert(offer.file_id, (meta.clone(), from.clone()));
+            .insert(offer.file_id, (meta.clone(), from));
         let _ = self
             .event_tx
             .send(ClientEvent::FileOffered { from, meta })
@@ -196,7 +197,7 @@ impl RuntimeContext {
     async fn handle_file_chunk(&self, chunk: cypher_proto::FileChunk) {
         let receive_state = self.active_recvs.get(&chunk.file_id).map(|entry| {
             let (receiver, peer_id, compressed) = entry.value();
-            (Arc::clone(receiver), peer_id.clone(), *compressed)
+            (Arc::clone(receiver), *peer_id, *compressed)
         });
         let Some((receiver, sender_peer_id, is_compressed)) = receive_state else {
             warn!("FileChunk for unknown file_id");
@@ -560,11 +561,11 @@ async fn send_chunks(
     let active_sends = Arc::clone(&context.active_sends);
     let compressed = meta.compressed;
     let file_id_for_chunks = file_id.clone();
-    let peer_id_for_chunks = peer_id.clone();
+    let peer_id_for_chunks = peer_id;
 
     let send_fn: ChunkSendFn = Box::new(move |index, data, hash| {
         let keys = Arc::clone(&keys);
-        let peer_id = peer_id_for_chunks.clone();
+        let peer_id = peer_id_for_chunks;
         let file_id = file_id_for_chunks.clone();
         let outbound_tx = outbound_tx.clone();
         let event_tx = event_tx.clone();

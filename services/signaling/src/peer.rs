@@ -405,7 +405,7 @@ impl SignalingService {
         }
 
         let req: CreateLinkRequest = serde_json::from_slice(&msg.payload)?;
-        let link_id = LinkId::generate();
+        let link_id = LinkId::random(&mut rand::rngs::OsRng);
         let link_key = format!("link:{}", link_id.as_str());
 
         let mut redis = self.redis.clone();

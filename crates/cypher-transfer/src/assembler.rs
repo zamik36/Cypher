@@ -36,7 +36,7 @@ impl FileAssembler {
 
         Ok(Self {
             file,
-            file_id: meta.file_id.clone(),
+            file_id: meta.file_id,
             expected_chunks: meta.chunk_count,
             received: HashSet::new(),
             expected_hash: meta.hash.to_vec(),
@@ -69,7 +69,7 @@ impl FileAssembler {
             .await?;
         Ok(Some(Self {
             file,
-            file_id: meta.file_id.clone(),
+            file_id: meta.file_id,
             expected_chunks: meta.chunk_count,
             received,
             expected_hash: meta.hash.to_vec(),

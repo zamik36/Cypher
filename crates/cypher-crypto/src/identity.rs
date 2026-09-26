@@ -1,4 +1,4 @@
-use cypher_common::{Error, PeerId, Result};
+use cypher_types::{Error, PeerId, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::RngCore;

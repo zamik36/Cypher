@@ -33,7 +33,7 @@ pub async fn join_link(
     // Add peer to the known peers set (O(1) dedup).
     {
         let mut set = state.peers.lock().await;
-        set.insert(peer_id.clone());
+        set.insert(peer_id);
     }
 
     let hex: String = peer_id

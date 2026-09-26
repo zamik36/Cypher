@@ -206,7 +206,7 @@ impl SignalingClient {
             .get("link_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Protocol("missing link_id in create_link response".into()))?;
-        Ok(LinkId(id.to_string()))
+        LinkId::parse(id).ok_or_else(|| Error::Protocol("malformed link_id".into()))
     }
 
     /// Join an existing link by sending `signal.requestPeer`.

@@ -304,7 +304,7 @@ impl ClientApi {
         let _ = self
             .event_tx
             .send(ClientEvent::Connected {
-                peer_id: self.session.peer_id().clone(),
+                peer_id: *self.session.peer_id(),
             })
             .await;
 

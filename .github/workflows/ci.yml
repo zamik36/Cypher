@@ -50,6 +50,7 @@ jobs:
           - { crate: cypher-proto, name: fuzz_decode_bytes }
           - { crate: cypher-crypto, name: fuzz_aead }
           - { crate: cypher-crypto, name: fuzz_ratchet }
+          - { crate: cypher-crypto, name: fuzz_decoders }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@nightly

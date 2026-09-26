@@ -1,8 +1,6 @@
-use thiserror::Error;
-
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -33,9 +31,6 @@ pub enum Error {
 
     #[error("Timeout")]
     Timeout,
-
-    #[error("Peer not found: {0}")]
-    PeerNotFound(String),
 
     #[error("Invalid data: {0}")]
     InvalidData(String),

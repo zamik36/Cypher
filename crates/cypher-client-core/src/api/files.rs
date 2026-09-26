@@ -43,7 +43,7 @@ impl ClientApi {
 
         self.pending_sends.insert(
             file_id,
-            (Arc::new(Mutex::new(chunker)), peer_id.clone(), meta.clone()),
+            (Arc::new(Mutex::new(chunker)), *peer_id, meta.clone()),
         );
         info!(peer_id = %peer_id, file = %meta.name, "FileOffer sent");
         Ok(meta)
@@ -72,7 +72,7 @@ impl ClientApi {
             file_id.to_vec(),
             (
                 Arc::new(Mutex::new(receiver)),
-                sender_peer_id.clone(),
+                sender_peer_id,
                 is_compressed,
             ),
         );

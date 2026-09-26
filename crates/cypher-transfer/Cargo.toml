@@ -11,6 +11,7 @@ cypher-proto.workspace = true
 cypher-crypto.workspace = true
 cypher-transport.workspace = true
 tokio.workspace = true
+rand.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

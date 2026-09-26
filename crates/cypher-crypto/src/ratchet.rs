@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use cypher_common::{Error, Result};
+use cypher_types::{Error, Result};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};

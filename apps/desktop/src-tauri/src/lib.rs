@@ -140,7 +140,7 @@ async fn handle_event(
             // Add peer (O(1) dedup via HashSet) and auto-initiate E2EE session.
             {
                 let mut set = peers.lock().await;
-                set.insert(peer_id.clone());
+                set.insert(peer_id);
             }
             {
                 if let Err(e) = api.initiate_session(&peer_id).await {

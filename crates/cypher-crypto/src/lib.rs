@@ -1,9 +1,22 @@
 pub mod aead;
+pub mod chunk;
+pub mod double_ratchet;
+mod error;
+pub mod handshake;
 pub mod identity;
+mod kdf;
+pub mod prekey;
 pub mod ratchet;
+mod reader;
+pub mod sealed;
 pub mod x3dh;
 
 pub use aead::{aead_decrypt, aead_encrypt};
+pub use chunk::{ChunkCipher, FileKey};
+pub use double_ratchet::{Header, Ratchet};
+pub use error::CryptoError;
+pub use handshake::InitHeader;
 pub use identity::{EphemeralKeyPair, IdentityKeyPair, IdentitySeed, KeyBundle, SignedPreKey};
+pub use prekey::{OneTimePreKey, PrekeyBundle};
 pub use ratchet::RatchetState;
 pub use x3dh::{SharedSecret, x3dh_initiator, x3dh_mutual, x3dh_responder};
