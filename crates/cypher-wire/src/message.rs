@@ -105,7 +105,7 @@ pub enum ServerMsg {
     Done,
     BootstrapInfo {
         relay_addr: String,
-        relay_key: [u8; 32],
+        onion_key: [u8; 32],
         capabilities: u32,
     },
     Error {
@@ -398,12 +398,12 @@ impl Frame<ServerMsg> {
             M::Done => header(kind::DONE, id, 0),
             M::BootstrapInfo {
                 relay_addr,
-                relay_key,
+                onion_key,
                 capabilities,
             } => {
                 let mut b = header(kind::BOOTSTRAP_INFO, id, 37 + relay_addr.len());
                 b.put_short_str(relay_addr);
-                b.put_slice(relay_key);
+                b.put_slice(onion_key);
                 b.put_u32_le(*capabilities);
                 b
             }
@@ -469,7 +469,7 @@ impl Frame<ServerMsg> {
             kind::DONE => M::Done,
             kind::BOOTSTRAP_INFO => M::BootstrapInfo {
                 relay_addr: r.short_str()?,
-                relay_key: r.array()?,
+                onion_key: r.array()?,
                 capabilities: r.u32()?,
             },
             kind::ERROR => M::Error {

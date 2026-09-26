@@ -6,6 +6,7 @@ use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use super::anon::Readiness;
 use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
@@ -226,6 +227,11 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn put_inbox(&mut self, msg_id: MsgId, inbox: [u8; 32], identity_dh: &[u8; 32], body: &[u8]) {
+        match self.anon.readiness(self.now) {
+            Readiness::Onion | Readiness::Session => {}
+            Readiness::Wait => return self.retry_later(msg_id, RETRY_BUSY_MS),
+            Readiness::Unavailable => return self.retry_later(msg_id, RETRY_OFFLINE_MS),
+        }
         let mut plain = Zeroizing::new(Vec::with_capacity(32 + body.len()));
         plain.extend_from_slice(self.peer_id.as_bytes());
         plain.extend_from_slice(body);

@@ -1,3 +1,4 @@
+mod anon;
 mod files;
 mod messaging;
 
@@ -17,6 +18,7 @@ use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::store::{META_PREKEYS, StoreOp, Table, Vault};
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
+use anon::{Anon, Readiness};
 use messaging::OutboxItem;
 
 const REQUEST_TIMEOUT_MS: u64 = 15_000;
@@ -91,6 +93,7 @@ pub struct Core<R> {
     last_inbox_fetch: u64,
     recent: RecentIds,
     progress_at: HashMap<FileId, u64>,
+    anon: Anon,
     effects: Vec<Effect>,
 }
 
@@ -164,6 +167,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_inbox_fetch: 0,
             recent: RecentIds::default(),
             progress_at: HashMap::new(),
+            anon: Anon::default(),
             effects: Vec::new(),
         };
         if fresh_prekeys {
@@ -194,7 +198,18 @@ impl<R: CryptoRngCore> Core<R> {
         match input {
             Input::Connected => self.on_connected(),
             Input::Disconnected => self.on_disconnected(),
-            Input::Frame(bytes) => self.on_frame(bytes),
+            Input::Frame(bytes) => self.on_frame(bytes, true),
+            Input::AnonymousFrame(bytes) => {
+                if let Some(frame) = self.anon.open(&bytes) {
+                    self.on_frame(frame, false);
+                }
+            }
+            Input::AnonymousChannel { up } => {
+                self.anon.set_relay_up(up);
+                if up {
+                    self.fetch_inbox();
+                }
+            }
             Input::Command(cmd) => self.on_command(cmd),
             Input::ChunkRead {
                 file_id,
@@ -226,6 +241,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.conn = Conn::Offline;
+        self.anon.on_disconnected();
         let pending: Vec<_> = self.pending.drain().map(|(_, (p, _))| p).collect();
         for p in pending {
             self.fail_request(p, FailReason::Offline);
@@ -239,17 +255,29 @@ impl<R: CryptoRngCore> Core<R> {
         self.emit(Event::Connected);
         self.publish_keys(false);
         self.request(ClientMsg::Bootstrap, Pending::Bootstrap, false);
-        self.fetch_inbox();
+        self.last_inbox_fetch = 0;
         self.flush_outbox();
         self.resume_transfers();
     }
 
-    fn on_frame(&mut self, bytes: Bytes) {
+    fn on_frame(&mut self, bytes: Bytes, session: bool) {
         let Ok(Frame { req_id, msg }) = Frame::<ServerMsg>::decode(bytes) else {
-            self.effects.push(Effect::Disconnect { reconnect: true });
+            if session {
+                self.effects.push(Effect::Disconnect { reconnect: true });
+            }
             return;
         };
-        self.last_rx = self.now;
+        if !session
+            && !matches!(
+                msg,
+                ServerMsg::InboxBatch { .. } | ServerMsg::Done | ServerMsg::Error { .. }
+            )
+        {
+            return;
+        }
+        if session {
+            self.last_rx = self.now;
+        }
         match msg {
             ServerMsg::Challenge { nonce } => self.on_challenge(&nonce),
             ServerMsg::Ready => self.on_ready(),
@@ -327,13 +355,16 @@ impl<R: CryptoRngCore> Core<R> {
                 Pending::Bootstrap,
                 ServerMsg::BootstrapInfo {
                     relay_addr,
-                    relay_key,
+                    onion_key,
                     ..
                 },
             ) => {
+                let relay = (!relay_addr.is_empty()).then_some(onion_key);
+                self.anon.on_bootstrap(relay, self.now);
+                self.fetch_inbox();
                 self.emit(Event::Bootstrap {
                     relay_addr,
-                    relay_key,
+                    onion_key,
                 });
             }
             (pending, _) => self.fail_request(pending, FailReason::ServerError),
@@ -345,7 +376,11 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::Resolve { link } | Pending::FetchKeys { link, .. } => {
                 self.emit(Event::JoinFailed { link, reason });
             }
-            Pending::CreateLink | Pending::InboxFetch | Pending::Bootstrap => {
+            Pending::Bootstrap => {
+                self.anon.on_bootstrap(None, self.now);
+                self.fetch_inbox();
+            }
+            Pending::CreateLink | Pending::InboxFetch => {
                 self.emit(Event::Warning { reason });
             }
             Pending::Send { msg_id, .. } | Pending::InboxPut { msg_id } => {
@@ -384,10 +419,12 @@ impl<R: CryptoRngCore> Core<R> {
             Command::MarkRead { peer, ids } => self.mark_read(peer, ids),
             Command::FetchInbox => self.fetch_inbox(),
             Command::RemovePeer { peer } => self.remove_peer(&peer),
+            Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
         }
     }
 
     fn on_tick(&mut self) {
+        self.anon.expire(self.now);
         let expired: Vec<u32> = self
             .pending
             .iter()
@@ -452,6 +489,10 @@ impl<R: CryptoRngCore> Core<R> {
                 .pending
                 .values()
                 .any(|(p, _)| matches!(p, Pending::InboxFetch))
+            || !matches!(
+                self.anon.readiness(self.now),
+                Readiness::Onion | Readiness::Session
+            )
         {
             return;
         }
@@ -527,14 +568,26 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         let req_id = self.alloc_req();
-        self.pending
-            .insert(req_id, (pending, self.now + REQUEST_TIMEOUT_MS));
+        let deadline = self.now + REQUEST_TIMEOUT_MS;
         let frame = Frame::new(req_id, msg).encode();
-        self.effects.push(if anonymous {
-            Effect::Anonymous(frame)
-        } else {
-            Effect::Transmit(frame)
-        });
+        let effect = match (anonymous, self.anon.readiness(self.now)) {
+            (false, _) | (true, Readiness::Session) => Effect::Transmit(frame),
+            (true, Readiness::Onion) => {
+                match self.anon.seal(&frame, self.now, deadline, &mut self.rng) {
+                    Some(blob) => Effect::Anonymous(blob),
+                    None => {
+                        self.fail_request(pending, FailReason::Offline);
+                        return;
+                    }
+                }
+            }
+            (true, Readiness::Wait | Readiness::Unavailable) => {
+                self.fail_request(pending, FailReason::Offline);
+                return;
+            }
+        };
+        self.pending.insert(req_id, (pending, deadline));
+        self.effects.push(effect);
     }
 
     fn alloc_req(&mut self) -> u32 {

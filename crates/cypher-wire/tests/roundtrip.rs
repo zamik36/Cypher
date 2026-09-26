@@ -87,7 +87,7 @@ fn server_samples() -> Vec<ServerMsg> {
         ServerMsg::Done,
         ServerMsg::BootstrapInfo {
             relay_addr: "relay.example:9443".into(),
-            relay_key: [7; 32],
+            onion_key: [7; 32],
             capabilities: 3,
         },
         ServerMsg::Error {

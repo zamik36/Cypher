@@ -8,11 +8,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use bytes::Bytes;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table};
 use cypher_crypto::IdentitySeed;
+use cypher_crypto::onion::{self, ReplyKey};
 use cypher_types::{FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 pub type Rng = ChaCha20Rng;
 
@@ -35,6 +37,8 @@ pub struct Server {
     pub drop_chunks_every: Option<usize>,
     chunk_counter: usize,
     rng: Option<Rng>,
+    pub session_inbox_ops: usize,
+    pub onion_inbox_ops: usize,
 }
 
 pub struct Client {
@@ -53,7 +57,11 @@ pub struct World {
     pub now: u64,
     pub server: Server,
     pub clients: Vec<Client>,
+    pub relay_up: bool,
     wire: VecDeque<(usize, Bytes)>,
+    onion_wire: VecDeque<(usize, Bytes)>,
+    onion_secret: StaticSecret,
+    onion_ctx: Option<(usize, u64, ReplyKey)>,
     rng: Rng,
 }
 
@@ -67,7 +75,11 @@ impl World {
                 ..Server::default()
             },
             clients: Vec::new(),
+            relay_up: true,
             wire: VecDeque::new(),
+            onion_wire: VecDeque::new(),
+            onion_secret: StaticSecret::from([3u8; 32]),
+            onion_ctx: None,
             rng: Rng::seed_from_u64(1),
         };
         for _ in 0..n {
@@ -122,6 +134,9 @@ impl World {
     pub fn connect(&mut self, i: usize) {
         self.clients[i].connected = true;
         self.clients[i].inputs.push_back(Input::Connected);
+        self.clients[i]
+            .inputs
+            .push_back(Input::AnonymousChannel { up: self.relay_up });
     }
 
     pub fn disconnect(&mut self, i: usize) {
@@ -246,6 +261,16 @@ impl World {
                 progressed = true;
                 self.serve(i, frame);
             }
+            while let Some((i, blob)) = self.onion_wire.pop_front() {
+                progressed = true;
+                let (corr, sealed) = blob.split_at(8);
+                let opened = onion::open_request(&self.onion_secret, sealed)
+                    .expect("relay forwards sealed requests");
+                let corr = u64::from_le_bytes(corr.try_into().unwrap());
+                self.onion_ctx = Some((i, corr, opened.reply));
+                self.serve(i, Bytes::from(opened.frame));
+                self.onion_ctx = None;
+            }
             if !progressed {
                 return;
             }
@@ -257,11 +282,12 @@ impl World {
         for effect in effects {
             let c = &mut self.clients[i];
             match effect {
-                Effect::Transmit(b) | Effect::Anonymous(b) => {
+                Effect::Transmit(b) => {
                     if c.connected {
                         self.wire.push_back((i, b));
                     }
                 }
+                Effect::Anonymous(b) => self.onion_wire.push_back((i, b)),
                 Effect::Persist(StoreOp::Put { table, key, value }) => {
                     c.kv.insert((table as u8, key), value);
                 }
@@ -310,6 +336,19 @@ impl World {
         }
     }
 
+    fn respond(&mut self, to: usize, frame: Frame<ServerMsg>) {
+        match &self.onion_ctx {
+            Some((client, corr, reply)) => {
+                let mut out = corr.to_le_bytes().to_vec();
+                out.extend_from_slice(&onion::seal_response(reply, &frame.encode()));
+                self.clients[*client]
+                    .inputs
+                    .push_back(Input::AnonymousFrame(Bytes::from(out)));
+            }
+            None => self.deliver(to, frame),
+        }
+    }
+
     fn deliver(&mut self, to: usize, frame: Frame<ServerMsg>) {
         if let ServerMsg::Recv { .. } = frame.msg {
             self.server.delivered.push((to, frame.encode()));
@@ -339,7 +378,7 @@ impl World {
             ClientMsg::Hello { peer, .. } => {
                 let nonce: [u8; 32] = self.server.rng.as_mut().unwrap().r#gen();
                 self.server.challenges.insert(from, (nonce, peer));
-                self.deliver(from, reply(ServerMsg::Challenge { nonce }));
+                self.respond(from, reply(ServerMsg::Challenge { nonce }));
             }
             ClientMsg::Auth { signature } => {
                 let (nonce, peer) = self.server.challenges.remove(&from).expect("hello first");
@@ -350,10 +389,22 @@ impl World {
                     .verify(&signed, &Signature::from_bytes(&signature))
                     .expect("valid auth signature");
                 self.server.online.insert(peer, from);
-                self.deliver(from, reply(ServerMsg::Ready));
+                self.respond(from, reply(ServerMsg::Ready));
             }
-            _ if authed.is_none() => panic!("unauthenticated request"),
-            ClientMsg::Ping => self.deliver(from, reply(ServerMsg::Pong)),
+            ClientMsg::InboxPut { .. }
+            | ClientMsg::InboxFetch { .. }
+            | ClientMsg::InboxAck { .. }
+                if self.onion_ctx.is_some() || authed.is_some() =>
+            {
+                if self.onion_ctx.is_some() {
+                    self.server.onion_inbox_ops += 1;
+                } else {
+                    self.server.session_inbox_ops += 1;
+                }
+                self.serve_inbox(from, req_id, msg);
+            }
+            _ if authed.is_none() || self.onion_ctx.is_some() => panic!("unauthenticated request"),
+            ClientMsg::Ping => self.respond(from, reply(ServerMsg::Pong)),
             ClientMsg::Send { to, want_ack, body } => {
                 let sender = authed.unwrap();
                 let is_chunk = body.first() == Some(&1);
@@ -375,7 +426,7 @@ impl World {
                     _ => DeliveryStatus::Offline,
                 };
                 if want_ack {
-                    self.deliver(from, reply(ServerMsg::SendAck { status }));
+                    self.respond(from, reply(ServerMsg::SendAck { status }));
                 }
             }
             ClientMsg::PublishKeys {
@@ -397,7 +448,7 @@ impl World {
                     entry.opks.extend(opks);
                 }
                 let opks_left = entry.opks.len() as u16;
-                self.deliver(from, reply(ServerMsg::KeysAck { opks_left }));
+                self.respond(from, reply(ServerMsg::KeysAck { opks_left }));
             }
             ClientMsg::FetchKeys { peer } => {
                 let msg = match self.server.keys.get_mut(&peer) {
@@ -409,12 +460,12 @@ impl World {
                         code: ErrorCode::NotFound,
                     },
                 };
-                self.deliver(from, reply(msg));
+                self.respond(from, reply(msg));
             }
             ClientMsg::CreateLink => {
                 let link = LinkId::random(self.server.rng.as_mut().unwrap());
                 self.server.links.insert(link.to_string(), authed.unwrap());
-                self.deliver(from, reply(ServerMsg::LinkCreated { link }));
+                self.respond(from, reply(ServerMsg::LinkCreated { link }));
             }
             ClientMsg::ResolveLink { link } => {
                 let msg = match self.server.links.get(link.as_str()) {
@@ -423,11 +474,30 @@ impl World {
                         code: ErrorCode::NotFound,
                     },
                 };
-                self.deliver(from, reply(msg));
+                self.respond(from, reply(msg));
             }
+            ClientMsg::Bootstrap => self.respond(
+                from,
+                reply(ServerMsg::BootstrapInfo {
+                    relay_addr: "relay.test:9443".into(),
+                    onion_key: PublicKey::from(&self.onion_secret).to_bytes(),
+                    capabilities: 1,
+                }),
+            ),
+            ClientMsg::InboxPut { .. }
+            | ClientMsg::InboxFetch { .. }
+            | ClientMsg::InboxAck { .. } => {
+                panic!("unauthenticated inbox request")
+            }
+        }
+    }
+
+    fn serve_inbox(&mut self, from: usize, req_id: u32, msg: ClientMsg) {
+        let reply = |msg| Frame::new(req_id, msg);
+        match msg {
             ClientMsg::InboxPut { inbox, item } => {
                 self.server.inboxes.entry(inbox).or_default().push(item);
-                self.deliver(from, reply(ServerMsg::Done));
+                self.respond(from, reply(ServerMsg::Done));
             }
             ClientMsg::InboxFetch { secret } => {
                 let id = cypher_wire::inbox_id(&secret);
@@ -444,7 +514,7 @@ impl World {
                     .unwrap_or_default();
                 let claim: [u8; 16] = self.server.rng.as_mut().unwrap().r#gen();
                 self.server.claims.insert(claim, (id, items.len()));
-                self.deliver(from, reply(ServerMsg::InboxBatch { claim, items }));
+                self.respond(from, reply(ServerMsg::InboxBatch { claim, items }));
             }
             ClientMsg::InboxAck { secret, claim } => {
                 if let Some((id, n)) = self.server.claims.remove(&claim) {
@@ -453,16 +523,9 @@ impl World {
                         v.drain(..n.min(v.len()));
                     }
                 }
-                self.deliver(from, reply(ServerMsg::Done));
+                self.respond(from, reply(ServerMsg::Done));
             }
-            ClientMsg::Bootstrap => self.deliver(
-                from,
-                reply(ServerMsg::BootstrapInfo {
-                    relay_addr: "relay.test:9443".into(),
-                    relay_key: [9; 32],
-                    capabilities: 1,
-                }),
-            ),
+            _ => unreachable!(),
         }
     }
 }

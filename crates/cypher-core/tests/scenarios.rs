@@ -434,3 +434,42 @@ fn missing_source_fails_transfer_cleanly() {
         }
     )));
 }
+
+#[test]
+fn inbox_traffic_goes_only_through_the_onion_relay() {
+    let mut w = paired();
+    w.disconnect(B);
+    let id = w.send_text(A, B, "sealed twice");
+    w.connect(B);
+    w.run();
+    assert_eq!(w.texts(B), ["sealed twice"]);
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
+    assert!(w.server.onion_inbox_ops >= 3);
+    assert_eq!(w.server.session_inbox_ops, 0);
+}
+
+#[test]
+fn inbox_falls_back_to_session_only_when_allowed() {
+    let mut w = World::new(2);
+    w.relay_up = false;
+    w.disconnect(A);
+    w.connect(A);
+    w.run();
+    assert_eq!(w.server.session_inbox_ops, 0, "waits for the relay first");
+    w.advance(11_000);
+    let before = w.server.session_inbox_ops;
+    assert!(before > 0, "fallback used the session");
+
+    w.command(
+        A,
+        Command::SetAnonymity {
+            require_onion: true,
+        },
+    );
+    w.command(A, Command::FetchInbox);
+    w.advance(1_000);
+    assert_eq!(
+        w.server.session_inbox_ops, before,
+        "no leak once onion is required"
+    );
+}

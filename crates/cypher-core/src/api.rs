@@ -10,8 +10,14 @@ pub enum Input {
     /// Transport to the gateway is up; the core starts authentication.
     Connected,
     Disconnected,
-    /// A frame from the gateway session or the anonymous transport.
+    /// A frame from the gateway session.
     Frame(Bytes),
+    /// A reply from the anonymous channel, as produced by the relay.
+    AnonymousFrame(Bytes),
+    /// The driver's relay (direct TLS or via Tor) went up or down.
+    AnonymousChannel {
+        up: bool,
+    },
     Command(Command),
     /// Answer to [`Effect::ReadChunk`]: `buf[..headroom]` is reserved for the
     /// core to write frame headers in place, the rest holds the chunk.
@@ -66,6 +72,11 @@ pub enum Command {
     RemovePeer {
         peer: PeerId,
     },
+    /// With `require_onion`, inbox traffic never falls back to the
+    /// identity-bearing gateway session.
+    SetAnonymity {
+        require_onion: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,8 +97,7 @@ impl MediaKind {
 #[derive(Debug)]
 pub enum Effect {
     Transmit(Bytes),
-    /// Send through the anonymity layer (onion relay / Tor), falling back to
-    /// the gateway session only if the user allows it.
+    /// Onion-sealed request for the relay channel (`[corr u64][blob]`).
     Anonymous(Bytes),
     Persist(StoreOp),
     Emit(Event),
@@ -129,7 +139,7 @@ pub enum Event {
     Superseded,
     Bootstrap {
         relay_addr: String,
-        relay_key: [u8; 32],
+        onion_key: [u8; 32],
     },
     LinkCreated {
         link: String,

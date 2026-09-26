@@ -5,6 +5,7 @@ mod error;
 pub mod handshake;
 pub mod identity;
 mod kdf;
+pub mod onion;
 pub mod prekey;
 pub mod ratchet;
 mod reader;
