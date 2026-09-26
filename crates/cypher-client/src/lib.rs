@@ -6,6 +6,8 @@ mod files;
 pub mod identity;
 mod net;
 mod store;
+#[cfg(feature = "tor")]
+mod tor;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,6 +62,16 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Never fall back to the identity-bearing session for inbox traffic.
     pub require_onion: bool,
+    /// Reach the onion relay through Tor (requires the `tor` feature).
+    pub tor: Option<TorConfig>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TorConfig {
+    /// Bridge lines for networks that block Tor (vanilla, obfs4, webtunnel).
+    pub bridges: Vec<String>,
+    /// Pluggable-transport binary (lyrebird) serving obfs4 and webtunnel.
+    pub transport_binary: Option<PathBuf>,
 }
 
 impl Config {

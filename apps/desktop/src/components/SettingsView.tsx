@@ -65,7 +65,7 @@ export default function SettingsView(props: SettingsViewProps) {
     setReconnecting(true);
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
-      await api.connectToGateway(normalizedAddr, anonymousEnabled());
+      await api.connectToGateway(normalizedAddr, anonymousEnabled(), anonymousSettings.bridgeLines);
       setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });
@@ -121,7 +121,7 @@ export default function SettingsView(props: SettingsViewProps) {
 
     setSavingAnonymous(true);
     try {
-      await api.applyAnonymousSettings(nextSettings.enabled);
+      await api.applyAnonymousSettings(nextSettings.enabled, nextSettings.bridgeLines);
       setAnonymousSettings(nextSettings);
       addToast(t().toast_anonymous_saved, "success");
     } catch (e) {

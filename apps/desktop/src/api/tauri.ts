@@ -79,8 +79,8 @@ function listenToEvent<T>(event: string, cb: (payload: T) => void): Promise<Taur
 }
 
 export const api = {
-  connectToGateway: (addr: string, requireOnion: boolean) =>
-    invokeCommand<string>("connect_to_gateway", { addr, requireOnion }),
+  connectToGateway: (addr: string, anonymous: boolean, bridges: string[]) =>
+    invokeCommand<string>("connect_to_gateway", { addr, anonymous, bridges }),
   createLink: () => invokeCommand<LinkInfo>("create_link"),
   joinLink: (linkId: string) => invokeCommand<string>("join_link", { linkId }),
   sendMessage: (peerId: string, text: string) => invokeCommand<string>("send_message", { peerId, text }),
@@ -99,8 +99,8 @@ export const api = {
   getHistory: (peerId: string, limit: number, before?: number) =>
     invokeCommand<UiMessage[]>("get_history", { peerId, limit, before }),
   clearChatHistory: () => invokeCommand<void>("clear_chat_history"),
-  applyAnonymousSettings: (requireOnion: boolean) =>
-    invokeCommand<void>("apply_anonymous_settings", { requireOnion }),
+  applyAnonymousSettings: (anonymous: boolean, bridges: string[]) =>
+    invokeCommand<void>("apply_anonymous_settings", { anonymous, bridges }),
 };
 
 export const onConnected = (cb: () => void) => listenToEvent<void>("cypher://connected", () => cb());

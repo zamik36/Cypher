@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use cypher_client::{Client, Config};
+use cypher_client::{Client, Config, TorConfig};
 use cypher_core::Event;
 use cypher_crypto::IdentitySeed;
 use cypher_types::FileId;
@@ -37,10 +37,20 @@ struct Session {
 /// Names of files offered to us, so accepted files can be saved safely.
 pub type Offers = Arc<StdMutex<HashMap<FileId, String>>>;
 
+/// Connection parameters of the current session, reused on restarts.
+#[derive(Clone, Default)]
+pub struct Endpoint {
+    pub gateway_addr: String,
+    /// Anonymous mode: inbox only via the onion relay, reached through Tor.
+    pub anonymous: bool,
+    pub bridges: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct AppState {
     identity: Mutex<Option<Identity>>,
     session: Mutex<Option<Session>>,
+    endpoint: Mutex<Endpoint>,
     pub offers: Offers,
 }
 
@@ -58,22 +68,26 @@ impl AppState {
             .map(|i| i.nickname.clone())
     }
 
-    /// (Re)starts the client for the unlocked identity against `gateway_addr`.
-    pub async fn connect(
-        &self,
-        app: &AppHandle,
-        gateway_addr: String,
-        require_onion: bool,
-    ) -> CmdResult<String> {
+    pub async fn endpoint(&self) -> Endpoint {
+        self.endpoint.lock().await.clone()
+    }
+
+    /// (Re)starts the client for the unlocked identity.
+    pub async fn connect(&self, app: &AppHandle, endpoint: Endpoint) -> CmdResult<String> {
         self.stop().await;
         let identity = self.identity.lock().await;
         let identity = identity.as_ref().ok_or("identity is locked")?;
         let config = Config {
-            gateway_addr,
+            gateway_addr: endpoint.gateway_addr.clone(),
             tls: tls_config()?,
             data_dir: data_dir(app)?,
-            require_onion,
+            require_onion: endpoint.anonymous,
+            tor: endpoint.anonymous.then(|| TorConfig {
+                bridges: endpoint.bridges.clone(),
+                transport_binary: bundled_transport(app),
+            }),
         };
+        *self.endpoint.lock().await = endpoint;
         let (client, mut rx) = Client::start(&identity.seed, config).await.map_err(err)?;
         let (events, _) = broadcast::channel(256);
         let (tx, app, offers) = (events.clone(), app.clone(), Arc::clone(&self.offers));
@@ -146,6 +160,20 @@ pub async fn await_event<T>(
 
 pub fn data_dir(app: &AppHandle) -> CmdResult<PathBuf> {
     app.path().app_data_dir().map_err(err)
+}
+
+/// Lyrebird shipped next to the executable, if the build bundles it.
+fn bundled_transport(app: &AppHandle) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "lyrebird.exe"
+    } else {
+        "lyrebird"
+    };
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join(name))
+        .filter(|p| p.exists())
 }
 
 /// System trust roots; `CYPHER_DEV_CA` pins development certificates instead.

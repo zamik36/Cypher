@@ -85,7 +85,7 @@ zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
 bip39 = { version = "2", features = ["std"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 async-nats = { version = "0.47", default-features = false, features = ["server_2_10", "ring"] }
 futures = "0.3"
@@ -96,8 +96,8 @@ webpki-roots = "1.0"
 rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.28"
-arti-client = "0.20"
-tor-rtcompat = "0.20"
+tor-rtcompat = { version = "0.46", default-features = false, features = ["tokio", "rustls"] }
+arti-client = { version = "0.46", default-features = false, features = ["tokio", "rustls", "compression", "bridge-client", "pt-client", "static-sqlite"] }
 
 # Internal crates
 cypher-types = { path = "crates/cypher-types" }

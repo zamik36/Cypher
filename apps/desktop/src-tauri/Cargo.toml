@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-cypher-client.workspace = true
+cypher-client = { workspace = true, features = ["tor"] }
 cypher-core.workspace = true
 cypher-crypto.workspace = true
 cypher-tls.workspace = true

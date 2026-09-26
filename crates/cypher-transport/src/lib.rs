@@ -50,11 +50,24 @@ pub async fn connect_tls(addr: &str, tls: Arc<rustls::ClientConfig>) -> Result<C
         .await
         .map_err(|_| Error::Timeout)??;
     tcp.set_nodelay(true)?;
+    tls_over(tcp, host, tls).await
+}
+
+/// TLS client handshake over an already established stream (e.g. a Tor
+/// circuit), verifying the certificate for `host`.
+pub async fn tls_over<S>(
+    stream: S,
+    host: &str,
+    tls: Arc<rustls::ClientConfig>,
+) -> Result<Conn<client::TlsStream<S>>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let name = rustls::pki_types::ServerName::try_from(host.to_owned())
         .map_err(|e| Error::Config(format!("invalid server name {host}: {e}")))?;
     let stream = timeout(
         HANDSHAKE_TIMEOUT,
-        TlsConnector::from(tls).connect(name, tcp),
+        TlsConnector::from(tls).connect(name, stream),
     )
     .await
     .map_err(|_| Error::Timeout)??;

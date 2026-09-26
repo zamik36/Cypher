@@ -69,7 +69,7 @@ export default function HomeView(props: HomeViewProps) {
     setAdvancedAddr(normalizedAddr);
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
-      await api.connectToGateway(normalizedAddr, anonymousSettings.enabled);
+      await api.connectToGateway(normalizedAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines);
       setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });

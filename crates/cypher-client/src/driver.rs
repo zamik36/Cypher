@@ -40,6 +40,8 @@ pub(crate) struct Driver {
     relay_retry: Retry,
     reconnect: bool,
     ops: Vec<Op>,
+    #[cfg(feature = "tor")]
+    tor: Option<std::sync::Arc<crate::tor::Tor>>,
 }
 
 struct Retry {
@@ -107,6 +109,8 @@ impl Driver {
             relay_retry: Retry::new(),
             reconnect: true,
             ops: Vec::new(),
+            #[cfg(feature = "tor")]
+            tor: None,
         };
         tokio::spawn(driver.run(requests, net_rx, io_rx, initial));
         Ok(())
@@ -216,14 +220,30 @@ impl Driver {
             && self.relay_retry.due()
         {
             self.relay_retry.pending = true;
-            net::spawn(
-                Link::Relay,
-                addr,
-                self.config.tls.clone(),
-                self.net_tx.clone(),
-            );
+            self.spawn_relay(addr);
         }
         self.feed(Input::Tick).await;
+    }
+
+    fn spawn_relay(&mut self, addr: String) {
+        #[cfg(feature = "tor")]
+        if let Some(config) = &self.config.tor {
+            let tor = self.tor.get_or_insert_with(|| {
+                crate::tor::Tor::new(config.clone(), self.config.data_dir.join("tor"))
+            });
+            tor.spawn_relay(addr, self.config.tls.clone(), self.net_tx.clone());
+            return;
+        }
+        #[cfg(not(feature = "tor"))]
+        if self.config.tor.is_some() {
+            tracing::warn!("built without Tor support; connecting to the relay directly");
+        }
+        net::spawn(
+            Link::Relay,
+            addr,
+            self.config.tls.clone(),
+            self.net_tx.clone(),
+        );
     }
 
     async fn feed(&mut self, input: Input) {

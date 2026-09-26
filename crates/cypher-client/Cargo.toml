@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+tor = ["dep:arti-client", "dep:tor-rtcompat"]
+
 [dependencies]
 cypher-types.workspace = true
 cypher-core.workspace = true
@@ -22,10 +25,13 @@ postcard.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+arti-client = { workspace = true, optional = true }
+tor-rtcompat = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 cypher-tls.workspace = true
+webpki-roots.workspace = true
 
 [lints]
 workspace = true

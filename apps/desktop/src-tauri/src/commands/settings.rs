@@ -1,7 +1,14 @@
-use cypher_core::Command;
 use tauri::{AppHandle, State};
 
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult, Endpoint, err};
+
+fn clean_bridges(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
 
 /// Starts (or restarts) the client against `addr` and returns our peer id.
 #[tauri::command]
@@ -9,24 +16,33 @@ pub async fn connect_to_gateway(
     app: AppHandle,
     state: State<'_, AppState>,
     addr: String,
-    require_onion: bool,
+    anonymous: bool,
+    bridges: Vec<String>,
 ) -> CmdResult<String> {
     let addr = addr.trim();
     cypher_transport::split_host_port(addr).map_err(err)?;
-    state.connect(&app, addr.to_owned(), require_onion).await
+    let endpoint = Endpoint {
+        gateway_addr: addr.to_owned(),
+        anonymous,
+        bridges: clean_bridges(bridges),
+    };
+    state.connect(&app, endpoint).await
 }
 
+/// Switching anonymity changes the transport, so the session restarts.
 #[tauri::command]
 pub async fn apply_anonymous_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
-    require_onion: bool,
+    anonymous: bool,
+    bridges: Vec<String>,
 ) -> CmdResult<()> {
-    state
-        .client()
-        .await?
-        .command(Command::SetAnonymity { require_onion })
-        .await
-        .map_err(err)
+    let endpoint = Endpoint {
+        anonymous,
+        bridges: clean_bridges(bridges),
+        ..state.endpoint().await
+    };
+    state.connect(&app, endpoint).await.map(|_| ())
 }
 
 #[tauri::command]

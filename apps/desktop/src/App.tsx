@@ -123,7 +123,7 @@ export default function App() {
 
     setConnection({ gatewayConnecting: true, gatewayError: null });
     try {
-      await api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled);
+      await api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines);
       await loadConversations();
     } catch (e) {
       setConnection({ gatewayConnecting: false, gatewayError: String(e) });

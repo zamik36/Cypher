@@ -20,6 +20,7 @@ fn live_config(dir: &Path) -> Option<Config> {
         tls: cypher_tls::make_client_config_with_pem(&pem).ok()?,
         data_dir: dir.to_owned(),
         require_onion: true,
+        tor: None,
     })
 }
 
