@@ -191,13 +191,24 @@ pub fn make_client_config() -> Arc<ClientConfig> {
     Arc::new(config)
 }
 
-/// Client config pinning the PEM-encoded development certificate.
+/// Client config pinning every certificate in a PEM bundle.
 pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
-    let cert = rustls_pemfile::certs(&mut pem.as_bytes())
-        .next()
-        .ok_or_else(|| Error::Transport("no certificate in PEM".into()))?
-        .map_err(|e| Error::Transport(format!("invalid certificate PEM: {e}")))?;
-    make_client_config_with_cert(cert)
+    ensure_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        let cert = cert.map_err(|e| Error::Transport(format!("invalid certificate PEM: {e}")))?;
+        roots
+            .add(cert)
+            .map_err(|e| Error::Transport(format!("failed to add certificate: {e}")))?;
+    }
+    if roots.is_empty() {
+        return Err(Error::Transport("no certificate in PEM".into()));
+    }
+    Ok(Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
 }
 
 /// Server config for a service: CA-issued PEM files in production, or a

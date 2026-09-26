@@ -197,6 +197,40 @@ mod tests {
     }
 
     #[test]
+    fn stored_messages_roundtrip_through_the_vault() {
+        use crate::api::{Content, MediaKind, MessageStatus, StoredMessage};
+        let v = Vault::new([1; 32]);
+        for content in [
+            Content::Text {
+                text: "hi".into(),
+                reply_to: Some(MsgId([2; 16])),
+            },
+            Content::File {
+                file_id: cypher_types::FileId([3; 16]),
+                name: "v.webm".into(),
+                mime: "audio/webm".into(),
+                size: 10,
+                kind: MediaKind::Voice {
+                    duration_ms: 1,
+                    waveform: vec![1, 2],
+                },
+            },
+        ] {
+            let msg = StoredMessage {
+                msg_id: MsgId([4; 16]),
+                peer: PeerId([5; 32]),
+                outgoing: true,
+                sent_at_ms: 6,
+                status: MessageStatus::Read,
+                content,
+            };
+            let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+            let sealed = v.seal(Table::Messages, &key, &msg, &mut OsRng);
+            assert_eq!(v.open_message(&key, &sealed).unwrap(), msg);
+        }
+    }
+
+    #[test]
     fn message_keys_sort_chronologically_per_peer() {
         let p = PeerId([1; 32]);
         let a = message_key(&p, 5, &MsgId([9; 16]));

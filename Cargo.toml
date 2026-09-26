@@ -5,6 +5,7 @@ members = [
     "crates/cypher-wire",
     "crates/cypher-crypto",
     "crates/cypher-core",
+    "crates/cypher-client",
     "crates/cypher-tls",
     "crates/cypher-transport",
     "crates/cypher-server-kit",
@@ -18,6 +19,7 @@ default-members = [
     "crates/cypher-wire",
     "crates/cypher-crypto",
     "crates/cypher-core",
+    "crates/cypher-client",
     "crates/cypher-tls",
     "crates/cypher-transport",
     "crates/cypher-server-kit",
@@ -108,6 +110,7 @@ tor-rtcompat = "0.20"
 cypher-types = { path = "crates/cypher-types" }
 cypher-wire = { path = "crates/cypher-wire" }
 cypher-core = { path = "crates/cypher-core" }
+cypher-client = { path = "crates/cypher-client" }
 cypher-server-kit = { path = "crates/cypher-server-kit" }
 cypher-proto = { path = "crates/cypher-proto" }
 cypher-crypto = { path = "crates/cypher-crypto" }

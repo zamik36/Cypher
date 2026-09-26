@@ -1,0 +1,31 @@
+[package]
+name = "cypher-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cypher-types.workspace = true
+cypher-core.workspace = true
+cypher-crypto.workspace = true
+cypher-transport.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+futures.workspace = true
+rustls.workspace = true
+rusqlite.workspace = true
+argon2.workspace = true
+rand.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+cypher-tls.workspace = true
+
+[lints]
+workspace = true

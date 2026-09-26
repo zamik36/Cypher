@@ -26,6 +26,10 @@ struct Args {
     duration: u64,
     #[arg(long, default_value = "localhost:9100")]
     gateway_addr: String,
+    /// Connect the receiving side of each pair here to exercise cross-node
+    /// delivery through NATS.
+    #[arg(long)]
+    peer_gateway_addr: Option<String>,
     /// PEM certificate to pin (development gateways).
     #[arg(long)]
     ca_cert: Option<std::path::PathBuf>,
@@ -60,17 +64,22 @@ async fn main() -> Result<()> {
     let spacing = Duration::from_secs_f64(2.0 / f64::from(args.rate.max(1)));
     let payload = Bytes::from(vec![0xA5u8; args.payload]);
 
+    let target = Arc::new(Target {
+        peer_addr: args
+            .peer_gateway_addr
+            .clone()
+            .unwrap_or_else(|| args.gateway_addr.clone()),
+        addr: args.gateway_addr.clone(),
+        tls,
+        msg_rate: args.msg_rate,
+        payload,
+        deadline,
+    });
     let mut tasks = Vec::with_capacity(pairs);
     for _ in 0..pairs {
-        let (tls, stats, addr, payload) = (
-            tls.clone(),
-            stats.clone(),
-            args.gateway_addr.clone(),
-            payload.clone(),
-        );
-        let msg_rate = args.msg_rate;
+        let (target, stats) = (Arc::clone(&target), Arc::clone(&stats));
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = run_pair(&addr, tls, &stats, deadline, msg_rate, payload).await {
+            if let Err(e) = run_pair(&target, &stats).await {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!("pair failed: {e:#}");
             }
@@ -84,27 +93,29 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_pair(
-    addr: &str,
+struct Target {
+    addr: String,
+    peer_addr: String,
     tls: Arc<rustls::ClientConfig>,
-    stats: &Stats,
-    deadline: Instant,
     msg_rate: u32,
     payload: Bytes,
-) -> Result<()> {
+    deadline: Instant,
+}
+
+async fn run_pair(t: &Target, stats: &Stats) -> Result<()> {
     let (a_id, b_id) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
-    let mut a = connect(addr, tls.clone(), &a_id).await?;
-    let b = connect(addr, tls, &b_id).await?;
+    let mut a = connect(&t.addr, t.tls.clone(), &a_id).await?;
+    let b = connect(&t.peer_addr, t.tls.clone(), &b_id).await?;
     stats.connected.fetch_add(2, Ordering::Relaxed);
     let b_peer = b_id.peer_id();
     let sink_task = tokio::spawn(drain(b));
 
-    let interval = Duration::from_secs_f64(1.0 / f64::from(msg_rate.max(1)));
+    let interval = Duration::from_secs_f64(1.0 / f64::from(t.msg_rate.max(1)));
     let mut req_id = 0u32;
-    while Instant::now() < deadline {
+    while Instant::now() < t.deadline {
         req_id += 1;
         let started = Instant::now();
-        a.send(Frame::new(req_id, send(b_peer, payload.clone())).encode())
+        a.send(Frame::new(req_id, send(b_peer, t.payload.clone())).encode())
             .await?;
         loop {
             let raw = a.next().await.context("gateway closed")??;
