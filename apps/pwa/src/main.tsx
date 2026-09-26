@@ -1,11 +1,23 @@
 import { render } from "solid-js/web";
-import App from "./App";
+import App from "@cypher/ui/App";
+import { registerPlatform } from "@cypher/ui/platform";
+import "@cypher/ui/index.css";
 import "./index.css";
+import InstallPrompt from "./InstallPrompt";
+import { webPlatform } from "./web/platform";
 
-// Register service worker for PWA installability.
+registerPlatform(webPlatform);
+
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/sw.js").catch(() => {});
+  navigator.serviceWorker.register("/sw.js").catch(() => undefined);
 }
 
-const root = document.getElementById("root")!;
-render(() => <App />, root);
+render(
+  () => (
+    <>
+      <App />
+      <InstallPrompt />
+    </>
+  ),
+  document.getElementById("root")!,
+);

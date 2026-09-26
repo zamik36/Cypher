@@ -1626,6 +1626,7 @@ dependencies = [
  "cypher-types",
  "getrandom 0.2.17",
  "js-sys",
+ "qrcode",
  "rand 0.8.5",
  "serde",
  "serde-wasm-bindgen",

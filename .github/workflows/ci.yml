@@ -81,6 +81,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: Start Redis and NATS
         run: |
@@ -92,14 +94,19 @@ jobs:
         run: |
           mkdir -p e2e
           P2P_NATS_USER=signaling P2P_NATS_PASSWORD=sig P2P_REDIS_URL=redis://:ci@127.0.0.1:6379             P2P_STUN_ADDR=127.0.0.1:3478 P2P_ONION_KEY_PATH=e2e/onion.bin P2P_RELAY_PUBLIC_ADDR=localhost:9300             target/release/signaling > e2e/signaling.log 2>&1 &
-          P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9100 P2P_DEV_CERT_OUT=e2e/gw1.pem             target/release/gateway > e2e/gateway1.log 2>&1 &
+          P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9100 P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT=e2e/gw1.pem             target/release/gateway > e2e/gateway1.log 2>&1 &
           P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9110 P2P_METRICS_ADDR=127.0.0.1:9095             P2P_DEV_CERT_OUT=e2e/gw2.pem target/release/gateway > e2e/gateway2.log 2>&1 &
-          P2P_NATS_USER=relay P2P_NATS_PASSWORD=rel P2P_RELAY_ADDR=127.0.0.1:9300 P2P_DEV_CERT_OUT=e2e/relay.pem             target/release/relay > e2e/relay.log 2>&1 &
+          P2P_NATS_USER=relay P2P_NATS_PASSWORD=rel P2P_RELAY_ADDR=127.0.0.1:9300 P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT=e2e/relay.pem             target/release/relay > e2e/relay.log 2>&1 &
           sleep 3
           cat e2e/gw1.pem e2e/relay.pem > e2e/stack.pem
           cat e2e/gw1.pem e2e/gw2.pem > e2e/gateways.pem
       - name: User journey
         run: CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA=e2e/stack.pem cargo test --release -p cypher-client --test live
+      - name: Web client journey (WebAssembly over WebSocket)
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          npm run build:wasm -w apps/pwa
+          CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 node apps/pwa/scripts/live.mjs
       - name: Cross-node load
         run: |
           target/release/load-test --connections 500 --duration 10 --gateway-addr localhost:9100             --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem --msg-rate 20 | tee e2e/load.txt
@@ -121,9 +128,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - name: Build frontend
-        run: cd apps/desktop && npm ci && npm run build
+        run: npm ci && npm run build -w apps/desktop
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -140,11 +146,23 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/pwa/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: cargo clippy (wasm32)
+        run: cargo clippy -p cypher-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Install dependencies
-        run: cd apps/pwa && npm ci
+        run: npm ci
+      - name: Build WebAssembly core
+        run: npm run build:wasm -w apps/pwa
+      - name: Typecheck
+        run: npm run typecheck
       - name: Build PWA
-        run: cd apps/pwa && npm run build
+        run: npm run build -w apps/pwa
       - name: Upload PWA artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:

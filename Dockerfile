@@ -5,6 +5,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY services/ services/
 COPY tools/ tools/
+COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
 
 RUN cargo build --release \
     -p gateway \
@@ -44,6 +45,7 @@ CMD ["signaling"]
 FROM runtime-base AS relay
 
 COPY --from=builder /app/target/release/relay /usr/local/bin/relay
-EXPOSE 9300 9092
+EXPOSE 9300 9301 9092
+ENV P2P_WS_ADDR=0.0.0.0:9301
 USER app
 CMD ["relay"]

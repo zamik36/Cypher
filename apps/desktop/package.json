@@ -1,22 +1,24 @@
 {
   "name": "cypher-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit -p .",
+    "build": "tsc --noEmit -p . && vite build",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@cypher/ui": "*",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-notification": "^2.3.3",
-    "solid-js": "^1.8"
+    "solid-js": "^1.9"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "typescript": "^5",
-    "vite": "^5",
-    "vite-plugin-solid": "^2"
+    "vite": "^8",
+    "vite-plugin-solid": "^2.11.12"
   }
 }

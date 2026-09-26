@@ -1,32 +1,36 @@
-import { defineConfig } from "vite";
+import { randomBytes } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { defineConfig, type Plugin } from "vite";
 import solid from "vite-plugin-solid";
-import { readFileSync, writeFileSync } from "fs";
-import { resolve } from "path";
-import { createHash } from "crypto";
-import type { Plugin } from "vite";
 
-/** Replace __BUILD_HASH__ in sw.js with a content hash after build. */
+/** Gives every build its own service-worker cache name. */
 function swCacheVersion(): Plugin {
   return {
     name: "sw-cache-version",
     apply: "build",
     closeBundle() {
-      const swPath = resolve(__dirname, "dist/sw.js");
-      try {
-        let content = readFileSync(swPath, "utf-8");
-        const hash = createHash("md5").update(Date.now().toString()).digest("hex").slice(0, 8);
-        content = content.replace("__BUILD_HASH__", hash);
-        writeFileSync(swPath, content);
-      } catch {
-        // sw.js may not exist in dist if not copied
-      }
+      const path = resolve(import.meta.dirname, "dist/sw.js");
+      const build = randomBytes(4).toString("hex");
+      writeFileSync(path, readFileSync(path, "utf-8").replace("__BUILD_HASH__", build));
     },
   };
 }
 
+const gatewayWs = process.env.CYPHER_DEV_GATEWAY_WS ?? "ws://127.0.0.1:9101";
+const relayWs = process.env.CYPHER_DEV_RELAY_WS ?? "ws://127.0.0.1:9301";
+
 export default defineConfig({
   plugins: [solid(), swCacheVersion()],
-  build: { target: ["es2021", "chrome97", "safari15"] },
+  build: { target: ["es2022", "chrome102", "safari16"] },
+  worker: { format: "es" },
   clearScreen: false,
-  server: { port: 5174, strictPort: true, host: "0.0.0.0" },
+  server: {
+    port: 5174,
+    strictPort: true,
+    proxy: {
+      "/ws": { target: gatewayWs, ws: true },
+      "/relay": { target: relayWs, ws: true },
+    },
+  },
 });

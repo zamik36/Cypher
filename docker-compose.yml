@@ -112,8 +112,10 @@ services:
       - ALL
     ports:
       - "9300:9300"
+      - "9301:9301"
     environment:
       LOG_FORMAT: json
+      P2P_WS_ADDR: "0.0.0.0:9301"
       P2P_NATS_URL: "nats://nats:4222"
       P2P_NATS_USER: relay
       P2P_NATS_PASSWORD: "${RELAY_NATS_PASSWORD}"

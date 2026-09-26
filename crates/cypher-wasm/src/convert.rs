@@ -1,4 +1,4 @@
-use cypher_core::{Effect, Rows, StoreOp, ui};
+use cypher_core::{Effect, Event, Rows, StoreOp, ui};
 use js_sys::{Array, Uint8Array};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -55,6 +55,28 @@ enum JsEffect<'a> {
     Disconnect {
         reconnect: bool,
     },
+    /// Outcome of a pending `create_link` / `join_link` call.
+    Reply {
+        op: &'static str,
+        value: String,
+        link: Option<&'a str>,
+    },
+}
+
+fn reply(event: &Event) -> Option<JsEffect<'_>> {
+    let (op, value, link) = match event {
+        Event::LinkCreated { link } => ("link_created", link.clone(), None),
+        Event::PeerAdded {
+            peer,
+            initiated_by_us: true,
+        } => ("joined", peer.to_hex(), None),
+        Event::JoinFailed { link, reason } => {
+            ("join_failed", format!("{reason:?}"), Some(link.as_str()))
+        }
+        Event::Warning { reason } => ("warning", format!("{reason:?}"), None),
+        _ => return None,
+    };
+    Some(JsEffect::Reply { op, value, link })
 }
 
 pub fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
@@ -78,10 +100,15 @@ pub fn effects_to_js(effects: Vec<Effect>) -> Result<Array, JsError> {
                 table: table.name(),
                 key,
             },
-            Effect::Emit(event) => match ui::event(event) {
-                Some((channel, payload)) => JsEffect::Event { channel, payload },
-                None => continue,
-            },
+            Effect::Emit(event) => {
+                if let Some(r) = reply(event) {
+                    out.push(&to_js(&r)?);
+                }
+                match ui::event(event) {
+                    Some((channel, payload)) => JsEffect::Event { channel, payload },
+                    None => continue,
+                }
+            }
             Effect::ReadChunk {
                 file_id,
                 index,

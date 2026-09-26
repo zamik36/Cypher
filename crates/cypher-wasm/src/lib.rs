@@ -20,6 +20,17 @@ fn js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }
 
+/// Renders `text` as an SVG QR code.
+#[wasm_bindgen(js_name = qrSvg)]
+pub fn qr_svg(text: &str) -> Result<String, JsError> {
+    let code = qrcode::QrCode::new(text.as_bytes()).map_err(js_err)?;
+    Ok(code
+        .render::<qrcode::render::svg::Color<'_>>()
+        .min_dimensions(180, 180)
+        .quiet_zone(true)
+        .build())
+}
+
 #[wasm_bindgen]
 pub struct Identity {
     seed: IdentitySeed,

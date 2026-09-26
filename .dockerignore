@@ -2,8 +2,9 @@ target/
 .git/
 node_modules/
 apps/desktop/src-tauri/gen/
-apps/pwa/node_modules/
-apps/pwa/dist/
+**/node_modules/
+**/dist/
+apps/pwa/src/wasm/
 *.md
 *.log
 .github/

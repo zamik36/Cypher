@@ -1,6 +1,8 @@
 import { render } from "solid-js/web";
-import App from "./App";
-import "./index.css";
+import App from "@cypher/ui/App";
+import { registerPlatform } from "@cypher/ui/platform";
+import "@cypher/ui/index.css";
+import { tauriPlatform } from "./tauri";
 
-const root = document.getElementById("root")!;
-render(() => <App />, root);
+registerPlatform(tauriPlatform);
+render(() => <App />, document.getElementById("root")!);

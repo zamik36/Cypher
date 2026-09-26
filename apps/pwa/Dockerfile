@@ -1,14 +1,30 @@
-# ── Build stage ────────────────────────────────────────────────────────
-FROM node:20-alpine@sha256:f598378b5240225e6beab68fa9f356db1fb8efe55173e6d4d8153113bb8f333c AS build
+FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS wasm
 
-WORKDIR /app/apps/pwa
-COPY apps/pwa/package.json apps/pwa/package-lock.json* ./
+RUN rustup target add wasm32-unknown-unknown \
+    && cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY services/ services/
+COPY tools/ tools/
+COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
+RUN cargo build -p cypher-wasm --release --target wasm32-unknown-unknown \
+    && wasm-bindgen --target web --out-dir /wasm target/wasm32-unknown-unknown/release/cypher_wasm.wasm
+
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
+
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages/ui/package.json packages/ui/
+COPY apps/desktop/package.json apps/desktop/
+COPY apps/pwa/package.json apps/pwa/
 RUN npm ci --ignore-scripts
-COPY apps/desktop/src/index.css /app/apps/desktop/src/index.css
-COPY apps/pwa/ .
-RUN npm run build
+COPY packages/ui/ packages/ui/
+COPY apps/pwa/ apps/pwa/
+COPY --from=wasm /wasm apps/pwa/src/wasm
+RUN npm run build -w apps/pwa
 
-# ── Serve stage ───────────────────────────────────────────────────────
 FROM caddy:2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
 
 RUN setcap -r /usr/bin/caddy \

@@ -1,71 +1,53 @@
-/// Service Worker for Cypher PWA — cache-first for static assets.
-/// __BUILD_HASH__ is replaced at build time by vite; falls back to "v2" in dev.
+/// Hashed `/assets/*` are immutable and served cache-first; everything else is
+/// network-first so fixes reach users on the next load.
 const CACHE_NAME = "cypher-pwa-__BUILD_HASH__";
-const PRECACHE = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))
-  );
+  e.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(["/", "/index.html"])));
   self.skipWaiting();
 });
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim()),
   );
-  self.clients.claim();
 });
 
-// Handle notification clicks — focus the app window.
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
   e.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
-      // Focus existing window if available.
-      for (const client of clients) {
-        if ("focus" in client) return client.focus();
-      }
-      // Otherwise open a new window.
-      return self.clients.openWindow("/");
-    })
+      const open = clients.find((c) => "focus" in c);
+      return open ? open.focus() : self.clients.openWindow("/");
+    }),
   );
 });
 
+function store(request, response) {
+  if (response.ok) {
+    const copy = response.clone();
+    caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+  }
+  return response;
+}
+
 self.addEventListener("fetch", (e) => {
   const { request } = e;
-  // Skip non-GET and WebSocket requests.
-  if (request.method !== "GET" || request.url.includes("/ws")) return;
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.origin !== location.origin) return;
+  if (url.pathname.startsWith("/ws") || url.pathname.startsWith("/relay")) return;
 
-  // Navigation fallback: return index.html for SPA routes.
-  if (request.mode === "navigate") {
-    e.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          }
-          return response;
-        })
-        .catch(() => caches.match("/index.html").then((r) => r || fetch(request)))
-    );
+  if (url.pathname.startsWith("/assets/")) {
+    e.respondWith(caches.match(request).then((hit) => hit || fetch(request).then((r) => store(request, r))));
     return;
   }
-
-  // Static assets: network-first — ensures security patches reach users quickly.
-  // Falls back to cache only when offline.
+  const fallback = request.mode === "navigate" ? "/index.html" : request;
   e.respondWith(
     fetch(request)
-      .then((response) => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-        }
-        return response;
-      })
-      .catch(() => caches.match(request))
+      .then((r) => store(request, r))
+      .catch(() => caches.match(fallback)),
   );
 });

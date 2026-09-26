@@ -113,7 +113,8 @@ services:
       - internal
 
   # Override: use ghcr.io images, remove external port bindings.
-  # IMPORTANT: Do NOT expose port 9101 (WS) externally — it is plaintext.
+  # IMPORTANT: never publish the plaintext WebSocket ports (gateway 9101,
+  # relay 9301); Caddy terminates TLS for them on /ws and /relay.
   # NOTE: user "0:0" is required to read TLS certs from the shared caddy-data volume;
   # root is heavily constrained via cap_drop, read_only, and no-new-privileges.
   gateway:
