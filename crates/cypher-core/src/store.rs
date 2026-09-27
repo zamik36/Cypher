@@ -1,5 +1,5 @@
 use cypher_crypto::aead;
-use cypher_types::{MsgId, PeerId};
+use cypher_types::{FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 
 use crate::CoreError;
 use crate::api::StoredMessage;
+use crate::media::MediaKey;
 
 /// Logical tables of the driver's ordered key-value store. Keys sort
 /// lexicographically as raw bytes; values are always [`Vault`]-sealed.
@@ -23,16 +24,20 @@ pub enum Table {
     /// Key: `msg_id` → latest [`crate::MessageStatus`]; overlays the
     /// status stored with the message itself.
     MessageStatus = 6,
+    /// Key: `file_id` → [`crate::MediaKey`] of a voice or video note kept
+    /// sealed at rest.
+    Media = 7,
 }
 
 impl Table {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Meta,
         Self::Peers,
         Self::Outbox,
         Self::Transfers,
         Self::Messages,
         Self::MessageStatus,
+        Self::Media,
     ];
 
     pub fn name(self) -> &'static str {
@@ -43,6 +48,7 @@ impl Table {
             Self::Transfers => "transfers",
             Self::Messages => "messages",
             Self::MessageStatus => "message_status",
+            Self::Media => "media",
         }
     }
 }
@@ -160,6 +166,11 @@ impl Vault {
     pub fn open_message(&self, key: &[u8], sealed: &[u8]) -> Result<StoredMessage, CoreError> {
         self.open(Table::Messages, key, sealed)
     }
+
+    /// Decrypts the playback key of a sealed media file.
+    pub fn open_media(&self, file_id: &FileId, sealed: &[u8]) -> Result<MediaKey, CoreError> {
+        self.open(Table::Media, file_id.as_bytes(), sealed)
+    }
 }
 
 fn aad(table: Table, key: &[u8]) -> Vec<u8> {
@@ -206,7 +217,7 @@ mod tests {
                 reply_to: Some(MsgId([2; 16])),
             },
             Content::File {
-                file_id: cypher_types::FileId([3; 16]),
+                file_id: FileId([3; 16]),
                 name: "v.webm".into(),
                 mime: "audio/webm".into(),
                 size: 10,

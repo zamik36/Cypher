@@ -5,6 +5,7 @@ members = [
     "crates/cypher-wire",
     "crates/cypher-crypto",
     "crates/cypher-core",
+    "crates/cypher-media",
     "crates/cypher-client",
     "crates/cypher-wasm",
     "crates/cypher-tls",
@@ -21,6 +22,7 @@ default-members = [
     "crates/cypher-wire",
     "crates/cypher-crypto",
     "crates/cypher-core",
+    "crates/cypher-media",
     "crates/cypher-client",
     "crates/cypher-wasm",
     "crates/cypher-tls",
@@ -105,6 +107,7 @@ arti-client = { version = "0.46", default-features = false, features = ["tokio",
 cypher-types = { path = "crates/cypher-types" }
 cypher-wire = { path = "crates/cypher-wire" }
 cypher-core = { path = "crates/cypher-core" }
+cypher-media = { path = "crates/cypher-media" }
 cypher-client = { path = "crates/cypher-client" }
 cypher-server-kit = { path = "crates/cypher-server-kit" }
 cypher-crypto = { path = "crates/cypher-crypto" }
@@ -117,4 +120,9 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+opt-level = 3
+
+# The Opus encoder is CPU-bound C translated to Rust; unoptimized it cannot
+# keep up with real-time capture in debug builds.
+[profile.dev.package.unsafe-libopus]
 opt-level = 3

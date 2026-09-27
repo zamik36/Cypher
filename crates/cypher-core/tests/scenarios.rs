@@ -1,8 +1,9 @@
 mod harness;
 
 use bytes::Bytes;
-use cypher_core::{Command, Content, Event, FailReason, MediaKind, MessageStatus};
-use cypher_types::PeerId;
+use cypher_core::{Command, Content, Event, FailReason, MediaKind, MessageStatus, Table, Vault};
+use cypher_crypto::IdentitySeed;
+use cypher_types::{FileId, PeerId};
 use cypher_wire::{Frame, ServerMsg};
 use harness::World;
 
@@ -157,7 +158,7 @@ fn offer_file(
     data: Vec<u8>,
     name: &str,
     kind: MediaKind,
-) -> cypher_types::FileId {
+) -> FileId {
     let file_id = w.file_id();
     let msg_id = w.msg_id();
     let peer = w.peer(to);
@@ -177,6 +178,15 @@ fn offer_file(
         },
     );
     file_id
+}
+
+/// Decrypts a client's sealed media copy the way a player would.
+fn play(w: &World, i: usize, file_id: FileId) -> Option<Vec<u8>> {
+    let c = &w.clients[i];
+    let vault = Vault::new(IdentitySeed(c.seed).derive_storage_key());
+    let raw = c.kv.get(&(Table::Media as u8, file_id.to_vec()))?;
+    let key = vault.open_media(&file_id, raw).ok()?;
+    key.open_all(c.sinks.get(&file_id)?).ok()
 }
 
 fn pattern(len: usize) -> Vec<u8> {
@@ -262,6 +272,8 @@ fn voice_message_is_auto_accepted_and_stored_sealed_identically() {
         "media is not stored in clear"
     );
     assert_eq!(w.clients[B].closed.get(&file_id), Some(&true));
+    assert_eq!(play(&w, A, file_id), Some(voice.clone()));
+    assert_eq!(play(&w, B, file_id), Some(voice));
 }
 
 #[test]
@@ -284,10 +296,11 @@ fn inline_video_note_travels_inside_the_message() {
                 duration_ms: 3000,
                 poster: vec![1; 128],
             },
-            inline: Some(note),
+            inline: Some(note.clone()),
         },
     );
     assert_eq!(w.clients[A].sinks[&file_id], w.clients[B].sinks[&file_id]);
+    assert_eq!(play(&w, B, file_id), Some(note));
     assert!(w.clients[B].events.iter().any(|e| matches!(
         e,
         Event::Message(m) if matches!(&m.content, Content::File { kind: MediaKind::VideoNote { duration_ms: 3000, .. }, .. })
@@ -383,6 +396,30 @@ fn simultaneous_mutual_join_converges() {
     w.send_text(B, A, "pong");
     assert_eq!(w.texts(B), ["ping"]);
     assert_eq!(w.texts(A), ["pong"]);
+}
+
+#[test]
+fn cancelled_media_forgets_its_playback_key() {
+    let mut w = paired();
+    w.server.drop_chunks_every = Some(1);
+    let file_id = offer_file(
+        &mut w,
+        A,
+        B,
+        pattern(512 * 1024),
+        "voice.webm",
+        MediaKind::Voice {
+            duration_ms: 30_000,
+            waveform: vec![1; 64],
+        },
+    );
+    let media_key = (Table::Media as u8, file_id.to_vec());
+    assert!(w.clients[A].kv.contains_key(&media_key));
+    assert!(w.clients[B].kv.contains_key(&media_key));
+    w.command(A, Command::CancelTransfer { file_id });
+    assert!(!w.clients[A].kv.contains_key(&media_key));
+    assert!(!w.clients[B].kv.contains_key(&media_key));
+    assert_eq!(w.clients[B].closed.get(&file_id), Some(&false));
 }
 
 #[test]

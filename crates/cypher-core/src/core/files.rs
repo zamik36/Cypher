@@ -11,6 +11,7 @@ use crate::envelope::{
     MEDIA_CHUNK_SIZE,
 };
 use crate::fs_name;
+use crate::media::MediaKey;
 use crate::relay::{self, CHUNK_HEADROOM};
 use crate::store::{StoreOp, Table};
 use crate::transfer::{
@@ -85,6 +86,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.store_inline(&desc, data);
         } else {
             if kind.is_media() {
+                self.persist_media_key(&desc);
                 self.effects.push(Effect::OpenSink {
                     file_id,
                     len: stored_len(&desc, true),
@@ -106,6 +108,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         let file_id = desc.file_id;
+        self.persist_media_key(desc);
         self.effects.push(Effect::OpenSink {
             file_id,
             len: sealed.len() as u64,
@@ -185,6 +188,10 @@ impl<R: CryptoRngCore> Core<R> {
         }
         inc.state = InState::Receiving;
         let (peer, len, sealed) = (inc.peer, inc.stored_len(), inc.sealed_at_rest());
+        if sealed {
+            let key = MediaKey::from_desc(&inc.desc);
+            self.persist_media(key);
+        }
         self.effects.push(Effect::OpenSink {
             file_id: *file_id,
             len,
@@ -260,15 +267,22 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Forgets a transfer; `reason == None` means it completed.
     fn drop_transfer(&mut self, file_id: &FileId, reason: Option<FailReason>, complete: bool) {
-        let had_sink = match (self.outgoing.remove(file_id), self.incoming.remove(file_id)) {
-            (Some(out), _) => out.kind.is_media(),
-            (None, Some(inc)) => inc.state == InState::Receiving,
+        let (had_sink, media) = match (self.outgoing.remove(file_id), self.incoming.remove(file_id))
+        {
+            (Some(out), _) => (out.kind.is_media(), out.kind.is_media()),
+            (None, Some(inc)) => (inc.state == InState::Receiving, inc.sealed_at_rest()),
             (None, None) => return,
         };
         if had_sink {
             self.effects.push(Effect::CloseSink {
                 file_id: *file_id,
                 complete,
+            });
+        }
+        if media && !complete {
+            self.persist(StoreOp::Delete {
+                table: Table::Media,
+                key: file_id.to_vec(),
             });
         }
         self.progress_at.remove(file_id);
@@ -482,6 +496,17 @@ impl<R: CryptoRngCore> Core<R> {
             let record = inc.to_record();
             self.persist_transfer_record(*file_id, &record);
         }
+    }
+
+    fn persist_media_key(&mut self, desc: &FileDesc) {
+        self.persist_media(MediaKey::from_desc(desc));
+    }
+
+    fn persist_media(&mut self, key: MediaKey) {
+        let op = self
+            .vault
+            .put(Table::Media, key.file_id.to_vec(), &key, &mut self.rng);
+        self.persist(op);
     }
 
     fn persist_transfer_record(

@@ -6,6 +6,7 @@ mod api;
 mod core;
 pub mod envelope;
 pub mod fs_name;
+mod media;
 mod peer;
 mod prekeys;
 pub mod relay;
@@ -17,6 +18,7 @@ pub use api::{
     Command, Content, Effect, Event, FailReason, Input, MediaKind, MessageStatus, StoredMessage,
 };
 pub use core::{Core, Rows, Snapshot};
+pub use media::MediaKey;
 pub use store::{StoreOp, Table, Vault, message_key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

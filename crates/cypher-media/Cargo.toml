@@ -1,0 +1,22 @@
+[package]
+name = "cypher-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+opus = ["dep:unsafe-libopus"]
+capture = ["opus", "dep:cpal", "dep:rtrb"]
+
+[dependencies]
+thiserror.workspace = true
+unsafe-libopus = { version = "0.2", optional = true }
+cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.4", optional = true }
+
+[dev-dependencies]
+matroska-demuxer = "0.8"
+
+[lints]
+workspace = true
