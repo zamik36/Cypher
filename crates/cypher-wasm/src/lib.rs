@@ -31,6 +31,12 @@ pub fn qr_svg(text: &str) -> Result<String, JsError> {
         .build())
 }
 
+/// 64-bar voice waveform from per-frame RMS values measured while recording.
+#[wasm_bindgen(js_name = waveformFromRms)]
+pub fn waveform_from_rms(frames: &[f32]) -> Vec<u8> {
+    cypher_media::waveform::from_frame_rms(frames)
+}
+
 #[wasm_bindgen]
 pub struct Identity {
     seed: IdentitySeed,
@@ -371,6 +377,28 @@ impl Client {
             msg.status = s;
         }
         to_js(&ui::message(&msg))
+    }
+
+    /// Decrypts a sealed voice or video note: `record` is its row from the
+    /// `media` table, `sealed` the file from OPFS. Returns `{ mime, bytes }`.
+    #[wasm_bindgen(js_name = openMedia)]
+    pub fn open_media(
+        &self,
+        file_id: &str,
+        record: &[u8],
+        sealed: &[u8],
+    ) -> Result<JsValue, JsError> {
+        let key = self
+            .vault
+            .open_media(&file(file_id)?, record)
+            .map_err(js_err)?;
+        let bytes = key.open_all(sealed).map_err(js_err)?;
+        let out = js_sys::Object::new();
+        js_sys::Reflect::set(&out, &"mime".into(), &key.mime.as_str().into())
+            .map_err(|_| JsError::new("reflect"))?;
+        js_sys::Reflect::set(&out, &"bytes".into(), &js_sys::Uint8Array::from(&bytes[..]))
+            .map_err(|_| JsError::new("reflect"))?;
+        Ok(out.into())
     }
 
     fn feed(&mut self, input: Input, now_ms: f64) -> Result<Array, JsError> {

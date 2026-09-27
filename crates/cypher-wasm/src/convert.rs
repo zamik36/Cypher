@@ -3,6 +3,9 @@ use js_sys::{Array, Uint8Array};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+// Each value is built and serialized immediately, one at a time; boxing the
+// large `Event` payload would only add an allocation per effect.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JsEffect<'a> {

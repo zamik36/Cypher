@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import init, { Client, Identity, qrSvg, type SealedIdentity } from "../wasm/cypher_wasm.js";
+import init, { Client, Identity, qrSvg, waveformFromRms, type SealedIdentity } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan, type Op } from "./idb";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
@@ -22,6 +22,8 @@ const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
 const TICK_MS = 500;
 const REPLY_TIMEOUT_MS = 20_000;
+/** Media up to this size travels inside the message (envelope limit). */
+const MAX_INLINE_BYTES = 32 * 1024;
 const IDENTITY_KEY = "current";
 
 const ready = init().then(() => openDb("cypher"));
@@ -285,6 +287,50 @@ async function run(cmd: Record<string, unknown>) {
 }
 
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+const unhex = (h: string) => Uint8Array.from(h.match(/../g) ?? [], (x) => parseInt(x, 16));
+
+async function sendMedia(
+  peer: string,
+  blob: Blob,
+  mime: string,
+  kind: "voice" | "video_note",
+  durationMs: number,
+  extra: { frames?: Float32Array; poster?: Uint8Array },
+) {
+  const waveform = kind === "voice" ? Array.from(waveformFromRms(extra.frames ?? new Float32Array())) : undefined;
+  const inline = blob.size <= MAX_INLINE_BYTES ? new Uint8Array(await blob.arrayBuffer()) : undefined;
+  const name = `${kind === "voice" ? "voice" : "note"}.${mime.includes("mp4") ? "mp4" : mime.includes("ogg") ? "ogg" : "webm"}`;
+  return serial(async () => {
+    const { msgId, fileId } = await run({
+      type: "send_file",
+      peer,
+      name,
+      mime,
+      size: blob.size,
+      kind,
+      duration_ms: durationMs,
+      waveform,
+      poster: extra.poster,
+      inline,
+    });
+    if (!msgId || !fileId) throw new Error("media rejected");
+    if (!inline) {
+      const file = new File([blob], name, { type: mime });
+      sources.set(fileId, file);
+      await put(db, "files", fileId, file);
+    }
+    return { msg_id: msgId, file_id: fileId, duration_ms: durationMs, waveform };
+  });
+}
+
+async function mediaBlob(fileId: string): Promise<Blob> {
+  const record = await get<Uint8Array>(db, "media", unhex(fileId));
+  if (!record) throw new Error("media not found");
+  const file = await (await (await sinkDir(true)).getFileHandle(fileId)).getFile();
+  const sealed = new Uint8Array(await file.arrayBuffer());
+  const { mime, bytes } = requireClient().openMedia(fileId, record, sealed) as { mime: string; bytes: Uint8Array };
+  return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime });
+}
 
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
@@ -349,7 +395,7 @@ const handlers: Handlers = {
     serial(async () => {
       const sent = [];
       for (const file of files) {
-        const { fileId } = await run({
+        const { msgId, fileId } = await run({
           type: "send_file",
           peer,
           name: file.name,
@@ -357,10 +403,10 @@ const handlers: Handlers = {
           size: file.size,
           kind: "file",
         });
-        if (!fileId) continue;
+        if (!msgId || !fileId) continue;
         sources.set(fileId, file);
         await put(db, "files", fileId, file);
-        sent.push({ file_id: fileId, file_name: file.name, total_size: file.size });
+        sent.push({ msg_id: msgId, file_id: fileId, file_name: file.name, total_size: file.size });
       }
       return sent;
     }),
@@ -380,7 +426,13 @@ const handlers: Handlers = {
     return out.sort((a, b) => b.last_message_at - a.last_message_at);
   },
   history: (peer, limit, before) => history(peer, Math.min(limit, 500), before),
-  clearHistory: () => clear(db, ["messages", "message_status"]),
+  sendMedia,
+  mediaBlob,
+  clearHistory: async () => {
+    await clear(db, ["messages", "message_status", "media"]);
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry("media", { recursive: true }).catch(() => undefined);
+  },
 };
 
 self.onmessage = async ({ data: { id, method, args } }: MessageEvent<Request>) => {

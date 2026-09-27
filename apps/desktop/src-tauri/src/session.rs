@@ -8,6 +8,7 @@ use std::time::Duration;
 use cypher_client::{Client, Config, TorConfig};
 use cypher_core::Event;
 use cypher_crypto::IdentitySeed;
+use cypher_media::Recorder;
 use cypher_types::FileId;
 use tauri::{AppHandle, Manager};
 use tokio::sync::{Mutex, broadcast};
@@ -52,6 +53,8 @@ pub struct AppState {
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
     pub offers: Offers,
+    /// The voice note being recorded, if any.
+    pub voice: StdMutex<Option<Recorder>>,
 }
 
 impl AppState {

@@ -1,8 +1,9 @@
 mod commands;
 mod dto;
+mod media_scheme;
 mod session;
 
-use commands::{chat, identity, link, qr, settings, transfer};
+use commands::{chat, identity, link, media, qr, settings, transfer};
 
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
@@ -19,6 +20,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(session::AppState::default())
+        .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::handle)
+        .on_page_load(|webview, _| allow_user_media(webview))
         .invoke_handler(tauri::generate_handler![
             identity::has_identity,
             identity::create_identity,
@@ -38,8 +41,34 @@ pub fn run() {
             transfer::browse_and_send,
             transfer::accept_file,
             transfer::cancel_transfer,
+            media::voice_start,
+            media::voice_stop,
+            media::voice_cancel,
+            media::send_video_note,
             qr::generate_qr,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");
 }
+
+/// WebKitGTK denies camera and microphone requests unless the embedder
+/// allows them; the other platforms ask the user themselves.
+#[cfg(target_os = "linux")]
+fn allow_user_media(webview: &tauri::Webview) {
+    use webkit2gtk::glib::ObjectExt;
+    use webkit2gtk::{PermissionRequestExt, UserMediaPermissionRequest, WebViewExt};
+
+    let _ = webview.with_webview(|platform| {
+        platform.inner().connect_permission_request(|_, request| {
+            if request.is::<UserMediaPermissionRequest>() {
+                request.allow();
+                true
+            } else {
+                false
+            }
+        });
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn allow_user_media(_webview: &tauri::Webview) {}

@@ -1,8 +1,12 @@
 import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
-import { api, type ChatMessage, type MessageStatus, type UiMessage } from "../platform";
+import { api, type ChatMessage, type MediaSent, type MessageStatus, type UiFile, type UiMessage } from "../platform";
 import { chatsByPeer, addMessage, getMessages, setMessages } from "../stores/chat";
 import { connection, setActivePeer, shortName } from "../stores/connection";
 import { upsertTransfer } from "../stores/transfers";
+import { trackMedia } from "../stores/media";
+import VoiceBubble from "./media/VoiceBubble";
+import RoundVideoBubble from "./media/RoundVideoBubble";
+import RecordButton from "./media/RecordButton";
 import { addToast } from "../stores/toasts";
 import { SendIcon, ChatIcon, UploadIcon } from "./Icons";
 import type { Page } from "./Sidebar";
@@ -27,11 +31,19 @@ const STATUS_MARK: Record<MessageStatus, string> = {
   failed: "!",
 };
 
+/** Chat-list preview of a message. */
+export function previewText(text: string, file?: UiFile | null): string {
+  if (!file) return text;
+  if (file.kind === "voice") return `🎤 ${t().media_voice}`;
+  if (file.kind === "video_note") return `⏺ ${t().media_video}`;
+  return `📎 ${text}`;
+}
+
 function fromHistory(peer: string, m: UiMessage): ChatMessage {
   return {
     msg_id: m.msg_id,
     from: m.outgoing ? "me" : peer,
-    text: m.file ? `📎 ${m.text}` : m.text,
+    text: previewText(m.text, m.file),
     timestamp: m.timestamp,
     status: m.status,
     file: m.file,
@@ -113,6 +125,7 @@ export default function ChatPane(props: ChatPaneProps) {
       for (const tr of await api.pickAndSend(peer)) {
         upsertTransfer(tr);
         addMessage(peer, {
+          msg_id: tr.msg_id,
           from: "me",
           text: `📎 ${tr.file_name}`,
           timestamp: Date.now(),
@@ -122,6 +135,18 @@ export default function ChatPane(props: ChatPaneProps) {
     } catch (e) {
       addToast(String(e), "error");
     }
+  }
+
+  function mediaSent(peer: string, sent: MediaSent, file: UiFile) {
+    trackMedia(sent.file_id);
+    addMessage(peer, {
+      msg_id: sent.msg_id,
+      from: "me",
+      text: previewText("", file),
+      timestamp: Date.now(),
+      status: "pending",
+      file,
+    });
   }
 
   return (
@@ -198,7 +223,14 @@ export default function ChatPane(props: ChatPaneProps) {
                           {isMine ? t().chat_me : t().chat_peer}
                         </div>
                         <div class="message-content">
-                          <div class="bubble">{msg.text}</div>
+                          <Show
+                            when={msg.file?.kind === "voice" || msg.file?.kind === "video_note"}
+                            fallback={<div class="bubble">{msg.text}</div>}
+                          >
+                            <Show when={msg.file!.kind === "voice"} fallback={<RoundVideoBubble file={msg.file!} />}>
+                              <div class="bubble media"><VoiceBubble file={msg.file!} /></div>
+                            </Show>
+                          </Show>
                           <span class="message-time">
                             {formatTime(msg.timestamp)}
                             <Show when={isMine && msg.status}>
@@ -223,9 +255,14 @@ export default function ChatPane(props: ChatPaneProps) {
                   onKeyDown={(e) => e.key === "Enter" && send()}
                   placeholder={t().chat_placeholder}
                 />
-                <button class="btn-icon" onClick={send} disabled={!draft().trim()}>
-                  <SendIcon />
-                </button>
+                <Show
+                  when={draft().trim()}
+                  fallback={<RecordButton peer={activePeer()!} onSent={(sent, file) => mediaSent(activePeer()!, sent, file)} />}
+                >
+                  <button class="btn-icon" onClick={send}>
+                    <SendIcon />
+                  </button>
+                </Show>
               </div>
             </Show>
           </div>

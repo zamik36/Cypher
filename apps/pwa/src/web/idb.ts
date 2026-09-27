@@ -1,6 +1,8 @@
 /** Minimal promise wrapper over IndexedDB for the worker's key-value tables. */
 
-const STORES = ["meta", "peers", "outbox", "transfers", "messages", "message_status", "identity", "files"];
+const STORES = ["meta", "peers", "outbox", "transfers", "messages", "message_status", "media", "identity", "files"];
+/** Bumped whenever STORES grows; the upgrade creates any missing store. */
+const VERSION = 2;
 
 export type Bytes = Uint8Array<ArrayBuffer>;
 export type Row = [Bytes, Bytes];
@@ -21,7 +23,7 @@ function result<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 export function openDb(name: string): Promise<IDBDatabase> {
-  const req = indexedDB.open(name, 1);
+  const req = indexedDB.open(name, VERSION);
   req.onupgradeneeded = () => {
     for (const store of STORES) {
       if (!req.result.objectStoreNames.contains(store)) req.result.createObjectStore(store);

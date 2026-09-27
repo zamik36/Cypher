@@ -1612,6 +1612,7 @@ dependencies = [
  "cypher-client",
  "cypher-core",
  "cypher-crypto",
+ "cypher-media",
  "cypher-tls",
  "cypher-transport",
  "cypher-types",
@@ -1626,6 +1627,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tokio",
  "tracing-subscriber",
+ "webkit2gtk",
 ]
 
 [[package]]
@@ -1706,6 +1708,7 @@ dependencies = [
  "bytes",
  "cypher-core",
  "cypher-crypto",
+ "cypher-media",
  "cypher-types",
  "getrandom 0.2.17",
  "js-sys",

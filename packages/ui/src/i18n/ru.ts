@@ -73,6 +73,16 @@ const ru: TranslationKeys = {
   chat_peer: "С",
   chat_placeholder: "Введите сообщение...",
 
+  // -- Media --
+  media_voice: "Голосовое сообщение",
+  media_video: "Видеосообщение",
+  media_hold_voice: "Удерживайте для записи голосового, нажмите — для видео",
+  media_hold_video: "Удерживайте для записи видео, нажмите — для голосового",
+  media_slide_cancel: "‹ Влево — отмена",
+  media_release_cancel: "Отпустите для отмены",
+  media_too_short: "Удерживайте кнопку для записи",
+  media_downloading: "Ещё загружается…",
+
   // -- Files --
   files_title: "Передачи",
   files_empty: "Нет передач файлов. Перетащите файл или выберите для отправки.",

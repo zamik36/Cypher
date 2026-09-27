@@ -11,6 +11,23 @@ export interface UiFile {
   mime: string;
   kind: "file" | "voice" | "video_note";
   duration_ms: number | null;
+  waveform?: number[] | null;
+  poster?: number[] | null;
+}
+
+export interface MediaSent {
+  msg_id: string;
+  file_id: string;
+  duration_ms: number;
+  waveform?: number[];
+}
+
+/** A finished round video from the shared recorder. */
+export interface VideoNote {
+  blob: Blob;
+  mime: string;
+  durationMs: number;
+  poster: Uint8Array;
 }
 
 export interface ChatMessage {
@@ -33,6 +50,7 @@ export interface UiMessage {
 }
 
 export interface TransferInfo {
+  msg_id?: string;
   file_id: string;
   file_name: string;
   total_size: number;
@@ -77,6 +95,14 @@ export interface Platform {
   acceptFile(fileId: string): Promise<void>;
   cancelTransfer(fileId: string): Promise<void>;
   generateQr(linkId: string): Promise<string>;
+  /** Starts a voice note; `onLevel` receives 0..1 loudness for the meter. */
+  startVoice(onLevel: (level: number) => void): Promise<void>;
+  /** Stops and sends the voice note; `null` when it was too short. */
+  stopVoice(peerId: string): Promise<MediaSent | null>;
+  cancelVoice(): Promise<void>;
+  sendVideoNote(peerId: string, note: VideoNote): Promise<MediaSent>;
+  /** URL an `<audio>`/`<video>` element can play a stored note from. */
+  mediaUrl(fileId: string): Promise<string>;
   getConversations(): Promise<ConversationEntry[]>;
   getHistory(peerId: string, limit: number, before?: number): Promise<UiMessage[]>;
   clearChatHistory(): Promise<void>;

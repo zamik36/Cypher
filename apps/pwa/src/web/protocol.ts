@@ -11,7 +11,16 @@ export interface Methods {
   createLink(): string;
   joinLink(link: string): string;
   command(cmd: Record<string, unknown>): { msgId?: string; fileId?: string };
-  sendFiles(peer: string, files: File[]): { file_id: string; file_name: string; total_size: number }[];
+  sendFiles(peer: string, files: File[]): { msg_id: string; file_id: string; file_name: string; total_size: number }[];
+  sendMedia(
+    peer: string,
+    blob: Blob,
+    mime: string,
+    kind: "voice" | "video_note",
+    durationMs: number,
+    extra: { frames?: Float32Array; poster?: Uint8Array },
+  ): { msg_id: string; file_id: string; duration_ms: number; waveform?: number[] };
+  mediaBlob(fileId: string): Blob;
   releaseDownload(fileId: string): void;
   qr(text: string): string;
   conversations(): { peer_id: string; display_name: null; last_message_at: number }[];

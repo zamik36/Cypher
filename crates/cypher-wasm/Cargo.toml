@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 cypher-core.workspace = true
 cypher-crypto.workspace = true
+cypher-media.workspace = true
 cypher-types.workspace = true
 bytes.workspace = true
 rand.workspace = true

@@ -63,6 +63,16 @@ const en = {
   chat_peer: "P",
   chat_placeholder: "Type a message...",
 
+  // -- Media --
+  media_voice: "Voice message",
+  media_video: "Video message",
+  media_hold_voice: "Hold to record a voice message, tap to switch to video",
+  media_hold_video: "Hold to record a video message, tap to switch to voice",
+  media_slide_cancel: "‹ Slide to cancel",
+  media_release_cancel: "Release to cancel",
+  media_too_short: "Hold the button to record",
+  media_downloading: "Still downloading…",
+
   // -- Files --
   files_title: "Transfers",
   files_empty: "No file transfers yet. Drop a file above or browse to send.",

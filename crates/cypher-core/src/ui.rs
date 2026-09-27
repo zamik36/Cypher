@@ -13,6 +13,10 @@ pub struct UiFile {
     pub mime: String,
     pub kind: &'static str,
     pub duration_ms: Option<u32>,
+    /// Voice notes: bar heights 0..=255.
+    pub waveform: Option<Vec<u8>>,
+    /// Video notes: JPEG first frame shown before playback.
+    pub poster: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,10 +83,16 @@ pub fn message(m: &StoredMessage) -> UiMessage {
             size,
             kind,
         } => {
-            let (kind, duration_ms) = match kind {
-                MediaKind::File => ("file", None),
-                MediaKind::Voice { duration_ms, .. } => ("voice", Some(*duration_ms)),
-                MediaKind::VideoNote { duration_ms, .. } => ("video_note", Some(*duration_ms)),
+            let (kind, duration_ms, waveform, poster) = match kind {
+                MediaKind::File => ("file", None, None, None),
+                MediaKind::Voice {
+                    duration_ms,
+                    waveform,
+                } => ("voice", Some(*duration_ms), Some(waveform.clone()), None),
+                MediaKind::VideoNote {
+                    duration_ms,
+                    poster,
+                } => ("video_note", Some(*duration_ms), None, Some(poster.clone())),
             };
             let file = UiFile {
                 file_id: file_id.to_hex(),
@@ -91,6 +101,8 @@ pub fn message(m: &StoredMessage) -> UiMessage {
                 mime: mime.clone(),
                 kind,
                 duration_ms,
+                waveform,
+                poster,
             };
             (name.clone(), Some(file))
         }

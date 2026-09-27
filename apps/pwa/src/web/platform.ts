@@ -1,12 +1,18 @@
 import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage, Unsubscribe } from "@cypher/ui/platform";
 import type { Method, Methods, WorkerMessage } from "./protocol";
+import { WebVoiceRecorder } from "./voice";
 
 const DOWNLOAD_RELEASE_MS = 60_000;
+/** Presses shorter than this are accidental taps, as on desktop. */
+const MIN_VOICE_MS = 500;
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 const listeners = new Map<string, Set<(payload: unknown) => void>>();
 let nextId = 1;
+let voice: WebVoiceRecorder | null = null;
+/** Decrypted notes stay as object URLs until history is cleared. */
+const mediaUrls = new Map<string, Promise<string>>();
 
 worker.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
   if ("id" in data) {
@@ -83,9 +89,40 @@ export const webPlatform: Platform = {
     await call("command", { type: "cancel_transfer", file_id: fileId });
   },
   generateQr: (linkId) => call("qr", linkId),
+  startVoice: async (onLevel) => {
+    if (voice) throw new Error("already recording");
+    voice = await WebVoiceRecorder.start(onLevel);
+  },
+  stopVoice: async (peerId) => {
+    const recorder = voice;
+    voice = null;
+    if (!recorder) throw new Error("not recording");
+    const clip = await recorder.stop();
+    if (clip.durationMs < MIN_VOICE_MS) return null;
+    return call("sendMedia", peerId, clip.blob, clip.mime, "voice", clip.durationMs, { frames: clip.frames });
+  },
+  cancelVoice: async () => {
+    voice?.cancel();
+    voice = null;
+  },
+  sendVideoNote: (peerId, note) =>
+    call("sendMedia", peerId, note.blob, note.mime, "video_note", note.durationMs, { poster: note.poster }),
+  mediaUrl: (fileId) => {
+    let url = mediaUrls.get(fileId);
+    if (!url) {
+      url = call("mediaBlob", fileId).then((blob) => URL.createObjectURL(blob));
+      url.catch(() => mediaUrls.delete(fileId));
+      mediaUrls.set(fileId, url);
+    }
+    return url;
+  },
   getConversations: () => call("conversations") as Promise<ConversationEntry[]>,
   getHistory: (peerId, limit, before) => call("history", peerId, limit, before) as Promise<UiMessage[]>,
-  clearChatHistory: () => call("clearHistory"),
+  clearChatHistory: async () => {
+    await call("clearHistory");
+    for (const url of mediaUrls.values()) void url.then(URL.revokeObjectURL, () => undefined);
+    mediaUrls.clear();
+  },
   on: async <T>(channel: string, cb: (payload: T) => void): Promise<Unsubscribe> => {
     const set = listeners.get(channel) ?? new Set();
     const handler = cb as (payload: unknown) => void;

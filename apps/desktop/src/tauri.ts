@@ -1,7 +1,24 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
+import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
+
+let stopLevels: UnlistenFn | null = null;
+
+/**
+ * Android grants RECORD_AUDIO through the WebView's permission prompt; the
+ * native recorder can only open the microphone after that.
+ */
+async function ensureMicPermission() {
+  if (!/Android/i.test(navigator.userAgent)) return;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  for (const track of stream.getTracks()) track.stop();
+}
+
+async function releaseLevels() {
+  stopLevels?.();
+  stopLevels = null;
+}
 
 export const tauriPlatform: Platform = {
   kind: "desktop",
@@ -21,6 +38,43 @@ export const tauriPlatform: Platform = {
   acceptFile: (fileId) => invoke<void>("accept_file", { fileId }),
   cancelTransfer: (fileId) => invoke<void>("cancel_transfer", { fileId }),
   generateQr: (linkId) => invoke<string>("generate_qr", { linkId }),
+  startVoice: async (onLevel) => {
+    await ensureMicPermission();
+    await releaseLevels();
+    stopLevels = await listen<number>("cypher://voice_level", (e) => onLevel(e.payload));
+    try {
+      await invoke<void>("voice_start");
+    } catch (e) {
+      await releaseLevels();
+      throw e;
+    }
+  },
+  stopVoice: async (peerId) => {
+    try {
+      return await invoke<MediaSent | null>("voice_stop", { peerId });
+    } finally {
+      await releaseLevels();
+    }
+  },
+  cancelVoice: async () => {
+    await releaseLevels();
+    await invoke<void>("voice_cancel");
+  },
+  sendVideoNote: async (peerId, note) => {
+    const video = new Uint8Array(await note.blob.arrayBuffer());
+    const body = new Uint8Array(note.poster.length + video.length);
+    body.set(note.poster);
+    body.set(video, note.poster.length);
+    return invoke<MediaSent>("send_video_note", body, {
+      headers: {
+        "x-peer": peerId,
+        "x-mime": note.mime,
+        "x-duration-ms": String(note.durationMs),
+        "x-poster-len": String(note.poster.length),
+      },
+    });
+  },
+  mediaUrl: async (fileId) => convertFileSrc(fileId, "cypher-media"),
   getConversations: () => invoke<ConversationEntry[]>("get_conversations"),
   getHistory: (peerId, limit, before) => invoke<UiMessage[]>("get_history", { peerId, limit, before }),
   clearChatHistory: () => invoke<void>("clear_chat_history"),

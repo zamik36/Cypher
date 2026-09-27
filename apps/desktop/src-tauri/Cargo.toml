@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 cypher-client = { workspace = true, features = ["tor"] }
 cypher-core.workspace = true
 cypher-crypto.workspace = true
+cypher-media = { workspace = true, features = ["capture"] }
 cypher-tls.workspace = true
 cypher-transport.workspace = true
 cypher-types.workspace = true
@@ -30,6 +31,9 @@ tracing-subscriber.workspace = true
 qrcode = "0.14"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
 
 [lints]
 workspace = true
