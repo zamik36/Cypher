@@ -92,7 +92,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 async-nats = { version = "0.47", default-features = false, features = ["server_2_10", "ring"] }
 futures = "0.3"
-prometheus = "0.13"
+prometheus = { version = "0.13", features = ["process"] }
 clap = { version = "4", features = ["derive"] }
 rcgen = { version = "0.14", features = ["pem"] }
 webpki-roots = "1.0"

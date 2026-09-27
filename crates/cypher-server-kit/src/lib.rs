@@ -70,6 +70,18 @@ pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Cli
 }
 
 /// Resolves on Ctrl-C, or SIGTERM on Unix.
+/// A token cancelled on Ctrl-C or SIGTERM, for a service's `run`.
+pub fn shutdown_token() -> tokio_util::sync::CancellationToken {
+    let token = tokio_util::sync::CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutdown signal received");
+        cancel.cancel();
+    });
+    token
+}
+
 pub async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

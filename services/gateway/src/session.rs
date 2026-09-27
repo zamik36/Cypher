@@ -62,7 +62,7 @@ impl<B: Bus> Gateway<B> {
     }
 
     /// Drives one connection until it closes, whatever the transport.
-    pub async fn serve<S, K>(self: Arc<Self>, stream: S, sink: K)
+    pub async fn handle<S, K>(self: Arc<Self>, stream: S, sink: K)
     where
         S: Stream<Item = io::Result<Bytes>> + Unpin + Send,
         K: Sink<Bytes, Error = io::Error> + Unpin + Send + 'static,

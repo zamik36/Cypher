@@ -2,18 +2,17 @@
 //! leaves WebAssembly memory; JS only moves bytes between the core, the
 //! WebSocket, IndexedDB and OPFS.
 
+mod command;
 mod convert;
 
-use cypher_core::{
-    Command, Core, Effect, Input, MediaKind, Snapshot, Table, Vault, message_key, ui,
-};
+use cypher_core::{Core, Effect, Input, Snapshot, Table, Vault, message_key, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
-use cypher_types::{FileId, MsgId, PeerId};
+use cypher_types::MsgId;
 use js_sys::Array;
 use rand::rngs::OsRng;
-use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
+use command::{JsCommand, Prepared, file, peer};
 use convert::{effects_to_js, pairs_from_js, to_js};
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
@@ -115,62 +114,11 @@ impl Identity {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum JsCommand {
-    CreateLink,
-    JoinLink {
-        link: String,
-    },
-    SendText {
-        peer: String,
-        text: String,
-    },
-    SendFile {
-        peer: String,
-        name: String,
-        mime: String,
-        size: f64,
-        kind: String,
-        duration_ms: Option<u32>,
-        waveform: Option<Vec<u8>>,
-        #[serde(default, with = "serde_bytes")]
-        poster: Option<Vec<u8>>,
-        #[serde(default, with = "serde_bytes")]
-        inline: Option<Vec<u8>>,
-    },
-    AcceptFile {
-        file_id: String,
-    },
-    CancelTransfer {
-        file_id: String,
-    },
-    MarkRead {
-        peer: String,
-        ids: Vec<String>,
-    },
-    FetchInbox,
-    SetAnonymity {
-        require_onion: bool,
-    },
-    RemovePeer {
-        peer: String,
-    },
-}
-
 #[wasm_bindgen]
 pub struct Client {
     core: Core<OsRng>,
     vault: Vault,
     startup: Vec<Effect>,
-}
-
-fn peer(hex: &str) -> Result<PeerId, JsError> {
-    PeerId::from_hex(hex).ok_or_else(|| JsError::new("invalid peer id"))
-}
-
-fn file(hex: &str) -> Result<FileId, JsError> {
-    FileId::from_hex(hex).ok_or_else(|| JsError::new("invalid file id"))
 }
 
 #[wasm_bindgen]
@@ -269,68 +217,12 @@ impl Client {
     /// Runs a UI command. Returns `{ effects, msgId?, fileId? }`.
     pub fn command(&mut self, cmd: JsValue, now_ms: f64) -> Result<JsValue, JsError> {
         let cmd: JsCommand = serde_wasm_bindgen::from_value(cmd).map_err(js_err)?;
-        let (mut msg_id, mut file_id) = (None, None);
-        let cmd = match cmd {
-            JsCommand::CreateLink => Command::CreateLink,
-            JsCommand::JoinLink { link } => Command::JoinLink { link },
-            JsCommand::SendText { peer: p, text } => {
-                let id = MsgId::random(&mut OsRng);
-                msg_id = Some(id);
-                Command::SendText {
-                    peer: peer(&p)?,
-                    msg_id: id,
-                    text,
-                    reply_to: None,
-                }
-            }
-            JsCommand::SendFile {
-                peer: p,
-                name,
-                mime,
-                size,
-                kind,
-                duration_ms,
-                waveform,
-                poster,
-                inline,
-            } => {
-                let (m, f) = (MsgId::random(&mut OsRng), FileId::random(&mut OsRng));
-                (msg_id, file_id) = (Some(m), Some(f));
-                let kind = match kind.as_str() {
-                    "voice" => MediaKind::Voice {
-                        duration_ms: duration_ms.unwrap_or(0),
-                        waveform: waveform.unwrap_or_default(),
-                    },
-                    "video_note" => MediaKind::VideoNote {
-                        duration_ms: duration_ms.unwrap_or(0),
-                        poster: poster.unwrap_or_default(),
-                    },
-                    _ => MediaKind::File,
-                };
-                Command::SendFile {
-                    peer: peer(&p)?,
-                    msg_id: m,
-                    file_id: f,
-                    name,
-                    mime,
-                    size: size as u64,
-                    kind,
-                    inline,
-                }
-            }
-            JsCommand::AcceptFile { file_id: f } => Command::AcceptFile { file_id: file(&f)? },
-            JsCommand::CancelTransfer { file_id: f } => {
-                Command::CancelTransfer { file_id: file(&f)? }
-            }
-            JsCommand::MarkRead { peer: p, ids } => Command::MarkRead {
-                peer: peer(&p)?,
-                ids: ids.iter().filter_map(|h| MsgId::from_hex(h)).collect(),
-            },
-            JsCommand::FetchInbox => Command::FetchInbox,
-            JsCommand::SetAnonymity { require_onion } => Command::SetAnonymity { require_onion },
-            JsCommand::RemovePeer { peer: p } => Command::RemovePeer { peer: peer(&p)? },
-        };
-        let effects = self.feed(Input::Command(cmd), now_ms)?;
+        let Prepared {
+            command,
+            msg_id,
+            file_id,
+        } = cmd.prepare(&mut OsRng).map_err(js_err)?;
+        let effects = self.feed(Input::Command(command), now_ms)?;
         let out = js_sys::Object::new();
         js_sys::Reflect::set(&out, &"effects".into(), &effects)
             .map_err(|_| JsError::new("reflect"))?;

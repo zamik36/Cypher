@@ -14,6 +14,7 @@ tracing-subscriber.workspace = true
 rand.workspace = true
 prometheus.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 async-nats.workspace = true
 
 [dev-dependencies]

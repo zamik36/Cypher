@@ -15,13 +15,14 @@ futures.workspace = true
 tracing.workspace = true
 tokio-tungstenite = { workspace = true, optional = true }
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tokio-rustls.workspace = true
 rustls.workspace = true
 
 [dev-dependencies]
 cypher-tls.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
 
 [lints]
 workspace = true

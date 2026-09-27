@@ -11,6 +11,7 @@ cypher-transport = { workspace = true, features = ["ws"] }
 cypher-server-kit.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tokio-util.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
@@ -18,6 +19,9 @@ futures.workspace = true
 serde.workspace = true
 prometheus.workspace = true
 async-nats.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

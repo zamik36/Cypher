@@ -1,22 +1,10 @@
 /// <reference lib="webworker" />
 import init, { Client, Identity, qrSvg, waveformFromRms, type SealedIdentity } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, openDb, put, remove, scan, type Op } from "./idb";
+import { applyOps, clear, get, openDb, put, remove, scan } from "./idb";
+import { applyEffects, type Effect, type EffectSinks, type ReadChunk, type Reply } from "./effects";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
-
-type Effect =
-  | { kind: "transmit" | "anonymous"; data: Uint8Array }
-  | Op
-  | { kind: "event"; channel: string; payload: unknown }
-  | { kind: "reply"; op: string; value: string; link?: string }
-  | { kind: "read_chunk"; file_id: string; index: number; offset: number; len: number; headroom: number }
-  | { kind: "open_sink"; file_id: string; len: number; sealed: boolean }
-  | { kind: "write_chunk"; file_id: string; offset: number; data: Uint8Array }
-  | { kind: "close_sink"; file_id: string; complete: boolean }
-  | { kind: "disconnect"; reconnect: boolean };
-
-type Reply = Extract<Effect, { kind: "reply" }>;
 
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
@@ -34,7 +22,7 @@ let queue: Promise<unknown> = Promise.resolve();
 
 const sources = new Map<string, File>();
 const offerNames = new Map<string, string>();
-const sinks = new Map<string, { handle: FileSystemSyncAccessHandle; name: string; sealed: boolean }>();
+const openSinks = new Map<string, { handle: FileSystemSyncAccessHandle; name: string; sealed: boolean }>();
 const waiters = new Set<(r: Reply) => boolean>();
 
 const post = (msg: WorkerMessage) => self.postMessage(msg);
@@ -57,54 +45,22 @@ function requireClient(): Client {
   return client;
 }
 
-/** Persists before anything leaves the device, mirroring the native driver. */
-async function apply(effects: Effect[]): Promise<void> {
-  let batch: Op[] = [];
-  const flush = async () => {
-    if (batch.length === 0) return;
-    const ops = batch;
-    batch = [];
-    await applyOps(db, ops);
-  };
-  for (const e of effects) {
-    switch (e.kind) {
-      case "put":
-      case "delete":
-        batch.push(e);
-        break;
-      case "transmit":
-        await flush();
-        gateway.send(e.data);
-        break;
-      case "anonymous":
-        await flush();
-        relay.send(e.data);
-        break;
-      case "event":
-        onEvent(e.channel, e.payload);
-        break;
-      case "reply":
-        for (const w of waiters) if (w(e)) waiters.delete(w);
-        break;
-      case "read_chunk":
-        void readChunk(e);
-        break;
-      case "open_sink":
-        await openSink(e.file_id, e.len, e.sealed);
-        break;
-      case "write_chunk":
-        sinks.get(e.file_id)?.handle.write(e.data, { at: e.offset });
-        break;
-      case "close_sink":
-        await closeSink(e.file_id, e.complete);
-        break;
-      case "disconnect":
-        gateway.restart(e.reconnect);
-        break;
-    }
-  }
-  await flush();
-}
+const sinks: EffectSinks = {
+  persist: (ops) => applyOps(db, ops),
+  transmit: (data) => gateway.send(data),
+  anonymous: (data) => relay.send(data),
+  event: onEvent,
+  reply: (r) => {
+    for (const w of waiters) if (w(r)) waiters.delete(w);
+  },
+  readChunk: (request) => void readChunk(request),
+  openSink,
+  writeChunk: (fileId, offset, data) => openSinks.get(fileId)?.handle.write(data, { at: offset }),
+  closeSink,
+  disconnect: (reconnect) => gateway.restart(reconnect),
+};
+
+const apply = (effects: Effect[]) => applyEffects(effects, sinks);
 
 function onEvent(channel: string, payload: unknown) {
   switch (channel) {
@@ -216,7 +172,7 @@ const relay = new Link(
   () => void feed((c, now) => c.anonymousChannel(false, now)),
 );
 
-async function readChunk(e: Extract<Effect, { kind: "read_chunk" }>) {
+async function readChunk(e: ReadChunk) {
   const file = sources.get(e.file_id) ?? (await get<File>(db, "files", e.file_id));
   if (!file) return feed((c, now) => c.chunkUnavailable(e.file_id, now));
   sources.set(e.file_id, file);
@@ -232,17 +188,17 @@ async function sinkDir(sealed: boolean) {
 }
 
 async function openSink(fileId: string, len: number, sealed: boolean) {
-  if (sinks.has(fileId)) return;
+  if (openSinks.has(fileId)) return;
   const file = await (await sinkDir(sealed)).getFileHandle(fileId, { create: true });
   const handle = await file.createSyncAccessHandle();
   if (handle.getSize() !== len) handle.truncate(len);
-  sinks.set(fileId, { handle, name: offerNames.get(fileId) ?? fileId, sealed });
+  openSinks.set(fileId, { handle, name: offerNames.get(fileId) ?? fileId, sealed });
 }
 
 async function closeSink(fileId: string, complete: boolean) {
-  const sink = sinks.get(fileId);
+  const sink = openSinks.get(fileId);
   if (!sink) return;
-  sinks.delete(fileId);
+  openSinks.delete(fileId);
   offerNames.delete(fileId);
   sink.handle.flush();
   sink.handle.close();

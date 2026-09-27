@@ -8,7 +8,7 @@ use cypher_types::{Error, MAX_FRAME_SIZE, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_rustls::{TlsAcceptor, TlsConnector, client, server};
+use tokio_rustls::{TlsAcceptor, TlsConnector, client};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -16,7 +16,7 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub type Conn<S> = Framed<S, LengthDelimitedCodec>;
 pub type ClientConn = Conn<client::TlsStream<TcpStream>>;
-pub type ServerConn = Conn<server::TlsStream<TcpStream>>;
+pub type ServerConn = Conn<tokio_rustls::server::TlsStream<TcpStream>>;
 
 pub fn codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
@@ -134,5 +134,6 @@ pub async fn accept(listener: &tokio::net::TcpListener) -> TcpStream {
     }
 }
 
+pub mod server;
 #[cfg(feature = "ws")]
 pub mod ws;

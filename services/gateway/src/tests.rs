@@ -23,19 +23,7 @@ fn gateway(bus: &MemBus) -> Arc<Gateway<MemBus>> {
 }
 
 fn metrics() -> Metrics {
-    use prometheus::{IntCounter, IntGauge};
-    let c = || IntCounter::new("t", "t").unwrap();
-    Metrics {
-        connections: IntGauge::new("t", "t").unwrap(),
-        frames_in: c(),
-        bytes_in: c(),
-        delivered_local: c(),
-        delivered_remote: c(),
-        busy: c(),
-        rate_limited: c(),
-        auth_failures: c(),
-        rejected: c(),
-    }
+    Metrics::register(&cypher_server_kit::metrics::Metrics::new().unwrap()).unwrap()
 }
 
 struct Client {
@@ -53,7 +41,7 @@ impl Client {
         let (tx, stream) = mpsc::channel(64);
         let (sink, rx) = mpsc::channel(4096);
         let sink = sink.sink_map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe));
-        tokio::spawn(Arc::clone(gw).serve(stream, sink));
+        tokio::spawn(Arc::clone(gw).handle(stream, sink));
         Self { tx, rx, id }
     }
 

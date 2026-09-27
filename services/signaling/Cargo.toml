@@ -11,6 +11,7 @@ cypher-wire.workspace = true
 cypher-crypto.workspace = true
 cypher-server-kit.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
