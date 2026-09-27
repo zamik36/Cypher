@@ -22,51 +22,29 @@ use crate::transfer::{
 const PROGRESS_INTERVAL_MS: u64 = 100;
 const PERSIST_EVERY_CHUNKS: u32 = 32;
 
+/// A file or media message the user is sending.
+pub(super) struct NewFile {
+    pub peer: PeerId,
+    pub msg_id: MsgId,
+    pub file_id: FileId,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub kind: MediaKind,
+    pub inline: Option<Vec<u8>>,
+}
+
 impl<R: CryptoRngCore> Core<R> {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn send_file(
-        &mut self,
-        peer: PeerId,
-        msg_id: MsgId,
-        file_id: FileId,
-        name: String,
-        mime: String,
-        size: u64,
-        kind: MediaKind,
-        inline: Option<Vec<u8>>,
-    ) {
-        let inline_ok = inline
-            .as_ref()
-            .is_none_or(|d| kind.is_media() && d.len() <= MAX_INLINE_LEN && d.len() as u64 == size);
-        let valid = self.peers.contains_key(&peer)
-            && size <= MAX_FILE_SIZE
-            && mime.len() <= MAX_MIME_LEN
-            && inline_ok
-            && !self.outgoing.contains_key(&file_id);
-        if !valid {
+    pub(super) fn send_file(&mut self, file: NewFile) {
+        if !self.accepts(&file) {
             self.emit(Event::MessageStatus {
-                msg_id,
+                msg_id: file.msg_id,
                 status: MessageStatus::Failed,
             });
             return;
         }
-
-        let chunk_size = match &inline {
-            Some(data) => u32::try_from(data.len()).unwrap_or(1).max(1),
-            None if kind.is_media() => MEDIA_CHUNK_SIZE,
-            None => FILE_CHUNK_SIZE,
-        };
-        let name = fs_name::sanitize(&name);
-        let desc = FileDesc {
-            file_id,
-            name: name.clone(),
-            mime: mime.clone(),
-            size,
-            chunk_size,
-            key: *FileKey::random(&mut self.rng).as_bytes(),
-            inline,
-        };
-
+        let (peer, msg_id, kind) = (file.peer, file.msg_id, file.kind.clone());
+        let desc = self.describe(file);
         self.store_message(StoredMessage {
             msg_id,
             peer,
@@ -74,30 +52,63 @@ impl<R: CryptoRngCore> Core<R> {
             sent_at_ms: self.now,
             status: MessageStatus::Pending,
             content: Content::File {
-                file_id,
-                name,
-                mime,
-                size,
+                file_id: desc.file_id,
+                name: desc.name.clone(),
+                mime: desc.mime.clone(),
+                size: desc.size,
                 kind: kind.clone(),
             },
         });
-
         if let Some(data) = &desc.inline {
             self.store_inline(&desc, data);
         } else {
-            if kind.is_media() {
-                self.persist_media_key(&desc);
-                self.effects.push(Effect::OpenSink {
-                    file_id,
-                    len: stored_len(&desc, true),
-                    sealed: true,
-                });
-            }
-            let out = Outgoing::new(peer, desc.clone(), kind.clone());
-            self.persist_transfer_record(file_id, &out.to_record());
-            self.outgoing.insert(file_id, out);
+            self.start_outgoing(peer, &desc, &kind);
         }
         self.enqueue(peer, msg_id, Body::File { desc, kind }, true);
+    }
+
+    fn accepts(&self, file: &NewFile) -> bool {
+        let inline_ok = file.inline.as_ref().is_none_or(|d| {
+            file.kind.is_media() && d.len() <= MAX_INLINE_LEN && d.len() as u64 == file.size
+        });
+        self.peers.contains_key(&file.peer)
+            && file.size <= MAX_FILE_SIZE
+            && file.mime.len() <= MAX_MIME_LEN
+            && inline_ok
+            && !self.outgoing.contains_key(&file.file_id)
+    }
+
+    /// Descriptor of an accepted file with a fresh key and a sanitized name.
+    fn describe(&mut self, file: NewFile) -> FileDesc {
+        let chunk_size = match &file.inline {
+            Some(data) => u32::try_from(data.len()).unwrap_or(1).max(1),
+            None if file.kind.is_media() => MEDIA_CHUNK_SIZE,
+            None => FILE_CHUNK_SIZE,
+        };
+        FileDesc {
+            file_id: file.file_id,
+            name: fs_name::sanitize(&file.name),
+            mime: file.mime,
+            size: file.size,
+            chunk_size,
+            key: *FileKey::random(&mut self.rng).as_bytes(),
+            inline: file.inline,
+        }
+    }
+
+    /// Registers a chunked transfer; media also opens the sender's sealed copy.
+    fn start_outgoing(&mut self, peer: PeerId, desc: &FileDesc, kind: &MediaKind) {
+        if kind.is_media() {
+            self.persist_media_key(desc);
+            self.effects.push(Effect::OpenSink {
+                file_id: desc.file_id,
+                len: stored_len(desc, true),
+                sealed: true,
+            });
+        }
+        let out = Outgoing::new(peer, desc.clone(), kind.clone());
+        self.persist_transfer_record(desc.file_id, &out.to_record());
+        self.outgoing.insert(desc.file_id, out);
     }
 
     /// Small media travels inside the message; both sides keep a sealed
@@ -190,7 +201,7 @@ impl<R: CryptoRngCore> Core<R> {
         let (peer, len, sealed) = (inc.peer, inc.stored_len(), inc.sealed_at_rest());
         if sealed {
             let key = MediaKey::from_desc(&inc.desc);
-            self.persist_media(key);
+            self.persist_media(&key);
         }
         self.effects.push(Effect::OpenSink {
             file_id: *file_id,
@@ -339,12 +350,16 @@ impl<R: CryptoRngCore> Core<R> {
             self.fail_outgoing(&file_id, FailReason::SourceUnavailable);
             return;
         }
-        let Ok(tag) = out.cipher.seal_detached(index, &mut buf[CHUNK_HEADROOM..]) else {
+        let (_, payload) = buf.split_at_mut(CHUNK_HEADROOM);
+        let Ok(tag) = out.cipher.seal_detached(index, payload) else {
             return;
         };
         buf.reserve_exact(CHUNK_TAG_LEN);
         buf.extend_from_slice(&tag);
-        relay::write_chunk_headers(&mut buf, &out.peer, &file_id, index);
+        let Some(headroom) = buf.first_chunk_mut::<CHUNK_HEADROOM>() else {
+            return;
+        };
+        relay::write_chunk_headers(headroom, &out.peer, &file_id, index);
         let frame = Bytes::from(buf);
 
         if out.kind.is_media() && out.stored_copy.set(index) {
@@ -499,13 +514,13 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn persist_media_key(&mut self, desc: &FileDesc) {
-        self.persist_media(MediaKey::from_desc(desc));
+        self.persist_media(&MediaKey::from_desc(desc));
     }
 
-    fn persist_media(&mut self, key: MediaKey) {
+    fn persist_media(&mut self, key: &MediaKey) {
         let op = self
             .vault
-            .put(Table::Media, key.file_id.to_vec(), &key, &mut self.rng);
+            .put(Table::Media, key.file_id.to_vec(), key, &mut self.rng);
         self.persist(op);
     }
 

@@ -101,12 +101,8 @@ impl FileDesc {
     /// Plaintext length of chunk `index`.
     pub fn chunk_len(&self, index: u32) -> u32 {
         let start = u64::from(index) * u64::from(self.chunk_size);
-        u32::try_from(
-            self.size
-                .saturating_sub(start)
-                .min(u64::from(self.chunk_size)),
-        )
-        .expect("bounded by chunk_size")
+        let rest = self.size.saturating_sub(start);
+        u32::try_from(rest).map_or(self.chunk_size, |rest| rest.min(self.chunk_size))
     }
 
     fn validate(&self) -> Result<(), CoreError> {
@@ -127,6 +123,10 @@ pub fn chunk_count(size: u64, chunk_size: u32) -> u32 {
 }
 
 impl Envelope {
+    #[expect(
+        clippy::expect_used,
+        reason = "postcard serialization into a Vec cannot fail for envelopes"
+    )]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = postcard::to_allocvec(self).expect("in-memory serialization");
         buf.resize(padded_len(buf.len()), 0);
@@ -232,15 +232,15 @@ mod tests {
                 kind: MediaKind::File,
             },
         };
-        assert!(Envelope::decode(&wrap(desc(MAX_FILE_SIZE + 1, 4)).encode()).is_err());
-        assert!(Envelope::decode(&wrap(desc(10, 0)).encode()).is_err());
-        assert!(Envelope::decode(&wrap(desc(10, MAX_CHUNK_SIZE + 1)).encode()).is_err());
+        Envelope::decode(&wrap(desc(MAX_FILE_SIZE + 1, 4)).encode()).unwrap_err();
+        Envelope::decode(&wrap(desc(10, 0)).encode()).unwrap_err();
+        Envelope::decode(&wrap(desc(10, MAX_CHUNK_SIZE + 1)).encode()).unwrap_err();
         let mut lying_inline = desc(10, 10);
         lying_inline.inline = Some(vec![0; 3]);
-        assert!(Envelope::decode(&wrap(lying_inline).encode()).is_err());
+        Envelope::decode(&wrap(lying_inline).encode()).unwrap_err();
         let mut long_name = desc(10, 4);
         long_name.name = "x".repeat(MAX_NAME_LEN + 1);
-        assert!(Envelope::decode(&wrap(long_name).encode()).is_err());
-        assert!(Envelope::decode(&[0xFF; 8]).is_err());
+        Envelope::decode(&wrap(long_name).encode()).unwrap_err();
+        Envelope::decode(&[0xFF; 8]).unwrap_err();
     }
 }

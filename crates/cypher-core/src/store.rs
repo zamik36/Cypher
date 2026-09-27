@@ -104,12 +104,8 @@ impl Vault {
         let mut out = Vec::with_capacity(VAULT_NONCE_LEN + plaintext.len() + aead::TAG_LEN);
         out.extend_from_slice(&nonce);
         out.extend_from_slice(plaintext);
-        let tag = aead::seal_detached(
-            &self.key,
-            &nonce,
-            &aad(table, key),
-            &mut out[VAULT_NONCE_LEN..],
-        );
+        let (_, body) = out.split_at_mut(VAULT_NONCE_LEN);
+        let tag = aead::seal_detached(&self.key, &nonce, &aad(table, key), body);
         out.extend_from_slice(&tag);
         out
     }
@@ -130,6 +126,10 @@ impl Vault {
             .map_err(|_| CoreError::Storage)
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "postcard serialization into a Vec cannot fail for our record types"
+    )]
     pub fn seal<T: Serialize>(
         &self,
         table: Table,
@@ -190,21 +190,15 @@ mod tests {
         let v = Vault::new([7; 32]);
         let sealed = v.seal(Table::Peers, b"k1", &("hello", 42u32), &mut OsRng);
         let back: (String, u32) = v.open(Table::Peers, b"k1", &sealed).unwrap();
-        assert_eq!(back, ("hello".to_string(), 42));
-        assert!(
-            v.open::<(String, u32)>(Table::Peers, b"k2", &sealed)
-                .is_err()
-        );
-        assert!(
-            v.open::<(String, u32)>(Table::Outbox, b"k1", &sealed)
-                .is_err()
-        );
-        assert!(
-            Vault::new([8; 32])
-                .open::<(String, u32)>(Table::Peers, b"k1", &sealed)
-                .is_err()
-        );
-        assert!(v.open_bytes(Table::Peers, b"k1", &sealed[..5]).is_err());
+        assert_eq!(back, ("hello".to_owned(), 42));
+        v.open::<(String, u32)>(Table::Peers, b"k2", &sealed)
+            .unwrap_err();
+        v.open::<(String, u32)>(Table::Outbox, b"k1", &sealed)
+            .unwrap_err();
+        Vault::new([8; 32])
+            .open::<(String, u32)>(Table::Peers, b"k1", &sealed)
+            .unwrap_err();
+        v.open_bytes(Table::Peers, b"k1", &sealed[..5]).unwrap_err();
     }
 
     #[test]

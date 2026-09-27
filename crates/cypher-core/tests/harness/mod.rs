@@ -1,8 +1,6 @@
 //! Deterministic in-memory world: a mock server with the gateway/signaling
 //! semantics of wire v2 and client drivers around real `Core` instances.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bytes::Bytes;
@@ -16,7 +14,7 @@ use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-pub type Rng = ChaCha20Rng;
+pub(crate) type Rng = ChaCha20Rng;
 
 #[derive(Default)]
 struct Keys {
@@ -25,7 +23,7 @@ struct Keys {
 }
 
 #[derive(Default)]
-pub struct Server {
+pub(crate) struct Server {
     online: HashMap<PeerId, usize>,
     challenges: HashMap<usize, ([u8; 32], PeerId)>,
     keys: HashMap<PeerId, Keys>,
@@ -41,7 +39,7 @@ pub struct Server {
     pub onion_inbox_ops: usize,
 }
 
-pub struct Client {
+pub(crate) struct Client {
     pub seed: [u8; 32],
     pub core: Option<Core<Rng>>,
     pub kv: BTreeMap<(u8, Vec<u8>), Vec<u8>>,
@@ -53,7 +51,7 @@ pub struct Client {
     inputs: VecDeque<Input>,
 }
 
-pub struct World {
+pub(crate) struct World {
     pub now: u64,
     pub server: Server,
     pub clients: Vec<Client>,
@@ -66,7 +64,7 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         let mut rng = Rng::seed_from_u64(42);
         let mut world = Self {
             now: 1_000_000,
@@ -104,12 +102,12 @@ impl World {
         world
     }
 
-    pub fn peer(&self, i: usize) -> PeerId {
+    pub(crate) fn peer(&self, i: usize) -> PeerId {
         self.clients[i].core.as_ref().unwrap().peer_id()
     }
 
     /// (Re)creates the core from the client's persisted key-value state.
-    pub fn boot(&mut self, i: usize) {
+    pub(crate) fn boot(&mut self, i: usize) {
         let c = &mut self.clients[i];
         let pick = |t: Table| -> Vec<(Vec<u8>, Vec<u8>)> {
             c.kv.iter()
@@ -125,13 +123,13 @@ impl World {
         };
         let rng = Rng::seed_from_u64(self.rng.r#gen());
         let (core, effects) =
-            Core::restore(&IdentitySeed(c.seed), snapshot, self.now, rng).unwrap();
+            Core::restore(&IdentitySeed(c.seed), &snapshot, self.now, rng).unwrap();
         c.core = Some(core);
         c.connected = false;
         self.apply(i, effects);
     }
 
-    pub fn connect(&mut self, i: usize) {
+    pub(crate) fn connect(&mut self, i: usize) {
         self.clients[i].connected = true;
         self.clients[i].inputs.push_back(Input::Connected);
         self.clients[i]
@@ -139,7 +137,7 @@ impl World {
             .push_back(Input::AnonymousChannel { up: self.relay_up });
     }
 
-    pub fn disconnect(&mut self, i: usize) {
+    pub(crate) fn disconnect(&mut self, i: usize) {
         let peer = self.peer(i);
         self.server
             .online
@@ -149,7 +147,7 @@ impl World {
         self.run();
     }
 
-    pub fn restart(&mut self, i: usize) {
+    pub(crate) fn restart(&mut self, i: usize) {
         let peer = self.peer(i);
         self.server.online.retain(|p, _| *p != peer);
         self.boot(i);
@@ -157,12 +155,12 @@ impl World {
         self.run();
     }
 
-    pub fn command(&mut self, i: usize, cmd: Command) {
+    pub(crate) fn command(&mut self, i: usize, cmd: Command) {
         self.clients[i].inputs.push_back(Input::Command(cmd));
         self.run();
     }
 
-    pub fn advance(&mut self, ms: u64) {
+    pub(crate) fn advance(&mut self, ms: u64) {
         let step = 500;
         let mut left = ms;
         while left > 0 {
@@ -176,15 +174,15 @@ impl World {
         }
     }
 
-    pub fn msg_id(&mut self) -> MsgId {
+    pub(crate) fn msg_id(&mut self) -> MsgId {
         MsgId(self.rng.r#gen())
     }
 
-    pub fn file_id(&mut self) -> FileId {
+    pub(crate) fn file_id(&mut self) -> FileId {
         FileId(self.rng.r#gen())
     }
 
-    pub fn create_link(&mut self, i: usize) -> String {
+    pub(crate) fn create_link(&mut self, i: usize) -> String {
         self.command(i, Command::CreateLink);
         self.clients[i]
             .events
@@ -198,12 +196,12 @@ impl World {
     }
 
     /// `joiner` joins a fresh link created by `host`.
-    pub fn pair(&mut self, host: usize, joiner: usize) {
+    pub(crate) fn pair(&mut self, host: usize, joiner: usize) {
         let link = self.create_link(host);
         self.command(joiner, Command::JoinLink { link });
     }
 
-    pub fn send_text(&mut self, from: usize, to: usize, text: &str) -> MsgId {
+    pub(crate) fn send_text(&mut self, from: usize, to: usize, text: &str) -> MsgId {
         let msg_id = self.msg_id();
         let peer = self.peer(to);
         self.command(
@@ -218,32 +216,32 @@ impl World {
         msg_id
     }
 
-    pub fn texts(&self, i: usize) -> Vec<String> {
+    pub(crate) fn texts(&self, i: usize) -> Vec<String> {
         self.clients[i]
             .events
             .iter()
             .filter_map(|e| match e {
                 Event::Message(m) if !m.outgoing => match &m.content {
                     cypher_core::Content::Text { text, .. } => Some(text.clone()),
-                    _ => None,
+                    cypher_core::Content::File { .. } => None,
                 },
                 _ => None,
             })
             .collect()
     }
 
-    pub fn status_of(&self, i: usize, id: MsgId) -> Option<cypher_core::MessageStatus> {
+    pub(crate) fn status_of(&self, i: usize, id: MsgId) -> Option<cypher_core::MessageStatus> {
         self.clients[i].events.iter().rev().find_map(|e| match e {
             Event::MessageStatus { msg_id, status } if *msg_id == id => Some(*status),
             _ => None,
         })
     }
 
-    pub fn has_event(&self, i: usize, pred: impl Fn(&Event) -> bool) -> bool {
+    pub(crate) fn has_event(&self, i: usize, pred: impl Fn(&Event) -> bool) -> bool {
         self.clients[i].events.iter().any(pred)
     }
 
-    pub fn run(&mut self) {
+    pub(crate) fn run(&mut self) {
         for _ in 0..100_000 {
             let mut progressed = false;
             for i in 0..self.clients.len() {
@@ -336,7 +334,7 @@ impl World {
         }
     }
 
-    fn respond(&mut self, to: usize, frame: Frame<ServerMsg>) {
+    fn respond(&mut self, to: usize, frame: &Frame<ServerMsg>) {
         match &self.onion_ctx {
             Some((client, corr, reply)) => {
                 let mut out = corr.to_le_bytes().to_vec();
@@ -349,7 +347,7 @@ impl World {
         }
     }
 
-    fn deliver(&mut self, to: usize, frame: Frame<ServerMsg>) {
+    fn deliver(&mut self, to: usize, frame: &Frame<ServerMsg>) {
         if let ServerMsg::Recv { .. } = frame.msg {
             self.server.delivered.push((to, frame.encode()));
         }
@@ -358,11 +356,15 @@ impl World {
             .push_back(Input::Frame(frame.encode()));
     }
 
-    pub fn inject(&mut self, to: usize, raw: Bytes) {
+    pub(crate) fn inject(&mut self, to: usize, raw: Bytes) {
         self.clients[to].inputs.push_back(Input::Frame(raw));
         self.run();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mock server: one flat arm per message kind"
+    )]
     fn serve(&mut self, from: usize, raw: Bytes) {
         let Ok(Frame { req_id, msg }) = Frame::<ClientMsg>::decode(raw) else {
             panic!("client sent malformed frame");
@@ -378,7 +380,7 @@ impl World {
             ClientMsg::Hello { peer, .. } => {
                 let nonce: [u8; 32] = self.server.rng.as_mut().unwrap().r#gen();
                 self.server.challenges.insert(from, (nonce, peer));
-                self.respond(from, reply(ServerMsg::Challenge { nonce }));
+                self.respond(from, &reply(ServerMsg::Challenge { nonce }));
             }
             ClientMsg::Auth { signature } => {
                 let (nonce, peer) = self.server.challenges.remove(&from).expect("hello first");
@@ -389,7 +391,7 @@ impl World {
                     .verify(&signed, &Signature::from_bytes(&signature))
                     .expect("valid auth signature");
                 self.server.online.insert(peer, from);
-                self.respond(from, reply(ServerMsg::Ready));
+                self.respond(from, &reply(ServerMsg::Ready));
             }
             ClientMsg::InboxPut { .. }
             | ClientMsg::InboxFetch { .. }
@@ -404,7 +406,7 @@ impl World {
                 self.serve_inbox(from, req_id, msg);
             }
             _ if authed.is_none() || self.onion_ctx.is_some() => panic!("unauthenticated request"),
-            ClientMsg::Ping => self.respond(from, reply(ServerMsg::Pong)),
+            ClientMsg::Ping => self.respond(from, &reply(ServerMsg::Pong)),
             ClientMsg::Send { to, want_ack, body } => {
                 let sender = authed.unwrap();
                 let is_chunk = body.first() == Some(&1);
@@ -418,7 +420,7 @@ impl World {
                         if !dropped {
                             self.deliver(
                                 idx,
-                                Frame::new(0, ServerMsg::Recv { from: sender, body }),
+                                &Frame::new(0, ServerMsg::Recv { from: sender, body }),
                             );
                         }
                         DeliveryStatus::Delivered
@@ -426,7 +428,7 @@ impl World {
                     _ => DeliveryStatus::Offline,
                 };
                 if want_ack {
-                    self.respond(from, reply(ServerMsg::SendAck { status }));
+                    self.respond(from, &reply(ServerMsg::SendAck { status }));
                 }
             }
             ClientMsg::PublishKeys {
@@ -448,7 +450,7 @@ impl World {
                     entry.opks.extend(opks);
                 }
                 let opks_left = entry.opks.len() as u16;
-                self.respond(from, reply(ServerMsg::KeysAck { opks_left }));
+                self.respond(from, &reply(ServerMsg::KeysAck { opks_left }));
             }
             ClientMsg::FetchKeys { peer } => {
                 let msg = match self.server.keys.get_mut(&peer) {
@@ -460,12 +462,12 @@ impl World {
                         code: ErrorCode::NotFound,
                     },
                 };
-                self.respond(from, reply(msg));
+                self.respond(from, &reply(msg));
             }
             ClientMsg::CreateLink => {
                 let link = LinkId::random(self.server.rng.as_mut().unwrap());
                 self.server.links.insert(link.to_string(), authed.unwrap());
-                self.respond(from, reply(ServerMsg::LinkCreated { link }));
+                self.respond(from, &reply(ServerMsg::LinkCreated { link }));
             }
             ClientMsg::ResolveLink { link } => {
                 let msg = match self.server.links.get(link.as_str()) {
@@ -474,11 +476,11 @@ impl World {
                         code: ErrorCode::NotFound,
                     },
                 };
-                self.respond(from, reply(msg));
+                self.respond(from, &reply(msg));
             }
             ClientMsg::Bootstrap => self.respond(
                 from,
-                reply(ServerMsg::BootstrapInfo {
+                &reply(ServerMsg::BootstrapInfo {
                     relay_addr: "relay.test:9443".into(),
                     onion_key: PublicKey::from(&self.onion_secret).to_bytes(),
                     capabilities: 1,
@@ -497,7 +499,7 @@ impl World {
         match msg {
             ClientMsg::InboxPut { inbox, item } => {
                 self.server.inboxes.entry(inbox).or_default().push(item);
-                self.respond(from, reply(ServerMsg::Done));
+                self.respond(from, &reply(ServerMsg::Done));
             }
             ClientMsg::InboxFetch { secret } => {
                 let id = cypher_wire::inbox_id(&secret);
@@ -514,7 +516,7 @@ impl World {
                     .unwrap_or_default();
                 let claim: [u8; 16] = self.server.rng.as_mut().unwrap().r#gen();
                 self.server.claims.insert(claim, (id, items.len()));
-                self.respond(from, reply(ServerMsg::InboxBatch { claim, items }));
+                self.respond(from, &reply(ServerMsg::InboxBatch { claim, items }));
             }
             ClientMsg::InboxAck { secret, claim } => {
                 if let Some((id, n)) = self.server.claims.remove(&claim) {
@@ -523,7 +525,7 @@ impl World {
                         v.drain(..n.min(v.len()));
                     }
                 }
-                self.respond(from, reply(ServerMsg::Done));
+                self.respond(from, &reply(ServerMsg::Done));
             }
             _ => unreachable!(),
         }

@@ -39,15 +39,13 @@ pub enum RelayBody {
 }
 
 impl RelayBody {
-    pub fn decode(body: Bytes) -> Result<Self, CoreError> {
-        let (&tag, _) = body.split_first().ok_or(CoreError::Invalid)?;
+    pub fn decode(body: &Bytes) -> Result<Self, CoreError> {
+        let (&tag, mut rest) = body.split_first().ok_or(CoreError::Invalid)?;
         match tag {
             TAG_MESSAGE => {
-                let flags = *body.get(1).ok_or(CoreError::Invalid)?;
-                let mut rest = &body[2..];
-                let init = match flags {
-                    0 => None,
-                    1 => {
+                let init = match take::<1>(&mut rest)? {
+                    [0] => None,
+                    [1] => {
                         let (init, tail) =
                             InitHeader::decode_prefix(rest).map_err(|_| CoreError::Invalid)?;
                         rest = tail;
@@ -55,47 +53,46 @@ impl RelayBody {
                     }
                     _ => return Err(CoreError::Invalid),
                 };
-                if rest.len() < HEADER_LEN {
-                    return Err(CoreError::Invalid);
-                }
-                let header = Header::decode(&rest[..HEADER_LEN]).map_err(|_| CoreError::Invalid)?;
-                let offset = body.len() - rest.len() + HEADER_LEN;
+                let header = Header::decode(&take::<HEADER_LEN>(&mut rest)?)
+                    .map_err(|_| CoreError::Invalid)?;
                 Ok(Self::Message {
                     init,
                     header,
-                    ciphertext: body.slice(offset..),
+                    ciphertext: body.slice(body.len() - rest.len()..),
                 })
             }
             TAG_CHUNK => {
-                if body.len() < CHUNK_HEADER_LEN {
-                    return Err(CoreError::Invalid);
-                }
+                let file_id = FileId(take(&mut rest)?);
+                let index = u32::from_le_bytes(take(&mut rest)?);
                 Ok(Self::Chunk {
-                    file_id: FileId(array(&body[1..17])),
-                    index: u32::from_le_bytes(array(&body[17..21])),
+                    file_id,
+                    index,
                     data: body.slice(CHUNK_HEADER_LEN..),
                 })
             }
             TAG_ACK => {
-                let b: &[u8; 1 + 16 + 4 + 8 + ACK_TAG_LEN] =
-                    body[..].try_into().map_err(|_| CoreError::Invalid)?;
-                Ok(Self::Ack {
-                    file_id: FileId(array(&b[1..17])),
-                    next: u32::from_le_bytes(array(&b[17..21])),
-                    sack: u64::from_le_bytes(array(&b[21..29])),
-                    tag: array(&b[29..45]),
-                })
+                let ack = Self::Ack {
+                    file_id: FileId(take(&mut rest)?),
+                    next: u32::from_le_bytes(take(&mut rest)?),
+                    sack: u64::from_le_bytes(take(&mut rest)?),
+                    tag: take(&mut rest)?,
+                };
+                if rest.is_empty() {
+                    Ok(ack)
+                } else {
+                    Err(CoreError::Invalid)
+                }
             }
             _ => Err(CoreError::Invalid),
         }
     }
 }
 
-/// Copies a length-checked slice into an array.
-fn array<const N: usize>(s: &[u8]) -> [u8; N] {
-    let mut out = [0u8; N];
-    out.copy_from_slice(s);
-    out
+/// Splits a fixed-size field off the front of `rest`.
+fn take<const N: usize>(rest: &mut &[u8]) -> Result<[u8; N], CoreError> {
+    let (head, tail) = rest.split_first_chunk::<N>().ok_or(CoreError::Invalid)?;
+    *rest = tail;
+    Ok(*head)
 }
 
 /// Builds a full `ClientMsg::Send` frame for a ratchet message.
@@ -130,13 +127,18 @@ pub fn message_body(init: Option<&InitHeader>, header: &Header, ciphertext: &[u8
     b
 }
 
-/// Writes `Send` + chunk headers into the reserved headroom of `buf`.
-pub fn write_chunk_headers(buf: &mut [u8], to: &PeerId, file_id: &FileId, index: u32) {
-    let (send, chunk) = buf[..CHUNK_HEADROOM].split_at_mut(SEND_HEADER_LEN);
-    write_send_header(send, 0, to, false);
-    chunk[0] = TAG_CHUNK;
-    chunk[1..17].copy_from_slice(file_id.as_bytes());
-    chunk[17..21].copy_from_slice(&index.to_le_bytes());
+/// Writes `Send` + chunk headers into the headroom reserved in front of a
+/// chunk read from disk.
+pub fn write_chunk_headers(
+    headroom: &mut [u8; CHUNK_HEADROOM],
+    to: &PeerId,
+    file_id: &FileId,
+    index: u32,
+) {
+    headroom[..SEND_HEADER_LEN].copy_from_slice(&send_header(0, to, false));
+    headroom[SEND_HEADER_LEN] = TAG_CHUNK;
+    headroom[SEND_HEADER_LEN + 1..SEND_HEADER_LEN + 17].copy_from_slice(file_id.as_bytes());
+    headroom[SEND_HEADER_LEN + 17..].copy_from_slice(&index.to_le_bytes());
 }
 
 pub fn ack_frame(
@@ -157,17 +159,18 @@ pub fn ack_frame(
 }
 
 fn put_send_header(b: &mut BytesMut, req_id: u32, to: &PeerId, want_ack: bool) {
-    let mut hdr = [0u8; SEND_HEADER_LEN];
-    write_send_header(&mut hdr, req_id, to, want_ack);
-    b.put_slice(&hdr);
+    b.put_slice(&send_header(req_id, to, want_ack));
 }
 
-fn write_send_header(out: &mut [u8], req_id: u32, to: &PeerId, want_ack: bool) {
+/// `ClientMsg::Send` framing: `[kind][req_id][to][want_ack]`.
+fn send_header(req_id: u32, to: &PeerId, want_ack: bool) -> [u8; SEND_HEADER_LEN] {
     const KIND_SEND: u8 = 0x10;
+    let mut out = [0u8; SEND_HEADER_LEN];
     out[0] = KIND_SEND;
     out[1..5].copy_from_slice(&req_id.to_le_bytes());
     out[5..37].copy_from_slice(to.as_bytes());
     out[37] = u8::from(want_ack);
+    out
 }
 
 #[cfg(test)]
@@ -202,7 +205,7 @@ mod tests {
             assert_eq!(to, PeerId([10; 32]));
             assert_eq!(&body[..], &message_body(init.as_ref(), &header, b"ct")[..]);
             assert_eq!(
-                RelayBody::decode(body).unwrap(),
+                RelayBody::decode(&body).unwrap(),
                 RelayBody::Message {
                     init,
                     header,
@@ -216,10 +219,11 @@ mod tests {
     fn chunk_headers_written_in_place() {
         let mut buf = vec![0u8; CHUNK_HEADROOM + 3];
         buf[CHUNK_HEADROOM..].copy_from_slice(b"abc");
-        write_chunk_headers(&mut buf, &PeerId([1; 32]), &FileId([2; 16]), 5);
+        let headroom = buf.first_chunk_mut::<CHUNK_HEADROOM>().unwrap();
+        write_chunk_headers(headroom, &PeerId([1; 32]), &FileId([2; 16]), 5);
         let (_, body) = decode_send(Bytes::from(buf));
         assert_eq!(
-            RelayBody::decode(body).unwrap(),
+            RelayBody::decode(&body).unwrap(),
             RelayBody::Chunk {
                 file_id: FileId([2; 16]),
                 index: 5,
@@ -238,7 +242,7 @@ mod tests {
             &[6; 16],
         ));
         assert_eq!(
-            RelayBody::decode(body).unwrap(),
+            RelayBody::decode(&body).unwrap(),
             RelayBody::Ack {
                 file_id: FileId([3; 16]),
                 next: 4,
@@ -247,7 +251,7 @@ mod tests {
             }
         );
         for bad in [&b""[..], &[0], &[0, 2], &[1, 0], &[2; 10], &[9]] {
-            assert!(RelayBody::decode(Bytes::copy_from_slice(bad)).is_err());
+            RelayBody::decode(&Bytes::copy_from_slice(bad)).unwrap_err();
         }
     }
 }

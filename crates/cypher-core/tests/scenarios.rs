@@ -1,3 +1,13 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::cast_possible_truncation,
+    reason = "test code: panics are assertions and every fixture is small"
+)]
+
 mod harness;
 
 use bytes::Bytes;

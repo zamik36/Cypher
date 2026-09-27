@@ -2,6 +2,10 @@
 //! WebAssembly build. It owns every protocol and cryptographic decision;
 //! drivers only move bytes between the core, the network and storage.
 
+// Adding a protocol variant must be handled at every match, never swallowed
+// by a catch-all arm.
+#![cfg_attr(not(test), deny(clippy::wildcard_enum_match_arm))]
+
 mod api;
 mod core;
 pub mod envelope;

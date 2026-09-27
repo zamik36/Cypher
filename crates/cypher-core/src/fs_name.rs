@@ -12,15 +12,14 @@ const RESERVED: [&str; 22] = [
 /// hide itself, on every platform the clients run on.
 pub fn sanitize(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
-    let mut out: String = base
+    let filtered: String = base
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
         .collect();
-
-    let trimmed = out
+    let mut out = filtered
         .trim_end_matches(['.', ' '])
-        .trim_start_matches(['.', ' ']);
-    out = trimmed.to_owned();
+        .trim_start_matches(['.', ' '])
+        .to_owned();
 
     let stem = out.split('.').next().unwrap_or_default();
     if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
@@ -42,11 +41,15 @@ fn truncate_keep_extension(name: &str) -> String {
         Some(i) if name.len() - i <= 16 => name.split_at(i),
         _ => (name, ""),
     };
-    let mut budget = MAX_NAME_BYTES - ext.len();
-    while !stem.is_char_boundary(budget) {
-        budget -= 1;
-    }
-    format!("{}{ext}", &stem[..budget])
+    let budget = MAX_NAME_BYTES - ext.len();
+    let kept: String = stem
+        .chars()
+        .scan(0, |used, c| {
+            *used += c.len_utf8();
+            (*used <= budget).then_some(c)
+        })
+        .collect();
+    format!("{kept}{ext}")
 }
 
 #[cfg(test)]
@@ -81,6 +84,10 @@ mod tests {
         let long = format!("{}.jpeg", "я".repeat(300));
         let out = sanitize(&long);
         assert!(out.len() <= 200);
-        assert!(out.ends_with(".jpeg"));
+        assert!(
+            std::path::Path::new(&out)
+                .extension()
+                .is_some_and(|e| e == "jpeg")
+        );
     }
 }

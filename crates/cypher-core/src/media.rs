@@ -59,12 +59,9 @@ impl MediaKey {
     /// Where chunk `index` lives in the sealed file and how long it is there.
     pub fn chunk_span(&self, index: u32) -> (u64, usize) {
         let start = u64::from(index) * u64::from(self.chunk_size);
-        let plain = self
-            .size
-            .saturating_sub(start)
-            .min(u64::from(self.chunk_size));
+        let rest = self.size.saturating_sub(start);
+        let plain = u32::try_from(rest).map_or(self.chunk_size, |rest| rest.min(self.chunk_size));
         let stride = u64::from(self.chunk_size) + CHUNK_TAG_LEN as u64;
-        // Bounded by `chunk_size`, which is at most `MAX_CHUNK_SIZE`.
         (u64::from(index) * stride, plain as usize + CHUNK_TAG_LEN)
     }
 
@@ -98,10 +95,10 @@ impl MediaKey {
         let mut chunk = Vec::with_capacity(self.chunk_size as usize + CHUNK_TAG_LEN);
         for index in 0..self.chunk_count() {
             let (offset, len) = self.chunk_span(index);
-            // `offset + len <= sealed_len`, checked above.
-            let offset = offset as usize;
+            let offset = usize::try_from(offset).map_err(|_| CoreError::Crypto)?;
+            let sealed_chunk = sealed.get(offset..offset + len).ok_or(CoreError::Crypto)?;
             chunk.clear();
-            chunk.extend_from_slice(&sealed[offset..offset + len]);
+            chunk.extend_from_slice(sealed_chunk);
             cipher.open(index, &mut chunk)?;
             out.extend_from_slice(&chunk);
         }
@@ -137,9 +134,9 @@ mod tests {
     fn sealed_file(d: &FileDesc, plain: &[u8]) -> Vec<u8> {
         let cipher = cipher_for(d);
         let mut out = Vec::new();
-        for (i, part) in plain.chunks(d.chunk_size as usize).enumerate() {
+        for (i, part) in (0..).zip(plain.chunks(d.chunk_size as usize)) {
             let mut buf = part.to_vec();
-            cipher.seal(i as u32, &mut buf).unwrap();
+            cipher.seal(i, &mut buf).unwrap();
             out.extend_from_slice(&buf);
         }
         out
@@ -147,7 +144,7 @@ mod tests {
 
     #[test]
     fn opens_whole_file_and_single_chunks() {
-        let plain: Vec<u8> = (0..10_000u32).map(|i| i as u8).collect();
+        let plain: Vec<u8> = (0..10_000u32).map(|i| i.to_le_bytes()[0]).collect();
         let d = desc(plain.len() as u64, 4096);
         let file = sealed_file(&d, &plain);
         let key = MediaKey::from_desc(&d);
@@ -155,7 +152,8 @@ mod tests {
         assert_eq!(key.open_all(&file).unwrap(), plain);
 
         let (offset, len) = key.chunk_span(2);
-        let mut last = file[offset as usize..offset as usize + len].to_vec();
+        let offset = usize::try_from(offset).unwrap();
+        let mut last = file[offset..offset + len].to_vec();
         key.open_chunk(2, &mut last).unwrap();
         assert_eq!(last, plain[8192..]);
     }
@@ -167,8 +165,8 @@ mod tests {
         let mut file = sealed_file(&d, &plain);
         let key = MediaKey::from_desc(&d);
         file[10] ^= 1;
-        assert!(key.open_all(&file).is_err());
-        assert!(key.open_all(&file[1..]).is_err());
+        key.open_all(&file).unwrap_err();
+        key.open_all(&file[1..]).unwrap_err();
         assert!(key.open_chunk(5, &mut vec![0; 20]).is_err());
 
         assert_eq!(key.chunks_covering(0, 4999), Some(0..=1));

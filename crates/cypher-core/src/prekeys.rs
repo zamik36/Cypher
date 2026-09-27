@@ -7,10 +7,8 @@ use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::CoreError;
-
-pub const OPK_BATCH: u32 = 100;
-pub const OPK_LOW_WATER: u16 = 20;
+pub(crate) const OPK_BATCH: u32 = 100;
+pub(crate) const OPK_LOW_WATER: u16 = 20;
 const MAX_RETAINED_OPKS: usize = 300;
 const SPK_ROTATION_MS: u64 = 7 * 24 * 3600 * 1000;
 
@@ -23,7 +21,7 @@ pub(crate) struct Prekeys {
 }
 
 impl Prekeys {
-    pub fn generate(now_ms: u64, rng: &mut impl CryptoRngCore) -> Self {
+    pub(crate) fn generate(now_ms: u64, rng: &mut impl CryptoRngCore) -> Self {
         Self {
             spk: SignedPreKey::generate(1, rng),
             spk_created_ms: now_ms,
@@ -34,14 +32,14 @@ impl Prekeys {
     }
 
     /// Signed bundle without a one-time prekey, as published to the server.
-    pub fn base_bundle(&self, identity: &IdentityKeyPair) -> Vec<u8> {
+    pub(crate) fn base_bundle(&self, identity: &IdentityKeyPair) -> Vec<u8> {
         let mut out = Vec::with_capacity(PrekeyBundle::MAX_LEN);
         PrekeyBundle::new(identity, &self.spk, None).encode(&mut out);
         out.truncate(BUNDLE_BASE_LEN);
         out
     }
 
-    pub fn new_batch(&mut self, rng: &mut impl CryptoRngCore) -> Vec<(u32, [u8; 32])> {
+    pub(crate) fn new_batch(&mut self, rng: &mut impl CryptoRngCore) -> Vec<(u32, [u8; 32])> {
         let batch: Vec<_> = (0..OPK_BATCH)
             .map(|_| {
                 let id = self.next_opk_id;
@@ -58,48 +56,48 @@ impl Prekeys {
         batch
     }
 
-    pub fn spk(&self, id: u32) -> Option<&SignedPreKey> {
-        if self.spk.id == id {
+    pub(crate) fn spk(&self, id: u32) -> Option<&SignedPreKey> {
+        if self.spk.id() == id {
             Some(&self.spk)
         } else {
-            self.prev_spk.as_ref().filter(|k| k.id == id)
+            self.prev_spk.as_ref().filter(|k| k.id() == id)
         }
     }
 
-    pub fn take_opk(&mut self, id: u32) -> Option<OneTimePreKey> {
+    pub(crate) fn take_opk(&mut self, id: u32) -> Option<OneTimePreKey> {
         self.opks.remove(&id)
     }
 
-    pub fn opk(&self, id: u32) -> Option<&OneTimePreKey> {
+    pub(crate) fn opk(&self, id: u32) -> Option<&OneTimePreKey> {
         self.opks.get(&id)
     }
 
-    pub fn rotate_if_due(&mut self, now_ms: u64, rng: &mut impl CryptoRngCore) -> bool {
+    pub(crate) fn rotate_if_due(&mut self, now_ms: u64, rng: &mut impl CryptoRngCore) -> bool {
         if now_ms.saturating_sub(self.spk_created_ms) < SPK_ROTATION_MS {
             return false;
         }
-        let next = SignedPreKey::generate(self.spk.id.wrapping_add(1).max(1), rng);
+        let next = SignedPreKey::generate(self.spk.id().wrapping_add(1).max(1), rng);
         self.prev_spk = Some(std::mem::replace(&mut self.spk, next));
         self.spk_created_ms = now_ms;
         true
     }
 
-    pub fn to_record(&self) -> PrekeysRecord {
+    pub(crate) fn to_record(&self) -> PrekeysRecord {
         PrekeysRecord {
-            spk: (self.spk.id, *self.spk.secret_bytes()),
+            spk: (self.spk.id(), *self.spk.secret_bytes()),
             spk_created_ms: self.spk_created_ms,
-            prev_spk: self.prev_spk.as_ref().map(|k| (k.id, *k.secret_bytes())),
+            prev_spk: self.prev_spk.as_ref().map(|k| (k.id(), *k.secret_bytes())),
             opks: self
                 .opks
                 .values()
-                .map(|k| (k.id, *k.secret_bytes()))
+                .map(|k| (k.id(), *k.secret_bytes()))
                 .collect(),
             next_opk_id: self.next_opk_id,
         }
     }
 
-    pub fn from_record(r: &PrekeysRecord) -> Result<Self, CoreError> {
-        Ok(Self {
+    pub(crate) fn from_record(r: &PrekeysRecord) -> Self {
+        Self {
             spk: SignedPreKey::from_secret_bytes(r.spk.0, r.spk.1),
             spk_created_ms: r.spk_created_ms,
             prev_spk: r
@@ -111,7 +109,7 @@ impl Prekeys {
                 .map(|&(id, s)| (id, OneTimePreKey::from_secret_bytes(id, s)))
                 .collect(),
             next_opk_id: r.next_opk_id,
-        })
+        }
     }
 }
 
@@ -167,7 +165,7 @@ mod tests {
         }
         assert_eq!(pk.opks.len(), MAX_RETAINED_OPKS);
         assert!(pk.opk(1).is_none() && pk.opk(500).is_some());
-        let restored = Prekeys::from_record(&pk.to_record()).unwrap();
+        let restored = Prekeys::from_record(&pk.to_record());
         assert!(restored.opk(500).is_some());
         assert_eq!(restored.next_opk_id, 501);
     }

@@ -5,7 +5,7 @@ use cypher_crypto::onion::{self, ReplyKey};
 use rand_core::CryptoRngCore;
 
 /// Correlation id prefix on every anonymous frame; the relay echoes it.
-pub const CORR_LEN: usize = 8;
+pub(super) const CORR_LEN: usize = 8;
 
 /// How long to wait for the driver's relay channel before falling back.
 const RELAY_WAIT_MS: u64 = 10_000;
@@ -50,7 +50,7 @@ impl Default for Anon {
 }
 
 impl Anon {
-    pub fn on_bootstrap(&mut self, relay: Option<[u8; 32]>, now_ms: u64) {
+    pub(super) fn on_bootstrap(&mut self, relay: Option<[u8; 32]>, now_ms: u64) {
         match relay {
             Some(key) => {
                 self.onion_key = Some(key);
@@ -60,22 +60,22 @@ impl Anon {
         }
     }
 
-    pub fn on_disconnected(&mut self) {
+    pub(super) fn on_disconnected(&mut self) {
         self.bootstrap = Bootstrap::Pending;
     }
 
-    pub fn set_relay_up(&mut self, up: bool) {
+    pub(super) fn set_relay_up(&mut self, up: bool) {
         self.relay_up = up;
         if !up {
             self.replies.clear();
         }
     }
 
-    pub fn set_require_onion(&mut self, require: bool) {
+    pub(super) fn set_require_onion(&mut self, require: bool) {
         self.require_onion = require;
     }
 
-    pub fn readiness(&self, now_ms: u64) -> Readiness {
+    pub(super) fn readiness(&self, now_ms: u64) -> Readiness {
         let fallback = if self.require_onion {
             Readiness::Unavailable
         } else {
@@ -83,17 +83,14 @@ impl Anon {
         };
         match self.bootstrap {
             _ if self.relay_up && self.onion_key.is_some() => Readiness::Onion,
-            Bootstrap::Pending => Readiness::Wait,
             Bootstrap::NoRelay => fallback,
-            Bootstrap::Relay { since } if now_ms.saturating_sub(since) < RELAY_WAIT_MS => {
-                Readiness::Wait
-            }
-            Bootstrap::Relay { .. } => fallback,
+            Bootstrap::Relay { since } if now_ms.saturating_sub(since) >= RELAY_WAIT_MS => fallback,
+            Bootstrap::Pending | Bootstrap::Relay { .. } => Readiness::Wait,
         }
     }
 
     /// Seals `frame` for the relay; only valid when readiness is `Onion`.
-    pub fn seal(
+    pub(super) fn seal(
         &mut self,
         frame: &[u8],
         now_ms: u64,
@@ -112,13 +109,13 @@ impl Anon {
     }
 
     /// Decrypts a relay reply back into a plain server frame.
-    pub fn open(&mut self, reply: &[u8]) -> Option<Bytes> {
+    pub(super) fn open(&mut self, reply: &[u8]) -> Option<Bytes> {
         let (corr, blob) = reply.split_first_chunk::<CORR_LEN>()?;
         let (key, _) = self.replies.remove(&u64::from_le_bytes(*corr))?;
         onion::open_response(&key, blob).ok().map(Bytes::from)
     }
 
-    pub fn expire(&mut self, now_ms: u64) {
+    pub(super) fn expire(&mut self, now_ms: u64) {
         self.replies.retain(|_, (_, deadline)| *deadline > now_ms);
     }
 }

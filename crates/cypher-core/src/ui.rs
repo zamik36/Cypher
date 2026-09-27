@@ -127,18 +127,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
             "error",
             UiPayload::Text("session opened on another device".into()),
         ),
-        Event::Onion { up } => (
-            "anonymity_level",
-            UiPayload::Anonymity {
-                level: u8::from(*up),
-                label: if *up { "Onion relay" } else { "Direct" },
-                description: if *up {
-                    "Inbox traffic is routed through the onion relay."
-                } else {
-                    "Onion relay unavailable; inbox traffic waits or uses the session."
-                },
-            },
-        ),
+        Event::Onion { up } => ("anonymity_level", anonymity(*up)),
         Event::PeerAdded { peer, .. } => ("peer_connected", UiPayload::Text(peer.to_hex())),
         Event::Message(m) if !m.outgoing => ("message", UiPayload::Message(message(m))),
         Event::MessageStatus { msg_id, status: s } => (
@@ -172,11 +161,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
             "file_progress",
             UiPayload::Progress {
                 file_id: file_id.to_hex(),
-                progress: if *total == 0 {
-                    1.0
-                } else {
-                    *bytes as f64 / *total as f64
-                },
+                progress: ratio(*bytes, *total),
             },
         ),
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
@@ -192,4 +177,29 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         }
         Event::Message(_) | Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
     })
+}
+
+fn anonymity(up: bool) -> UiPayload {
+    UiPayload::Anonymity {
+        level: u8::from(up),
+        label: if up { "Onion relay" } else { "Direct" },
+        description: if up {
+            "Inbox traffic is routed through the onion relay."
+        } else {
+            "Onion relay unavailable; inbox traffic waits or uses the session."
+        },
+    }
+}
+
+/// Transfer progress in `0..=1` for display.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "display-only ratio; files are far below 2^52 bytes"
+)]
+fn ratio(bytes: u64, total: u64) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        bytes as f64 / total as f64
+    }
 }

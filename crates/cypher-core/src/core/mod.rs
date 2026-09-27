@@ -105,7 +105,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Returns persistence effects when fresh prekeys had to be generated.
     pub fn restore(
         seed: &IdentitySeed,
-        snapshot: Snapshot,
+        snapshot: &Snapshot,
         now_ms: u64,
         mut rng: R,
     ) -> Result<(Self, Vec<Effect>), CoreError> {
@@ -114,40 +114,16 @@ impl<R: CryptoRngCore> Core<R> {
         let inbox_secret = seed.derive_inbox_secret();
 
         let mut fresh_prekeys = false;
-        let prekeys = match snapshot.meta.iter().find(|(k, _)| k == META_PREKEYS) {
-            Some((k, v)) => {
-                Prekeys::from_record(&vault.open::<PrekeysRecord>(Table::Meta, k, v)?)?
-            }
-            None => {
-                fresh_prekeys = true;
-                Prekeys::generate(now_ms, &mut rng)
-            }
+        let prekeys = if let Some((k, v)) = snapshot.meta.iter().find(|(k, _)| k == META_PREKEYS) {
+            Prekeys::from_record(&vault.open::<PrekeysRecord>(Table::Meta, k, v)?)
+        } else {
+            fresh_prekeys = true;
+            Prekeys::generate(now_ms, &mut rng)
         };
 
-        let mut peers = HashMap::new();
-        for (k, v) in &snapshot.peers {
-            let id = PeerId::from_bytes(k).ok_or(CoreError::Storage)?;
-            peers.insert(
-                id,
-                Peer::from_record(&vault.open::<PeerRecord>(Table::Peers, k, v)?)?,
-            );
-        }
-        let mut outbox = BTreeMap::new();
-        for (k, v) in &snapshot.outbox {
-            let item: OutboxItem = vault.open(Table::Outbox, k, v)?;
-            outbox.insert(item.msg_id, item);
-        }
-        let mut outgoing = HashMap::new();
-        let mut incoming = HashMap::new();
-        for (k, v) in &snapshot.transfers {
-            let rec: TransferRecord = vault.open(Table::Transfers, k, v)?;
-            let id = rec.desc.file_id;
-            if rec.outgoing {
-                outgoing.insert(id, Outgoing::from_record(rec));
-            } else {
-                incoming.insert(id, Incoming::from_record(rec));
-            }
-        }
+        let peers = load_peers(&vault, &snapshot.peers)?;
+        let outbox = load_outbox(&vault, &snapshot.outbox)?;
+        let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers)?;
 
         let mut core = Self {
             rng,
@@ -291,8 +267,16 @@ impl<R: CryptoRngCore> Core<R> {
                 self.emit(Event::Superseded);
                 self.effects.push(Effect::Disconnect { reconnect: false });
             }
-            ServerMsg::Recv { from, body } => self.on_relay(from, body, false),
-            msg => match self.pending.remove(&req_id) {
+            ServerMsg::Recv { from, body } => self.on_relay(from, &body, false),
+            msg @ (ServerMsg::SendAck { .. }
+            | ServerMsg::Keys { .. }
+            | ServerMsg::KeysAck { .. }
+            | ServerMsg::LinkCreated { .. }
+            | ServerMsg::LinkResolved { .. }
+            | ServerMsg::InboxBatch { .. }
+            | ServerMsg::Done
+            | ServerMsg::BootstrapInfo { .. }
+            | ServerMsg::Error { .. }) => match self.pending.remove(&req_id) {
                 Some((pending, _)) => self.on_response(pending, msg),
                 None if matches!(
                     msg,
@@ -325,7 +309,9 @@ impl<R: CryptoRngCore> Core<R> {
                 ErrorCode::NotFound => FailReason::NotFound,
                 ErrorCode::Unauthorized => FailReason::Unauthorized,
                 ErrorCode::RateLimited | ErrorCode::Unavailable => FailReason::Offline,
-                _ => FailReason::ServerError,
+                ErrorCode::BadRequest | ErrorCode::TooLarge | ErrorCode::Internal => {
+                    FailReason::ServerError
+                }
             };
             self.fail_request(pending, reason);
             return;
@@ -348,7 +334,7 @@ impl<R: CryptoRngCore> Core<R> {
                 }
             }
             (Pending::Send { msg_id, peer, body }, ServerMsg::SendAck { status }) => {
-                self.on_send_ack(msg_id, peer, body, status);
+                self.on_send_ack(msg_id, peer, &body, status);
             }
             (Pending::InboxPut { msg_id }, ServerMsg::Done) => self.on_inbox_queued(msg_id),
             (Pending::InboxFetch, ServerMsg::InboxBatch { claim, items }) => {
@@ -415,12 +401,19 @@ impl<R: CryptoRngCore> Core<R> {
                 size,
                 kind,
                 inline,
-            } => {
-                self.send_file(peer, msg_id, file_id, name, mime, size, kind, inline);
-            }
+            } => self.send_file(files::NewFile {
+                peer,
+                msg_id,
+                file_id,
+                name,
+                mime,
+                size,
+                kind,
+                inline,
+            }),
             Command::AcceptFile { file_id } => self.accept_file(&file_id),
             Command::CancelTransfer { file_id } => self.cancel_transfer(&file_id),
-            Command::MarkRead { peer, ids } => self.mark_read(peer, ids),
+            Command::MarkRead { peer, ids } => self.mark_read(peer, &ids),
             Command::FetchInbox => self.fetch_inbox(),
             Command::RemovePeer { peer } => self.remove_peer(&peer),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
@@ -516,11 +509,10 @@ impl<R: CryptoRngCore> Core<R> {
             let Ok(plain) = cypher_crypto::sealed::open(&self.identity.dh_secret, &item) else {
                 continue;
             };
-            if plain.len() < 32 {
+            let Some((from, body)) = plain.split_first_chunk::<32>() else {
                 continue;
-            }
-            let from = PeerId::from_bytes(&plain[..32]).expect("length checked");
-            self.on_relay(from, Bytes::copy_from_slice(&plain[32..]), true);
+            };
+            self.on_relay(PeerId(*from), &Bytes::copy_from_slice(body), true);
         }
         self.request(
             ClientMsg::InboxAck {
@@ -577,12 +569,11 @@ impl<R: CryptoRngCore> Core<R> {
         let effect = match (anonymous, self.anon.readiness(self.now)) {
             (false, _) | (true, Readiness::Session) => Effect::Transmit(frame),
             (true, Readiness::Onion) => {
-                match self.anon.seal(&frame, self.now, deadline, &mut self.rng) {
-                    Some(blob) => Effect::Anonymous(blob),
-                    None => {
-                        self.fail_request(pending, FailReason::Offline);
-                        return;
-                    }
+                if let Some(blob) = self.anon.seal(&frame, self.now, deadline, &mut self.rng) {
+                    Effect::Anonymous(blob)
+                } else {
+                    self.fail_request(pending, FailReason::Offline);
+                    return;
                 }
             }
             (true, Readiness::Wait | Readiness::Unavailable) => {
@@ -630,6 +621,41 @@ impl<R: CryptoRngCore> Core<R> {
             self.effects.push(Effect::Persist(op));
         }
     }
+}
+
+fn load_peers(vault: &Vault, rows: &Rows) -> Result<HashMap<PeerId, Peer>, CoreError> {
+    rows.iter()
+        .map(|(k, v)| {
+            let id = PeerId::from_bytes(k).ok_or(CoreError::Storage)?;
+            let peer = Peer::from_record(&vault.open::<PeerRecord>(Table::Peers, k, v)?)?;
+            Ok((id, peer))
+        })
+        .collect()
+}
+
+fn load_outbox(vault: &Vault, rows: &Rows) -> Result<BTreeMap<MsgId, OutboxItem>, CoreError> {
+    rows.iter()
+        .map(|(k, v)| {
+            let item: OutboxItem = vault.open(Table::Outbox, k, v)?;
+            Ok((item.msg_id, item))
+        })
+        .collect()
+}
+
+type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
+
+fn load_transfers(vault: &Vault, rows: &Rows) -> Result<Transfers, CoreError> {
+    let (mut outgoing, mut incoming) = (HashMap::new(), HashMap::new());
+    for (k, v) in rows {
+        let rec: TransferRecord = vault.open(Table::Transfers, k, v)?;
+        let id = rec.desc.file_id;
+        if rec.outgoing {
+            outgoing.insert(id, Outgoing::from_record(rec));
+        } else {
+            incoming.insert(id, Incoming::from_record(rec));
+        }
+    }
+    Ok((outgoing, incoming))
 }
 
 #[derive(Default)]

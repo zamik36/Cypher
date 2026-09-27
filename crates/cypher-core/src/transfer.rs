@@ -13,8 +13,8 @@ use crate::envelope::FileDesc;
 const WINDOW_BYTES: u64 = 8 << 20;
 const MIN_WINDOW: usize = 4;
 const MAX_WINDOW: usize = 256;
-pub const RTO_MS: u64 = 4_000;
-pub const MAX_RETRIES: u8 = 5;
+pub(crate) const RTO_MS: u64 = 4_000;
+pub(crate) const MAX_RETRIES: u8 = 5;
 /// Receiver acknowledges at least this often (in chunks).
 const ACK_EVERY: u32 = 8;
 
@@ -29,7 +29,7 @@ pub(crate) struct Bitmap {
 }
 
 impl Bitmap {
-    pub fn new(len: u32) -> Self {
+    pub(crate) fn new(len: u32) -> Self {
         Self {
             words: vec![0; (len as usize).div_ceil(64)],
             len,
@@ -38,7 +38,7 @@ impl Bitmap {
         }
     }
 
-    pub fn from_bytes(len: u32, bytes: &[u8]) -> Self {
+    pub(crate) fn from_bytes(len: u32, bytes: &[u8]) -> Self {
         let mut b = Self::new(len);
         for (byte_idx, &byte) in bytes.iter().enumerate() {
             for bit in 0..8 {
@@ -52,26 +52,33 @@ impl Bitmap {
         b
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut out: Vec<u8> = self.words.iter().flat_map(|w| w.to_le_bytes()).collect();
         out.truncate((self.len as usize).div_ceil(8));
         out
     }
 
-    pub fn len(&self) -> u32 {
+    pub(crate) fn len(&self) -> u32 {
         self.len
     }
 
-    pub fn get(&self, i: u32) -> bool {
-        i < self.len && self.words[(i / 64) as usize] & (1 << (i % 64)) != 0
+    pub(crate) fn get(&self, i: u32) -> bool {
+        i < self.len
+            && self
+                .words
+                .get((i / 64) as usize)
+                .is_some_and(|w| w & (1 << (i % 64)) != 0)
     }
 
     /// Returns true when the bit was newly set.
-    pub fn set(&mut self, i: u32) -> bool {
+    pub(crate) fn set(&mut self, i: u32) -> bool {
         if i >= self.len || self.get(i) {
             return false;
         }
-        self.words[(i / 64) as usize] |= 1 << (i % 64);
+        let Some(word) = self.words.get_mut((i / 64) as usize) else {
+            return false;
+        };
+        *word |= 1 << (i % 64);
         self.ones += 1;
         if i == self.prefix {
             self.prefix = self.first_zero_from(i).unwrap_or(self.len);
@@ -79,21 +86,21 @@ impl Bitmap {
         true
     }
 
-    pub fn count(&self) -> u32 {
+    pub(crate) fn count(&self) -> u32 {
         self.ones
     }
 
     /// Every index below this is set.
-    pub fn prefix(&self) -> u32 {
+    pub(crate) fn prefix(&self) -> u32 {
         self.prefix
     }
 
-    pub fn first_zero_from(&self, from: u32) -> Option<u32> {
+    pub(crate) fn first_zero_from(&self, from: u32) -> Option<u32> {
         let from = from.max(self.prefix);
         let mut w = (from / 64) as usize;
         let mut mask = !0u64 << (from % 64);
-        while w < self.words.len() {
-            let free = !self.words[w] & mask;
+        while let Some(&word) = self.words.get(w) {
+            let free = !word & mask;
             if free != 0 {
                 let i = u32::try_from(w * 64).ok()? + free.trailing_zeros();
                 return (i < self.len).then_some(i);
@@ -104,7 +111,7 @@ impl Bitmap {
         None
     }
 
-    pub fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.ones == self.len
     }
 }
@@ -147,7 +154,7 @@ pub(crate) enum AckOutcome {
 }
 
 impl Outgoing {
-    pub fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
+    pub(crate) fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
         let count = desc.chunk_count();
         let cipher = cipher_for(&desc);
         Self {
@@ -163,7 +170,7 @@ impl Outgoing {
     }
 
     /// Peer accepted (or asked to resume) with a bitmap of chunks it holds.
-    pub fn accept(&mut self, have: &[u8]) {
+    pub(crate) fn accept(&mut self, have: &[u8]) {
         let theirs = Bitmap::from_bytes(self.acked.len(), have);
         for i in 0..self.acked.len() {
             if theirs.get(i) {
@@ -175,21 +182,21 @@ impl Outgoing {
     }
 
     /// Connection lost: forget in-flight chunks until the session is back.
-    pub fn pause(&mut self) {
+    pub(crate) fn pause(&mut self) {
         if self.state == OutState::Sending {
             self.in_flight.clear();
             self.state = OutState::Stalled;
         }
     }
 
-    pub fn resume(&mut self) {
+    pub(crate) fn resume(&mut self) {
         if self.state == OutState::Stalled {
             self.state = OutState::Sending;
         }
     }
 
     /// Chunk indices the driver should read now, marking them in flight.
-    pub fn schedule(&mut self, now_ms: u64) -> Vec<u32> {
+    pub(crate) fn schedule(&mut self, now_ms: u64) -> Vec<u32> {
         if self.state != OutState::Sending {
             return Vec::new();
         }
@@ -216,7 +223,7 @@ impl Outgoing {
         out
     }
 
-    pub fn on_ack(&mut self, next: u32, sack: u64) -> AckOutcome {
+    pub(crate) fn on_ack(&mut self, next: u32, sack: u64) -> AckOutcome {
         if self.state != OutState::Sending || next > self.acked.len() {
             return AckOutcome::Ignored;
         }
@@ -243,7 +250,7 @@ impl Outgoing {
     }
 
     /// Returns chunks to resend; flips to `Stalled` when retries run out.
-    pub fn expired(&mut self, now_ms: u64) -> Vec<u32> {
+    pub(crate) fn expired(&mut self, now_ms: u64) -> Vec<u32> {
         let mut resend = Vec::new();
         for (&i, f) in &mut self.in_flight {
             if now_ms.saturating_sub(f.sent_ms) < RTO_MS << f.retries.min(4) {
@@ -264,11 +271,11 @@ impl Outgoing {
         resend
     }
 
-    pub fn acked_bytes(&self) -> u64 {
+    pub(crate) fn acked_bytes(&self) -> u64 {
         acked_bytes(&self.acked, &self.desc)
     }
 
-    pub fn to_record(&self) -> TransferRecord {
+    pub(crate) fn to_record(&self) -> TransferRecord {
         TransferRecord {
             outgoing: true,
             peer: self.peer,
@@ -279,7 +286,7 @@ impl Outgoing {
         }
     }
 
-    pub fn from_record(r: TransferRecord) -> Self {
+    pub(crate) fn from_record(r: TransferRecord) -> Self {
         let mut t = Self::new(r.peer, r.desc, r.kind);
         t.acked = Bitmap::from_bytes(t.acked.len(), &r.done);
         t.stored_copy = t.acked.clone();
@@ -319,7 +326,7 @@ pub(crate) enum ChunkOutcome {
 }
 
 impl Incoming {
-    pub fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
+    pub(crate) fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
         let received = Bitmap::new(desc.chunk_count());
         Self {
             peer,
@@ -332,16 +339,16 @@ impl Incoming {
         }
     }
 
-    pub fn sealed_at_rest(&self) -> bool {
+    pub(crate) fn sealed_at_rest(&self) -> bool {
         self.kind.is_media()
     }
 
     /// Bytes on disk: media keeps ciphertext (tag per chunk), files plaintext.
-    pub fn stored_len(&self) -> u64 {
+    pub(crate) fn stored_len(&self) -> u64 {
         stored_len(&self.desc, self.sealed_at_rest())
     }
 
-    pub fn on_chunk(&mut self, index: u32, ciphertext: &[u8]) -> ChunkOutcome {
+    pub(crate) fn on_chunk(&mut self, index: u32, ciphertext: &[u8]) -> ChunkOutcome {
         if self.state != InState::Receiving || index >= self.received.len() {
             return ChunkOutcome::Rejected;
         }
@@ -375,7 +382,7 @@ impl Incoming {
     }
 
     /// Cumulative ack plus a 64-chunk selective bitmap after it.
-    pub fn ack_state(&self) -> (u32, u64) {
+    pub(crate) fn ack_state(&self) -> (u32, u64) {
         let next = self
             .received
             .first_zero_from(0)
@@ -391,11 +398,11 @@ impl Incoming {
         (next, sack)
     }
 
-    pub fn received_bytes(&self) -> u64 {
+    pub(crate) fn received_bytes(&self) -> u64 {
         acked_bytes(&self.received, &self.desc)
     }
 
-    pub fn to_record(&self) -> TransferRecord {
+    pub(crate) fn to_record(&self) -> TransferRecord {
         TransferRecord {
             outgoing: false,
             peer: self.peer,
@@ -406,7 +413,7 @@ impl Incoming {
         }
     }
 
-    pub fn from_record(r: TransferRecord) -> Self {
+    pub(crate) fn from_record(r: TransferRecord) -> Self {
         let mut t = Self::new(r.peer, r.desc, r.kind);
         t.received = Bitmap::from_bytes(t.received.len(), &r.done);
         if r.accepted {
@@ -476,7 +483,7 @@ mod tests {
     }
 
     fn seal(desc: &FileDesc, index: u32) -> Vec<u8> {
-        let mut buf = vec![index as u8; desc.chunk_len(index) as usize];
+        let mut buf = vec![index.to_le_bytes()[0]; desc.chunk_len(index) as usize];
         cipher_for(desc).seal(index, &mut buf).unwrap();
         buf
     }
@@ -521,16 +528,26 @@ mod tests {
         assert!(out.schedule(t).is_empty());
     }
 
+    fn receiving(d: &FileDesc) -> Incoming {
+        let mut inc = Incoming::new(PeerId([3; 32]), d.clone(), MediaKind::File);
+        inc.state = InState::Receiving;
+        inc
+    }
+
     #[test]
-    fn receiver_validates_and_acks() {
+    fn receiver_ignores_chunks_before_accepting() {
         let d = desc(2500, 1024);
         let mut inc = Incoming::new(PeerId([3; 32]), d.clone(), MediaKind::File);
         assert!(matches!(
             inc.on_chunk(0, &seal(&d, 0)),
             ChunkOutcome::Rejected
         ));
-        inc.state = InState::Receiving;
+    }
 
+    #[test]
+    fn receiver_validates_and_acks() {
+        let d = desc(2500, 1024);
+        let mut inc = receiving(&d);
         let c2 = seal(&d, 2);
         assert_eq!(c2.len(), 452 + CHUNK_TAG_LEN);
         match inc.on_chunk(2, &c2) {
@@ -554,7 +571,16 @@ mod tests {
         forged[0] ^= 1;
         assert!(matches!(inc.on_chunk(0, &forged), ChunkOutcome::Rejected));
         assert_eq!(inc.ack_state(), (0, 0b10));
+    }
 
+    #[test]
+    fn receiver_completes_out_of_order() {
+        let d = desc(2500, 1024);
+        let mut inc = receiving(&d);
+        assert!(matches!(
+            inc.on_chunk(2, &seal(&d, 2)),
+            ChunkOutcome::Store { .. }
+        ));
         assert!(matches!(
             inc.on_chunk(0, &seal(&d, 0)),
             ChunkOutcome::Store { .. }

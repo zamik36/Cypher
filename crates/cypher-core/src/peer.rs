@@ -20,18 +20,18 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
-    pub fn is_unconfirmed_initiator(&self) -> bool {
+    pub(crate) fn is_unconfirmed_initiator(&self) -> bool {
         self.pending_init.is_some()
     }
 
-    pub fn remember_ephemeral(list: &mut Vec<[u8; 32]>, ephemeral: [u8; 32]) {
+    pub(crate) fn remember_ephemeral(list: &mut Vec<[u8; 32]>, ephemeral: [u8; 32]) {
         if list.len() >= MAX_REMEMBERED_INITS {
             list.remove(0);
         }
         list.push(ephemeral);
     }
 
-    pub fn to_record(&self) -> PeerRecord {
+    pub(crate) fn to_record(&self) -> PeerRecord {
         let mut init = Vec::new();
         if let Some(h) = &self.pending_init {
             h.encode(&mut init);
@@ -46,7 +46,7 @@ impl Peer {
         }
     }
 
-    pub fn from_record(r: &PeerRecord) -> Result<Self, CoreError> {
+    pub(crate) fn from_record(r: &PeerRecord) -> Result<Self, CoreError> {
         let pending_init = if r.pending_init.is_empty() {
             None
         } else {
@@ -83,11 +83,16 @@ mod zeroizing_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     use zeroize::Zeroizing;
 
-    pub fn serialize<S: Serializer>(v: &Zeroizing<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(
+        v: &Zeroizing<Vec<u8>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(v)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<Vec<u8>>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Zeroizing<Vec<u8>>, D::Error> {
         Vec::<u8>::deserialize(d).map(Zeroizing::new)
     }
 }

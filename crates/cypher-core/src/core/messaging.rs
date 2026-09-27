@@ -70,7 +70,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.enqueue(peer, msg_id, Body::Text { text, reply_to }, true);
     }
 
-    pub(super) fn mark_read(&mut self, peer: PeerId, ids: Vec<MsgId>) {
+    pub(super) fn mark_read(&mut self, peer: PeerId, ids: &[MsgId]) {
         for chunk in ids.chunks(MAX_RECEIPT_IDS) {
             self.send_control(
                 peer,
@@ -201,7 +201,7 @@ impl<R: CryptoRngCore> Core<R> {
         &mut self,
         msg_id: MsgId,
         peer: PeerId,
-        body: Bytes,
+        body: &Bytes,
         status: DeliveryStatus,
     ) {
         match status {
@@ -211,7 +211,7 @@ impl<R: CryptoRngCore> Core<R> {
                 .get(&peer)
                 .and_then(|p| p.inbox.map(|i| (i, p.identity_dh)))
             {
-                Some((inbox, identity_dh)) => self.put_inbox(msg_id, inbox, &identity_dh, &body),
+                Some((inbox, identity_dh)) => self.put_inbox(msg_id, inbox, &identity_dh, body),
                 None => self.retry_later(msg_id, RETRY_OFFLINE_MS),
             },
             DeliveryStatus::Busy => self.retry_later(msg_id, RETRY_BUSY_MS),
@@ -374,7 +374,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    pub(super) fn on_relay(&mut self, from: PeerId, body: Bytes, via_inbox: bool) {
+    pub(super) fn on_relay(&mut self, from: PeerId, body: &Bytes, via_inbox: bool) {
         match RelayBody::decode(body) {
             Ok(RelayBody::Message {
                 init,
