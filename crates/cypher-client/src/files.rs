@@ -34,6 +34,11 @@ pub enum IoJob {
         len: u32,
         headroom: usize,
     },
+    /// Closes any handle to a temporary source and deletes it.
+    Remove {
+        file_id: FileId,
+        path: PathBuf,
+    },
 }
 
 pub enum IoDone {
@@ -110,6 +115,11 @@ impl Worker {
                     },
                     Err(_) => IoDone::ReadFailed { file_id },
                 }),
+                IoJob::Remove { file_id, path } => {
+                    self.sources.remove(&file_id);
+                    let _ = std::fs::remove_file(path);
+                    None
+                }
             };
             if let Some(event) = event {
                 let _ = done.send(event);
@@ -173,7 +183,7 @@ impl Worker {
 }
 
 #[cfg(unix)]
-fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+pub(crate) fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)
 }
 
@@ -183,7 +193,7 @@ fn write_all_at(f: &File, buf: &[u8], offset: u64) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+pub(crate) fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
     use std::os::windows::fs::FileExt;
     while !buf.is_empty() {
         match f.seek_read(buf, offset)? {

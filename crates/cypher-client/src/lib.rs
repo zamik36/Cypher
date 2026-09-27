@@ -4,6 +4,7 @@
 mod driver;
 mod files;
 pub mod identity;
+mod media;
 mod net;
 mod store;
 #[cfg(feature = "tor")]
@@ -28,6 +29,7 @@ use store::{FILES_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
+pub use media::{MAX_RANGE_LEN, MediaSlice};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -75,9 +77,17 @@ pub struct TorConfig {
 }
 
 impl Config {
+    /// Sealed copy of a voice or video note.
     pub fn media_path(&self, file_id: &FileId) -> PathBuf {
         self.data_dir
             .join("media")
+            .join(format!("{}.bin", file_id.to_hex()))
+    }
+
+    /// Plaintext of an outgoing recording, deleted once its transfer ends.
+    pub(crate) fn outgoing_path(&self, file_id: &FileId) -> PathBuf {
+        self.data_dir
+            .join("outgoing")
             .join(format!("{}.bin", file_id.to_hex()))
     }
 }
@@ -219,6 +229,72 @@ impl Client {
         Ok((msg_id, file_id))
     }
 
+    /// Sends a recording held in memory (voice or video note). Small notes
+    /// travel inline; larger ones are staged in a temporary file.
+    pub async fn send_media(
+        &self,
+        peer: PeerId,
+        data: Vec<u8>,
+        name: &str,
+        mime: &str,
+        kind: MediaKind,
+    ) -> Result<(MsgId, FileId), ClientError> {
+        if !kind.is_media() || data.is_empty() {
+            return Err(ClientError::InvalidInput);
+        }
+        let (msg_id, file_id) = (MsgId::random(&mut OsRng), FileId::random(&mut OsRng));
+        let size = data.len() as u64;
+        let mut cmd = Command::SendFile {
+            peer,
+            msg_id,
+            file_id,
+            name: name.to_owned(),
+            mime: mime.to_owned(),
+            size,
+            kind,
+            inline: None,
+        };
+        if data.len() <= MAX_INLINE_LEN {
+            if let Command::SendFile { inline, .. } = &mut cmd {
+                *inline = Some(data);
+            }
+            self.command(cmd).await?;
+            return Ok((msg_id, file_id));
+        }
+        let path = self.config.outgoing_path(&file_id);
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        tokio::fs::write(&path, data).await?;
+        self.send(Request::Track {
+            file_id,
+            path,
+            then: Some(cmd),
+        })
+        .await?;
+        Ok((msg_id, file_id))
+    }
+
+    /// Plaintext bytes `start..=end` of a stored voice or video note,
+    /// decrypting only the chunks that cover the range.
+    pub async fn media_range(
+        &self,
+        file_id: FileId,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<MediaSlice, ClientError> {
+        let raw = self
+            .store
+            .get(Table::Media.name(), file_id.to_vec())
+            .await?
+            .ok_or(ClientError::InvalidInput)?;
+        let key = self.vault.open_media(&file_id, &raw)?;
+        let path = self.config.media_path(&file_id);
+        tokio::task::spawn_blocking(move || media::read_range(&path, &key, start, end))
+            .await
+            .map_err(|_| ClientError::Closed)?
+    }
+
     /// Accepts an offered file, storing it at `dest`.
     pub async fn accept_file(&self, file_id: FileId, dest: PathBuf) -> Result<(), ClientError> {
         self.send(Request::Track {
@@ -273,14 +349,20 @@ impl Client {
             .collect())
     }
 
-    /// Deletes every stored message; sessions and contacts are kept.
+    /// Deletes every stored message and media note; sessions and contacts
+    /// are kept.
     pub async fn clear_history(&self) -> Result<(), ClientError> {
         self.store
             .apply(vec![
                 store::Op::Clear(Table::Messages.name()),
                 store::Op::Clear(Table::MessageStatus.name()),
+                store::Op::Clear(Table::Media.name()),
             ])
-            .await
+            .await?;
+        match tokio::fs::remove_dir_all(self.config.data_dir.join("media")).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
     }
 
     pub async fn shutdown(&self) {

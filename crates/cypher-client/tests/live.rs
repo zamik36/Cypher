@@ -132,7 +132,8 @@ async fn full_user_journey_against_live_stack() {
     assert_eq!(std::fs::read(&dest).unwrap(), data);
 
     let voice = dir_a.path().join("voice.webm");
-    std::fs::write(&voice, vec![3u8; 150 * 1024]).unwrap();
+    let voice_len = 150 * 1024u64;
+    std::fs::write(&voice, vec![3u8; voice_len as usize]).unwrap();
     let kind = MediaKind::Voice {
         duration_ms: 9_000,
         waveform: vec![5; 64],
@@ -149,6 +150,60 @@ async fn full_user_journey_against_live_stack() {
     assert_eq!(
         std::fs::read(a.media_path(&voice_id)).unwrap(),
         std::fs::read(b.media_path(&voice_id)).unwrap(),
+    );
+    let played = b.media_range(voice_id, 0, None).await.unwrap();
+    assert_eq!(
+        (played.total, played.bytes.len()),
+        (voice_len, voice_len as usize)
+    );
+    assert!(
+        played.bytes.iter().all(|&x| x == 3),
+        "receiver plays the recording"
+    );
+    let tail = a.media_range(voice_id, voice_len - 10, None).await.unwrap();
+    assert_eq!(
+        (tail.start, tail.end, tail.bytes),
+        (voice_len - 10, voice_len - 1, vec![3; 10])
+    );
+
+    let recording: Vec<u8> = (0..300 * 1024).map(|i| (i % 251) as u8).collect();
+    let (_, note_id) = a
+        .send_media(
+            b.peer_id(),
+            recording.clone(),
+            "note.webm",
+            "video/webm",
+            MediaKind::VideoNote {
+                duration_ms: 4_000,
+                poster: vec![0xFF, 0xD8],
+            },
+        )
+        .await
+        .unwrap();
+    wait_for(&mut ev_a, |e| {
+        matches!(e, Event::TransferComplete { file_id: f } if *f == note_id).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut got = Vec::new();
+    while (got.len() as u64) < recording.len() as u64 {
+        let part = b
+            .media_range(note_id, got.len() as u64, None)
+            .await
+            .unwrap();
+        got.extend_from_slice(&part.bytes);
+    }
+    assert_eq!(
+        got, recording,
+        "video note round-trips through ranged reads"
+    );
+    assert!(
+        !dir_a
+            .path()
+            .join("outgoing")
+            .join(format!("{}.bin", note_id.to_hex()))
+            .exists(),
+        "staged plaintext is deleted once sent"
     );
 
     let history = b.history(a.peer_id(), None, 50).await.unwrap();

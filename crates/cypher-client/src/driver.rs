@@ -298,6 +298,8 @@ impl Driver {
                     len,
                     sealed,
                 } => {
+                    // A sealed copy always lives at `media_path`; `files` keeps
+                    // pointing at the transfer's plaintext source or target.
                     let path = if sealed {
                         self.config.media_path(&file_id)
                     } else if let Some(entry) = self.files.get(&file_id) {
@@ -305,7 +307,6 @@ impl Driver {
                     } else {
                         continue;
                     };
-                    self.remember_file(file_id, path.clone());
                     self.io.submit(IoJob::Open { file_id, path, len });
                 }
                 Effect::WriteChunk {
@@ -343,8 +344,9 @@ impl Driver {
         if let Event::Connected = event {
             self.gateway_retry.backoff = MIN_BACKOFF;
         }
-        if let Event::TransferFailed { file_id, .. } = &event {
-            self.forget_file(*file_id);
+        if let Event::TransferComplete { file_id } | Event::TransferFailed { file_id, .. } = &event
+        {
+            self.release_file(*file_id);
         }
         let _ = self.events.send(event);
     }
@@ -372,9 +374,18 @@ impl Driver {
         self.files.insert(file_id, entry);
     }
 
-    fn forget_file(&mut self, file_id: FileId) {
-        if self.files.remove(&file_id).is_some() {
-            self.ops.push(Op::Delete(FILES_TABLE, file_id.to_vec()));
+    /// Drops the bookkeeping of a finished transfer and deletes the staged
+    /// plaintext of an outgoing recording.
+    fn release_file(&mut self, file_id: FileId) {
+        let Some(entry) = self.files.remove(&file_id) else {
+            return;
+        };
+        self.ops.push(Op::Delete(FILES_TABLE, file_id.to_vec()));
+        if entry.path == self.config.outgoing_path(&file_id) {
+            self.io.submit(IoJob::Remove {
+                file_id,
+                path: entry.path,
+            });
         }
     }
 }
