@@ -12,7 +12,7 @@ const MAX_SKEW_SECS: u64 = 120;
 
 /// Opens an onion-sealed request, answers it anonymously and seals the reply.
 /// Returns `None` for anything that must be dropped silently.
-pub async fn handle(handler: &Handler, secret: &StaticSecret, blob: &[u8]) -> Option<Bytes> {
+pub(crate) async fn handle(handler: &Handler, secret: &StaticSecret, blob: &[u8]) -> Option<Bytes> {
     let opened = onion::open_request(secret, blob).ok()?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     if now.abs_diff(opened.timestamp_secs) > MAX_SKEW_SECS {

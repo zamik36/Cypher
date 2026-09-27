@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 /// Per-connection bytes a slow reader may have queued before new deliveries
 /// are refused (`Busy`). Bounds gateway memory per connection.
-pub const QUEUE_BYTES: usize = 8 << 20;
+pub(crate) const QUEUE_BYTES: usize = 8 << 20;
 const QUEUE_FRAMES: usize = 1024;
 
 /// Bounded outbound queue shared by everything that writes to one client.
@@ -16,12 +16,12 @@ pub struct Outbox {
     queued: Arc<AtomicUsize>,
 }
 
-pub struct OutboxReceiver {
+pub(crate) struct OutboxReceiver {
     rx: mpsc::Receiver<Bytes>,
     queued: Arc<AtomicUsize>,
 }
 
-pub fn outbox() -> (Outbox, OutboxReceiver) {
+pub(crate) fn outbox() -> (Outbox, OutboxReceiver) {
     let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
     let queued = Arc::new(AtomicUsize::new(0));
     (
@@ -50,13 +50,13 @@ impl Outbox {
 }
 
 impl OutboxReceiver {
-    pub async fn recv(&mut self) -> Option<Bytes> {
+    pub(crate) async fn recv(&mut self) -> Option<Bytes> {
         let frame = self.rx.recv().await?;
         self.queued.fetch_sub(frame.len(), Ordering::AcqRel);
         Some(frame)
     }
 
-    pub fn try_recv(&mut self) -> Option<Bytes> {
+    pub(crate) fn try_recv(&mut self) -> Option<Bytes> {
         let frame = self.rx.try_recv().ok()?;
         self.queued.fetch_sub(frame.len(), Ordering::AcqRel);
         Some(frame)

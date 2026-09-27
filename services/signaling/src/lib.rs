@@ -111,7 +111,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
 
     info!(
         redis = %cypher_server_kit::redact_url(&config.redis_url),
-        nats = %config.nats.nats_url,
+        nats = %config.nats.url,
         "signaling starting"
     );
 

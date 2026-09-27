@@ -21,6 +21,13 @@ pub struct Metrics {
 impl Metrics {
     /// A fresh registry; on Linux it also exports process resident memory,
     /// CPU time and open file descriptors (`process_*`).
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "fallible on Linux, where the process collector is registered"
+        )
+    )]
     pub fn new() -> anyhow::Result<Self> {
         let registry = Registry::new();
         #[cfg(target_os = "linux")]

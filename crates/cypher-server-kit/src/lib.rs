@@ -39,11 +39,14 @@ pub fn load_config<T: DeserializeOwned>() -> anyhow::Result<T> {
 /// permissions (`deploy/nats.conf`); a shared token is accepted for dev.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct NatsConfig {
-    #[serde(default = "default_nats_url")]
-    pub nats_url: String,
-    pub nats_user: Option<String>,
-    pub nats_password: Option<String>,
-    pub nats_token: Option<String>,
+    #[serde(rename = "nats_url", default = "default_nats_url")]
+    pub url: String,
+    #[serde(rename = "nats_user")]
+    pub user: Option<String>,
+    #[serde(rename = "nats_password")]
+    pub password: Option<String>,
+    #[serde(rename = "nats_token")]
+    pub token: Option<String>,
 }
 
 fn default_nats_url() -> String {
@@ -53,9 +56,9 @@ fn default_nats_url() -> String {
 pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Client> {
     let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
     let options = match (
-        non_empty(&config.nats_user),
-        non_empty(&config.nats_password),
-        non_empty(&config.nats_token),
+        non_empty(&config.user),
+        non_empty(&config.password),
+        non_empty(&config.token),
     ) {
         (Some(user), Some(password), _) => {
             async_nats::ConnectOptions::with_user_and_password(user, password)
@@ -65,11 +68,10 @@ pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Cli
     };
     Ok(options
         .retry_on_initial_connect()
-        .connect(&config.nats_url)
+        .connect(&config.url)
         .await?)
 }
 
-/// Resolves on Ctrl-C, or SIGTERM on Unix.
 /// A token cancelled on Ctrl-C or SIGTERM, for a service's `run`.
 pub fn shutdown_token() -> tokio_util::sync::CancellationToken {
     let token = tokio_util::sync::CancellationToken::new();
@@ -82,6 +84,7 @@ pub fn shutdown_token() -> tokio_util::sync::CancellationToken {
     token
 }
 
+/// Resolves on Ctrl-C, or SIGTERM on Unix.
 pub async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -123,11 +126,11 @@ pub fn init_tracing() {
 
 /// Hides credentials in URLs before they are logged.
 pub fn redact_url(raw: &str) -> String {
-    let Some(scheme_end) = raw.find("://").map(|i| i + 3) else {
+    let Some((scheme, rest)) = raw.split_once("://") else {
         return raw.to_owned();
     };
-    match raw[scheme_end..].find('@') {
-        Some(at) => format!("{}***{}", &raw[..scheme_end], &raw[scheme_end + at..]),
+    match rest.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://***@{host}"),
         None => raw.to_owned(),
     }
 }
@@ -167,8 +170,8 @@ mod tests {
             .try_deserialize()
             .unwrap();
         assert_eq!(cfg.limit, 42);
-        assert_eq!(cfg.nats.nats_user.as_deref(), Some("gateway"));
-        assert_eq!(cfg.nats.nats_url, "nats://127.0.0.1:4222");
+        assert_eq!(cfg.nats.user.as_deref(), Some("gateway"));
+        assert_eq!(cfg.nats.url, "nats://127.0.0.1:4222");
     }
 
     #[test]

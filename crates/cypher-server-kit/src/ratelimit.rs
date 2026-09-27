@@ -10,6 +10,10 @@ pub struct TokenBucket {
 }
 
 impl TokenBucket {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "configured rates and sizes are far below 2^52"
+    )]
     pub fn new(capacity: u64, per_second: u64) -> Self {
         Self {
             capacity: capacity as f64,
@@ -23,6 +27,7 @@ impl TokenBucket {
         self.try_consume_at(n, Instant::now())
     }
 
+    #[expect(clippy::cast_precision_loss, reason = "frame sizes are far below 2^52")]
     fn try_consume_at(&mut self, n: u64, now: Instant) -> bool {
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);

@@ -9,9 +9,9 @@ const KEYS_TTL_SECS: u64 = 30 * 24 * 3600;
 const LINK_TTL_SECS: u64 = 24 * 3600;
 const INBOX_TTL_SECS: u64 = 14 * 24 * 3600;
 const CLAIM_TTL_SECS: u64 = 120;
-pub const MAX_INBOX_ITEMS: usize = 1000;
+pub(crate) const MAX_INBOX_ITEMS: usize = 1000;
 /// Keeps every inbox batch below the NATS and frame payload limits.
-pub const MAX_BATCH_BYTES: usize = 768 * 1024;
+pub(crate) const MAX_BATCH_BYTES: usize = 768 * 1024;
 
 fn key(prefix: &[u8], id: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(prefix.len() + id.len());
@@ -20,13 +20,13 @@ fn key(prefix: &[u8], id: &[u8]) -> Vec<u8> {
     k
 }
 
-pub enum PutOutcome {
+pub(crate) enum PutOutcome {
     Stored,
     Full,
 }
 
 #[derive(Clone)]
-pub struct Store {
+pub(crate) struct Store {
     redis: ConnectionManager,
     put_script: Script,
     fetch_script: Script,
@@ -34,7 +34,7 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn connect(url: &str) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(url: &str) -> anyhow::Result<Self> {
         let redis = redis::Client::open(url)?.get_connection_manager().await?;
         Ok(Self {
             redis,
@@ -72,7 +72,7 @@ impl Store {
         })
     }
 
-    pub async fn publish_keys(
+    pub(crate) async fn publish_keys(
         &self,
         peer: &PeerId,
         base: &[u8],
@@ -98,14 +98,14 @@ impl Store {
                 .collect();
             pipe.rpush(&opk_key, encoded).ignore();
         }
-        pipe.expire(&opk_key, KEYS_TTL_SECS as i64)
+        pipe.expire(&opk_key, i64::try_from(KEYS_TTL_SECS).unwrap_or(i64::MAX))
             .ignore()
             .llen(&opk_key);
         let (left,): (u64,) = pipe.query_async(&mut self.redis.clone()).await?;
         Ok(u16::try_from(left).unwrap_or(u16::MAX))
     }
 
-    pub async fn fetch_keys(
+    pub(crate) async fn fetch_keys(
         &self,
         peer: &PeerId,
     ) -> redis::RedisResult<Option<(Bytes, Option<(u32, [u8; 32])>)>> {
@@ -122,7 +122,11 @@ impl Store {
         Ok(base.map(|b| (Bytes::from(b), opk)))
     }
 
-    pub async fn create_link(&self, link: &LinkId, peer: &PeerId) -> redis::RedisResult<bool> {
+    pub(crate) async fn create_link(
+        &self,
+        link: &LinkId,
+        peer: &PeerId,
+    ) -> redis::RedisResult<bool> {
         let mut redis = self.redis.clone();
         redis::cmd("SET")
             .arg(key(b"l:", link.as_str().as_bytes()))
@@ -135,7 +139,7 @@ impl Store {
             .map(|r| r.is_some())
     }
 
-    pub async fn resolve_link(&self, link: &LinkId) -> redis::RedisResult<Option<PeerId>> {
+    pub(crate) async fn resolve_link(&self, link: &LinkId) -> redis::RedisResult<Option<PeerId>> {
         let raw: Option<Vec<u8>> = self
             .redis
             .clone()
@@ -144,7 +148,11 @@ impl Store {
         Ok(raw.and_then(|r| PeerId::from_bytes(&r)))
     }
 
-    pub async fn inbox_put(&self, inbox: &[u8; 32], item: &[u8]) -> redis::RedisResult<PutOutcome> {
+    pub(crate) async fn inbox_put(
+        &self,
+        inbox: &[u8; 32],
+        item: &[u8],
+    ) -> redis::RedisResult<PutOutcome> {
         let stored: i64 = self
             .put_script
             .key(key(b"i:", inbox))
@@ -161,7 +169,7 @@ impl Store {
     }
 
     /// Claims the oldest items exclusively until acked or the claim expires.
-    pub async fn inbox_fetch(
+    pub(crate) async fn inbox_fetch(
         &self,
         inbox: &[u8; 32],
         claim: &[u8; 16],
@@ -180,7 +188,11 @@ impl Store {
         Ok(items.into_iter().map(Bytes::from).collect())
     }
 
-    pub async fn inbox_ack(&self, inbox: &[u8; 32], claim: &[u8; 16]) -> redis::RedisResult<()> {
+    pub(crate) async fn inbox_ack(
+        &self,
+        inbox: &[u8; 32],
+        claim: &[u8; 16],
+    ) -> redis::RedisResult<()> {
         let _: i64 = self
             .ack_script
             .key(key(b"i:", inbox))

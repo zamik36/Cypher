@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers fail loudly on broken fixtures"
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -125,9 +130,7 @@ async fn shutdown_stops_accepting_and_closes_open_connections() {
         .expect("serve returns after shutdown")
         .unwrap();
     assert!(!echo_roundtrip(&mut conn, b"after").await);
-    assert!(
-        connect_tls(&server.addr, Arc::clone(&server.client))
-            .await
-            .is_err()
-    );
+    connect_tls(&server.addr, Arc::clone(&server.client))
+        .await
+        .unwrap_err();
 }

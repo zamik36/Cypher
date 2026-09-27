@@ -68,25 +68,28 @@ impl Bus for async_nats::Client {
     }
 
     async fn publish(&self, subject: String, payload: Bytes) {
-        let _ = async_nats::Client::publish(self, subject, payload).await;
+        let _ = Self::publish(self, subject, payload).await;
     }
 
     async fn subscribe(&self, subject: String) -> Result<Self::Sub, BusError> {
-        fn convert(m: async_nats::Message) -> BusMsg {
+        fn to_bus_msg(m: async_nats::Message) -> BusMsg {
             BusMsg {
                 payload: m.payload,
                 reply: m.reply.map(|r| r.to_string()),
             }
         }
-        async_nats::Client::subscribe(self, subject)
+        Self::subscribe(self, subject)
             .await
-            .map(|s| s.map(convert as fn(async_nats::Message) -> BusMsg))
+            .map(|s| {
+                let convert: fn(async_nats::Message) -> BusMsg = to_bus_msg;
+                s.map(convert)
+            })
             .map_err(|_| BusError::Unavailable)
     }
 }
 
 #[cfg(test)]
-pub mod mem {
+pub(crate) mod mem {
     //! In-memory bus: exact-subject pub/sub plus a pluggable signaling stub.
 
     use std::collections::HashMap;
@@ -100,7 +103,7 @@ pub mod mem {
     type Responder = Arc<dyn Fn(Option<PeerId>, Bytes) -> Bytes + Send + Sync>;
 
     #[derive(Clone, Default)]
-    pub struct MemBus {
+    pub(crate) struct MemBus {
         inner: Arc<Mutex<Inner>>,
     }
 
@@ -113,7 +116,7 @@ pub mod mem {
     }
 
     impl MemBus {
-        pub fn respond_with(
+        pub(crate) fn respond_with(
             &self,
             subject: &str,
             f: impl Fn(Option<PeerId>, Bytes) -> Bytes + Send + Sync + 'static,
@@ -172,7 +175,7 @@ pub mod mem {
                 .map_err(|_| BusError::Unavailable)
         }
 
-        async fn publish(&self, subject: String, payload: Bytes) {
+        fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send {
             let waiter = self.inner.lock().unwrap().replies.remove(&subject);
             match waiter {
                 Some(tx) => {
@@ -185,9 +188,13 @@ pub mod mem {
                     });
                 }
             }
+            std::future::ready(())
         }
 
-        async fn subscribe(&self, subject: String) -> Result<Self::Sub, BusError> {
+        fn subscribe(
+            &self,
+            subject: String,
+        ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
             let (tx, rx) = mpsc::unbounded_channel();
             self.inner
                 .lock()
@@ -196,7 +203,7 @@ pub mod mem {
                 .entry(subject)
                 .or_default()
                 .push(tx);
-            Ok(UnboundedReceiverStream::new(rx))
+            std::future::ready(Ok(UnboundedReceiverStream::new(rx)))
         }
     }
 }

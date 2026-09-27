@@ -1,3 +1,5 @@
+use rand::RngCore;
+use rand::rngs::OsRng;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,7 +16,8 @@ pub fn load_or_create_secret(path: &Path) -> anyhow::Result<[u8; 32]> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let secret: [u8; 32] = rand::random();
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
     let temp_path = temp_path(path);
     {
         let mut file = OpenOptions::new()
@@ -77,6 +80,10 @@ fn restrict_file_permissions(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the Unix variant, which can fail"
+)]
 fn restrict_file_permissions(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }

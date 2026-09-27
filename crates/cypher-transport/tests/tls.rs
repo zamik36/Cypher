@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers fail loudly on broken fixtures"
+)]
+
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -67,11 +72,9 @@ async fn untrusted_certificate_is_refused() {
     });
     let other = cypher_tls::SelfSignedCert::generate(&["localhost"]).unwrap();
     let wrong_pin = cypher_tls::make_client_config_with_pem(&other.cert_pem).unwrap();
-    assert!(
-        connect_tls(&format!("localhost:{port}"), wrong_pin)
-            .await
-            .is_err()
-    );
+    connect_tls(&format!("localhost:{port}"), wrong_pin)
+        .await
+        .unwrap_err();
 }
 
 #[tokio::test]

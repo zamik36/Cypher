@@ -95,9 +95,9 @@ mod tests {
             ("example.org", 443)
         );
         assert_eq!(split_host_port("[::1]:9100").unwrap(), ("::1", 9100));
-        assert!(split_host_port("nohost").is_err());
-        assert!(split_host_port(":80").is_err());
-        assert!(split_host_port("h:99999").is_err());
+        split_host_port("nohost").unwrap_err();
+        split_host_port(":80").unwrap_err();
+        split_host_port("h:99999").unwrap_err();
     }
 }
 

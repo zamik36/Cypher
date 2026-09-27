@@ -7,9 +7,9 @@ use tracing::warn;
 
 use crate::store::{PutOutcome, Store};
 
-pub const CAPABILITY_ONION: u32 = 1;
+pub(crate) const CAPABILITY_ONION: u32 = 1;
 
-pub struct Handler {
+pub(crate) struct Handler {
     pub store: Store,
     pub onion_public: [u8; 32],
     pub relay_addr: Option<String>,
@@ -18,7 +18,7 @@ pub struct Handler {
 impl Handler {
     /// Answers one client request. `peer` is the gateway-authenticated
     /// identity, absent for anonymous (onion) requests.
-    pub async fn handle(&self, peer: Option<PeerId>, frame: Bytes) -> Bytes {
+    pub(crate) async fn handle(&self, peer: Option<PeerId>, frame: Bytes) -> Bytes {
         let (req_id, msg) = match Frame::<ClientMsg>::decode(frame) {
             Ok(Frame { req_id, msg }) => (req_id, self.answer(peer, msg).await),
             Err(_) => (0, error(ErrorCode::BadRequest)),

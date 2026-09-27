@@ -196,12 +196,9 @@ impl<B: Bus> Session<B> {
         let ClientMsg::Auth { signature } = auth.msg else {
             return None;
         };
-        let mut signed = [0u8; 64];
-        let ctx_len = SESSION_AUTH_CONTEXT.len();
-        signed[..ctx_len].copy_from_slice(SESSION_AUTH_CONTEXT);
-        signed[ctx_len..ctx_len + 32].copy_from_slice(&nonce);
+        let signed = [SESSION_AUTH_CONTEXT, nonce.as_slice()].concat();
         if key
-            .verify(&signed[..ctx_len + 32], &Signature::from_bytes(&signature))
+            .verify(&signed, &Signature::from_bytes(&signature))
             .is_err()
         {
             self.gw.metrics.auth_failures.inc();
@@ -275,9 +272,8 @@ impl<B: Bus> Session<B> {
                     gw.metrics.delivered_remote.inc();
                     DeliveryStatus::Delivered
                 }
-                Ok(_) => DeliveryStatus::Busy,
+                Ok(_) | Err(BusError::Unavailable) => DeliveryStatus::Busy,
                 Err(BusError::NoResponders | BusError::Timeout) => DeliveryStatus::Offline,
-                Err(BusError::Unavailable) => DeliveryStatus::Busy,
             };
             out.try_push(frame(req_id, ServerMsg::SendAck { status }));
         });

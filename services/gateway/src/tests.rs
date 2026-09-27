@@ -249,7 +249,7 @@ async fn delivery_across_gateway_nodes() {
     ));
     match b.recv().await.unwrap().msg {
         ServerMsg::Recv { from, body } => {
-            assert_eq!((from, &body[..]), (a.peer(), &b"cross-node"[..]))
+            assert_eq!((from, &body[..]), (a.peer(), &b"cross-node"[..]));
         }
         other => panic!("unexpected {other:?}"),
     }
