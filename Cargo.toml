@@ -46,17 +46,87 @@ license = "MIT"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-unused_qualifications = "warn"
-rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_qualifications = "deny"
+unreachable_pub = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_lifetimes = "deny"
+redundant_lifetimes = "deny"
+unit_bindings = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+unused_import_braces = "deny"
+unused_macro_rules = "deny"
 
+# Exceptions are written as #[expect(lint, reason = "...")] at the narrowest
+# scope; plain #[allow] is itself denied.
 [workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-dbg_macro = "warn"
-todo = "warn"
-redundant_clone = "warn"
-inefficient_to_string = "warn"
-needless_pass_by_ref_mut = "warn"
-large_futures = "warn"
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+# restriction: no panics or leftovers in production code
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+get_unwrap = "deny"
+mem_forget = "deny"
+# restriction: unsafe hygiene
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+# restriction: lint hygiene
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+# restriction: correctness and clarity
+clone_on_ref_ptr = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+mutex_atomic = "deny"
+lossy_float_literal = "deny"
+float_cmp_const = "deny"
+unused_result_ok = "deny"
+infinite_loop = "deny"
+assertions_on_result_states = "deny"
+empty_drop = "deny"
+empty_structs_with_brackets = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+unneeded_field_pattern = "deny"
+verbose_file_reads = "deny"
+str_to_string = "deny"
+format_push_string = "deny"
+fn_to_numeric_cast_any = "deny"
+as_underscore = "deny"
+try_err = "deny"
+if_then_some_else_none = "deny"
+mixed_read_write_in_expression = "deny"
+same_name_method = "deny"
+redundant_type_annotations = "deny"
+large_include_file = "deny"
+# nursery picks
+cognitive_complexity = "deny"
+redundant_clone = "deny"
+use_self = "deny"
+or_fun_call = "deny"
+needless_collect = "deny"
+needless_pass_by_ref_mut = "deny"
+significant_drop_in_scrutinee = "deny"
+large_futures = "deny"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -114,6 +184,8 @@ cypher-tls = { path = "crates/cypher-tls" }
 cypher-transport = { path = "crates/cypher-transport" }
 
 [profile.release]
+# Abort on integer overflow instead of wrapping silently (nonces, lengths).
+overflow-checks = true
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

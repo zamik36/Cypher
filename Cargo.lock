@@ -1626,6 +1626,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "webkit2gtk",
 ]

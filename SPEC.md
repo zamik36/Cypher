@@ -1,6 +1,6 @@
 # SPEC — доводка «Шифра» до production: план, статус, остаток
 
-> Обновлено: 2026-09-27. Ветка `dev`. Коммиты делаются без упоминания AI и без Co-Authored-By.
+> Обновлено: 2026-09-27 (фаза C завершена). Ветка `dev`. Коммиты делаются без упоминания AI и без Co-Authored-By.
 > Отчёт по этапам 0–6 лежит в [docs/report-2026-09.md](docs/report-2026-09.md), дорожная карта — в [docs/roadmap.md](docs/roadmap.md).
 
 ## Цель
@@ -23,8 +23,8 @@
 |---|---|---|
 | A | Удаление P2P и STUN, исправление секретов NATS в деплое, закрепление toolchain 1.98.1, обновление Justfile | ✅ `1e27b5c` |
 | B | Сервисы разделены на lib и тонкий bin (`run(config, shutdown)`), общий `cypher_transport::server::serve`, метрики на экземпляр, `OnionUpstream` в relay, чистый модуль команд в wasm, `effects.ts` в PWA | ✅ `c872cda` |
-| C | Строгие линтеры Rust: все нарушения исправлены, конфиг включён | 🔶 в работе, **не закоммичено** |
-| D | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants, бенчмарки, нагрузка 10k) | ⏳ |
+| C | Строгие линтеры Rust: все нарушения исправлены, конфиг включён | ✅ `969d2af`…`93c98a4` + конфиг |
+| D ⏭ | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants, бенчмарки, нагрузка 10k) | ⏳ |
 | E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ⏳ |
 | F | Производительность: criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ⏳ |
 | G | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
@@ -45,70 +45,56 @@
   - тесты метрик в server-kit.
 - **Раньше:** этапы 0–6 (протокол v2, ядро, сервисы, нативный и WASM-клиенты, голосовые и кружочки), см. отчёт.
 
-## Фаза C — текущее состояние (рабочее дерево, НЕ закоммичено)
-**Конфиг уже внесён:**
-- в корневой `Cargo.toml`: `[workspace.lints]` (rust + clippy pedantic/restriction/nursery) и `overflow-checks = true` в release;
-- новые файлы `clippy.toml` и `rustfmt.toml`.
+## Фаза C — итог
+**Конфиг:**
+- `[workspace.lints]`: rust + clippy `all`/`pedantic` в режиме deny, отобранные restriction- и nursery-линты;
+- `clippy.toml`: пороги и `disallowed-methods`;
+- `rustfmt.toml`;
+- `overflow-checks = true` в release.
 
-Из плана сознательно убраны линты, которые давали шум без пользы:
-- `let_underscore_drop`;
-- `tests_outside_test_module` — ложные срабатывания на `tests/`;
-- `partial_pub_fields` — в core поля «публичные данные + приватные инварианты» сделаны так намеренно.
+Исключения — только `#[expect(lint, reason = "…")]` на самом узком месте. `#[allow]` запрещён (`allow_attributes`).
 
-**Уже чисто при новом конфиге:**
-- **`cypher-types`**: `to_vec`/`to_hex` берут `self`, base32 без индексации.
-- **`cypher-wire`**:
-  - `Reader` на `first_chunk`/`advance`;
-  - `field_len` — единственный `expect` с reason;
-  - `peek_send` на `split_first_chunk`;
-  - `#![cfg_attr(not(test), deny(arithmetic_side_effects, wildcard_enum_match_arm))]`;
-  - saturating-подсказки ёмкости.
-- **`cypher-crypto`**:
-  - `kdf::{hkdf, hmac_sha256, split}` — `expect` с reason;
-  - `id()` у prekey, `signed_message` через `concat`;
-  - `identity_file::open` через `Reader`;
-  - `LARGEST_BUCKET`, `AAD_FIXED_LEN`;
-  - `#![cfg_attr(not(test), deny(arithmetic_side_effects))]`.
+**Точечная строгость:**
+- `cypher-wire` — запрет неявной арифметики (`arithmetic_side_effects`) и catch-all веток `_` в `match` по enum (`wildcard_enum_match_arm`);
+- `cypher-crypto` — запрет неявной арифметики;
+- `cypher-core` — запрет catch-all веток.
 
-  Все 40 тестов зелёные.
-- **`cypher-core`, почти готово:**
-  - сделано: `relay.rs` переписан (`take::<N>`, `send_header() -> [u8; N]`, `write_chunk_headers(&mut [u8; CHUNK_HEADROOM], …)`); `send_file(NewFile)`; `restore(&Snapshot)` с `load_peers`/`load_outbox`/`load_transfers`; `mark_read(&[MsgId])`; `on_send_ack(&Bytes)`; `Prekeys::from_record` без `Result`; `Bitmap` через `get`/`get_mut`; `fs_name` без срезов строк; `media.rs` без кастов и срезов; `store`/`envelope` — `expect` с reason. Тесты core зелёные: 24 + 19.
-  - осталось:
-    1. `core/files.rs::send_file` — 70 строк при лимите 60: вынести валидацию и построение `FileDesc` в функции.
-    2. `core/messaging.rs:214` — лишний `&body`.
-    3. `RelayBody::decode(body: Bytes)` → `&Bytes`; вызовы — `messaging.rs:378` и тесты в `relay.rs`.
-    4. `transfer.rs` — тест `receiver_validates_and_acks` (сложность 21): разбить на два.
-    5. `ui.rs::event` — 72 строки: вынести ветки Transfer* в отдельную функцию; для прогресса — `#[expect(clippy::cast_precision_loss, reason = "UI ratio; exact below 2^52 bytes")]`.
-    6. В `tests/scenarios.rs` — точный набор `#![expect(...)]` для тестового кода (indexing_slicing, panic, unreachable, unwrap/expect, cast_possible_truncation, too_many_lines — только те, что реально срабатывают). Убрать `#![allow(dead_code)]` в `tests/harness/mod.rs` вместе с мёртвыми хелперами. Wildcard-match в harness — заменить на явные варианты.
-    7. Добавить `#![deny(clippy::wildcard_enum_match_arm)]` в `crates/cypher-core/src/lib.rs` и исправить найденное.
-- **Остальные крейты.** Число нарушений — по последнему отчёту:
+Везде только для продового кода (`cfg_attr(not(test), …)`).
 
-  | Крейт | Нарушений |
-  |---|---|
-  | media | 45 |
-  | desktop | 27 |
-  | client | 19 |
-  | wasm | 16 |
-  | load-test | 11 |
-  | server-kit | 11 |
-  | gateway | 8 |
-  | transport | 2 |
-  | signaling | 1 |
+**Из плана сознательно убраны:**
+- `let_underscore_drop` — шумит на намеренных `let _ = tx.send(..)`; реальные баги ловят `let_underscore_lock`/`future`;
+- `tests_outside_test_module` — ложно срабатывает на `tests/`;
+- `partial_pub_fields` — поля «публичные данные + приватные инварианты» сделаны так намеренно (например, `MediaKey` скрывает ключ).
 
-  Подсказки:
-  - **media:** касты в DSP — одна функция `sample_to_i16` с `#[expect(cast_possible_truncation, reason)]`; в `opus.rs` — `#![expect(unsafe_code, reason = "sole boundary to unsafe-libopus")]` и SAFETY-комментарии по одному на блок.
-  - **desktop, wasm:** модульный `#![expect(clippy::needless_pass_by_value, reason = "IPC/ABI requires owned args")]`; `main`/`run` без `expect`.
-  - **load-test:** `writeln!` вместо `println!`, либо `expect(print_stdout)` на уровне крейта с reason.
-  - **wasm `command.rs`:** в `file_size` добавить `#[expect(cast_possible_truncation, cast_sign_loss, reason = "checked: whole, non-negative, < 2^53")]` на `let exact`.
-  - **gateway `bus.rs:83`:** `trivial_casts` — заменить каст на коэрсию через `let f: fn(...) -> BusMsg = convert;`.
-- **Добавить `.gitattributes`** с `* text=auto eol=lf` и выполнить `git add --renormalize .`.
-- **Коммитить группами после полной зелени:**
-  1. конфиг + types/wire/crypto;
-  2. core;
-  3. media/client/wasm;
-  4. transport/tls/server-kit;
-  5. services;
-  6. desktop/tools.
+**Приёмы, которые теперь в коде:**
+- Разбор недоверенных данных — `first_chunk`/`split_first_chunk`/`take::<N>` вместо индексов.
+- Заголовки — массивы `[u8; N]` с константными индексами.
+- Подсказки ёмкости — saturating-арифметика.
+- Числовые преобразования медиа собраны в `cypher-media/src/num.rs`: каждое с reason, почему потеря допустима для аудио.
+- Ресемплер работает без кастов позиции: целый индекс плюс дробная часть.
+- Инварианты, которые не выразить типом, — одна функция с `expect(reason)`: `wire::codec::field_len`, `crypto::kdf::{hkdf, hmac_sha256}`, postcard в vault/envelope/ratchet/driver.
+- Код, сгенерированный макросами (`#[tauri::command]` → `unreachable!`, `generate_context!` → `process::exit`), — модульный или точечный `expect`.
+
+**Попутные улучшения:**
+- `Core::restore(&Snapshot)` с `load_peers`/`load_outbox`/`load_transfers`.
+- `send_file(NewFile)`: `accepts`/`describe`/`start_outgoing`.
+- Исчерпывающие `match` по `ServerMsg`, `ErrorCode` и `Event`.
+- `relay.rs` переписан.
+- `NatsConfig { url, user, password, token }` (serde-имена `nats_*` сохранены).
+- Desktop:
+  - `run()` возвращает `tauri::Result`, `main` — `ExitCode`;
+  - guard мьютекса больше не держится через `.await`;
+  - `unique_path` не перезаписывает файл и не ищет бесконечно.
+- wasm: `historyRange` — свободная функция; `SendFile(JsFile)`.
+- Живой тест клиента разбит на 6 этапов.
+
+**Проверено:**
+- `fmt`, clippy `-D warnings`: workspace, desktop, wasm32, комбинации фич media, Android arm64, Linux (Docker);
+- 39 наборов тестов;
+- живые сценарии: нативный клиент, WASM через WebSocket, браузерные journey и media.
+
+## Следующий шаг — фаза D (инструменты и CI)
+По плану: nextest, doctest, Miri-job без кэша и секретов, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow.
 
 ### Полезные команды
 ```sh
