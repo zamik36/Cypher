@@ -1,10 +1,12 @@
 [advisories]
+# An ignore that no longer matches anything is stale and must be removed.
+unused-ignored-advisory = "deny"
 ignore = [
-    "RUSTSEC-2025-0134",  # rustls-pemfile: unmaintained (migrating later)
-    "RUSTSEC-2024-0437",  # protobuf v2: recursion crash (prometheus 0.13 dep, no upgrade path)
-    "RUSTSEC-2024-0436",  # paste: unmaintained via optional arti-client Tor stack, no safe replacement upstream yet
-    "RUSTSEC-2023-0071",  # rsa Marvin timing advisory via optional arti-client Tor stack, no safe upgrade available yet
-    "RUSTSEC-2024-0370",  # proc-macro-error: build-time macro via tauri's Linux GTK stack (glib-macros), not shipped code
+    "RUSTSEC-2025-0134", # rustls-pemfile: unmaintained (migrating later)
+    "RUSTSEC-2024-0437", # protobuf v2: recursion crash (prometheus 0.13 dep, no upgrade path)
+    "RUSTSEC-2024-0436", # paste: unmaintained via optional arti-client Tor stack, no safe replacement upstream yet
+    "RUSTSEC-2023-0071", # rsa Marvin timing advisory via optional arti-client Tor stack, no safe upgrade available yet
+    "RUSTSEC-2024-0370", # proc-macro-error: build-time macro via tauri's Linux GTK stack (glib-macros), not shipped code
 ]
 
 [licenses]
@@ -26,8 +28,16 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+# Version wildcards are banned for crates.io deps; workspace path deps are fine.
+wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
+# TLS is rustls only: native TLS stacks must never sneak in transitively.
+deny = [
+    { name = "openssl", reason = "TLS is rustls only" },
+    { name = "openssl-sys", reason = "TLS is rustls only" },
+    { name = "native-tls", reason = "TLS is rustls only" },
+]
 
 [sources]
 unknown-registry = "deny"

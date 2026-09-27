@@ -139,7 +139,11 @@ jobs:
           java-version: 17
       - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
       - name: Install Android NDK
-        run: sdkmanager "ndk;27.0.12077973"
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          # tauri needs NDK_HOME; opusic-sys builds libopus with the NDK cmake toolchain.
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: 22

@@ -11,6 +11,20 @@ use cypher_wire::{
 };
 use proptest::prelude::*;
 
+/// Proptest settings; under Miri a handful of cases and no failure files,
+/// which Miri's isolation forbids. Coverage of inputs is the fuzzers' job.
+fn proptest_config(cases: u32) -> ProptestConfig {
+    if cfg!(miri) {
+        ProptestConfig {
+            cases: 4,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        }
+    } else {
+        ProptestConfig::with_cases(cases)
+    }
+}
+
 fn link() -> LinkId {
     LinkId::parse("abcdefghijklmnopqrstuvwxyz").unwrap()
 }
@@ -216,6 +230,8 @@ fn peek_send_matches_decoder_and_shares_buffer() {
 }
 
 proptest! {
+    #![proptest_config(proptest_config(256))]
+
     #[test]
     fn arbitrary_bytes_never_panic(data in prop::collection::vec(any::<u8>(), 0..512)) {
         let b = Bytes::from(data);

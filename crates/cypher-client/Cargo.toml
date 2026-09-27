@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [features]
 tor = ["dep:arti-client", "dep:tor-rtcompat"]
@@ -23,7 +24,6 @@ serde.workspace = true
 postcard.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-zeroize.workspace = true
 arti-client = { workspace = true, optional = true }
 tor-rtcompat = { workspace = true, optional = true }
 

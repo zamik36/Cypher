@@ -63,6 +63,7 @@ fn recv(to: &mut Ratchet, m: &(Header, Vec<u8>)) -> Result<Vec<u8>, CryptoError>
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "twenty DH ratchet steps; minutes under Miri")]
 fn handshake_with_and_without_opk_then_both_directions() {
     for with_opk in [false, true] {
         let (mut a, mut b) = establish(with_opk);
@@ -210,6 +211,7 @@ fn forged_dh_step_with_low_order_key_is_rejected() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "derives thousands of skipped keys; minutes under Miri")]
 fn too_many_skipped_is_rejected_without_desync() {
     let (mut a, mut b) = establish(false);
     let mut last = None;
@@ -223,6 +225,7 @@ fn too_many_skipped_is_rejected_without_desync() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "derives thousands of skipped keys; minutes under Miri")]
 fn skipped_key_store_evicts_oldest() {
     let (mut a, mut b) = establish(false);
     let mut pending = Vec::new();
@@ -299,10 +302,25 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
+/// Proptest settings; under Miri a handful of cases and no failure files,
+/// which Miri's isolation forbids. Coverage of inputs is the fuzzers' job.
+fn proptest_config(cases: u32) -> ProptestConfig {
+    if cfg!(miri) {
+        ProptestConfig {
+            cases: 4,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        }
+    } else {
+        ProptestConfig::with_cases(cases)
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(proptest_config(64))]
 
     #[test]
+    #[cfg_attr(miri, ignore = "up to 200 ops per case; tens of minutes under Miri")]
     fn arbitrary_schedules_decrypt_every_message_once(ops in prop::collection::vec(op(), 1..200)) {
         let (mut a, mut b) = establish(true);
         let mut to_a: InFlight = Vec::new();

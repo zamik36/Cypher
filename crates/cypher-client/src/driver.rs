@@ -226,6 +226,13 @@ impl Driver {
         self.feed(Input::Tick).await;
     }
 
+    #[cfg_attr(
+        not(feature = "tor"),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "the Tor build caches its client in self"
+        )
+    )]
     fn spawn_relay(&mut self, addr: String) {
         #[cfg(feature = "tor")]
         if let Some(config) = &self.config.tor {

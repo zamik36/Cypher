@@ -1,0 +1,8 @@
+[default.extend-words]
+# Double Ratchet header field: length of the previous sending chain (Signal spec).
+pn = "pn"
+# Retransmission timeout.
+rto = "rto"
+
+[files]
+extend-exclude = ["*.lock", "apps/pwa/src/wasm/", "**/fuzz/corpus/"]

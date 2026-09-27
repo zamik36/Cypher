@@ -11,10 +11,10 @@ allow-indexing-slicing-in-tests = true
 allow-print-in-tests = true
 allow-dbg-in-tests = true
 disallowed-methods = [
-  { path = "std::thread::sleep", reason = "blocks the async runtime; use tokio::time::sleep" },
-  { path = "std::env::set_var", reason = "unsound with concurrent threads" },
-  { path = "std::env::remove_var", reason = "unsound with concurrent threads" },
-  { path = "std::process::exit", reason = "return an ExitCode from main instead" },
-  { path = "rand::thread_rng", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
-  { path = "rand::random", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
+    { path = "std::thread::sleep", reason = "blocks the async runtime; use tokio::time::sleep" },
+    { path = "std::env::set_var", reason = "unsound with concurrent threads" },
+    { path = "std::env::remove_var", reason = "unsound with concurrent threads" },
+    { path = "std::process::exit", reason = "return an ExitCode from main instead" },
+    { path = "rand::thread_rng", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
+    { path = "rand::random", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
 ]

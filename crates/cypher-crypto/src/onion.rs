@@ -146,6 +146,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "seals a maximum-size frame; minutes under Miri")]
     fn oversized_frames_are_rejected() {
         let (_, pk) = keys();
         assert!(seal_request(&pk, &vec![0u8; MAX_ONION_FRAME + 1], 0, &mut OsRng).is_err());

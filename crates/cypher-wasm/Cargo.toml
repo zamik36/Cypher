@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -27,6 +28,11 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[package.metadata.cargo-machete]
+# getrandom is only here to enable its `js` backend for wasm32; serde_bytes
+# is referenced by path inside #[serde(with = "serde_bytes")].
+ignored = ["getrandom", "serde_bytes"]
 
 [lints]
 workspace = true

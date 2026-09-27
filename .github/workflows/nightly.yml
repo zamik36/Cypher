@@ -1,0 +1,99 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NIGHTLY: nightly-2026-09-20
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  miri-full:
+    name: Miri (including slow tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # Same isolation as the CI Miri job: no target cache, no secrets.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: miri, rust-src
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: cargo miri nextest --run-ignored all
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: >-
+          cargo +${{ env.NIGHTLY }} miri nextest run --profile miri-full --run-ignored all
+          -p cypher-types -p cypher-wire -p cypher-crypto -p cypher-core -p cypher-media
+
+  fuzz:
+    name: Fuzz ${{ matrix.target.name }} (10 min)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { crate: cypher-wire, name: fuzz_frames }
+          - { crate: cypher-wire, name: fuzz_bodies }
+          - { crate: cypher-crypto, name: fuzz_aead }
+          - { crate: cypher-crypto, name: fuzz_ratchet }
+          - { crate: cypher-crypto, name: fuzz_decoders }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          key: fuzz-${{ matrix.target.crate }}-${{ matrix.target.name }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-fuzz@0.13.1
+      - name: Run fuzzer
+        working-directory: crates/${{ matrix.target.crate }}
+        run: cargo +${{ env.NIGHTLY }} fuzz run ${{ matrix.target.name }} -- -max_total_time=600
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fuzz-${{ matrix.target.name }}
+          path: crates/${{ matrix.target.crate }}/fuzz/artifacts/
+
+  mutants:
+    name: Mutation testing ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # Report only: surviving mutants point at weak tests, they do not gate merges.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [cypher-crypto, cypher-wire, cypher-core]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146,cargo-mutants@27.1.0
+      - name: cargo mutants
+        run: cargo mutants --package ${{ matrix.crate }} --test-tool nextest --jobs 2
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: mutants-${{ matrix.crate }}
+          path: mutants.out/

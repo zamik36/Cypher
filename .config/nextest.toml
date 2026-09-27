@@ -1,0 +1,23 @@
+[profile.default]
+# Tests that take longer than this are reported as slow; after four periods
+# they are killed, so a hung test fails CI instead of stalling it.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# Miri interprets every instruction; crypto tests take minutes, not millis.
+# The whole-system core scenarios take up to an hour each there, so the PR job
+# skips them and the nightly job (profile miri-full) runs everything.
+[profile.miri]
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 10 }
+default-filter = "not (package(cypher-core) & binary(scenarios))"
+
+[profile.miri-full]
+fail-fast = false
+slow-timeout = { period = "300s", terminate-after = 12 }

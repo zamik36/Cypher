@@ -24,9 +24,9 @@
 | A | Удаление P2P и STUN, исправление секретов NATS в деплое, закрепление toolchain 1.98.1, обновление Justfile | ✅ `1e27b5c` |
 | B | Сервисы разделены на lib и тонкий bin (`run(config, shutdown)`), общий `cypher_transport::server::serve`, метрики на экземпляр, `OnionUpstream` в relay, чистый модуль команд в wasm, `effects.ts` в PWA | ✅ `c872cda` |
 | C | Строгие линтеры Rust: все нарушения исправлены, конфиг включён | ✅ `969d2af`…`93c98a4` + конфиг |
-| D ⏭ | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants, бенчмарки, нагрузка 10k) | ⏳ |
-| E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ⏳ |
-| F | Производительность: criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ⏳ |
+| D | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants); Opus на эталонном libopus, `unsafe_code = "forbid"` | ✅ |
+| E ⏭ | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ⏳ |
+| F | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ⏳ |
 | G | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
 | H | Документация: заново `architecture.md`, `protocol-v2.md`, `threat-model.md`; удалить `onion-routing.md`; обновить README, deploy, commands; новый `CONTRIBUTING.md`; обновить roadmap и report | ⏳ |
 
@@ -93,8 +93,47 @@
 - 39 наборов тестов;
 - живые сценарии: нативный клиент, WASM через WebSocket, браузерные journey и media.
 
-## Следующий шаг — фаза D (инструменты и CI)
-По плану: nextest, doctest, Miri-job без кэша и секретов, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow.
+## Фаза D — итог
+**Инструменты** (версии закреплены в CI через `taiki-e/install-action`):
+- `cargo-nextest` 0.9.146 — `.config/nextest.toml`, профили `default`, `ci` (junit), `miri`, `miri-full`;
+- `cargo-machete`, `typos` (`_typos.toml`), `taplo` (`.taplo.toml`), `cargo-hack`;
+- `cargo-deny`: `wildcards = "deny"`, бан openssl и native-tls, `unused-ignored-advisory = "deny"`. Все крейты `publish = false`.
+
+**CI** (`.github/workflows/ci.yml`):
+- job `test` — nextest `--profile ci` + doctest'ы, junit как артефакт;
+- новый job `hygiene` — taplo, typos, machete, `cargo hack clippy --each-feature` для media, client и transport;
+- новый job `miri` — закреплённый nightly, без кэша target, без секретов, `persist-credentials: false`, `-Zmiri-strict-provenance`;
+- `permissions: contents: read` по умолчанию на весь workflow.
+
+**Nightly** (`.github/workflows/nightly.yml`, cron):
+- Miri `miri-full --run-ignored all`;
+- fuzz по 10 мин на цель;
+- cargo-mutants для crypto, wire и core — отчёт, без gate.
+
+**Miri нашёл UB в `unsafe-libopus`.** Tree Borrows: запрещённый reborrow в `opus_custom_encoder_ctl_impl`, где C-шный memset идёт по хвосту структуры через указатель на поле. Что изменилось:
+- голос кодирует эталонный libopus через крейт `opus` (bundled, cmake);
+- в воркспейсе больше нет `unsafe`, поэтому `unsafe_code = "forbid"`;
+- для Android `opusic-sys` берёт тулчейн NDK из `ANDROID_NDK_HOME` — выставлен в `release.yml`. Локально на Windows нужен `CMAKE_GENERATOR=Ninja`.
+
+**Что Miri пропускает в PR:**
+- **Отмечены `cfg_attr(miri, ignore)` с reason** — тяжёлые тесты:
+  - Argon2 на 64 МиБ;
+  - кадр onion максимального размера;
+  - тысячи пропущенных ключей;
+  - proptest с 200 операциями;
+  - 20 DH-шагов.
+- **Исключён `default-filter` профиля `miri`** — бинарник `cypher-core::scenarios`: до часа на тест.
+- **Как запустить всё** — nightly или `just miri miri-full --run-ignored all`.
+- **Proptest под Miri** — 4 случая и без файлов persistence.
+
+**Проверено:**
+- nextest — 163 теста, плюс doctest'ы;
+- Miri по types, wire, crypto, core и media — UB нет;
+- clippy `-D warnings`: workspace, desktop, wasm32, все 8 комбинаций фич, Android arm64 с libopus, Linux в Docker (workspace, desktop, тесты media);
+- taplo, typos, machete, deny.
+
+## Следующий шаг — фаза E (покрытие)
+По плану: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml`, затем тесты по пробелам.
 
 ### Полезные команды
 ```sh
@@ -106,7 +145,8 @@ CARGO_TARGET_DIR=target/lint cargo clippy -p <crate> --all-targets --all-feature
 cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy -p cypher-desktop --all-targets -- -D warnings
 cargo clippy -p cypher-wasm -p cypher-media --target wasm32-unknown-unknown -- -D warnings
-cargo test --workspace --all-features
+cargo nextest run --workspace --all-features
+# Всё вместе: just check (lint + hygiene + test); UB: just miri
 ```
 **Грабли:**
 - Неисполненный `#[expect]` — тоже ошибка, поэтому `expect` ставится точечно.

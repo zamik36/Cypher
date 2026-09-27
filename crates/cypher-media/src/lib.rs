@@ -32,8 +32,8 @@ pub enum MediaError {
     Device(String),
     #[error("unsupported sample format")]
     UnsupportedFormat,
-    #[error("opus encoder error {0}")]
-    Encoder(i32),
+    #[error("opus encoder: {0}")]
+    Encoder(String),
     #[error("recording thread stopped unexpectedly")]
     Aborted,
 }

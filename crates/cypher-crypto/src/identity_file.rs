@@ -129,6 +129,7 @@ mod tests {
     const PASS: &str = "correct horse battery";
 
     #[test]
+    #[cfg_attr(miri, ignore = "Argon2id over 64 MiB takes tens of minutes under Miri")]
     fn roundtrip_and_wrong_passphrase() {
         let seed = IdentitySeed::generate();
         let blob = seal(&seed, "alice", PASS, &mut OsRng).unwrap();
@@ -142,6 +143,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Argon2id over 64 MiB takes tens of minutes under Miri")]
     fn rejects_weak_input_and_tampering() {
         let seed = IdentitySeed::generate();
         assert_eq!(

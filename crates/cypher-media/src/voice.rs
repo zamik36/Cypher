@@ -37,7 +37,7 @@ impl<L: FnMut(f32)> VoiceEncoder<L> {
     /// `input_rate` is the capture device's rate; `on_level` receives a 0..=1
     /// loudness value for recording meters.
     pub fn new(input_rate: u32, on_level: L) -> Result<Self, MediaError> {
-        let encoder = OpusEncoder::voice(BITRATE)?;
+        let mut encoder = OpusEncoder::voice(BITRATE)?;
         let webm = OpusWebm::new(encoder.lookahead()?);
         Ok(Self {
             resampler: Resampler::new(input_rate),
@@ -98,7 +98,10 @@ impl<L: FnMut(f32)> FrameSink<L> {
             *dst = num::pcm16(s);
         }
         let n = self.encoder.encode(&self.pcm, &mut self.packet)?;
-        let packet = self.packet.get(..n).ok_or(MediaError::Encoder(-1))?;
+        let packet = self
+            .packet
+            .get(..n)
+            .ok_or_else(|| MediaError::Encoder(format!("packet of {n} bytes")))?;
         self.webm.push(packet);
         self.frame_rms.push(rms);
         if self.frame_rms.len().is_multiple_of(LEVEL_EVERY_FRAMES) {

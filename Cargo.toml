@@ -43,9 +43,11 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+# Application crates: nothing here is published to crates.io.
+publish = false
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
 unused_qualifications = "deny"
@@ -170,7 +172,14 @@ rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.28"
 tor-rtcompat = { version = "0.46", default-features = false, features = ["tokio", "rustls"] }
-arti-client = { version = "0.46", default-features = false, features = ["tokio", "rustls", "compression", "bridge-client", "pt-client", "static-sqlite"] }
+arti-client = { version = "0.46", default-features = false, features = [
+    "tokio",
+    "rustls",
+    "compression",
+    "bridge-client",
+    "pt-client",
+    "static-sqlite",
+] }
 
 # Internal crates
 cypher-types = { path = "crates/cypher-types" }
@@ -190,9 +199,4 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
-opt-level = 3
-
-# The Opus encoder is CPU-bound C translated to Rust; unoptimized it cannot
-# keep up with real-time capture in debug builds.
-[profile.dev.package.unsafe-libopus]
 opt-level = 3

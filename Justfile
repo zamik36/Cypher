@@ -64,9 +64,12 @@ services:
 
 # ─── Quality ─────────────────────────────────────────────────────────────────
 
-# Run all tests
+nightly := "nightly-2026-09-20"
+
+# Run all tests (nextest) and doctests
 test:
-    cargo test --workspace --all-features
+    cargo nextest run --workspace --all-features
+    cargo test --doc --workspace --all-features
 
 # Formatting and clippy for every target the project ships
 lint:
@@ -75,8 +78,21 @@ lint:
     cargo clippy -p cypher-desktop --all-targets -- -D warnings
     cargo clippy -p cypher-wasm -p cypher-media --target wasm32-unknown-unknown -- -D warnings
 
-# Run lint + tests
-check: lint test
+# TOML formatting, typos, unused dependencies, every feature on its own
+hygiene:
+    taplo fmt --check
+    typos
+    cargo machete
+    cargo hack clippy --each-feature --all-targets -p cypher-media -p cypher-client -p cypher-transport -- -D warnings
+    cargo deny --all-features check
+
+# Undefined-behaviour check; `just miri miri-full --run-ignored all` runs everything
+miri profile="miri" *args:
+    MIRIFLAGS=-Zmiri-strict-provenance cargo +{{nightly}} miri nextest run --profile {{profile}} \
+        -p cypher-types -p cypher-wire -p cypher-crypto -p cypher-core -p cypher-media {{args}}
+
+# Run lint + hygiene + tests
+check: lint hygiene test
 
 # Live end-to-end journeys against locally running services (`just infra services`)
 e2e:

@@ -1,0 +1,8 @@
+include = ["**/*.toml"]
+# .cargo/ holds untracked per-developer config (linker choice etc.).
+exclude = ["**/target/**", "**/node_modules/**", "apps/desktop/src-tauri/gen/**", ".cargo/**"]
+
+[formatting]
+column_width = 100
+array_auto_collapse = false
+indent_string = "    "
