@@ -153,7 +153,6 @@ services:
       LOG_FORMAT: json
       P2P_RELAY_PUBLIC_ADDR: "${DOMAIN}:9300"
     ports: !override
-      - "3478:3478/udp"
       - "127.0.0.1:9091:9091"
     deploy:
       resources:

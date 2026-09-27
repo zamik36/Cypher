@@ -8,6 +8,10 @@ permissions:
   contents: write
   packages: write
 
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NIGHTLY: nightly-2026-09-20
+
 jobs:
   docker-release:
     name: Docker Release Images
@@ -89,7 +93,9 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
           key: desktop-${{ matrix.target }}-${{ hashFiles('crates/**/*.rs', 'apps/desktop/src-tauri/src/**/*.rs') }}
@@ -120,8 +126,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:

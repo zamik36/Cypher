@@ -23,7 +23,9 @@ jobs:
         env:
           DOMAIN: ${{ secrets.DOMAIN }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
-          NATS_AUTH_TOKEN: ${{ secrets.NATS_AUTH_TOKEN }}
+          GATEWAY_NATS_PASSWORD: ${{ secrets.GATEWAY_NATS_PASSWORD }}
+          SIGNALING_NATS_PASSWORD: ${{ secrets.SIGNALING_NATS_PASSWORD }}
+          RELAY_NATS_PASSWORD: ${{ secrets.RELAY_NATS_PASSWORD }}
           GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -33,7 +35,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DOMAIN,REDIS_PASSWORD,NATS_AUTH_TOKEN,GRAFANA_PASSWORD,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
+          envs: DOMAIN,REDIS_PASSWORD,GATEWAY_NATS_PASSWORD,SIGNALING_NATS_PASSWORD,RELAY_NATS_PASSWORD,GRAFANA_PASSWORD,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
           command_timeout: 10m
           script: |
             set -e
@@ -50,8 +52,12 @@ jobs:
             umask 077
             export GHCR_REPO="ghcr.io/zamik36/cypher"
             : > .env
-            for var in DOMAIN REDIS_PASSWORD NATS_AUTH_TOKEN GHCR_REPO GRAFANA_PASSWORD; do
-              printf '%s=%s\n' "$var" "$(printenv "$var")" >> .env
+            # Refuse to deploy with a missing secret: services would start without
+            # credentials and NATS would reject its own config.
+            for var in DOMAIN REDIS_PASSWORD GATEWAY_NATS_PASSWORD SIGNALING_NATS_PASSWORD RELAY_NATS_PASSWORD GHCR_REPO GRAFANA_PASSWORD; do
+              value="$(printenv "$var")"
+              [ -n "$value" ] || { echo "secret $var is not set" >&2; exit 1; }
+              printf '%s=%s\n' "$var" "$value" >> .env
             done
 
             # Pull pre-built images from ghcr.io

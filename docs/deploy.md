@@ -4,7 +4,7 @@
 
 - OS: Ubuntu 22.04+ or another Linux host with Docker
 - Resources: 2+ vCPU, 4+ GB RAM, 20+ GB disk
-- Open ports: `80`, `443`, `9100`, `9300`, `3478/udp`
+- Open ports: `80`, `443`, `9100`, `9300`
 - Domain: A record pointing to the server IP
 
 ## Quick Start
@@ -35,7 +35,14 @@ Set at least:
 
 - `DOMAIN=cypher.example.com`
 - `REDIS_PASSWORD=<strong random password>`
-- `NATS_AUTH_TOKEN=<strong random token>`
+- `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD` — one
+  strong random password per service; `deploy/nats.conf` gives each service
+  only the subjects it needs.
+- `GRAFANA_PASSWORD=<strong random password>`
+
+Generate each secret with `openssl rand -base64 32`. The GitHub deploy
+workflows read the same names from repository secrets and refuse to deploy
+when any of them is empty.
 
 Important:
 
@@ -66,14 +73,14 @@ curl -s http://localhost:9092/metrics | head -5
 Internet
   |
   +-- :443 (HTTPS) --> Caddy --> PWA static files
-  |                          +--> Gateway :9101 (WebSocket)
-  +-- :9100 (TLS)  --> Caddy --> Gateway :9100 (native TLS)
-  +-- :9300 (TLS)  --> Caddy --> Relay :9300
-  +-- :3478/udp    --> Signaling (STUN)
+  |                          +--> /ws    --> Gateway :9101 (WebSocket)
+  |                          +--> /relay --> Relay   :9301 (WebSocket)
+  +-- :9100 (TLS)  ---------------------> Gateway :9100 (native clients)
+  +-- :9300 (TLS)  ---------------------> Relay   :9300 (onion channel)
                             |
                        Internal network
-                       +--> Redis
-                       +--> NATS
+                       +--> NATS  (gateway, signaling, relay; per-service users)
+                       +--> Redis (signaling only)
 ```
 
 ## Persistent Service Keys

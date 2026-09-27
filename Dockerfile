@@ -1,4 +1,4 @@
-FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
+FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -35,9 +35,7 @@ FROM runtime-base AS signaling
 
 COPY --from=builder /app/target/release/signaling /usr/local/bin/signaling
 RUN mkdir -p /data/signaling && chown app:app /data/signaling
-EXPOSE 9200 3478/udp 9091
-ENV P2P_SIGNALING_ADDR=0.0.0.0:9200 \
-    P2P_STUN_ADDR=0.0.0.0:3478
+EXPOSE 9091
 WORKDIR /
 USER app
 CMD ["signaling"]

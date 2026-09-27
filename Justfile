@@ -1,8 +1,16 @@
 # Шифр (Cypher) — build & run commands
 # Install: cargo install just
 # Usage:  just <recipe>    (run `just` without args to see all recipes)
+#
+# Local services read secrets from .env (copy .env.example): each service
+# connects to NATS as its own least-privilege user (deploy/nats.conf).
 
 set windows-shell := ["bash", "-cu"]
+set dotenv-load := true
+
+nats_url := "nats://127.0.0.1:4222"
+# Development gateways and relays write their self-signed certificates here.
+certs := "target/dev-certs"
 
 # Default: show available recipes
 default:
@@ -12,9 +20,9 @@ default:
 
 # Start Redis + NATS in Docker
 infra:
-    docker compose up -d
+    docker compose up -d redis nats
 
-# Stop Redis + NATS
+# Stop the Docker stack
 infra-down:
     docker compose down
 
@@ -28,46 +36,71 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run gateway service
+# Run gateway service (TLS :9100, WebSocket :9101)
 gateway:
-    cargo run -p gateway
+    mkdir -p {{certs}}
+    P2P_NATS_URL={{nats_url}} P2P_NATS_USER=gateway P2P_NATS_PASSWORD="$GATEWAY_NATS_PASSWORD" \
+    P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT={{certs}}/gateway.pem cargo run -p gateway
 
-# Run signaling service
+# Run signaling service (NATS + Redis only)
 signaling:
+    P2P_NATS_URL={{nats_url}} P2P_NATS_USER=signaling P2P_NATS_PASSWORD="$SIGNALING_NATS_PASSWORD" \
+    P2P_REDIS_URL="redis://:$REDIS_PASSWORD@127.0.0.1:6379" P2P_RELAY_PUBLIC_ADDR=localhost:9300 \
     cargo run -p signaling
 
-# Run relay service
+# Run relay service (TLS :9300, WebSocket :9301)
 relay:
-    cargo run -p relay
+    mkdir -p {{certs}}
+    P2P_NATS_URL={{nats_url}} P2P_NATS_USER=relay P2P_NATS_PASSWORD="$RELAY_NATS_PASSWORD" \
+    P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT={{certs}}/relay.pem cargo run -p relay
 
-# Run all 3 backend services (gateway + signaling + relay)
+# Run all 3 backend services
 services:
     #!/usr/bin/env bash
     set -e
-    echo "Starting gateway, signaling, relay..."
-    cargo run -p gateway &
-    cargo run -p signaling &
-    cargo run -p relay &
+    cargo build -p gateway -p signaling -p relay
+    just gateway & just signaling & just relay &
     wait
 
-# ─── Tests ───────────────────────────────────────────────────────────────────
+# ─── Quality ─────────────────────────────────────────────────────────────────
 
 # Run all tests
 test:
-    cargo test --workspace
+    cargo test --workspace --all-features
 
-# Run clippy
+# Formatting and clippy for every target the project ships
 lint:
-    cargo clippy --workspace -- -D warnings
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy -p cypher-desktop --all-targets -- -D warnings
+    cargo clippy -p cypher-wasm -p cypher-media --target wasm32-unknown-unknown -- -D warnings
 
-# Run tests + clippy
-check: test lint
+# Run lint + tests
+check: lint test
+
+# Live end-to-end journeys against locally running services (`just infra services`)
+e2e:
+    cat {{certs}}/gateway.pem {{certs}}/relay.pem > {{certs}}/stack.pem
+    CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA={{certs}}/stack.pem cargo test --release -p cypher-client --test live
+    npm run build:wasm -w apps/pwa
+    CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 npm run test:live -w apps/pwa
+
+# Gateway load test against a local gateway
+load connections="1000" duration="30":
+    cargo run --release -p load-test -- --connections {{connections}} --duration {{duration}} \
+        --gateway-addr localhost:9100 --ca-cert {{certs}}/gateway.pem
+
+# ─── Frontend ────────────────────────────────────────────────────────────────
+
+# Install all frontend dependencies (npm workspaces)
+deps:
+    npm install
+
+# Build the WebAssembly core for the PWA
+wasm:
+    npm run build:wasm -w apps/pwa
 
 # ─── Desktop (Windows/Linux/macOS) ──────────────────────────────────────────
-
-# Install desktop frontend dependencies
-desktop-deps:
-    cd apps/desktop && npm install
 
 # Run desktop app in dev mode (hot-reload)
 desktop-dev:
@@ -91,102 +124,46 @@ android-debug:
 android-release:
     cd apps/desktop && cargo tauri android build --apk --release
 
-# Build Android release APK and sign it
+# Sign the release APK with a local development keystore
 android-sign: android-release
     #!/usr/bin/env bash
     set -e
-    export ANDROID_HOME="C:/Users/Ilya/AppData/Local/Android/Sdk"
+    : "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
+    PASS="${CYPHER_KEYSTORE_PASS:-p2ptest123}"
     KEYSTORE="apps/desktop/src-tauri/gen/android/release.keystore"
     APK_DIR="apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release"
     APK_UNSIGNED="$APK_DIR/app-universal-release-unsigned.apk"
     APK_SIGNED="$APK_DIR/cypher-release-signed.apk"
-
-    # Generate keystore if not exists
     if [ ! -f "$KEYSTORE" ]; then
-        echo "Generating debug signing keystore..."
-        keytool -genkeypair -v \
-            -keystore "$KEYSTORE" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -alias cypher \
-            -storepass p2ptest123 -keypass p2ptest123 \
-            -dname "CN=Cypher Dev, O=Cypher, L=Dev, C=US"
-        echo "Keystore created: $KEYSTORE"
+        keytool -genkeypair -v -keystore "$KEYSTORE" -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias cypher -storepass "$PASS" -keypass "$PASS" -dname "CN=Cypher Dev, O=Cypher, C=US"
     fi
-
-    # Find the unsigned APK
     if [ ! -f "$APK_UNSIGNED" ]; then
-        echo "Looking for APK..."
         APK_UNSIGNED=$(find apps/desktop/src-tauri/gen/android/app/build/outputs/apk -name "*unsigned*.apk" | head -1)
     fi
-
-    echo "Signing $APK_UNSIGNED ..."
-
-    # Align
     BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-    "$BT/zipalign.exe" -f 4 "$APK_UNSIGNED" "$APK_SIGNED"
-
-    # Sign with apksigner
-    "$BT/apksigner.bat" sign \
-        --ks "$KEYSTORE" \
-        --ks-key-alias cypher \
-        --ks-pass pass:p2ptest123 \
-        --key-pass pass:p2ptest123 \
-        "$APK_SIGNED"
-
-    echo ""
-    echo "=== Signed APK ready ==="
+    "$BT/zipalign" -f 4 "$APK_UNSIGNED" "$APK_SIGNED"
+    SIGNER="$BT/apksigner"; [ -f "$SIGNER.bat" ] && SIGNER="$SIGNER.bat"
+    "$SIGNER" sign --ks "$KEYSTORE" --ks-key-alias cypher --ks-pass "pass:$PASS" --key-pass "pass:$PASS" "$APK_SIGNED"
     realpath "$APK_SIGNED"
-    echo ""
 
-# ─── iOS / PWA ───────────────────────────────────────────────────────────────
+# ─── PWA ─────────────────────────────────────────────────────────────────────
 
-# Install PWA dependencies
-pwa-deps:
-    cd apps/pwa && npm install
-
-# Run PWA dev server (accessible on LAN at http://<your-ip>:5174)
-pwa-dev:
-    cd apps/pwa && npm run dev
+# Run PWA dev server; /ws and /relay are proxied to the local services
+pwa-dev: wasm
+    CYPHER_DEV_GATEWAY_WS=ws://127.0.0.1:9101 CYPHER_DEV_RELAY_WS=ws://127.0.0.1:9301 npm run dev -w apps/pwa
 
 # Build PWA for production
-pwa-build:
-    cd apps/pwa && npm run build
-
-# Serve built PWA on LAN (for iOS testing via Add to Home Screen)
-pwa-serve port="5174":
-    cd apps/pwa && npx serve dist -l {{port}} --no-clipboard
+pwa-build: wasm
+    npm run build -w apps/pwa
 
 # ─── Full stack (for testing) ────────────────────────────────────────────────
 
-# Start everything for local WiFi testing: infra + services + PWA dev server
-test-local:
+# Start infra, the three services and the PWA dev server
+test-local: infra
     #!/usr/bin/env bash
     set -e
-    echo "=== Starting infrastructure ==="
-    docker compose up -d
-    sleep 2
-
-    echo ""
-    echo "=== Starting backend services ==="
-    cargo run -p gateway &
-    cargo run -p signaling &
-    cargo run -p relay &
-    sleep 3
-
-    echo ""
-    echo "=== Starting PWA dev server ==="
-    cd apps/pwa && npm run dev &
-
-    echo ""
-    echo "========================================="
-    echo "  All services running!"
-    echo ""
-    echo "  Gateway TLS:  0.0.0.0:9100"
-    echo "  Gateway WS:   0.0.0.0:9101"
-    echo "  Signaling:    0.0.0.0:9200"
-    echo "  Relay:        0.0.0.0:9300"
-    echo "  PWA:          http://0.0.0.0:5174"
-    echo ""
-    echo "  From phone, open: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<your-ip>'):5174"
-    echo "========================================="
+    just services &
+    just pwa-dev &
+    echo "Gateway TLS :9100, WS :9101 | Relay TLS :9300, WS :9301 | PWA http://localhost:5174"
     wait

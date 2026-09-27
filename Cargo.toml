@@ -36,7 +36,6 @@ default-members = [
 exclude = [
     "crates/cypher-crypto/fuzz",
     "crates/cypher-wire/fuzz",
-    "crates/cypher-nat",
 ]
 
 [workspace.package]
@@ -113,7 +112,6 @@ cypher-server-kit = { path = "crates/cypher-server-kit" }
 cypher-crypto = { path = "crates/cypher-crypto" }
 cypher-tls = { path = "crates/cypher-tls" }
 cypher-transport = { path = "crates/cypher-transport" }
-cypher-nat = { path = "crates/cypher-nat" }
 
 [profile.release]
 lto = "fat"

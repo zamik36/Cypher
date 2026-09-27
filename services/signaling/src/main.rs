@@ -4,7 +4,6 @@
 mod handler;
 mod onion;
 mod store;
-mod stun;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -33,8 +32,6 @@ struct Config {
     redis_url: String,
     #[serde(flatten)]
     nats: cypher_server_kit::NatsConfig,
-    #[serde(default = "default_stun_addr")]
-    stun_addr: SocketAddr,
     #[serde(default = "default_metrics_addr")]
     metrics_addr: SocketAddr,
     #[serde(default = "default_onion_key_path")]
@@ -45,9 +42,6 @@ struct Config {
 
 fn default_redis_url() -> String {
     "redis://127.0.0.1:6379".into()
-}
-fn default_stun_addr() -> SocketAddr {
-    SocketAddr::from(([0, 0, 0, 0], 3478))
 }
 fn default_metrics_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9091))
@@ -117,9 +111,6 @@ async fn main() -> anyhow::Result<()> {
         nats = %config.nats.nats_url,
         "signaling starting"
     );
-
-    let stun = stun::StunServer::bind(config.stun_addr).await?;
-    tokio::spawn(async move { stun.run().await });
 
     let onion_secret = StaticSecret::from(secrets::load_or_create_secret(&config.onion_key_path)?);
     let service = Arc::new(Service {

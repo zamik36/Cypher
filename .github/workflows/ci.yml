@@ -7,6 +7,8 @@ on:
     branches: [main]
 
 env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NIGHTLY: nightly-2026-09-20
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   REGISTRY: ghcr.io
@@ -18,8 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: Install ALSA headers (voice capture)
@@ -36,7 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: Install ALSA headers (voice capture)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -57,14 +62,16 @@ jobs:
           - { crate: cypher-crypto, name: fuzz_decoders }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
           key: fuzz-${{ matrix.target.crate }}-${{ matrix.target.name }}
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
       - name: Run fuzzer
-        run: cd crates/${{ matrix.target.crate }} && cargo +nightly fuzz run ${{ matrix.target.name }} -- -max_total_time=30
+        run: cd crates/${{ matrix.target.crate }} && cargo +${{ env.NIGHTLY }} fuzz run ${{ matrix.target.name }} -- -max_total_time=30
 
   deny:
     name: Deny (license & advisories)
@@ -84,8 +91,9 @@ jobs:
       P2P_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: Start Redis and NATS
@@ -97,7 +105,7 @@ jobs:
       - name: Start services
         run: |
           mkdir -p e2e
-          P2P_NATS_USER=signaling P2P_NATS_PASSWORD=sig P2P_REDIS_URL=redis://:ci@127.0.0.1:6379             P2P_STUN_ADDR=127.0.0.1:3478 P2P_ONION_KEY_PATH=e2e/onion.bin P2P_RELAY_PUBLIC_ADDR=localhost:9300             target/release/signaling > e2e/signaling.log 2>&1 &
+          P2P_NATS_USER=signaling P2P_NATS_PASSWORD=sig P2P_REDIS_URL=redis://:ci@127.0.0.1:6379             P2P_ONION_KEY_PATH=e2e/onion.bin P2P_RELAY_PUBLIC_ADDR=localhost:9300             target/release/signaling > e2e/signaling.log 2>&1 &
           P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9100 P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT=e2e/gw1.pem             target/release/gateway > e2e/gateway1.log 2>&1 &
           P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9110 P2P_METRICS_ADDR=127.0.0.1:9095             P2P_DEV_CERT_OUT=e2e/gw2.pem target/release/gateway > e2e/gateway2.log 2>&1 &
           P2P_NATS_USER=relay P2P_NATS_PASSWORD=rel P2P_RELAY_ADDR=127.0.0.1:9300 P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT=e2e/relay.pem             target/release/relay > e2e/relay.log 2>&1 &
@@ -134,8 +142,9 @@ jobs:
           cache: npm
       - name: Build frontend
         run: npm ci && npm run build -w apps/desktop
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: cargo clippy (desktop)
@@ -150,8 +159,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
           components: clippy
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
