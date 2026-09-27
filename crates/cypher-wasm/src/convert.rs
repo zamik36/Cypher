@@ -5,7 +5,10 @@ use wasm_bindgen::prelude::*;
 
 // Each value is built and serialized immediately, one at a time; boxing the
 // large `Event` payload would only add an allocation per effect.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+    target_pointer_width = "64",
+    expect(clippy::large_enum_variant, reason = "short-lived, serialized at once")
+)]
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JsEffect<'a> {
@@ -82,82 +85,97 @@ fn reply(event: &Event) -> Option<JsEffect<'_>> {
     Some(JsEffect::Reply { op, value, link })
 }
 
-pub fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
+pub(crate) fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
     value
         .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
-pub fn effects_to_js(effects: Vec<Effect>) -> Result<Array, JsError> {
+pub(crate) fn effects_to_js(effects: &[Effect]) -> Result<Array, JsError> {
     let out = Array::new();
-    for effect in &effects {
-        let js = match effect {
-            Effect::Transmit(b) => JsEffect::Transmit { data: b },
-            Effect::Anonymous(b) => JsEffect::Anonymous { data: b },
-            Effect::Persist(StoreOp::Put { table, key, value }) => JsEffect::Put {
-                table: table.name(),
-                key,
-                value,
-            },
-            Effect::Persist(StoreOp::Delete { table, key }) => JsEffect::Delete {
-                table: table.name(),
-                key,
-            },
-            Effect::Emit(event) => {
-                if let Some(r) = reply(event) {
-                    out.push(&to_js(&r)?);
-                }
-                match ui::event(event) {
-                    Some((channel, payload)) => JsEffect::Event { channel, payload },
-                    None => continue,
-                }
-            }
-            Effect::ReadChunk {
-                file_id,
-                index,
-                offset,
-                len,
-                headroom,
-            } => JsEffect::ReadChunk {
-                file_id: file_id.to_hex(),
-                index: *index,
-                offset: *offset as f64,
-                len: *len,
-                headroom: u32::try_from(*headroom).unwrap_or(u32::MAX),
-            },
-            Effect::OpenSink {
-                file_id,
-                len,
-                sealed,
-            } => JsEffect::OpenSink {
-                file_id: file_id.to_hex(),
-                len: *len as f64,
-                sealed: *sealed,
-            },
-            Effect::WriteChunk {
-                file_id,
-                offset,
-                data,
-            } => JsEffect::WriteChunk {
-                file_id: file_id.to_hex(),
-                offset: *offset as f64,
-                data,
-            },
-            Effect::CloseSink { file_id, complete } => JsEffect::CloseSink {
-                file_id: file_id.to_hex(),
-                complete: *complete,
-            },
-            Effect::Disconnect { reconnect } => JsEffect::Disconnect {
-                reconnect: *reconnect,
-            },
-        };
-        out.push(&to_js(&js)?);
+    for effect in effects {
+        if let Effect::Emit(event) = effect
+            && let Some(r) = reply(event)
+        {
+            out.push(&to_js(&r)?);
+        }
+        if let Some(js) = js_effect(effect) {
+            out.push(&to_js(&js)?);
+        }
     }
     Ok(out)
 }
 
+/// The JS shape of one effect; `None` for events the UI never sees.
+fn js_effect(effect: &Effect) -> Option<JsEffect<'_>> {
+    Some(match effect {
+        Effect::Transmit(b) => JsEffect::Transmit { data: b },
+        Effect::Anonymous(b) => JsEffect::Anonymous { data: b },
+        Effect::Persist(StoreOp::Put { table, key, value }) => JsEffect::Put {
+            table: table.name(),
+            key,
+            value,
+        },
+        Effect::Persist(StoreOp::Delete { table, key }) => JsEffect::Delete {
+            table: table.name(),
+            key,
+        },
+        Effect::Emit(event) => {
+            let (channel, payload) = ui::event(event)?;
+            JsEffect::Event { channel, payload }
+        }
+        Effect::ReadChunk {
+            file_id,
+            index,
+            offset,
+            len,
+            headroom,
+        } => JsEffect::ReadChunk {
+            file_id: file_id.to_hex(),
+            index: *index,
+            offset: js_number(*offset),
+            len: *len,
+            headroom: u32::try_from(*headroom).unwrap_or(u32::MAX),
+        },
+        Effect::OpenSink {
+            file_id,
+            len,
+            sealed,
+        } => JsEffect::OpenSink {
+            file_id: file_id.to_hex(),
+            len: js_number(*len),
+            sealed: *sealed,
+        },
+        Effect::WriteChunk {
+            file_id,
+            offset,
+            data,
+        } => JsEffect::WriteChunk {
+            file_id: file_id.to_hex(),
+            offset: js_number(*offset),
+            data,
+        },
+        Effect::CloseSink { file_id, complete } => JsEffect::CloseSink {
+            file_id: file_id.to_hex(),
+            complete: *complete,
+        },
+        Effect::Disconnect { reconnect } => JsEffect::Disconnect {
+            reconnect: *reconnect,
+        },
+    })
+}
+
+/// File offsets and sizes as JS numbers.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "files are capped at 64 GiB, far inside the 2^53 exact range of JS numbers"
+)]
+fn js_number(v: u64) -> f64 {
+    v as f64
+}
+
 /// `[[Uint8Array, Uint8Array], ...]` → owned key/value pairs.
-pub fn pairs_from_js(rows: &Array) -> Result<Rows, JsError> {
+pub(crate) fn pairs_from_js(rows: &Array) -> Result<Rows, JsError> {
     rows.iter()
         .map(|row| {
             let pair: Array = row

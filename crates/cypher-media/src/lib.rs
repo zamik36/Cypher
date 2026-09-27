@@ -1,6 +1,7 @@
 //! Voice-note media: waveform previews and a WebM/Opus muxer everywhere,
 //! plus Opus encoding (`opus`) and microphone capture (`capture`) natively.
 
+mod num;
 pub mod waveform;
 pub mod webm;
 

@@ -10,8 +10,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, Stream, StreamConfig};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::MediaError;
 use crate::voice::{Recording, VoiceEncoder};
+use crate::{MediaError, num};
 
 /// How often the encoder thread drains the ring.
 const POLL: Duration = Duration::from_millis(20);
@@ -144,7 +144,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels.max(1));
-    let scale = 1.0 / channels as f32;
+    let scale = 1.0 / num::count(channels);
     device
         .build_input_stream::<T, _, _>(
             *config,

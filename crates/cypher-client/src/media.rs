@@ -43,7 +43,8 @@ pub(crate) fn read_range(
     let chunk_size = u64::from(key.chunk_size);
     let first_offset = u64::from(*chunks.start()) * chunk_size;
 
-    let mut plain = Vec::with_capacity((end - start + 1) as usize);
+    let span = usize::try_from(end - start + 1).map_err(|_| ClientError::InvalidInput)?;
+    let mut plain = Vec::with_capacity(span);
     let mut buf = Vec::with_capacity(key.chunk_size as usize + 16);
     for index in chunks {
         let (offset, len) = key.chunk_span(index);
@@ -52,11 +53,9 @@ pub(crate) fn read_range(
         key.open_chunk(index, &mut buf)?;
         plain.extend_from_slice(&buf);
     }
-    // Both bounds lie inside the decrypted chunks, and the slice is at most
-    // MAX_RANGE_LEN long.
-    let from = (start - first_offset) as usize;
-    let to = (end - first_offset) as usize;
-    plain.truncate(to + 1);
+    // Both bounds lie inside the decrypted chunks, at most MAX_RANGE_LEN apart.
+    let from = usize::try_from(start - first_offset).map_err(|_| ClientError::InvalidInput)?;
+    plain.truncate(from + span);
     plain.drain(..from);
     Ok(MediaSlice {
         mime: key.mime.clone(),

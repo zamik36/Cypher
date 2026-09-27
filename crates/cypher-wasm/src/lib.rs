@@ -1,6 +1,6 @@
 //! WebAssembly binding of `cypher-core` for the browser client. The seed never
 //! leaves WebAssembly memory; JS only moves bytes between the core, the
-//! WebSocket, IndexedDB and OPFS.
+//! WebSocket, `IndexedDB` and OPFS.
 
 mod command;
 mod convert;
@@ -78,7 +78,7 @@ impl Identity {
         Self::seal(seed, nickname, passphrase)
     }
 
-    pub fn unlock(blob: &[u8], passphrase: &str) -> Result<Identity, JsError> {
+    pub fn unlock(blob: &[u8], passphrase: &str) -> Result<Self, JsError> {
         let (seed, nickname) = identity_file::open(blob, passphrase).map_err(js_err)?;
         Ok(Self { seed, nickname })
     }
@@ -123,25 +123,25 @@ pub struct Client {
 
 #[wasm_bindgen]
 impl Client {
-    /// Restores the core from IndexedDB rows: each argument is an array of
+    /// Restores the core from `IndexedDB` rows: each argument is an array of
     /// `[key, value]` byte pairs from the matching table.
     #[wasm_bindgen(constructor)]
     pub fn new(
         identity: &Identity,
-        meta: Array,
-        peers: Array,
-        outbox: Array,
-        transfers: Array,
+        meta: &Array,
+        peers: &Array,
+        outbox: &Array,
+        transfers: &Array,
         now_ms: f64,
-    ) -> Result<Client, JsError> {
+    ) -> Result<Self, JsError> {
         let snapshot = Snapshot {
-            meta: pairs_from_js(&meta)?,
-            peers: pairs_from_js(&peers)?,
-            outbox: pairs_from_js(&outbox)?,
-            transfers: pairs_from_js(&transfers)?,
+            meta: pairs_from_js(meta)?,
+            peers: pairs_from_js(peers)?,
+            outbox: pairs_from_js(outbox)?,
+            transfers: pairs_from_js(transfers)?,
         };
         let (core, startup) =
-            Core::restore(&identity.seed, snapshot, now(now_ms), OsRng).map_err(js_err)?;
+            Core::restore(&identity.seed, &snapshot, now(now_ms), OsRng).map_err(js_err)?;
         Ok(Self {
             core,
             vault: Vault::new(identity.seed.derive_storage_key()),
@@ -151,7 +151,7 @@ impl Client {
 
     #[wasm_bindgen(js_name = startupEffects)]
     pub fn startup_effects(&mut self) -> Result<Array, JsError> {
-        effects_to_js(std::mem::take(&mut self.startup))
+        effects_to_js(&std::mem::take(&mut self.startup))
     }
 
     #[wasm_bindgen(js_name = peerId)]
@@ -237,21 +237,6 @@ impl Client {
         Ok(out.into())
     }
 
-    /// `[from, to)` IndexedDB key bounds of a conversation, oldest first.
-    #[wasm_bindgen(js_name = historyRange)]
-    pub fn history_range(&self, peer_hex: &str, before_ms: Option<f64>) -> Result<Array, JsError> {
-        let p = peer(peer_hex)?;
-        let before = before_ms.map_or(u64::MAX, now);
-        let bounds = Array::new();
-        bounds.push(&js_sys::Uint8Array::from(
-            &message_key(&p, 0, &MsgId([0; 16]))[..],
-        ));
-        bounds.push(&js_sys::Uint8Array::from(
-            &message_key(&p, before, &MsgId([0; 16]))[..],
-        ));
-        Ok(bounds)
-    }
-
     /// Decrypts a stored message, applying a newer status row if present.
     #[wasm_bindgen(js_name = openMessage)]
     pub fn open_message(
@@ -294,10 +279,31 @@ impl Client {
     }
 
     fn feed(&mut self, input: Input, now_ms: f64) -> Result<Array, JsError> {
-        effects_to_js(self.core.handle(input, now(now_ms)))
+        effects_to_js(&self.core.handle(input, now(now_ms)))
     }
 }
 
+/// `[from, to)` `IndexedDB` key bounds of a conversation, oldest first.
+#[wasm_bindgen(js_name = historyRange)]
+pub fn history_range(peer_hex: &str, before_ms: Option<f64>) -> Result<Array, JsError> {
+    let p = peer(peer_hex)?;
+    let before = before_ms.map_or(u64::MAX, now);
+    let bounds = Array::new();
+    bounds.push(&js_sys::Uint8Array::from(
+        message_key(&p, 0, &MsgId([0; 16])).as_slice(),
+    ));
+    bounds.push(&js_sys::Uint8Array::from(
+        message_key(&p, before, &MsgId([0; 16])).as_slice(),
+    ));
+    Ok(bounds)
+}
+
+/// JS timestamps (ms, a double) as core time; invalid values become 0.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "finite and positive checked; the cast saturates above u64::MAX"
+)]
 fn now(ms: f64) -> u64 {
     if ms.is_finite() && ms > 0.0 {
         ms as u64

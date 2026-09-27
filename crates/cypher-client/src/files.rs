@@ -11,7 +11,7 @@ use bytes::Bytes;
 use cypher_types::FileId;
 use tokio::sync::mpsc;
 
-pub enum IoJob {
+pub(crate) enum IoJob {
     Open {
         file_id: FileId,
         path: PathBuf,
@@ -41,7 +41,7 @@ pub enum IoJob {
     },
 }
 
-pub enum IoDone {
+pub(crate) enum IoDone {
     ChunkRead {
         file_id: FileId,
         index: u32,
@@ -56,12 +56,12 @@ pub enum IoDone {
 }
 
 #[derive(Clone)]
-pub struct FileIo {
+pub(crate) struct FileIo {
     tx: std_mpsc::Sender<IoJob>,
 }
 
 impl FileIo {
-    pub fn spawn(done: mpsc::UnboundedSender<IoDone>) -> io::Result<Self> {
+    pub(crate) fn spawn(done: mpsc::UnboundedSender<IoDone>) -> io::Result<Self> {
         let (tx, rx) = std_mpsc::channel();
         thread::Builder::new()
             .name("cypher-files".into())
@@ -69,7 +69,7 @@ impl FileIo {
         Ok(Self { tx })
     }
 
-    pub fn submit(&self, job: IoJob) {
+    pub(crate) fn submit(&self, job: IoJob) {
         let _ = self.tx.send(job);
     }
 }
@@ -177,7 +177,8 @@ impl Worker {
             std::collections::hash_map::Entry::Vacant(e) => e.insert(File::open(path)?),
         };
         let mut buf = vec![0u8; headroom + len as usize];
-        read_exact_at(file, &mut buf[headroom..], offset)?;
+        let (_, chunk) = buf.split_at_mut(headroom);
+        read_exact_at(file, chunk, offset)?;
         Ok(buf)
     }
 }
@@ -199,7 +200,7 @@ pub(crate) fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> io
         match f.seek_read(buf, offset)? {
             0 => return Err(io::ErrorKind::UnexpectedEof.into()),
             n => {
-                buf = &mut buf[n..];
+                buf = std::mem::take(&mut buf).split_at_mut(n).1;
                 offset += n as u64;
             }
         }
@@ -214,7 +215,7 @@ fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
         match f.seek_write(buf, offset)? {
             0 => return Err(io::ErrorKind::WriteZero.into()),
             n => {
-                buf = &buf[n..];
+                buf = buf.split_at(n).1;
                 offset += n as u64;
             }
         }

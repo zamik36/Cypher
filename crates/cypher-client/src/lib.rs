@@ -120,9 +120,10 @@ impl Client {
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), ClientError> {
         let peer_id = seed.derive_identity().peer_id();
         std::fs::create_dir_all(&config.data_dir)?;
+        let hex = peer_id.to_hex();
         let db = config
             .data_dir
-            .join(format!("state-{}.db", &peer_id.to_hex()[..16]));
+            .join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
         let store = Store::open(&db)?;
 
         let snapshot = Snapshot {
@@ -133,7 +134,7 @@ impl Client {
         };
         let vault = Vault::new(seed.derive_storage_key());
         let files = load_files(&store, &vault).await?;
-        let (core, initial) = Core::restore(seed, snapshot, now_ms(), OsRng)?;
+        let (core, initial) = Core::restore(seed, &snapshot, now_ms(), OsRng)?;
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (req_tx, req_rx) = mpsc::channel(256);

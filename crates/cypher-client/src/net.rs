@@ -9,19 +9,19 @@ use tokio::sync::mpsc;
 const OUTBOUND_FRAMES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Link {
+pub(crate) enum Link {
     Gateway,
     Relay,
 }
 
-pub enum NetEvent {
+pub(crate) enum NetEvent {
     Up(Link, mpsc::Sender<Bytes>),
     Frame(Link, Bytes),
     Down(Link),
 }
 
 /// Connects directly over TLS, then pumps frames until either side closes.
-pub fn spawn(
+pub(crate) fn spawn(
     link: Link,
     addr: String,
     tls: Arc<rustls::ClientConfig>,
@@ -38,7 +38,7 @@ pub fn spawn(
 }
 
 /// Moves frames between an established connection and the driver.
-pub async fn pump<S>(link: Link, conn: Conn<S>, events: mpsc::UnboundedSender<NetEvent>)
+pub(crate) async fn pump<S>(link: Link, conn: Conn<S>, events: mpsc::UnboundedSender<NetEvent>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {

@@ -23,14 +23,14 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(90);
 const CIRCUIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct Tor {
+pub(crate) struct Tor {
     config: TorConfig,
     dir: PathBuf,
     client: OnceCell<Arc<TorClient<PreferredRuntime>>>,
 }
 
 impl Tor {
-    pub fn new(config: TorConfig, dir: PathBuf) -> Arc<Self> {
+    pub(crate) fn new(config: TorConfig, dir: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             config,
             dir,
@@ -52,7 +52,7 @@ impl Tor {
     }
 
     /// Connects to `addr` over a Tor circuit, then runs TLS inside it.
-    pub fn spawn_relay(
+    pub(crate) fn spawn_relay(
         self: &Arc<Self>,
         addr: String,
         tls: Arc<rustls::ClientConfig>,
@@ -112,12 +112,12 @@ mod tests {
             ],
             transport_binary: Some("lyrebird".into()),
         };
-        assert!(build_config(&ok, dir.path()).is_ok());
+        build_config(&ok, dir.path()).unwrap();
         let bad = TorConfig {
             bridges: vec!["definitely not a bridge".into()],
             transport_binary: None,
         };
-        assert!(build_config(&bad, dir.path()).is_err());
+        build_config(&bad, dir.path()).unwrap_err();
     }
 
     /// Needs Internet access: `CYPHER_TOR_SMOKE=1 cargo test -p cypher-client --features tor`.

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -41,7 +42,7 @@ pub(crate) struct Driver {
     reconnect: bool,
     ops: Vec<Op>,
     #[cfg(feature = "tor")]
-    tor: Option<std::sync::Arc<crate::tor::Tor>>,
+    tor: Option<Arc<crate::tor::Tor>>,
 }
 
 struct Retry {
@@ -85,7 +86,7 @@ pub(crate) struct Parts {
 }
 
 impl Driver {
-    pub fn spawn(
+    pub(crate) fn spawn(
         parts: Parts,
         events: mpsc::UnboundedSender<Event>,
         requests: mpsc::Receiver<Request>,
@@ -211,7 +212,7 @@ impl Driver {
             net::spawn(
                 Link::Gateway,
                 self.config.gateway_addr.clone(),
-                self.config.tls.clone(),
+                Arc::clone(&self.config.tls),
                 self.net_tx.clone(),
             );
         }
@@ -231,7 +232,7 @@ impl Driver {
             let tor = self.tor.get_or_insert_with(|| {
                 crate::tor::Tor::new(config.clone(), self.config.data_dir.join("tor"))
             });
-            tor.spawn_relay(addr, self.config.tls.clone(), self.net_tx.clone());
+            tor.spawn_relay(addr, Arc::clone(&self.config.tls), self.net_tx.clone());
             return;
         }
         #[cfg(not(feature = "tor"))]
@@ -241,7 +242,7 @@ impl Driver {
         net::spawn(
             Link::Relay,
             addr,
-            self.config.tls.clone(),
+            Arc::clone(&self.config.tls),
             self.net_tx.clone(),
         );
     }
@@ -277,62 +278,71 @@ impl Driver {
                     offset,
                     len,
                     headroom,
-                } => match self.files.get(&file_id) {
-                    Some(entry) => self.io.submit(IoJob::Read {
-                        file_id,
-                        path: entry.path.clone(),
-                        index,
-                        offset,
-                        len,
-                        headroom,
-                    }),
-                    None => {
+                } => {
+                    if let Some(entry) = self.files.get(&file_id) {
+                        self.io.submit(IoJob::Read {
+                            file_id,
+                            path: entry.path.clone(),
+                            index,
+                            offset,
+                            len,
+                            headroom,
+                        });
+                    } else {
                         let effects = self
                             .core
                             .handle(Input::ChunkUnavailable { file_id }, now_ms());
                         Box::pin(self.apply(effects)).await;
                     }
-                },
-                Effect::OpenSink {
-                    file_id,
-                    len,
-                    sealed,
-                } => {
-                    // A sealed copy always lives at `media_path`; `files` keeps
-                    // pointing at the transfer's plaintext source or target.
-                    let path = if sealed {
-                        self.config.media_path(&file_id)
-                    } else if let Some(entry) = self.files.get(&file_id) {
-                        entry.path.clone()
-                    } else {
-                        continue;
-                    };
-                    self.io.submit(IoJob::Open { file_id, path, len });
-                }
-                Effect::WriteChunk {
-                    file_id,
-                    offset,
-                    data,
-                } => {
-                    self.io.submit(IoJob::Write {
-                        file_id,
-                        offset,
-                        data,
-                    });
-                }
-                Effect::CloseSink { file_id, complete } => {
-                    self.io.submit(IoJob::Close {
-                        file_id,
-                        keep: complete,
-                    });
                 }
                 Effect::Disconnect { reconnect } => {
                     self.reconnect = reconnect;
                     self.gateway = None;
                 }
+                effect @ (Effect::OpenSink { .. }
+                | Effect::WriteChunk { .. }
+                | Effect::CloseSink { .. }) => {
+                    if let Some(job) = self.sink_job(effect) {
+                        self.io.submit(job);
+                    }
+                }
             }
         }
         self.flush().await;
+    }
+
+    /// File IO for a sink effect; `None` when the transfer's target is unknown.
+    fn sink_job(&self, effect: Effect) -> Option<IoJob> {
+        Some(match effect {
+            Effect::OpenSink {
+                file_id,
+                len,
+                sealed,
+            } => {
+                // A sealed copy always lives at `media_path`; `files` keeps
+                // pointing at the transfer's plaintext source or target.
+                let path = if sealed {
+                    self.config.media_path(&file_id)
+                } else {
+                    self.files.get(&file_id)?.path.clone()
+                };
+                IoJob::Open { file_id, path, len }
+            }
+            Effect::WriteChunk {
+                file_id,
+                offset,
+                data,
+            } => IoJob::Write {
+                file_id,
+                offset,
+                data,
+            },
+            Effect::CloseSink { file_id, complete } => IoJob::Close {
+                file_id,
+                keep: complete,
+            },
+            _ => return None,
+        })
     }
 
     fn emit(&mut self, event: Event) {
@@ -362,6 +372,10 @@ impl Driver {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "postcard serialization of a path into a Vec cannot fail"
+    )]
     fn remember_file(&mut self, file_id: FileId, path: PathBuf) {
         let entry = FileEntry { path };
         let value = self.vault.seal_bytes(

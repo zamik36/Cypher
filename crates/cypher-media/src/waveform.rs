@@ -1,6 +1,8 @@
 //! Loudness summaries: a live level meter and the fixed-size waveform that
 //! travels inside a voice message.
 
+use crate::num;
+
 /// Buckets in a voice-message waveform.
 pub const BUCKETS: usize = 64;
 /// Levels below this are drawn as silence.
@@ -11,7 +13,7 @@ pub fn rms(samples: &[f32]) -> f32 {
         return 0.0;
     }
     let sum: f32 = samples.iter().map(|s| s * s).sum();
-    (sum / samples.len() as f32).sqrt()
+    (sum / num::count(samples.len())).sqrt()
 }
 
 /// Perceptual 0..=1 level of an RMS value, for recording meters.
@@ -31,7 +33,9 @@ pub fn from_frame_rms(frames: &[f32]) -> Vec<u8> {
         .map(|b| {
             let start = b * frames.len() / BUCKETS;
             let end = ((b + 1) * frames.len() / BUCKETS).max(start + 1);
-            frames[start.min(frames.len() - 1)..end.min(frames.len())]
+            frames
+                .get(start..end.min(frames.len()))
+                .unwrap_or_default()
                 .iter()
                 .copied()
                 .fold(0.0, f32::max)
@@ -43,7 +47,7 @@ pub fn from_frame_rms(frames: &[f32]) -> Vec<u8> {
     }
     peaks
         .iter()
-        .map(|p| ((p / loudest).sqrt() * 255.0).round() as u8)
+        .map(|p| num::bar((p / loudest).sqrt()))
         .collect()
 }
 
@@ -61,15 +65,17 @@ mod tests {
     #[test]
     fn silence_and_empty_input_are_flat() {
         assert_eq!(from_frame_rms(&[]), vec![0; BUCKETS]);
-        assert_eq!(from_pcm(&[0.0; 48_000], 48_000), vec![0; BUCKETS]);
-        assert_eq!(level(0.0), 0.0);
+        assert_eq!(from_pcm(&vec![0.0; 48_000], 48_000), vec![0; BUCKETS]);
+        assert!(level(0.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn loud_half_shows_up_in_the_right_buckets() {
         let mut pcm = vec![0.0f32; 48_000];
-        for (i, s) in pcm[24_000..].iter_mut().enumerate() {
-            *s = (i as f32 * 0.05).sin() * 0.5;
+        let mut phase = 0.0f32;
+        for s in &mut pcm[24_000..] {
+            *s = phase.sin() * 0.5;
+            phase += 0.05;
         }
         let w = from_pcm(&pcm, 48_000);
         assert_eq!(w.len(), BUCKETS);
@@ -86,7 +92,7 @@ mod tests {
 
     #[test]
     fn level_maps_dbfs_to_unit_range() {
-        assert_eq!(level(1.0), 1.0);
+        assert!((level(1.0) - 1.0).abs() < f32::EPSILON);
         assert!((level(0.001) - 0.0).abs() < 1e-6);
         assert!((level(0.031_62) - 0.5).abs() < 0.01);
     }

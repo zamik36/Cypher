@@ -3,12 +3,12 @@
 
 use crate::opus::{MAX_PACKET, OpusEncoder};
 use crate::webm::OpusWebm;
-use crate::{FRAME_MS, FRAME_SAMPLES, MAX_VOICE_MS, MediaError, SAMPLE_RATE, waveform};
+use crate::{FRAME_MS, FRAME_SAMPLES, MAX_VOICE_MS, MediaError, SAMPLE_RATE, num, waveform};
 
 /// Speech bitrate: transparent for voice, ~180 KiB per minute.
 const BITRATE: i32 = 24_000;
 /// Level callbacks fire every other frame (25 Hz), enough for a meter.
-const LEVEL_EVERY_FRAMES: u32 = 2;
+const LEVEL_EVERY_FRAMES: usize = 2;
 
 pub struct Recording {
     pub webm: Vec<u8>,
@@ -55,18 +55,21 @@ impl<L: FnMut(f32)> VoiceEncoder<L> {
     }
 
     pub fn duration_ms(&self) -> u32 {
-        self.sink.frame_rms.len() as u32 * FRAME_MS
+        u32::try_from(self.sink.frame_rms.len())
+            .unwrap_or(u32::MAX)
+            .saturating_mul(FRAME_MS)
     }
 
     /// Feeds mono samples in `[-1, 1]`; audio past [`MAX_VOICE_MS`] is dropped.
     pub fn push(&mut self, mono: &[f32]) -> Result<(), MediaError> {
         self.resampled.clear();
         self.resampler.process(mono, &mut self.resampled);
-        let mut rest = &self.resampled[..];
+        let mut rest = self.resampled.as_slice();
         while !rest.is_empty() && self.duration_ms() < MAX_VOICE_MS {
             let take = (FRAME_SAMPLES - self.frame.len()).min(rest.len());
-            self.frame.extend_from_slice(&rest[..take]);
-            rest = &rest[take..];
+            let (head, tail) = rest.split_at(take);
+            self.frame.extend_from_slice(head);
+            rest = tail;
             if self.frame.len() == FRAME_SAMPLES {
                 self.sink.encode(&self.frame)?;
                 self.frame.clear();
@@ -92,12 +95,13 @@ impl<L: FnMut(f32)> FrameSink<L> {
     fn encode(&mut self, frame: &[f32]) -> Result<(), MediaError> {
         let rms = waveform::rms(frame);
         for (dst, &s) in self.pcm.iter_mut().zip(frame) {
-            *dst = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+            *dst = num::pcm16(s);
         }
         let n = self.encoder.encode(&self.pcm, &mut self.packet)?;
-        self.webm.push(&self.packet[..n]);
+        let packet = self.packet.get(..n).ok_or(MediaError::Encoder(-1))?;
+        self.webm.push(packet);
         self.frame_rms.push(rms);
-        if (self.frame_rms.len() as u32).is_multiple_of(LEVEL_EVERY_FRAMES) {
+        if self.frame_rms.len().is_multiple_of(LEVEL_EVERY_FRAMES) {
             (self.on_level)(waveform::level(rms));
         }
         Ok(())
@@ -108,40 +112,48 @@ impl<L: FnMut(f32)> FrameSink<L> {
 /// codes at most wideband speech, so interpolation images above ~12 kHz are
 /// discarded by the encoder anyway; most devices already run at 48 kHz.
 struct Resampler {
-    step: f64,
-    pos: f64,
+    /// Input samples consumed per output sample; `None` passes 48 kHz through.
+    step: Option<f32>,
+    /// Position in `[last] ++ input`: index 0 is the previous call's last
+    /// sample, so interpolation continues seamlessly across calls.
+    index: usize,
+    frac: f32,
     last: f32,
 }
 
 impl Resampler {
     fn new(input_rate: u32) -> Self {
         Self {
-            step: f64::from(input_rate.max(1)) / f64::from(SAMPLE_RATE),
-            pos: 0.0,
+            step: (input_rate != SAMPLE_RATE).then(|| num::ratio(input_rate, SAMPLE_RATE)),
+            index: 1,
+            frac: 0.0,
             last: 0.0,
         }
     }
 
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-        if self.step == 1.0 {
+        let Some(step) = self.step else {
             out.extend_from_slice(input);
             return;
-        }
+        };
         let Some(&tail) = input.last() else {
             return;
         };
-        let n = input.len() as f64;
-        // `pos` indexes `input`; -1 refers to the previous call's last sample.
-        while self.pos + 1.0 < n {
-            let base = self.pos.floor();
-            let frac = (self.pos - base) as f32;
-            let i = base as isize;
-            let a = if i < 0 { self.last } else { input[i as usize] };
-            let b = input[(i + 1) as usize];
-            out.push(a + (b - a) * frac);
-            self.pos += self.step;
+        while let Some(&b) = input.get(self.index) {
+            let a = self
+                .index
+                .checked_sub(1)
+                .and_then(|i| input.get(i))
+                .copied()
+                .unwrap_or(self.last);
+            out.push(a + (b - a) * self.frac);
+            self.frac += step;
+            while self.frac >= 1.0 {
+                self.frac -= 1.0;
+                self.index += 1;
+            }
         }
-        self.pos -= n;
+        self.index -= input.len();
         self.last = tail;
     }
 }
@@ -154,16 +166,22 @@ mod tests {
 
     use super::*;
 
-    fn tone(rate: u32, seconds: f32) -> Vec<f32> {
-        (0..(rate as f32 * seconds) as usize)
-            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.4)
+    /// `samples` of a 440 Hz sine at `rate`.
+    fn tone(rate: u32, samples: usize) -> Vec<f32> {
+        let step = num::ratio(440, rate) * std::f32::consts::TAU;
+        let mut phase = 0.0f32;
+        (0..samples)
+            .map(|_| {
+                phase += step;
+                phase.sin() * 0.4
+            })
             .collect()
     }
 
     #[test]
     fn resampler_preserves_duration_across_chunk_boundaries() {
         for rate in [8_000, 16_000, 44_100, 48_000, 96_000] {
-            let input = tone(rate, 1.0);
+            let input = tone(rate, rate as usize);
             let mut r = Resampler::new(rate);
             let mut out = Vec::new();
             for chunk in input.chunks(333) {
@@ -185,7 +203,7 @@ mod tests {
     fn encodes_a_playable_voice_note() {
         let mut levels = Vec::new();
         let mut enc = VoiceEncoder::new(44_100, |l| levels.push(l)).unwrap();
-        let mut pcm = tone(44_100, 1.5);
+        let mut pcm = tone(44_100, 66_150);
         pcm.extend(std::iter::repeat_n(0.0, 44_100 / 2));
         for chunk in pcm.chunks(441) {
             enc.push(chunk).unwrap();

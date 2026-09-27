@@ -12,57 +12,44 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum JsCommand {
+pub(crate) enum JsCommand {
     CreateLink,
-    JoinLink {
-        link: String,
-    },
-    SendText {
-        peer: String,
-        text: String,
-    },
-    SendFile {
-        peer: String,
-        name: String,
-        mime: String,
-        size: f64,
-        kind: JsMediaKind,
-        duration_ms: Option<u32>,
-        waveform: Option<Vec<u8>>,
-        #[serde(default, with = "serde_bytes")]
-        poster: Option<Vec<u8>>,
-        #[serde(default, with = "serde_bytes")]
-        inline: Option<Vec<u8>>,
-    },
-    AcceptFile {
-        file_id: String,
-    },
-    CancelTransfer {
-        file_id: String,
-    },
-    MarkRead {
-        peer: String,
-        ids: Vec<String>,
-    },
+    JoinLink { link: String },
+    SendText { peer: String, text: String },
+    SendFile(JsFile),
+    AcceptFile { file_id: String },
+    CancelTransfer { file_id: String },
+    MarkRead { peer: String, ids: Vec<String> },
     FetchInbox,
-    SetAnonymity {
-        require_onion: bool,
-    },
-    RemovePeer {
-        peer: String,
-    },
+    SetAnonymity { require_onion: bool },
+    RemovePeer { peer: String },
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct JsFile {
+    peer: String,
+    name: String,
+    mime: String,
+    size: f64,
+    kind: JsMediaKind,
+    duration_ms: Option<u32>,
+    waveform: Option<Vec<u8>>,
+    #[serde(default, with = "serde_bytes")]
+    poster: Option<Vec<u8>>,
+    #[serde(default, with = "serde_bytes")]
+    inline: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum JsMediaKind {
+pub(crate) enum JsMediaKind {
     File,
     Voice,
     VideoNote,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CommandError {
+pub(crate) enum CommandError {
     #[error("invalid peer id")]
     Peer,
     #[error("invalid file id")]
@@ -75,14 +62,14 @@ pub enum CommandError {
 
 /// A core command plus the ids generated for it, returned to the UI.
 #[derive(Debug)]
-pub struct Prepared {
+pub(crate) struct Prepared {
     pub command: Command,
     pub msg_id: Option<MsgId>,
     pub file_id: Option<FileId>,
 }
 
 impl JsCommand {
-    pub fn prepare(self, rng: &mut impl CryptoRngCore) -> Result<Prepared, CommandError> {
+    pub(crate) fn prepare(self, rng: &mut impl CryptoRngCore) -> Result<Prepared, CommandError> {
         let plain = |command| Prepared {
             command,
             msg_id: None,
@@ -104,44 +91,7 @@ impl JsCommand {
                     file_id: None,
                 }
             }
-            Self::SendFile {
-                peer: p,
-                name,
-                mime,
-                size,
-                kind,
-                duration_ms,
-                waveform,
-                poster,
-                inline,
-            } => {
-                let (msg_id, file_id) = (MsgId::random(rng), FileId::random(rng));
-                let kind = match kind {
-                    JsMediaKind::File => MediaKind::File,
-                    JsMediaKind::Voice => MediaKind::Voice {
-                        duration_ms: duration_ms.unwrap_or(0),
-                        waveform: waveform.unwrap_or_default(),
-                    },
-                    JsMediaKind::VideoNote => MediaKind::VideoNote {
-                        duration_ms: duration_ms.unwrap_or(0),
-                        poster: poster.unwrap_or_default(),
-                    },
-                };
-                Prepared {
-                    command: Command::SendFile {
-                        peer: peer(&p)?,
-                        msg_id,
-                        file_id,
-                        name,
-                        mime,
-                        size: file_size(size)?,
-                        kind,
-                        inline,
-                    },
-                    msg_id: Some(msg_id),
-                    file_id: Some(file_id),
-                }
-            }
+            Self::SendFile(file) => file.prepare(rng)?,
             Self::AcceptFile { file_id } => plain(Command::AcceptFile {
                 file_id: file(&file_id)?,
             }),
@@ -162,18 +112,53 @@ impl JsCommand {
     }
 }
 
-pub fn peer(hex: &str) -> Result<PeerId, CommandError> {
+impl JsFile {
+    fn prepare(self, rng: &mut impl CryptoRngCore) -> Result<Prepared, CommandError> {
+        let (msg_id, file_id) = (MsgId::random(rng), FileId::random(rng));
+        let kind = match self.kind {
+            JsMediaKind::File => MediaKind::File,
+            JsMediaKind::Voice => MediaKind::Voice {
+                duration_ms: self.duration_ms.unwrap_or(0),
+                waveform: self.waveform.unwrap_or_default(),
+            },
+            JsMediaKind::VideoNote => MediaKind::VideoNote {
+                duration_ms: self.duration_ms.unwrap_or(0),
+                poster: self.poster.unwrap_or_default(),
+            },
+        };
+        Ok(Prepared {
+            command: Command::SendFile {
+                peer: peer(&self.peer)?,
+                msg_id,
+                file_id,
+                name: self.name,
+                mime: self.mime,
+                size: file_size(self.size)?,
+                kind,
+                inline: self.inline,
+            },
+            msg_id: Some(msg_id),
+            file_id: Some(file_id),
+        })
+    }
+}
+
+pub(crate) fn peer(hex: &str) -> Result<PeerId, CommandError> {
     PeerId::from_hex(hex).ok_or(CommandError::Peer)
 }
 
-pub fn file(hex: &str) -> Result<FileId, CommandError> {
+pub(crate) fn file(hex: &str) -> Result<FileId, CommandError> {
     FileId::from_hex(hex).ok_or(CommandError::File)
 }
 
 /// JS numbers are doubles: accept only whole, non-negative, exact values.
 fn file_size(size: f64) -> Result<u64, CommandError> {
     if size.is_finite() && size >= 0.0 && size.fract() == 0.0 && size <= MAX_SAFE_INTEGER {
-        // Whole, non-negative and below 2^53: the conversion is exact.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked above: whole, non-negative and below 2^53, so exact"
+        )]
         let exact = size as u64;
         Ok(exact)
     } else {
@@ -256,13 +241,11 @@ mod tests {
 
     #[test]
     fn unknown_command_types_and_media_kinds_do_not_parse() {
-        assert!(serde_json::from_value::<JsCommand>(json!({ "type": "format_disk" })).is_err());
-        assert!(
-            serde_json::from_value::<JsCommand>(json!({
-                "type": "send_file", "peer": PEER, "name": "f", "mime": "x/y",
-                "size": 1, "kind": "hologram"
-            }))
-            .is_err()
-        );
+        serde_json::from_value::<JsCommand>(json!({ "type": "format_disk" })).unwrap_err();
+        serde_json::from_value::<JsCommand>(json!({
+            "type": "send_file", "peer": PEER, "name": "f", "mime": "x/y",
+            "size": 1, "kind": "hologram"
+        }))
+        .unwrap_err();
     }
 }

@@ -1,4 +1,4 @@
-//! Minimal WebM muxer for a single mono Opus track.
+//! Minimal `WebM` muxer for a single mono Opus track.
 //!
 //! Frames are appended as they are encoded; `finish` lays out
 //! `SeekHead, Info (with Duration), Tracks, Clusters…, Cues` in one buffer so
@@ -46,7 +46,7 @@ const CUE_TRACK_POSITIONS: u32 = 0xB7;
 const CUE_TRACK: u32 = 0xF7;
 const CUE_CLUSTER_POSITION: u32 = 0xF1;
 
-const TRACK: u64 = 1;
+const TRACK: u8 = 1;
 const TRACK_TYPE_AUDIO: u64 = 2;
 /// One cluster per 5 s keeps block timestamps well inside `i16` and gives
 /// players a cue point every few seconds.
@@ -85,10 +85,10 @@ impl OpusWebm {
             self.close_cluster();
             self.cluster_start_ms = ts;
         }
-        // Bounded by CLUSTER_MS, far below i16::MAX.
-        let relative = (ts - self.cluster_start_ms) as i16;
+        // Clusters close after CLUSTER_MS, far below i16::MAX.
+        let relative = i16::try_from(ts - self.cluster_start_ms).unwrap_or(i16::MAX);
         let mut block = Vec::with_capacity(4 + packet.len());
-        block.push(0x80 | TRACK as u8);
+        block.push(0x80 | TRACK);
         block.extend_from_slice(&relative.to_be_bytes());
         block.push(0x80);
         block.extend_from_slice(packet);
@@ -105,7 +105,8 @@ impl OpusWebm {
 
         let mut info = Vec::new();
         uint(&mut info, TIMESTAMP_SCALE, 1_000_000);
-        float(&mut info, DURATION, self.duration_ms() as f64);
+        let duration = u32::try_from(self.duration_ms()).map_or(f64::MAX, f64::from);
+        float(&mut info, DURATION, duration);
         string(&mut info, MUXING_APP, APP);
         string(&mut info, WRITING_APP, APP);
 
@@ -114,7 +115,7 @@ impl OpusWebm {
 
         // Seek positions are written as fixed 8-byte integers so the SeekHead
         // size does not depend on the offsets it contains.
-        let seek_head_len = self.seek_head(0, 0, 0).len() as u64;
+        let seek_head_len = Self::seek_head(0, 0, 0).len() as u64;
         let info_pos = seek_head_len;
         let tracks_pos = info_pos + wrapped_len(INFO, info.len());
         let clusters_pos = tracks_pos + wrapped_len(TRACKS, tracks.len());
@@ -123,7 +124,7 @@ impl OpusWebm {
         let mut cues = Vec::new();
         for &(time, offset) in &self.cues {
             let mut position = Vec::new();
-            uint(&mut position, CUE_TRACK, TRACK);
+            uint(&mut position, CUE_TRACK, u64::from(TRACK));
             uint(&mut position, CUE_CLUSTER_POSITION, clusters_pos + offset);
             let mut point = Vec::new();
             uint(&mut point, CUE_TIME, time);
@@ -131,7 +132,7 @@ impl OpusWebm {
             element(&mut cues, CUE_POINT, &point);
         }
 
-        let mut segment = self.seek_head(info_pos, tracks_pos, cues_pos);
+        let mut segment = Self::seek_head(info_pos, tracks_pos, cues_pos);
         element(&mut segment, INFO, &info);
         element(&mut segment, TRACKS, &tracks);
         segment.extend_from_slice(&self.clusters);
@@ -170,8 +171,8 @@ impl OpusWebm {
         uint(&mut audio, CHANNELS, 1);
 
         let mut entry = Vec::new();
-        uint(&mut entry, TRACK_NUMBER, TRACK);
-        uint(&mut entry, TRACK_UID, TRACK);
+        uint(&mut entry, TRACK_NUMBER, u64::from(TRACK));
+        uint(&mut entry, TRACK_UID, u64::from(TRACK));
         uint(&mut entry, TRACK_TYPE, TRACK_TYPE_AUDIO);
         string(&mut entry, CODEC_ID, "A_OPUS");
         element(&mut entry, CODEC_PRIVATE, &head);
@@ -185,7 +186,7 @@ impl OpusWebm {
         entry
     }
 
-    fn seek_head(&self, info: u64, tracks: u64, cues: u64) -> Vec<u8> {
+    fn seek_head(info: u64, tracks: u64, cues: u64) -> Vec<u8> {
         let mut body = Vec::new();
         for (id, pos) in [(INFO, info), (TRACKS, tracks), (CUES, cues)] {
             let mut seek = Vec::new();
@@ -215,7 +216,7 @@ fn ebml_header() -> Vec<u8> {
 fn id_bytes(id: u32) -> Vec<u8> {
     let bytes = id.to_be_bytes();
     let skip = bytes.iter().take_while(|&&b| b == 0).count();
-    bytes[skip..].to_vec()
+    bytes.get(skip..).unwrap_or_default().to_vec()
 }
 
 fn size_len(size: u64) -> usize {
@@ -225,7 +226,7 @@ fn size_len(size: u64) -> usize {
 fn put_size(out: &mut Vec<u8>, size: u64) {
     let n = size_len(size);
     let marked = size | (1u64 << (7 * n));
-    out.extend_from_slice(&marked.to_be_bytes()[8 - n..]);
+    out.extend_from_slice(marked.to_be_bytes().get(8 - n..).unwrap_or_default());
 }
 
 fn wrapped_len(id: u32, body: usize) -> u64 {
@@ -241,7 +242,7 @@ fn element(out: &mut Vec<u8>, id: u32, body: &[u8]) {
 fn uint(out: &mut Vec<u8>, id: u32, v: u64) {
     let bytes = v.to_be_bytes();
     let skip = bytes.iter().take_while(|&&b| b == 0).count().min(7);
-    element(out, id, &bytes[skip..]);
+    element(out, id, bytes.get(skip..).unwrap_or_default());
 }
 
 fn float(out: &mut Vec<u8>, id: u32, v: f64) {
@@ -263,7 +264,7 @@ mod tests {
     fn mux(frames: u64) -> Vec<u8> {
         let mut w = OpusWebm::new(312);
         for i in 0..frames {
-            w.push(&[0xFC, i as u8, 0xAA]);
+            w.push(&[0xFC, i.to_le_bytes()[0], 0xAA]);
         }
         assert_eq!(w.duration_ms(), frames * 20);
         w.finish()
@@ -285,7 +286,12 @@ mod tests {
         let file = mux(frames);
         let mut mkv = MatroskaFile::open(Cursor::new(file)).expect("valid webm");
         assert_eq!(mkv.info().timestamp_scale().get(), 1_000_000);
-        assert_eq!(mkv.info().duration(), Some((frames * 20) as f64));
+        let expected = f64::from(u32::try_from(frames * 20).unwrap());
+        assert!(
+            mkv.info()
+                .duration()
+                .is_some_and(|d| (d - expected).abs() < 1e-9)
+        );
 
         let track = &mkv.tracks()[0];
         assert_eq!(track.track_type(), TrackType::Audio);
@@ -296,13 +302,13 @@ mod tests {
         assert_eq!(u16::from_le_bytes([head[10], head[11]]), 312);
         let audio = track.audio().expect("audio settings");
         assert_eq!(audio.channels().get(), 1);
-        assert_eq!(audio.sampling_frequency(), 48_000.0);
+        assert!((audio.sampling_frequency() - 48_000.0).abs() < f64::EPSILON);
 
         let mut frame = Frame::default();
         let mut seen = 0u64;
         while mkv.next_frame(&mut frame).expect("frame") {
             assert_eq!(frame.timestamp, seen * 20);
-            assert_eq!(frame.data, [0xFC, seen as u8, 0xAA]);
+            assert_eq!(frame.data, [0xFC, seen.to_le_bytes()[0], 0xAA]);
             seen += 1;
         }
         assert_eq!(seen, frames);

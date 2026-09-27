@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use crate::ClientError;
 
 /// Driver-owned table: file id → local path of a transfer.
-pub const FILES_TABLE: &str = "driver_files";
+pub(crate) const FILES_TABLE: &str = "driver_files";
 
 use cypher_core::Rows as Pairs;
 
@@ -33,7 +33,7 @@ enum Job {
     ),
 }
 
-pub enum Op {
+pub(crate) enum Op {
     Put(&'static str, Vec<u8>, Vec<u8>),
     Delete(&'static str, Vec<u8>),
     Clear(&'static str),
@@ -49,12 +49,12 @@ impl From<StoreOp> for Op {
 }
 
 #[derive(Clone)]
-pub struct Store {
+pub(crate) struct Store {
     tx: std_mpsc::Sender<Job>,
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self, ClientError> {
+    pub(crate) fn open(path: &Path) -> Result<Self, ClientError> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
@@ -72,19 +72,19 @@ impl Store {
     }
 
     /// Resolves once the batch is durable.
-    pub async fn apply(&self, ops: Vec<Op>) -> Result<(), ClientError> {
+    pub(crate) async fn apply(&self, ops: Vec<Op>) -> Result<(), ClientError> {
         if ops.is_empty() {
             return Ok(());
         }
         self.call(|reply| Job::Apply(ops, reply)).await
     }
 
-    pub async fn scan(&self, table: &'static str) -> Result<Pairs, ClientError> {
+    pub(crate) async fn scan(&self, table: &'static str) -> Result<Pairs, ClientError> {
         self.call(|reply| Job::Scan(table, reply)).await
     }
 
     /// Keys in `[from, to)`, newest (largest) first.
-    pub async fn range_desc(
+    pub(crate) async fn range_desc(
         &self,
         table: &'static str,
         from: Vec<u8>,
@@ -101,7 +101,7 @@ impl Store {
         .await
     }
 
-    pub async fn get(
+    pub(crate) async fn get(
         &self,
         table: &'static str,
         key: Vec<u8>,

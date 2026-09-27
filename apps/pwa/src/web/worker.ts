@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import init, { Client, Identity, qrSvg, waveformFromRms, type SealedIdentity } from "../wasm/cypher_wasm.js";
+import init, { Client, historyRange, Identity, qrSvg, waveformFromRms, type SealedIdentity } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan } from "./idb";
 import { applyEffects, type Effect, type EffectSinks, type ReadChunk, type Reply } from "./effects";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
@@ -290,7 +290,7 @@ async function mediaBlob(fileId: string): Promise<Blob> {
 
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
-  const [from, to] = c.historyRange(peer, before) as [Uint8Array, Uint8Array];
+  const [from, to] = historyRange(peer, before) as [Uint8Array, Uint8Array];
   const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true), limit, true);
   const statuses = await Promise.all(
     rows.map(([key]) => get<Uint8Array>(db, "message_status", key.subarray(key.length - 16))),
