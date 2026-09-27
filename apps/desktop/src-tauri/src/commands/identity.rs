@@ -24,12 +24,12 @@ async fn activate(state: &AppState, unlocked: Unlocked) -> String {
 }
 
 #[tauri::command]
-pub async fn has_identity(app: AppHandle) -> CmdResult<bool> {
+pub(crate) async fn has_identity(app: AppHandle) -> CmdResult<bool> {
     Ok(IdentityStore::new(&data_dir(&app)?).exists())
 }
 
 #[tauri::command]
-pub async fn create_identity(
+pub(crate) async fn create_identity(
     app: AppHandle,
     state: State<'_, AppState>,
     nickname: String,
@@ -40,7 +40,7 @@ pub async fn create_identity(
 }
 
 #[tauri::command]
-pub async fn unlock_identity(
+pub(crate) async fn unlock_identity(
     app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
@@ -51,7 +51,7 @@ pub async fn unlock_identity(
 }
 
 #[tauri::command]
-pub async fn import_mnemonic(
+pub(crate) async fn import_mnemonic(
     app: AppHandle,
     state: State<'_, AppState>,
     mnemonic: String,
@@ -64,7 +64,7 @@ pub async fn import_mnemonic(
 
 /// Re-verifies the passphrase before revealing the recovery phrase.
 #[tauri::command]
-pub async fn export_mnemonic(app: AppHandle, passphrase: String) -> CmdResult<String> {
+pub(crate) async fn export_mnemonic(app: AppHandle, passphrase: String) -> CmdResult<String> {
     with_store(&app, move |s| {
         s.unlock(&passphrase).map(|u| u.seed.to_mnemonic())
     })
@@ -72,14 +72,14 @@ pub async fn export_mnemonic(app: AppHandle, passphrase: String) -> CmdResult<St
 }
 
 #[derive(Serialize)]
-pub struct Conversation {
+pub(crate) struct Conversation {
     peer_id: String,
     display_name: Option<String>,
     last_message_at: u64,
 }
 
 #[tauri::command]
-pub async fn get_conversations(state: State<'_, AppState>) -> CmdResult<Vec<Conversation>> {
+pub(crate) async fn get_conversations(state: State<'_, AppState>) -> CmdResult<Vec<Conversation>> {
     let client = state.client().await?;
     let mut out = Vec::new();
     for peer in client.contacts().await.map_err(err)? {
@@ -95,7 +95,7 @@ pub async fn get_conversations(state: State<'_, AppState>) -> CmdResult<Vec<Conv
 }
 
 #[tauri::command]
-pub async fn get_history(
+pub(crate) async fn get_history(
     state: State<'_, AppState>,
     peer_id: String,
     before: Option<u64>,
@@ -111,6 +111,6 @@ pub async fn get_history(
 }
 
 #[tauri::command]
-pub async fn clear_chat_history(state: State<'_, AppState>) -> CmdResult<()> {
+pub(crate) async fn clear_chat_history(state: State<'_, AppState>) -> CmdResult<()> {
     state.client().await?.clear_history().await.map_err(err)
 }

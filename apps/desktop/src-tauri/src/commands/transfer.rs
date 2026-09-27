@@ -10,7 +10,7 @@ use super::chat::parse_peer;
 use crate::session::{AppState, CmdResult, err};
 
 #[derive(Serialize)]
-pub struct TransferInfo {
+pub(crate) struct TransferInfo {
     file_id: String,
     msg_id: String,
     file_name: String,
@@ -23,7 +23,7 @@ pub struct TransferInfo {
 /// The backend owns path selection: the webview can never make the client
 /// read an arbitrary file.
 #[tauri::command]
-pub async fn browse_and_send(
+pub(crate) async fn browse_and_send(
     app: AppHandle,
     state: State<'_, AppState>,
     peer_id: String,
@@ -59,7 +59,7 @@ pub async fn browse_and_send(
 /// Saves into the user's downloads folder under the (already sanitized)
 /// offered name, never overwriting an existing file.
 #[tauri::command]
-pub async fn accept_file(
+pub(crate) async fn accept_file(
     app: AppHandle,
     state: State<'_, AppState>,
     file_id: String,
@@ -72,7 +72,7 @@ pub async fn accept_file(
         .remove(&id)
         .ok_or("unknown offer")?;
     let dir = app.path().download_dir().map_err(err)?;
-    let dest = unique_path(&dir, &name);
+    let dest = unique_path(&dir, &name).ok_or("too many files with this name")?;
     state
         .client()
         .await?
@@ -82,7 +82,7 @@ pub async fn accept_file(
 }
 
 #[tauri::command]
-pub async fn cancel_transfer(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
+pub(crate) async fn cancel_transfer(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
     let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
     state
         .client()
@@ -98,19 +98,22 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
+/// Most `name (n).ext` variants tried before giving up.
+const MAX_NAME_VARIANTS: u32 = 10_000;
+
+/// `name`, or `name (n).ext` when taken; `None` rather than overwrite.
+fn unique_path(dir: &Path, name: &str) -> Option<PathBuf> {
     let candidate = dir.join(name);
     if !candidate.exists() {
-        return candidate;
+        return Some(candidate);
     }
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
         _ => (name, String::new()),
     };
-    (1..)
+    (1..=MAX_NAME_VARIANTS)
         .map(|n| dir.join(format!("{stem} ({n}){ext}")))
         .find(|p| !p.exists())
-        .unwrap_or(candidate)
 }
 
 #[cfg(test)]
@@ -123,8 +126,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         std::fs::write(dir.join("a (1).txt"), b"x").unwrap();
-        assert_eq!(unique_path(&dir, "a.txt"), dir.join("a (2).txt"));
-        assert_eq!(unique_path(&dir, "b.txt"), dir.join("b.txt"));
+        assert_eq!(unique_path(&dir, "a.txt"), Some(dir.join("a (2).txt")));
+        assert_eq!(unique_path(&dir, "b.txt"), Some(dir.join("b.txt")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

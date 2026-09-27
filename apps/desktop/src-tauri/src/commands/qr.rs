@@ -6,7 +6,7 @@ use crate::session::{CmdResult, err};
 
 /// Renders `link_id` as a PNG data URI.
 #[tauri::command]
-pub async fn generate_qr(link_id: String) -> CmdResult<String> {
+pub(crate) async fn generate_qr(link_id: String) -> CmdResult<String> {
     let code = QrCode::new(link_id.as_bytes()).map_err(err)?;
     let img = code.render::<Luma<u8>>().quiet_zone(true).build();
     let mut png = std::io::Cursor::new(Vec::new());

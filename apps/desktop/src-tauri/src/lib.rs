@@ -8,10 +8,17 @@ use commands::{chat, identity, link, media, qr, settings, transfer};
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
 pub fn mobile_entry_point() {
-    run();
+    if let Err(e) = run() {
+        tracing::error!("application failed: {e}");
+    }
 }
 
-pub fn run() {
+#[expect(
+    clippy::exit,
+    clippy::disallowed_methods,
+    reason = "tauri::generate_context! expands to process::exit for invalid embedded assets"
+)]
+pub fn run() -> tauri::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -48,10 +55,9 @@ pub fn run() {
             qr::generate_qr,
         ])
         .run(tauri::generate_context!())
-        .expect("error running tauri application");
 }
 
-/// WebKitGTK denies camera and microphone requests unless the embedder
+/// `WebKitGTK` denies camera and microphone requests unless the embedder
 /// allows them; the other platforms ask the user themselves.
 #[cfg(target_os = "linux")]
 fn allow_user_media(webview: &tauri::Webview) {

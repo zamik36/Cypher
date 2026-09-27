@@ -5,12 +5,12 @@ use tauri::State;
 use crate::session::{AppState, CmdResult, await_event, err};
 
 #[derive(Serialize)]
-pub struct LinkInfo {
+pub(crate) struct LinkInfo {
     link_id: String,
 }
 
 #[tauri::command]
-pub async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInfo> {
+pub(crate) async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInfo> {
     let (client, mut events) = state.client_and_events().await?;
     client.command(Command::CreateLink).await.map_err(err)?;
     await_event(&mut events, |e| match e {
@@ -25,7 +25,7 @@ pub async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInfo> {
 
 /// Resolves to the joined peer id once the session is established.
 #[tauri::command]
-pub async fn join_link(state: State<'_, AppState>, link_id: String) -> CmdResult<String> {
+pub(crate) async fn join_link(state: State<'_, AppState>, link_id: String) -> CmdResult<String> {
     let (client, mut events) = state.client_and_events().await?;
     let link = link_id.trim().to_owned();
     client

@@ -12,7 +12,7 @@ fn clean_bridges(lines: Vec<String>) -> Vec<String> {
 
 /// Starts (or restarts) the client against `addr` and returns our peer id.
 #[tauri::command]
-pub async fn connect_to_gateway(
+pub(crate) async fn connect_to_gateway(
     app: AppHandle,
     state: State<'_, AppState>,
     addr: String,
@@ -31,7 +31,7 @@ pub async fn connect_to_gateway(
 
 /// Switching anonymity changes the transport, so the session restarts.
 #[tauri::command]
-pub async fn apply_anonymous_settings(
+pub(crate) async fn apply_anonymous_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     anonymous: bool,
@@ -46,6 +46,6 @@ pub async fn apply_anonymous_settings(
 }
 
 #[tauri::command]
-pub async fn get_nickname(state: State<'_, AppState>) -> CmdResult<Option<String>> {
+pub(crate) async fn get_nickname(state: State<'_, AppState>) -> CmdResult<Option<String>> {
     Ok(state.nickname().await)
 }

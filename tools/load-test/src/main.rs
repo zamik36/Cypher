@@ -1,6 +1,7 @@
 //! Gateway load generator: pairs of authenticated clients exchanging relayed
 //! frames; reports connection success and Send→SendAck latency percentiles.
 
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -89,7 +90,7 @@ async fn main() -> Result<()> {
     for t in tasks {
         let _ = t.await;
     }
-    report(&stats, args.duration).await;
+    report(&stats, args.duration).await?;
     Ok(())
 }
 
@@ -104,8 +105,8 @@ struct Target {
 
 async fn run_pair(t: &Target, stats: &Stats) -> Result<()> {
     let (a_id, b_id) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
-    let mut a = connect(&t.addr, t.tls.clone(), &a_id).await?;
-    let b = connect(&t.peer_addr, t.tls.clone(), &b_id).await?;
+    let mut a = connect(&t.addr, Arc::clone(&t.tls), &a_id).await?;
+    let b = connect(&t.peer_addr, Arc::clone(&t.tls), &b_id).await?;
     stats.connected.fetch_add(2, Ordering::Relaxed);
     let b_peer = b_id.peer_id();
     let sink_task = tokio::spawn(drain(b));
@@ -189,26 +190,35 @@ async fn next(conn: &mut ClientConn) -> Result<ServerMsg> {
     Ok(Frame::<ServerMsg>::decode(raw.freeze())?.msg)
 }
 
-async fn report(stats: &Stats, secs: u64) {
+async fn report(stats: &Stats, secs: u64) -> Result<()> {
     let mut lat = stats.latencies_us.lock().await;
     lat.sort_unstable();
-    let pct = |p: f64| {
-        lat.get(((lat.len() as f64 * p) as usize).min(lat.len().saturating_sub(1)))
-            .copied()
-            .unwrap_or(0)
-    };
+    let pct = |p: usize| percentile(&lat, p);
     let sent = stats.sent.load(Ordering::Relaxed);
-    println!("connected:   {}", stats.connected.load(Ordering::Relaxed));
-    println!("errors:      {}", stats.errors.load(Ordering::Relaxed));
-    println!(
-        "relayed:     {sent} ({:.0}/s)",
-        sent as f64 / secs.max(1) as f64
-    );
-    println!(
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "connected:   {}",
+        stats.connected.load(Ordering::Relaxed)
+    )?;
+    writeln!(out, "errors:      {}", stats.errors.load(Ordering::Relaxed))?;
+    writeln!(out, "relayed:     {sent} ({}/s)", sent / secs.max(1))?;
+    writeln!(
+        out,
         "latency µs:  p50={} p90={} p99={} max={}",
-        pct(0.50),
-        pct(0.90),
-        pct(0.99),
+        pct(50),
+        pct(90),
+        pct(99),
         lat.last().copied().unwrap_or(0)
-    );
+    )?;
+    Ok(())
+}
+
+/// The `p`-th percentile (0..=100) of sorted samples, nearest-rank.
+fn percentile(sorted: &[u64], p: usize) -> u64 {
+    let rank = sorted.len().saturating_mul(p) / 100;
+    sorted
+        .get(rank.min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0)
 }

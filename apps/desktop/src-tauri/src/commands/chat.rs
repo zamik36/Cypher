@@ -4,13 +4,13 @@ use tauri::State;
 
 use crate::session::{AppState, CmdResult, err};
 
-pub fn parse_peer(hex: &str) -> CmdResult<PeerId> {
+pub(crate) fn parse_peer(hex: &str) -> CmdResult<PeerId> {
     PeerId::from_hex(hex).ok_or_else(|| "invalid peer id".to_owned())
 }
 
 /// Returns the message id so the UI can track delivery status.
 #[tauri::command]
-pub async fn send_message(
+pub(crate) async fn send_message(
     state: State<'_, AppState>,
     peer_id: String,
     text: String,
@@ -22,7 +22,7 @@ pub async fn send_message(
 }
 
 #[tauri::command]
-pub async fn mark_read(
+pub(crate) async fn mark_read(
     state: State<'_, AppState>,
     peer_id: String,
     msg_ids: Vec<String>,

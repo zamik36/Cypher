@@ -16,11 +16,11 @@ use tokio::task::JoinHandle;
 
 use crate::dto;
 
-pub const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub type CmdResult<T> = Result<T, String>;
+pub(crate) type CmdResult<T> = Result<T, String>;
 
-pub fn err(e: impl std::fmt::Display) -> String {
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
@@ -36,11 +36,11 @@ struct Session {
 }
 
 /// Names of files offered to us, so accepted files can be saved safely.
-pub type Offers = Arc<StdMutex<HashMap<FileId, String>>>;
+pub(crate) type Offers = Arc<StdMutex<HashMap<FileId, String>>>;
 
 /// Connection parameters of the current session, reused on restarts.
 #[derive(Clone, Default)]
-pub struct Endpoint {
+pub(crate) struct Endpoint {
     pub gateway_addr: String,
     /// Anonymous mode: inbox only via the onion relay, reached through Tor.
     pub anonymous: bool,
@@ -48,7 +48,7 @@ pub struct Endpoint {
 }
 
 #[derive(Default)]
-pub struct AppState {
+pub(crate) struct AppState {
     identity: Mutex<Option<Identity>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
@@ -58,12 +58,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn set_identity(&self, seed: IdentitySeed, nickname: String) {
+    pub(crate) async fn set_identity(&self, seed: IdentitySeed, nickname: String) {
         self.stop().await;
         *self.identity.lock().await = Some(Identity { seed, nickname });
     }
 
-    pub async fn nickname(&self) -> Option<String> {
+    pub(crate) async fn nickname(&self) -> Option<String> {
         self.identity
             .lock()
             .await
@@ -71,12 +71,12 @@ impl AppState {
             .map(|i| i.nickname.clone())
     }
 
-    pub async fn endpoint(&self) -> Endpoint {
+    pub(crate) async fn endpoint(&self) -> Endpoint {
         self.endpoint.lock().await.clone()
     }
 
     /// (Re)starts the client for the unlocked identity.
-    pub async fn connect(&self, app: &AppHandle, endpoint: Endpoint) -> CmdResult<String> {
+    pub(crate) async fn connect(&self, app: &AppHandle, endpoint: Endpoint) -> CmdResult<String> {
         self.stop().await;
         let identity = self.identity.lock().await;
         let identity = identity.as_ref().ok_or("identity is locked")?;
@@ -114,7 +114,7 @@ impl AppState {
         Ok(me)
     }
 
-    pub async fn client(&self) -> CmdResult<Client> {
+    pub(crate) async fn client(&self) -> CmdResult<Client> {
         self.session
             .lock()
             .await
@@ -125,14 +125,17 @@ impl AppState {
 
     /// Client plus an event subscription taken before any command is sent,
     /// so replies cannot be missed.
-    pub async fn client_and_events(&self) -> CmdResult<(Client, broadcast::Receiver<Event>)> {
+    pub(crate) async fn client_and_events(
+        &self,
+    ) -> CmdResult<(Client, broadcast::Receiver<Event>)> {
         let guard = self.session.lock().await;
         let s = guard.as_ref().ok_or("not connected")?;
         Ok((s.client.clone(), s.events.subscribe()))
     }
 
-    pub async fn stop(&self) {
-        if let Some(s) = self.session.lock().await.take() {
+    pub(crate) async fn stop(&self) {
+        let session = self.session.lock().await.take();
+        if let Some(s) = session {
             s.client.shutdown().await;
             s.pump.abort();
         }
@@ -140,7 +143,7 @@ impl AppState {
 }
 
 /// Waits for the first event `pick` accepts.
-pub async fn await_event<T>(
+pub(crate) async fn await_event<T>(
     rx: &mut broadcast::Receiver<Event>,
     mut pick: impl FnMut(&Event) -> Option<CmdResult<T>>,
 ) -> CmdResult<T> {
@@ -161,7 +164,7 @@ pub async fn await_event<T>(
     .unwrap_or_else(|_| Err("timed out".to_owned()))
 }
 
-pub fn data_dir(app: &AppHandle) -> CmdResult<PathBuf> {
+pub(crate) fn data_dir(app: &AppHandle) -> CmdResult<PathBuf> {
     app.path().app_data_dir().map_err(err)
 }
 

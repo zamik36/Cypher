@@ -1,5 +1,5 @@
-//! Voice notes are recorded natively (cpal → Opus → WebM); video notes are
-//! recorded by the webview's MediaRecorder and handed over as one raw IPC
+//! Voice notes are recorded natively (cpal → Opus → `WebM`); video notes are
+//! recorded by the webview's `MediaRecorder` and handed over as one raw IPC
 //! body. Both are then sent, stored sealed and played through
 //! `cypher-media://`.
 
@@ -19,7 +19,7 @@ const MIN_VOICE_MS: u32 = 500;
 const MAX_VIDEO_NOTE_BYTES: usize = 32 << 20;
 
 #[derive(Serialize)]
-pub struct MediaSent {
+pub(crate) struct MediaSent {
     msg_id: String,
     file_id: String,
     duration_ms: u32,
@@ -27,7 +27,7 @@ pub struct MediaSent {
 }
 
 #[tauri::command]
-pub async fn voice_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+pub(crate) async fn voice_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     if state.voice.lock().map_err(err)?.is_some() {
         return Err("already recording".into());
     }
@@ -51,7 +51,7 @@ pub async fn voice_start(app: AppHandle, state: State<'_, AppState>) -> CmdResul
 
 /// Stops recording and sends the note; `None` when it was too short.
 #[tauri::command]
-pub async fn voice_stop(
+pub(crate) async fn voice_stop(
     state: State<'_, AppState>,
     peer_id: String,
 ) -> CmdResult<Option<MediaSent>> {
@@ -90,7 +90,7 @@ pub async fn voice_stop(
 }
 
 #[tauri::command]
-pub async fn voice_cancel(state: State<'_, AppState>) -> CmdResult<()> {
+pub(crate) async fn voice_cancel(state: State<'_, AppState>) -> CmdResult<()> {
     let recorder = state.voice.lock().map_err(err)?.take();
     if let Some(recorder) = recorder {
         tauri::async_runtime::spawn_blocking(move || recorder.cancel())
@@ -103,7 +103,7 @@ pub async fn voice_cancel(state: State<'_, AppState>) -> CmdResult<()> {
 /// Body: `poster JPEG ‖ video`, split by `x-poster-len`; the peer, MIME type
 /// and duration travel in headers so the video is never base64-encoded.
 #[tauri::command]
-pub async fn send_video_note(
+pub(crate) async fn send_video_note(
     state: State<'_, AppState>,
     request: Request<'_>,
 ) -> CmdResult<MediaSent> {

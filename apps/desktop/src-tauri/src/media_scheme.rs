@@ -9,9 +9,13 @@ use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
 use crate::session::AppState;
 
-pub const SCHEME: &str = "cypher-media";
+pub(crate) const SCHEME: &str = "cypher-media";
 
-pub fn handle<R: Runtime>(
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "signature required by register_asynchronous_uri_scheme_protocol"
+)]
+pub(crate) fn handle<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
     responder: UriSchemeResponder,
