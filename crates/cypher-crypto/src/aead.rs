@@ -9,12 +9,16 @@ pub const NONCE_LEN: usize = 12;
 /// AES-256-GCM seal with an explicit nonce. The caller guarantees the
 /// `(key, nonce)` pair is never reused.
 pub fn seal(key: &[u8; 32], nonce: &[u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(plaintext.len() + TAG_LEN);
+    let mut buf = Vec::with_capacity(plaintext.len().saturating_add(TAG_LEN));
     buf.extend_from_slice(plaintext);
     seal_in_place(key, nonce, aad, &mut buf);
     buf
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "a Vec always grows to fit the tag; only plaintexts over 64 GiB fail"
+)]
 pub fn seal_in_place(key: &[u8; 32], nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut Vec<u8>) {
     Aes256Gcm::new(key.into())
         .encrypt_in_place(Nonce::from_slice(nonce), aad, buf)
@@ -22,6 +26,10 @@ pub fn seal_in_place(key: &[u8; 32], nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &
 }
 
 /// Encrypts `buf` in place and returns the detached tag.
+#[expect(
+    clippy::expect_used,
+    reason = "only plaintexts over the 64 GiB AES-GCM limit fail; chunks are at most 1 MiB"
+)]
 pub fn seal_detached(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],

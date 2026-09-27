@@ -1,7 +1,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use cypher_types::{LinkId, PeerId};
 
-use crate::codec::{Reader, WriteExt};
+use crate::codec::{Reader, WriteExt, field_len};
 use crate::{
     BUNDLE_BASE_LEN, FRAME_HEADER_LEN, MAX_BODY_LEN, MAX_INBOX_BATCH, MAX_INBOX_ITEM_LEN,
     MAX_OPKS_PER_PUBLISH, MAX_RELAY_ADDR_LEN, WireError,
@@ -136,36 +136,36 @@ pub enum ErrorCode {
 }
 
 mod kind {
-    pub const HELLO: u8 = 0x01;
-    pub const CHALLENGE: u8 = 0x02;
-    pub const AUTH: u8 = 0x03;
-    pub const READY: u8 = 0x04;
-    pub const PING: u8 = 0x05;
-    pub const PONG: u8 = 0x06;
-    pub const SUPERSEDED: u8 = 0x07;
-    pub const SEND: u8 = 0x10;
-    pub const RECV: u8 = 0x11;
-    pub const SEND_ACK: u8 = 0x12;
-    pub const PUBLISH_KEYS: u8 = 0x20;
-    pub const FETCH_KEYS: u8 = 0x21;
-    pub const KEYS: u8 = 0x22;
-    pub const KEYS_ACK: u8 = 0x23;
-    pub const CREATE_LINK: u8 = 0x30;
-    pub const RESOLVE_LINK: u8 = 0x31;
-    pub const LINK_CREATED: u8 = 0x32;
-    pub const LINK_RESOLVED: u8 = 0x33;
-    pub const INBOX_PUT: u8 = 0x40;
-    pub const INBOX_FETCH: u8 = 0x41;
-    pub const INBOX_ACK: u8 = 0x42;
-    pub const INBOX_BATCH: u8 = 0x43;
-    pub const DONE: u8 = 0x44;
-    pub const BOOTSTRAP: u8 = 0x50;
-    pub const BOOTSTRAP_INFO: u8 = 0x51;
-    pub const ERROR: u8 = 0x7F;
+    pub(super) const HELLO: u8 = 0x01;
+    pub(super) const CHALLENGE: u8 = 0x02;
+    pub(super) const AUTH: u8 = 0x03;
+    pub(super) const READY: u8 = 0x04;
+    pub(super) const PING: u8 = 0x05;
+    pub(super) const PONG: u8 = 0x06;
+    pub(super) const SUPERSEDED: u8 = 0x07;
+    pub(super) const SEND: u8 = 0x10;
+    pub(super) const RECV: u8 = 0x11;
+    pub(super) const SEND_ACK: u8 = 0x12;
+    pub(super) const PUBLISH_KEYS: u8 = 0x20;
+    pub(super) const FETCH_KEYS: u8 = 0x21;
+    pub(super) const KEYS: u8 = 0x22;
+    pub(super) const KEYS_ACK: u8 = 0x23;
+    pub(super) const CREATE_LINK: u8 = 0x30;
+    pub(super) const RESOLVE_LINK: u8 = 0x31;
+    pub(super) const LINK_CREATED: u8 = 0x32;
+    pub(super) const LINK_RESOLVED: u8 = 0x33;
+    pub(super) const INBOX_PUT: u8 = 0x40;
+    pub(super) const INBOX_FETCH: u8 = 0x41;
+    pub(super) const INBOX_ACK: u8 = 0x42;
+    pub(super) const INBOX_BATCH: u8 = 0x43;
+    pub(super) const DONE: u8 = 0x44;
+    pub(super) const BOOTSTRAP: u8 = 0x50;
+    pub(super) const BOOTSTRAP_INFO: u8 = 0x51;
+    pub(super) const ERROR: u8 = 0x7F;
 }
 
 fn header(kind: u8, req_id: u32, body_len: usize) -> BytesMut {
-    let mut b = BytesMut::with_capacity(FRAME_HEADER_LEN + body_len);
+    let mut b = BytesMut::with_capacity(body_len.saturating_add(FRAME_HEADER_LEN));
     b.put_u8(kind);
     b.put_u32_le(req_id);
     b
@@ -203,6 +203,7 @@ fn read_link(r: &mut Reader) -> Result<LinkId, WireError> {
 }
 
 impl Frame<ClientMsg> {
+    #[expect(clippy::too_many_lines, reason = "one flat arm per message kind")]
     pub fn encode(&self) -> Bytes {
         use ClientMsg as M;
         let id = self.req_id;
@@ -220,7 +221,7 @@ impl Frame<ClientMsg> {
             }
             M::Ping => header(kind::PING, id, 0),
             M::Send { to, want_ack, body } => {
-                let mut b = header(kind::SEND, id, 33 + body.len());
+                let mut b = header(kind::SEND, id, body.len().saturating_add(33));
                 b.put_slice(to.as_bytes());
                 b.put_u8(u8::from(*want_ack));
                 b.put_slice(body);
@@ -231,10 +232,17 @@ impl Frame<ClientMsg> {
                 opks,
                 replace_opks,
             } => {
-                let mut b = header(kind::PUBLISH_KEYS, id, base.len() + 3 + opks.len() * 36);
+                let mut b = header(
+                    kind::PUBLISH_KEYS,
+                    id,
+                    opks.len()
+                        .saturating_mul(36)
+                        .saturating_add(base.len())
+                        .saturating_add(3),
+                );
                 b.put_slice(base);
                 b.put_u8(u8::from(*replace_opks));
-                b.put_u16_le(u16::try_from(opks.len()).expect("bounded by MAX_OPKS_PER_PUBLISH"));
+                b.put_u16_le(field_len(opks.len()));
                 for (opk_id, key) in opks {
                     b.put_u32_le(*opk_id);
                     b.put_slice(key);
@@ -253,7 +261,7 @@ impl Frame<ClientMsg> {
                 b
             }
             M::InboxPut { inbox, item } => {
-                let mut b = header(kind::INBOX_PUT, id, 32 + item.len());
+                let mut b = header(kind::INBOX_PUT, id, item.len().saturating_add(32));
                 b.put_slice(inbox);
                 b.put_slice(item);
                 b
@@ -274,6 +282,11 @@ impl Frame<ClientMsg> {
         b.freeze()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        reason = "one flat arm per message kind"
+    )]
     pub fn decode(buf: Bytes) -> Result<Self, WireError> {
         use ClientMsg as M;
         let (k, req_id, mut r) = read_header(buf)?;
@@ -340,6 +353,7 @@ impl Frame<ClientMsg> {
 }
 
 impl Frame<ServerMsg> {
+    #[expect(clippy::too_many_lines, reason = "one flat arm per message kind")]
     pub fn encode(&self) -> Bytes {
         use ServerMsg as M;
         let id = self.req_id;
@@ -358,7 +372,7 @@ impl Frame<ServerMsg> {
                 b
             }
             M::Keys { base, opk } => {
-                let mut b = header(kind::KEYS, id, base.len() + 37);
+                let mut b = header(kind::KEYS, id, base.len().saturating_add(37));
                 b.put_slice(base);
                 match opk {
                     Some((opk_id, key)) => {
@@ -386,10 +400,12 @@ impl Frame<ServerMsg> {
                 b
             }
             M::InboxBatch { claim, items } => {
-                let body_len: usize = items.iter().map(|i| 4 + i.len()).sum();
-                let mut b = header(kind::INBOX_BATCH, id, 17 + body_len);
+                let body_len = items
+                    .iter()
+                    .fold(0usize, |n, i| n.saturating_add(i.len()).saturating_add(4));
+                let mut b = header(kind::INBOX_BATCH, id, body_len.saturating_add(17));
                 b.put_slice(claim);
-                b.put_u8(u8::try_from(items.len()).expect("bounded by MAX_INBOX_BATCH"));
+                b.put_u8(field_len(items.len()));
                 for item in items {
                     b.put_bytes_prefixed(item);
                 }
@@ -401,7 +417,11 @@ impl Frame<ServerMsg> {
                 onion_key,
                 capabilities,
             } => {
-                let mut b = header(kind::BOOTSTRAP_INFO, id, 37 + relay_addr.len());
+                let mut b = header(
+                    kind::BOOTSTRAP_INFO,
+                    id,
+                    relay_addr.len().saturating_add(37),
+                );
                 b.put_short_str(relay_addr);
                 b.put_slice(onion_key);
                 b.put_u32_le(*capabilities);
@@ -417,6 +437,7 @@ impl Frame<ServerMsg> {
         b.freeze()
     }
 
+    #[expect(clippy::too_many_lines, reason = "one flat arm per message kind")]
     pub fn decode(buf: Bytes) -> Result<Self, WireError> {
         use ServerMsg as M;
         let (k, req_id, mut r) = read_header(buf)?;
@@ -497,27 +518,32 @@ pub fn encode_recv(from: &PeerId, body: &[u8]) -> Bytes {
 }
 
 fn recv_frame(req_id: u32, from: &PeerId, body: &[u8]) -> Bytes {
-    let mut b = header(kind::RECV, req_id, 32 + body.len());
+    let mut b = header(kind::RECV, req_id, body.len().saturating_add(32));
     b.put_slice(from.as_bytes());
     b.put_slice(body);
     b.freeze()
 }
 
+/// `[kind][req_id][to 32][want_ack]` in front of a client `Send` body.
+const SEND_HEADER_LEN: usize = FRAME_HEADER_LEN + 33;
+
 /// Zero-copy view of a client `Send` used by the gateway router: peeks at the
 /// destination without decoding the whole frame.
 pub fn peek_send(frame: &Bytes) -> Option<(u32, PeerId, bool, Bytes)> {
-    if frame.len() < FRAME_HEADER_LEN + 33 || frame[0] != kind::SEND {
-        return None;
-    }
-    let req_id = u32::from_le_bytes(frame[1..5].try_into().ok()?);
-    let to = PeerId(frame[5..37].try_into().ok()?);
-    let want_ack = match frame[37] {
+    let (&[k], rest) = frame.split_first_chunk::<1>()?;
+    let (req_id, rest) = rest.split_first_chunk::<4>()?;
+    let (to, rest) = rest.split_first_chunk::<32>()?;
+    let (&[ack], body) = rest.split_first_chunk::<1>()?;
+    let want_ack = match ack {
         0 => false,
         1 => true,
         _ => return None,
     };
-    let body = frame.slice(38..);
-    (body.len() <= MAX_BODY_LEN).then_some((req_id, to, want_ack, body))
+    if k != kind::SEND || body.len() > MAX_BODY_LEN {
+        return None;
+    }
+    let body = frame.slice(SEND_HEADER_LEN..);
+    Some((u32::from_le_bytes(*req_id), PeerId(*to), want_ack, body))
 }
 
 /// Validated relay address for [`ServerMsg::BootstrapInfo`].

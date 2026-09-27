@@ -9,7 +9,9 @@ use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
 use crate::aead;
+use crate::error::CryptoError;
 use crate::identity::IdentitySeed;
+use crate::reader::Reader;
 
 const VERSION: u8 = 2;
 const SALT_LEN: usize = 16;
@@ -51,7 +53,11 @@ pub fn seal(
     let mut nonce = [0u8; aead::NONCE_LEN];
     rng.fill_bytes(&mut nonce);
 
-    let mut out = Vec::with_capacity(HEADER_LEN + 32 + nickname.len() + aead::TAG_LEN);
+    let mut out = Vec::with_capacity(
+        nickname
+            .len()
+            .saturating_add(HEADER_LEN + 32 + aead::TAG_LEN),
+    );
     out.push(VERSION);
     out.extend_from_slice(&salt);
     for p in [M_KIB, T_COST, P_COST] {
@@ -60,7 +66,7 @@ pub fn seal(
     out.extend_from_slice(&nonce);
 
     let key = derive_key(passphrase, &salt, M_KIB, T_COST, P_COST)?;
-    let mut plain = Zeroizing::new(Vec::with_capacity(32 + nickname.len()));
+    let mut plain = Zeroizing::new(Vec::with_capacity(nickname.len().saturating_add(32)));
     plain.extend_from_slice(seed.as_bytes());
     plain.extend_from_slice(nickname.as_bytes());
     let ciphertext = aead::seal(&key, &nonce, &out, &plain);
@@ -69,32 +75,35 @@ pub fn seal(
 }
 
 pub fn open(data: &[u8], passphrase: &str) -> Result<(IdentitySeed, String), IdentityFileError> {
-    if data.len() < HEADER_LEN + 32 + aead::TAG_LEN || data[0] != VERSION {
+    let corrupt = |_: CryptoError| IdentityFileError::Corrupt;
+    let (header, ciphertext) = data
+        .split_at_checked(HEADER_LEN)
+        .ok_or(IdentityFileError::Corrupt)?;
+    let mut r = Reader::new(header);
+    if r.u8().map_err(corrupt)? != VERSION {
         return Err(IdentityFileError::Corrupt);
     }
-    let (header, ciphertext) = data.split_at(HEADER_LEN);
-    let salt = &header[1..1 + SALT_LEN];
-    let param = |i: usize| {
-        let at = 1 + SALT_LEN + i * 4;
-        u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
-    };
-    let (m, t, p) = (param(0), param(1), param(2));
-    if m > MAX_M_KIB {
+    let salt: [u8; SALT_LEN] = r.array().map_err(corrupt)?;
+    let (m, t, p) = (
+        r.u32().map_err(corrupt)?,
+        r.u32().map_err(corrupt)?,
+        r.u32().map_err(corrupt)?,
+    );
+    let nonce: [u8; aead::NONCE_LEN] = r.array().map_err(corrupt)?;
+    r.finish().map_err(corrupt)?;
+    if m > MAX_M_KIB || ciphertext.len() < 32 + aead::TAG_LEN {
         return Err(IdentityFileError::Corrupt);
     }
-    let key = derive_key(passphrase, salt, m, t, p)?;
-    let nonce: &[u8; aead::NONCE_LEN] = header[HEADER_LEN - aead::NONCE_LEN..]
-        .try_into()
-        .map_err(|_| IdentityFileError::Corrupt)?;
+    let key = derive_key(passphrase, &salt, m, t, p)?;
     let plain = Zeroizing::new(
-        aead::open(&key, nonce, header, ciphertext)
+        aead::open(&key, &nonce, header, ciphertext)
             .map_err(|_| IdentityFileError::WrongPassphrase)?,
     );
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&plain[..32]);
-    let nickname =
-        String::from_utf8(plain[32..].to_vec()).map_err(|_| IdentityFileError::Corrupt)?;
-    Ok((IdentitySeed(seed), nickname))
+    let (seed, nickname) = plain
+        .split_first_chunk::<32>()
+        .ok_or(IdentityFileError::Corrupt)?;
+    let nickname = String::from_utf8(nickname.to_vec()).map_err(|_| IdentityFileError::Corrupt)?;
+    Ok((IdentitySeed(*seed), nickname))
 }
 
 fn derive_key(

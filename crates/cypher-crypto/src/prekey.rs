@@ -11,13 +11,13 @@ const SPK_SIGNATURE_CONTEXT: &[u8] = b"cypher/v2/spk";
 
 /// Medium-term X25519 prekey, signed by the identity key and rotated periodically.
 pub struct SignedPreKey {
-    pub id: u32,
+    id: u32,
     secret: StaticSecret,
 }
 
 /// Single-use X25519 prekey; the server hands each one out at most once.
 pub struct OneTimePreKey {
-    pub id: u32,
+    id: u32,
     secret: StaticSecret,
 }
 
@@ -36,6 +36,10 @@ macro_rules! prekey_common {
                     id,
                     secret: StaticSecret::from(secret),
                 }
+            }
+
+            pub fn id(&self) -> u32 {
+                self.id
             }
 
             pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
@@ -102,7 +106,7 @@ impl PrekeyBundle {
             spk_id: spk.id,
             spk: spk.public(),
             spk_signature: spk.sign(identity),
-            opk: opk.map(|k| (k.id, k.public())),
+            opk: opk.map(|k| (k.id(), k.public())),
         }
     }
 

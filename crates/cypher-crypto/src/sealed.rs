@@ -27,10 +27,11 @@ pub fn seal(
         b"cypher/v2/sealed",
     );
 
-    let mut out = Vec::with_capacity(SEALED_OVERHEAD + plaintext.len());
+    let mut out = Vec::with_capacity(plaintext.len().saturating_add(SEALED_OVERHEAD));
     out.extend_from_slice(&eph_pub);
     out.extend_from_slice(plaintext);
-    let tag = aead::seal_detached(&key, &NONCE, &binding, &mut out[32..]);
+    let (_, body) = out.split_at_mut(eph_pub.len());
+    let tag = aead::seal_detached(&key, &NONCE, &binding, body);
     out.extend_from_slice(&tag);
     Ok(out)
 }

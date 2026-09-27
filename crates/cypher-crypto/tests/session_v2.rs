@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers fail loudly on broken fixtures"
+)]
+
 use cypher_crypto::double_ratchet::MAX_SKIP;
 use cypher_crypto::handshake::{self, InitHeader};
 use cypher_crypto::prekey::SignedPreKey;
@@ -254,8 +259,8 @@ fn snapshot_restore_continues_without_key_reuse() {
     let back = send(&mut b2, b"back");
     assert_eq!(recv(&mut a2, &back).unwrap(), b"back");
 
-    assert!(Ratchet::from_bytes(&blob_a[..blob_a.len() - 1]).is_err());
-    assert!(Ratchet::from_bytes(b"garbage").is_err());
+    Ratchet::from_bytes(&blob_a[..blob_a.len() - 1]).unwrap_err();
+    Ratchet::from_bytes(b"garbage").unwrap_err();
 }
 
 #[test]

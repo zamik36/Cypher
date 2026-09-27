@@ -1,4 +1,4 @@
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::WireError;
 
@@ -22,9 +22,7 @@ impl Reader {
     }
 
     pub(crate) fn u8(&mut self) -> Result<u8, WireError> {
-        self.need(1)?;
-        let v = self.buf[0];
-        self.buf = self.buf.slice(1..);
+        let [v] = self.array()?;
         Ok(v)
     }
 
@@ -37,10 +35,8 @@ impl Reader {
     }
 
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
-        self.need(N)?;
-        let mut out = [0u8; N];
-        out.copy_from_slice(&self.buf[..N]);
-        self.buf = self.buf.slice(N..);
+        let out = *self.buf.first_chunk::<N>().ok_or(WireError::Truncated)?;
+        self.buf.advance(N);
         Ok(out)
     }
 
@@ -83,13 +79,26 @@ pub(crate) trait WriteExt {
 
 impl WriteExt for BytesMut {
     fn put_bytes_prefixed(&mut self, b: &[u8]) {
-        self.put_u32_le(u32::try_from(b.len()).expect("field bounded by frame size"));
+        self.put_u32_le(field_len(b.len()));
         self.put_slice(b);
     }
 
     fn put_short_str(&mut self, s: &str) {
-        let len = u8::try_from(s.len()).expect("short string bounded to 255 bytes");
-        self.put_u8(len);
+        self.put_u8(field_len(s.len()));
         self.put_slice(s.as_bytes());
     }
+}
+
+/// Length or count of a field being encoded. Every message type bounds its
+/// fields far below the prefix width (frames are at most `MAX_FRAME_SIZE`,
+/// short strings and batches are validated where they are built), so a
+/// failure here is a programming error, never input-dependent.
+#[expect(
+    clippy::expect_used,
+    reason = "encoders only receive fields their message types already bound"
+)]
+pub(crate) fn field_len<T: TryFrom<usize>>(len: usize) -> T {
+    T::try_from(len)
+        .ok()
+        .expect("field length exceeds its wire prefix")
 }

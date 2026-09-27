@@ -20,11 +20,11 @@ macro_rules! fixed_id {
                 &self.0
             }
 
-            pub fn to_vec(&self) -> Vec<u8> {
+            pub fn to_vec(self) -> Vec<u8> {
                 self.0.to_vec()
             }
 
-            pub fn to_hex(&self) -> String {
+            pub fn to_hex(self) -> String {
                 hex::encode(self.0)
             }
 
@@ -120,18 +120,18 @@ fn base32_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(5) * 8);
     let mut bits = 0u32;
     let mut num_bits = 0u32;
+    // Masked to five bits, so the lookup always hits the alphabet.
+    let symbol = |v: u32| ALPHABET.get((v & 0x1F) as usize).map(|&c| char::from(c));
     for &byte in data {
         bits = (bits << 8) | u32::from(byte);
         num_bits += 8;
         while num_bits >= 5 {
             num_bits -= 5;
-            out.push(char::from(ALPHABET[((bits >> num_bits) & 0x1F) as usize]));
+            out.extend(symbol(bits >> num_bits));
         }
     }
     if num_bits > 0 {
-        out.push(char::from(
-            ALPHABET[((bits << (5 - num_bits)) & 0x1F) as usize],
-        ));
+        out.extend(symbol(bits << (5 - num_bits)));
     }
     out
 }

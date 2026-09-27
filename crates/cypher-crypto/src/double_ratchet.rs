@@ -19,6 +19,8 @@ const MAX_STORED_SKIPPED: usize = 2000;
 
 const SNAPSHOT_VERSION: u8 = 2;
 const AAD_CONTEXT: &[u8] = b"cypher/v2";
+/// Context, both identity keys and the ratchet header.
+const AAD_FIXED_LEN: usize = AAD_CONTEXT.len() + 64 + HEADER_LEN;
 
 /// Per-message ratchet header. Sent in clear, authenticated as AAD.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,7 +276,7 @@ impl Ratchet {
     }
 
     fn aad(&self, header: &Header, extra: &[u8]) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(AAD_CONTEXT.len() + 64 + HEADER_LEN + extra.len());
+        let mut aad = Vec::with_capacity(extra.len().saturating_add(AAD_FIXED_LEN));
         aad.extend_from_slice(AAD_CONTEXT);
         aad.extend_from_slice(&self.ad[0]);
         aad.extend_from_slice(&self.ad[1]);
@@ -297,7 +299,12 @@ impl Ratchet {
             pn: self.pn,
             skipped: self.skipped.iter_ordered().collect(),
         };
-        Zeroizing::new(postcard::to_allocvec(&snapshot).expect("in-memory serialization"))
+        #[expect(
+            clippy::expect_used,
+            reason = "serializing plain arrays and integers into a Vec cannot fail"
+        )]
+        let bytes = postcard::to_allocvec(&snapshot).expect("in-memory serialization");
+        Zeroizing::new(bytes)
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self, CryptoError> {
@@ -397,7 +404,8 @@ fn skip_chain(
     if until <= from {
         return Ok(ck);
     }
-    if (until - from) as usize + out.len() > MAX_SKIP as usize {
+    let new_keys = usize::try_from(until.saturating_sub(from)).unwrap_or(usize::MAX);
+    if new_keys.saturating_add(out.len()) > MAX_SKIP as usize {
         return Err(CryptoError::TooManySkipped);
     }
     for n in from..until {

@@ -12,11 +12,12 @@ use crate::error::CryptoError;
 use crate::reader::Reader;
 use crate::sealed;
 
-const BUCKETS: [usize; 4] = [1024, 4096, 16 * 1024, 96 * 1024];
+const LARGEST_BUCKET: usize = 96 * 1024;
+const BUCKETS: [usize; 4] = [1024, 4096, 16 * 1024, LARGEST_BUCKET];
 const RESPONSE_AAD: &[u8] = b"cypher/v2/onion-response";
 
 /// Largest frame that fits in a sealed onion request.
-pub const MAX_ONION_FRAME: usize = BUCKETS[BUCKETS.len() - 1] - 32 - 8 - 4;
+pub const MAX_ONION_FRAME: usize = LARGEST_BUCKET - 32 - 8 - 4;
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ReplyKey([u8; 32]);
@@ -40,7 +41,7 @@ pub fn seal_request(
     rng.fill_bytes(&mut reply);
     let reply = ReplyKey(reply);
 
-    let mut plain = Vec::with_capacity(bucket(44 + frame.len()));
+    let mut plain = Vec::with_capacity(bucket(frame.len().saturating_add(44)));
     plain.extend_from_slice(&reply.0);
     plain.extend_from_slice(&now_secs.to_le_bytes());
     plain.extend_from_slice(
@@ -79,7 +80,8 @@ fn parse_request(plain: &[u8]) -> Result<OpenedRequest, CryptoError> {
 }
 
 pub fn seal_response(reply: &ReplyKey, frame: &[u8]) -> Vec<u8> {
-    let mut plain = Vec::with_capacity(bucket(4 + frame.len()) + aead::TAG_LEN);
+    let mut plain =
+        Vec::with_capacity(bucket(frame.len().saturating_add(4)).saturating_add(aead::TAG_LEN));
     plain.extend_from_slice(&u32::try_from(frame.len()).unwrap_or(u32::MAX).to_le_bytes());
     plain.extend_from_slice(frame);
     plain.resize(bucket(plain.len()), 0);
@@ -99,7 +101,7 @@ fn bucket(n: usize) -> usize {
         .iter()
         .copied()
         .find(|&b| b >= n)
-        .unwrap_or_else(|| n.next_multiple_of(BUCKETS[BUCKETS.len() - 1]))
+        .unwrap_or_else(|| n.next_multiple_of(LARGEST_BUCKET))
 }
 
 #[cfg(test)]
@@ -140,13 +142,13 @@ mod tests {
 
         let resp = seal_response(&reply, b"y");
         let (_, other_reply) = seal_request(&pk, b"z", 0, &mut OsRng).unwrap();
-        assert!(open_response(&other_reply, &resp).is_err());
+        open_response(&other_reply, &resp).unwrap_err();
     }
 
     #[test]
     fn oversized_frames_are_rejected() {
         let (_, pk) = keys();
         assert!(seal_request(&pk, &vec![0u8; MAX_ONION_FRAME + 1], 0, &mut OsRng).is_err());
-        assert!(seal_request(&pk, &vec![0u8; MAX_ONION_FRAME], 0, &mut OsRng).is_ok());
+        seal_request(&pk, &vec![0u8; MAX_ONION_FRAME], 0, &mut OsRng).unwrap();
     }
 }

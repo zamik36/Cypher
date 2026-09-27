@@ -1,3 +1,10 @@
+//! Cryptography of Cypher: identities, X3DH handshake, Double Ratchet,
+//! sealed sender, onion requests and per-file chunk encryption.
+
+// Counters here are nonces and message numbers: overflow must be handled
+// explicitly, never wrap or panic by accident.
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
+
 pub mod aead;
 pub mod chunk;
 pub mod double_ratchet;

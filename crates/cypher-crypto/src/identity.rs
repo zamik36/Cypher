@@ -20,6 +20,7 @@ impl IdentitySeed {
         Self(bytes)
     }
 
+    #[expect(clippy::expect_used, reason = "32 bytes is always valid BIP39 entropy")]
     pub fn to_mnemonic(&self) -> String {
         bip39::Mnemonic::from_entropy(&self.0)
             .expect("32 bytes is valid BIP39 entropy")
@@ -107,7 +108,7 @@ mod tests {
         let kp = IdentityKeyPair::generate();
         let sig = kp.sign(b"hello");
         let vk = VerifyingKey::from_bytes(kp.peer_id().as_bytes()).unwrap();
-        assert!(vk.verify(b"hello", &sig).is_ok());
+        vk.verify(b"hello", &sig).unwrap();
         assert!(vk.verify(b"world", &sig).is_err());
     }
 

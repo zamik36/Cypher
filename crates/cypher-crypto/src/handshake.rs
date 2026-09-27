@@ -69,19 +69,22 @@ impl InitHeader {
         Ok((header, r.rest()))
     }
 
-    fn signed_message(&self, responder: &PeerId) -> [u8; 14 + 32 + 32 + 32 + 4 + 5] {
-        let mut msg = [0u8; 14 + 32 + 32 + 32 + 4 + 5];
-        let (ctx, rest) = msg.split_at_mut(14);
-        ctx.copy_from_slice(INIT_SIGNATURE_CONTEXT);
-        rest[..32].copy_from_slice(&self.identity_dh);
-        rest[32..64].copy_from_slice(&self.ephemeral);
-        rest[64..96].copy_from_slice(responder.as_bytes());
-        rest[96..100].copy_from_slice(&self.spk_id.to_le_bytes());
-        if let Some(id) = self.opk_id {
-            rest[100] = 1;
-            rest[101..105].copy_from_slice(&id.to_le_bytes());
-        }
-        msg
+    /// `context ‖ identity_dh ‖ ephemeral ‖ responder ‖ spk_id ‖ has_opk ‖ opk_id`.
+    fn signed_message(&self, responder: &PeerId) -> Vec<u8> {
+        let (has_opk, opk_id) = match self.opk_id {
+            Some(id) => (1u8, id.to_le_bytes()),
+            None => (0, [0; 4]),
+        };
+        [
+            INIT_SIGNATURE_CONTEXT,
+            &self.identity_dh,
+            &self.ephemeral,
+            responder.as_bytes(),
+            &self.spk_id.to_le_bytes(),
+            &[has_opk],
+            &opk_id,
+        ]
+        .concat()
     }
 }
 
@@ -131,10 +134,10 @@ pub fn respond(
 ) -> Result<Ratchet, CryptoError> {
     let opk_matches = match (header.opk_id, opk) {
         (None, None) => true,
-        (Some(id), Some(k)) => id == k.id,
+        (Some(id), Some(k)) => id == k.id(),
         _ => false,
     };
-    if spk.id != header.spk_id || !opk_matches {
+    if spk.id() != header.spk_id || !opk_matches {
         return Err(CryptoError::Malformed);
     }
     let vk = VerifyingKey::from_bytes(initiator.as_bytes()).map_err(|_| CryptoError::Malformed)?;

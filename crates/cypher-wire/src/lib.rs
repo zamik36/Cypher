@@ -4,6 +4,13 @@
 //! Layout: `[kind u8][req_id u32 LE][fields...]`, little-endian integers,
 //! `u32`-prefixed byte strings. Decoding is zero-copy for payload fields.
 
+// Parses untrusted input: arithmetic must say how it handles overflow, and
+// every match must name each message kind so new ones cannot slip through.
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::wildcard_enum_match_arm)
+)]
+
 mod codec;
 mod message;
 
@@ -19,7 +26,7 @@ pub const PROTOCOL_VERSION: u16 = 2;
 pub const FRAME_HEADER_LEN: usize = 5;
 
 /// Encoded prekey bundle without the one-time prekey part:
-/// identity(32) ‖ identity_dh(32) ‖ spk_id(4) ‖ spk(32) ‖ signature(64).
+/// identity(32) ‖ `identity_dh(32)` ‖ `spk_id(4)` ‖ spk(32) ‖ signature(64).
 pub const BUNDLE_BASE_LEN: usize = 164;
 
 pub const MAX_BODY_LEN: usize = cypher_types::MAX_FRAME_SIZE - FRAME_HEADER_LEN - 64;

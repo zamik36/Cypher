@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers fail loudly on broken fixtures"
+)]
+
 use bytes::Bytes;
 use cypher_types::{LinkId, PeerId};
 use cypher_wire::{
@@ -99,16 +104,16 @@ fn server_samples() -> Vec<ServerMsg> {
 
 #[test]
 fn every_client_message_roundtrips() {
-    for (i, msg) in client_samples().into_iter().enumerate() {
-        let frame = Frame::new(i as u32 + 1, msg);
+    for (req_id, msg) in (1..).zip(client_samples()) {
+        let frame = Frame::new(req_id, msg);
         assert_eq!(Frame::<ClientMsg>::decode(frame.encode()).unwrap(), frame);
     }
 }
 
 #[test]
 fn every_server_message_roundtrips() {
-    for (i, msg) in server_samples().into_iter().enumerate() {
-        let frame = Frame::new(i as u32, msg);
+    for (req_id, msg) in (0..).zip(server_samples()) {
+        let frame = Frame::new(req_id, msg);
         assert_eq!(Frame::<ServerMsg>::decode(frame.encode()).unwrap(), frame);
     }
 }

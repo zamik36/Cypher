@@ -12,7 +12,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::aead::TAG_LEN;
 use crate::error::CryptoError;
-use crate::kdf::hkdf;
+use crate::kdf::{hkdf, hmac_sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -61,8 +61,7 @@ impl ChunkCipher {
         let ack_key = hkdf::<32>(None, key.as_bytes(), b"cypher/v2/ack");
         Self {
             aes: Aes256Gcm::new(key.as_bytes().into()),
-            ack_mac: <HmacSha256 as Mac>::new_from_slice(ack_key.as_ref())
-                .expect("HMAC accepts any key"),
+            ack_mac: hmac_sha256(ack_key.as_ref()),
             file_id,
             chunk_count,
         }
@@ -138,7 +137,7 @@ impl ChunkCipher {
         aad[..16].copy_from_slice(self.file_id.as_bytes());
         aad[16..20].copy_from_slice(&self.chunk_count.to_le_bytes());
         aad[20..24].copy_from_slice(&index.to_le_bytes());
-        aad[24] = u8::from(index + 1 == self.chunk_count);
+        aad[24] = u8::from(index.checked_add(1) == Some(self.chunk_count));
         Ok((nonce, aad))
     }
 }

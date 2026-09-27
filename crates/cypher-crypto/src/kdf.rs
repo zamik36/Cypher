@@ -6,6 +6,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 
 /// HKDF-SHA256 extract-and-expand into a fixed-size, auto-zeroizing buffer.
+#[expect(
+    clippy::expect_used,
+    reason = "expand only fails for outputs over 255 blocks, ruled out at compile time"
+)]
 pub(crate) fn hkdf<const N: usize>(
     salt: Option<&[u8]>,
     ikm: &[u8],
@@ -19,9 +23,30 @@ pub(crate) fn hkdf<const N: usize>(
     out
 }
 
-/// Symmetric-key ratchet step (Signal KDF_CK): returns `(next_chain_key, message_key)`.
+/// HMAC-SHA256 keyed with `key`.
+#[expect(
+    clippy::expect_used,
+    reason = "HMAC accepts keys of any length; new_from_slice cannot fail"
+)]
+pub(crate) fn hmac_sha256(key: &[u8]) -> HmacSha256 {
+    <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length")
+}
+
+/// Splits derived key material into two keys of fixed sizes.
+pub(crate) fn split<const A: usize, const B: usize, const N: usize>(
+    okm: &[u8; N],
+) -> ([u8; A], [u8; B]) {
+    const { assert!(A + B == N, "split sizes must cover the input exactly") };
+    let (a, b) = okm.split_at(A);
+    let (mut left, mut right) = ([0u8; A], [0u8; B]);
+    left.copy_from_slice(a);
+    right.copy_from_slice(b);
+    (left, right)
+}
+
+/// Symmetric-key ratchet step (Signal `KDF_CK`): returns `(next_chain_key, message_key)`.
 pub(crate) fn kdf_ck(ck: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let keyed = HmacSha256::new_from_slice(ck).expect("HMAC accepts any key length");
+    let keyed = hmac_sha256(ck);
     let mut mk_mac = keyed.clone();
     mk_mac.update(&[0x01]);
     let mut ck_mac = keyed;
@@ -32,14 +57,9 @@ pub(crate) fn kdf_ck(ck: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     )
 }
 
-/// Root-key ratchet step (Signal KDF_RK): returns `(root_key, chain_key)`.
+/// Root-key ratchet step (Signal `KDF_RK)`: returns `(root_key, chain_key)`.
 pub(crate) fn kdf_rk(rk: &[u8; 32], dh_out: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-    let okm = hkdf::<64>(Some(rk), dh_out, b"cypher/v2/rk");
-    let mut root = [0u8; 32];
-    let mut chain = [0u8; 32];
-    root.copy_from_slice(&okm[..32]);
-    chain.copy_from_slice(&okm[32..]);
-    (root, chain)
+    split(&hkdf::<64>(Some(rk), dh_out, b"cypher/v2/rk"))
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -50,14 +70,8 @@ pub(crate) struct MessageKeys {
 
 /// Expands a one-shot message key into an AES-256 key and a GCM nonce.
 pub(crate) fn message_keys(mk: &[u8; 32]) -> MessageKeys {
-    let okm = hkdf::<44>(None, mk, b"cypher/v2/msg");
-    let mut keys = MessageKeys {
-        key: [0; 32],
-        nonce: [0; 12],
-    };
-    keys.key.copy_from_slice(&okm[..32]);
-    keys.nonce.copy_from_slice(&okm[32..]);
-    keys
+    let (key, nonce) = split(&hkdf::<44>(None, mk, b"cypher/v2/msg"));
+    MessageKeys { key, nonce }
 }
 
 #[cfg(test)]
