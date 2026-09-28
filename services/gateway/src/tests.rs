@@ -233,6 +233,32 @@ async fn second_login_supersedes_the_first() {
 }
 
 #[tokio::test]
+async fn login_on_another_node_supersedes_the_first() {
+    let bus = MemBus::default();
+    let (gw1, gw2) = (gateway(&bus), gateway(&bus));
+    let seed = cypher_crypto::IdentitySeed([6; 32]);
+    let mut first = Client::connect_as(&gw1, seed.derive_identity());
+    first.authenticate().await;
+    let mut second = Client::connect_as(&gw2, seed.derive_identity());
+    second.authenticate().await;
+    assert!(matches!(
+        first.recv().await.unwrap().msg,
+        ServerMsg::Superseded
+    ));
+    assert!(first.closed().await);
+
+    let mut sender = Client::connect(&gw1);
+    sender.authenticate().await;
+    sender
+        .send(1, send(second.peer(), true, b"still here"))
+        .await;
+    assert!(
+        matches!(second.recv().await.unwrap().msg, ServerMsg::Recv { .. }),
+        "the new session did not evict itself"
+    );
+}
+
+#[tokio::test]
 async fn delivery_across_gateway_nodes() {
     let bus = MemBus::default();
     let (gw1, gw2) = (gateway(&bus), gateway(&bus));

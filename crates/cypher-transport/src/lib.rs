@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::BytesMut;
 use cypher_types::{Error, MAX_FRAME_SIZE, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -25,8 +26,13 @@ pub fn codec() -> LengthDelimitedCodec {
         .new_codec()
 }
 
+/// Read and write buffer of a connection. tokio-util's 8 KiB default made
+/// them the largest part of an idle gateway connection; chat frames fit
+/// several to a write batch and the buffers grow for file chunks.
+const BUFFER: usize = 2048;
+
 pub fn framed<S: AsyncRead + AsyncWrite>(stream: S) -> Conn<S> {
-    Framed::new(stream, codec())
+    Framed::with_capacity(stream, codec(), BUFFER)
 }
 
 /// Splits `host:port`, accepting bracketed IPv6 literals (`[::1]:443`).
@@ -115,7 +121,7 @@ where
     use futures::StreamExt;
     let (sink, stream) = conn.split();
     (
-        Box::pin(stream.map(|r| r.map(bytes::BytesMut::freeze))),
+        Box::pin(stream.map(|r| r.map(BytesMut::freeze))),
         Box::pin(sink),
     )
 }

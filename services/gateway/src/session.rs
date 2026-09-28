@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cypher_server_kit::ratelimit::ConnLimiter;
-use cypher_server_kit::{SIG_REQUEST_SUBJECT, control_subject, peer_subject};
+use cypher_server_kit::{SIG_REQUEST_SUBJECT, peer_subject};
 use cypher_types::{PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg, encode_recv,
@@ -129,14 +129,11 @@ impl<B: Bus> Session<B> {
             old.outbox.try_push(frame(0, ServerMsg::Superseded));
             old.kick.cancel();
         }
-        self.gw
-            .bus
-            .publish(control_subject(&hex), Bytes::new())
-            .await;
-        let (Ok(mut relayed), Ok(mut control)) = (
-            self.gw.bus.subscribe(peer_subject(&hex)).await,
-            self.gw.bus.subscribe(control_subject(&hex)).await,
-        ) else {
+        // An empty message evicts an older session on another node; it goes
+        // out before this session subscribes, so it never reaches itself.
+        let subject = peer_subject(&hex);
+        self.gw.bus.publish(subject.clone(), Bytes::new()).await;
+        let Ok(mut relayed) = self.gw.bus.subscribe(subject).await else {
             return Some(peer);
         };
         self.out.try_push(frame(0, ServerMsg::Ready));
@@ -147,11 +144,14 @@ impl<B: Bus> Session<B> {
                 biased;
                 () = self.cancel.cancelled() => Next::Closed,
                 () = kick.cancelled() => Next::Kicked,
-                Some(_) = control.next() => {
-                    self.out.try_push(frame(0, ServerMsg::Superseded));
-                    Next::Kicked
-                }
-                msg = relayed.next() => msg.map_or(Next::Closed, Next::Relayed),
+                msg = relayed.next() => match msg {
+                    Some(msg) if msg.payload.is_empty() => {
+                        self.out.try_push(frame(0, ServerMsg::Superseded));
+                        Next::Kicked
+                    }
+                    Some(msg) => Next::Relayed(msg),
+                    None => Next::Closed,
+                },
                 item = stream.next() => match item {
                     Some(Ok(bytes)) => Next::Frame(bytes),
                     _ => Next::Closed,

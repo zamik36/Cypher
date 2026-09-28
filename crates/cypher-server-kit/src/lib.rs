@@ -15,14 +15,11 @@ pub const SIG_REQUEST_SUBJECT: &str = "sig.req";
 pub const SIG_ONION_SUBJECT: &str = "sig.onion";
 pub const SIG_QUEUE_GROUP: &str = "signaling";
 
-/// Subject on which a connected peer's gateway accepts relayed frames.
+/// Subject on which a connected peer's gateway accepts relayed frames. An
+/// empty message on it evicts the session holding it: relayed frames are
+/// never empty, and one subscription per connection halves NATS state.
 pub fn peer_subject(peer_hex: &str) -> String {
     format!("peer.{peer_hex}")
-}
-
-/// Subject used to evict an older session of the same identity.
-pub fn control_subject(peer_hex: &str) -> String {
-    format!("ctl.{peer_hex}")
 }
 
 /// Loads `T` from an optional `config.toml` and `P2P_*` environment variables.
@@ -226,6 +223,5 @@ mod tests {
     #[test]
     fn subjects() {
         assert_eq!(peer_subject("ab"), "peer.ab");
-        assert_eq!(control_subject("ab"), "ctl.ab");
     }
 }
