@@ -198,8 +198,6 @@ jobs:
     name: End-to-end (live stack)
     runs-on: ubuntu-latest
     needs: [check]
-    env:
-      P2P_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master
@@ -207,22 +205,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
-      - name: Start Redis and NATS
-        run: |
-          docker run -d --name redis -p 6379:6379 redis:7-alpine redis-server --requirepass ci
-          docker run -d --name nats -p 4222:4222 -v "$PWD/deploy/nats.conf:/etc/nats/nats.conf:ro"             -e GATEWAY_NATS_PASSWORD=gw -e SIGNALING_NATS_PASSWORD=sig -e RELAY_NATS_PASSWORD=rel             nats:2-alpine -c /etc/nats/nats.conf
       - name: Build services
         run: cargo build --release -p gateway -p signaling -p relay -p load-test
-      - name: Start services
-        run: |
-          mkdir -p e2e
-          P2P_NATS_USER=signaling P2P_NATS_PASSWORD=sig P2P_REDIS_URL=redis://:ci@127.0.0.1:6379             P2P_ONION_KEY_PATH=e2e/onion.bin P2P_RELAY_PUBLIC_ADDR=localhost:9300             target/release/signaling > e2e/signaling.log 2>&1 &
-          P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9100 P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT=e2e/gw1.pem             target/release/gateway > e2e/gateway1.log 2>&1 &
-          P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9110 P2P_METRICS_ADDR=127.0.0.1:9095             P2P_DEV_CERT_OUT=e2e/gw2.pem target/release/gateway > e2e/gateway2.log 2>&1 &
-          P2P_NATS_USER=relay P2P_NATS_PASSWORD=rel P2P_RELAY_ADDR=127.0.0.1:9300 P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT=e2e/relay.pem             target/release/relay > e2e/relay.log 2>&1 &
-          sleep 3
-          cat e2e/gw1.pem e2e/relay.pem > e2e/stack.pem
-          cat e2e/gw1.pem e2e/gw2.pem > e2e/gateways.pem
+      - name: Start stack
+        run: .github/scripts/start-stack.sh
       - name: User journey
         run: CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA=e2e/stack.pem cargo test --release -p e2e --test live
       - name: Web client journey (WebAssembly over WebSocket)
@@ -230,10 +216,15 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.129 --locked
           npm run build:wasm -w apps/pwa
           CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 node apps/pwa/scripts/live.mjs
+      # 5k clients across two gateway nodes (NATS). The memory budget is ~1.6x
+      # the measured cost of a connection (docs/performance.md).
       - name: Cross-node load
         run: |
-          target/release/load-test --connections 500 --duration 10 --gateway-addr localhost:9100             --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem --msg-rate 20 | tee e2e/load.txt
-          grep -q "errors:      0" e2e/load.txt
+          ulimit -n 65536
+          target/release/load-test --connections 5000 --ramp 10 --duration 15 --msg-rate 5 \
+            --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
+            --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
+            --assert-max-bytes-per-conn 40000
       - name: Service logs
         if: failure()
         run: tail -n 100 e2e/*.log

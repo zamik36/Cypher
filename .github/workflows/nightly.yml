@@ -89,6 +89,33 @@ jobs:
           name: criterion
           path: target/criterion/
 
+  load:
+    name: Load (10k connections, two nodes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Build services
+        run: cargo build --release -p gateway -p signaling -p relay -p load-test
+      - name: Start stack
+        run: .github/scripts/start-stack.sh
+      - name: Load
+        run: |
+          ulimit -n 65536
+          target/release/load-test --connections 10000 --ramp 20 --duration 60 --msg-rate 5 \
+            --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
+            --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
+            --assert-max-bytes-per-conn 40000 --json | tee e2e/load.json
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: load
+          path: e2e/
+
   mutants:
     name: Mutation testing ${{ matrix.crate }}
     runs-on: ubuntu-latest

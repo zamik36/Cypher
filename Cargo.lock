@@ -4174,6 +4174,8 @@ dependencies = [
  "cypher-wire",
  "futures",
  "rustls",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
