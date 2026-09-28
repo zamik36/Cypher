@@ -13,7 +13,12 @@ sha2.workspace = true
 cypher-types.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "wire"
+harness = false
 
 [lints]
 workspace = true

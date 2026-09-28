@@ -18,11 +18,16 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 serde_json.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
+
+[[bench]]
+name = "core"
+harness = false
 
 [lints]
 workspace = true

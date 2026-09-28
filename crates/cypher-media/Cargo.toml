@@ -17,7 +17,13 @@ cpal = { version = "0.18", optional = true }
 rtrb = { version = "0.4", optional = true }
 
 [dev-dependencies]
+criterion.workspace = true
 matroska-demuxer = "0.8"
+
+[[bench]]
+name = "media"
+harness = false
+required-features = ["opus"]
 
 [lints]
 workspace = true

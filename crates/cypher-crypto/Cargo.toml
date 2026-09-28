@@ -24,8 +24,13 @@ argon2.workspace = true
 postcard.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 rand_chacha.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "crypto"
+harness = false
 
 [lints]
 workspace = true

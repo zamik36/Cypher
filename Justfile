@@ -97,6 +97,10 @@ cov *args:
     cargo llvm-cov nextest --workspace --all-features --json --summary-only --output-path target/cov.json
     cargo run -q -p xtask -- coverage-gate {{args}}
 
+# Criterion benchmarks (release profile); reports in target/criterion
+bench *args:
+    cargo bench --benches -p cypher-crypto -p cypher-wire -p cypher-core -p cypher-media --features cypher-media/opus -- {{args}}
+
 # Run lint + hygiene + tests
 check: lint hygiene test
 
