@@ -195,6 +195,9 @@ cypher-crypto = { path = "crates/cypher-crypto" }
 cypher-tls = { path = "crates/cypher-tls" }
 cypher-transport = { path = "crates/cypher-transport" }
 
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 # Abort on integer overflow instead of wrapping silently (nonces, lengths).
 overflow-checks = true
