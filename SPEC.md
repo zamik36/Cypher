@@ -25,9 +25,9 @@
 | B | Сервисы разделены на lib и тонкий bin (`run(config, shutdown)`), общий `cypher_transport::server::serve`, метрики на экземпляр, `OnionUpstream` в relay, чистый модуль команд в wasm, `effects.ts` в PWA | ✅ `c872cda` |
 | C | Строгие линтеры Rust: все нарушения исправлены, конфиг включён | ✅ `969d2af`…`93c98a4` + конфиг |
 | D | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants); Opus на эталонном libopus, `unsafe_code = "forbid"` | ✅ `66ae1e7` |
-| E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ✅ (desktop 74% из 80 — остаток в G) |
-| F ⏭ | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ⏳ |
-| G | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
+| E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ✅ `f044c26` (desktop 74% из 80 — остаток в G) |
+| F | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ✅ `e884ca1`…`8849b9f` |
+| G ⏭ | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
 | H | Документация: заново `architecture.md`, `protocol-v2.md`, `threat-model.md`; удалить `onion-routing.md`; обновить README, deploy, commands; новый `CONTRIBUTING.md`; обновить roadmap и report | ⏳ |
 
 Полный текст плана: `C:\Users\Ilya\.claude\plans\async-spinning-neumann.md`.
@@ -190,14 +190,55 @@
 
 **Desktop ниже цели.** В оставшихся 26% — запуск приложения (`run`, `main`), запись с микрофона, файловый диалог и регистрация URI-схемы. Им нужно настоящее окно или устройство, это проверяется в фазе G (WebDriver).
 
-## Следующий шаг — фаза F (производительность)
+## Фаза F — итог
+Все цифры, методика и способ воспроизведения — в `docs/performance.md`.
+
+**Сделано:**
+- **Бенчмарки на criterion** для crypto, wire, core и media: `just bench`; nightly-job `bench` сохраняет `target/criterion`. На PR бенчмарки только компилируются через `clippy --all-targets`.
+- **Load-test переписан:**
+  - модули;
+  - `--ramp`/`--duration`;
+  - перцентили p50–p999 для подключения и пересылки;
+  - `--json`;
+  - `--metrics-addr` — RSS gateway в пересчёте на его соединения;
+  - `--src-ips`;
+  - пороги `--max-errors`, `--assert-p99-ms`, `--assert-max-bytes-per-conn`.
+- **Нагрузка в CI:**
+  - e2e — 5k клиентов на двух узлах: 0 ошибок, p99 ≤ 50 мс, ≤ 40 КБ на соединение;
+  - nightly — 10k клиентов, 60 с.
+  - Стек поднимает `.github/scripts/start-stack.sh`.
+- **Профилирование и оптимизация.** heaptrack показал, что память соединения — это буферы `Framed` по 8 КиБ и две подписки NATS на пира. Что изменено:
+  - вытеснение старой сессии — пустое сообщение на `peer.<id>`;
+  - `ctl.*` убран;
+  - буферы соединения по 2 КиБ.
+
+  Итог: **38.3 → 24.5 КБ на соединение**.
+- **Утечек нет.** Соединения, дескрипторы и подписки возвращаются к исходным значениям. Рост RSS между прогонами — это удержание памяти аренами glibc. mimalloc проверен и отклонён: пиковый расход у него выше.
+- **Dev-профиль:** без отладочной информации для зависимостей. `target/` больше не разрастается до 100+ ГБ.
+
+**Linux, 10k клиентов на двух узлах:**
+- 0 ошибок;
+- пересылка p50 0.98 / p99 2.5 мс;
+- 18.8 тыс. сообщений/с;
+- 24.5 КБ на соединение.
+
+**Микробенчмарки:**
+- ratchet — 1.9 мкс на 1 КиБ;
+- AES-GCM на чанках — ≈1 ГБ/с;
+- X3DH — 381 мкс;
+- кодирование Opus — ×183 от реального времени.
+
+**Не сделано:**
+- прогон на 100k — это ручная процедура на отдельной машине, описана в `docs/performance.md`;
+- CPU-профиль под нагрузкой — узких мест по задержкам и пропускной способности не видно.
+
+## Следующий шаг — фаза G (фронтенд)
 По плану:
-- criterion-бенчмарки;
-- метрики процесса;
-- модульный load-test с `--json` и `--assert-*`;
-- нагрузка в CI и nightly;
-- профилирование;
-- `docs/performance.md`.
+- строгий `tsconfig`;
+- ESLint (strict-type-checked) и Prettier;
+- vitest: сторы, i18n, idb на fake-indexeddb, `effects.ts`;
+- Playwright из сценариев journey и media;
+- WebDriver-тесты desktop для запуска приложения, микрофона и файлового диалога — это закроет цель покрытия desktop.
 
 ### Полезные команды
 ```sh
