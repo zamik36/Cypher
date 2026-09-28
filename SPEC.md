@@ -24,9 +24,9 @@
 | A | Удаление P2P и STUN, исправление секретов NATS в деплое, закрепление toolchain 1.98.1, обновление Justfile | ✅ `1e27b5c` |
 | B | Сервисы разделены на lib и тонкий bin (`run(config, shutdown)`), общий `cypher_transport::server::serve`, метрики на экземпляр, `OnionUpstream` в relay, чистый модуль команд в wasm, `effects.ts` в PWA | ✅ `c872cda` |
 | C | Строгие линтеры Rust: все нарушения исправлены, конфиг включён | ✅ `969d2af`…`93c98a4` + конфиг |
-| D | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants); Opus на эталонном libopus, `unsafe_code = "forbid"` | ✅ |
-| E ⏭ | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ⏳ |
-| F | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ⏳ |
+| D | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants); Opus на эталонном libopus, `unsafe_code = "forbid"` | ✅ `66ae1e7` |
+| E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ✅ (desktop 74% из 80 — остаток в G) |
+| F ⏭ | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ⏳ |
 | G | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
 | H | Документация: заново `architecture.md`, `protocol-v2.md`, `threat-model.md`; удалить `onion-routing.md`; обновить README, deploy, commands; новый `CONTRIBUTING.md`; обновить roadmap и report | ⏳ |
 
@@ -132,8 +132,72 @@
 - clippy `-D warnings`: workspace, desktop, wasm32, все 8 комбинаций фич, Android arm64 с libopus, Linux в Docker (workspace, desktop, тесты media);
 - taplo, typos, machete, deny.
 
-## Следующий шаг — фаза E (покрытие)
-По плану: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml`, затем тесты по пробелам.
+## Фаза E — итог
+**Храповик покрытия:**
+- `tools/xtask`: `cargo run -p xtask -- coverage-gate [--report] [--bump]`;
+- `.config/coverage.toml`: нижний порог (`floor`) и цель (`target`) по крейтам;
+- в `excluded` явно перечислены wasm, e2e, load-test и xtask. Новый крейт, не попавший ни в пороги, ни в `excluded`, — ошибка.
+
+`--bump` ставит порог на 1 пункт ниже замера: пути с таймаутами и переподключениями дают разброс около пункта между прогонами. Порог никогда не опускается. Пороги взяты из Linux-замера, как в CI.
+
+**CI:**
+- job `coverage` поднимает Redis и NATS с ACL, меряет `cargo llvm-cov nextest --workspace`, прогоняет gate, сохраняет lcov как артефакт;
+- job `test` собирает default-members, desktop тестируется в своём job;
+- рецепт `just cov`.
+
+**`tests/e2e`** — новый крейт:
+- `Stack` поднимает gateway, signaling и relay в процессе теста на свободных портах с dev-сертификатами;
+- `journey` — общий пользовательский сценарий;
+- `tests/stack.rs` запускается при `CYPHER_TEST_REDIS` и `CYPHER_TEST_NATS`;
+- `tests/live.rs` — бывший live-тест `cypher-client`, для развёрнутого стека.
+
+Тесты со стеком объединены в nextest-группу `live-stack` (`max-threads = 1`): два стека в одной очереди NATS отвечали бы друг другу.
+
+**Найдено тестами и исправлено:**
+- `cypher-media://` отвечал 416 вместо 404 на неизвестный файл. Добавлен `ClientError::NotFound`.
+- Секрет на диске (`secrets.rs`): временный файл с фиксированным именем, оставшийся после падения, навсегда блокировал старт signaling. Теперь у временного файла случайное имя.
+- Ошибки подключения клиента к gateway и relay нигде не логировались. Теперь `warn` с адресом и причиной.
+- Desktop-тесты на Windows не запускались (`0xc0000139`): манифест Common Controls v6 теперь встраивается во все цели через `build.rs`.
+
+**Рефакторинг ради тестируемости:**
+- **tls:** удалено неиспользуемое API (`make_client_config_with_cert`, `make_server_config`); загрузка PEM стала приватной, цикл повторов упрощён.
+- **media:** захват через DIP. Поток-кодер получает `open`; downmix — чистая функция.
+- **desktop:**
+  - `Paths` и TLS резолвятся при старте и хранятся в `AppState`;
+  - `connect` принимает sink событий и не зависит от Tauri;
+  - команды обобщены по `Runtime`;
+  - `VideoNote::parse` вынесен в отдельную функцию;
+  - команды тестируются через mock runtime и настоящий IPC.
+- **server-kit:** `NatsConfig::auth()` с явным приоритетом «user+password > token», пустые значения считаются отсутствующими.
+
+**Linux-замер, 209 тестов** (порог = замер − 1):
+
+| Крейт | % | Цель |
+|---|---|---|
+| crypto | 97.6 | 90 |
+| wire | 97.2 | 90 |
+| types | 96.6 | 90 |
+| transport | 96.6 | 80 |
+| tls | 96.3 | 80 |
+| core | 92.1 | 90 |
+| signaling | 91.6 | 80 |
+| media | 89.4 | 80 |
+| client | 88.0 | 80 |
+| gateway | 87.8 | 80 |
+| server-kit | 85.7 | 80 |
+| relay | 81.1 | 80 |
+| desktop | 74.4 | 80 |
+
+**Desktop ниже цели.** В оставшихся 26% — запуск приложения (`run`, `main`), запись с микрофона, файловый диалог и регистрация URI-схемы. Им нужно настоящее окно или устройство, это проверяется в фазе G (WebDriver).
+
+## Следующий шаг — фаза F (производительность)
+По плану:
+- criterion-бенчмарки;
+- метрики процесса;
+- модульный load-test с `--json` и `--assert-*`;
+- нагрузка в CI и nightly;
+- профилирование;
+- `docs/performance.md`.
 
 ### Полезные команды
 ```sh
@@ -159,7 +223,8 @@ cargo nextest run --workspace --all-features
   - `cypher-it-nats`: запуск с `MSYS_NO_PATHCONV=1`, `-v "C:/Users/Ilya/student/p2p/deploy/nats.conf:/etc/nats/nats.conf:ro"`, env `GATEWAY_NATS_PASSWORD=gwpass`, `SIGNALING_NATS_PASSWORD=sigpass`, `RELAY_NATS_PASSWORD=relpass`, порт `127.0.0.1:14222:4222`.
 - Сервисы — `…/scratchpad/it/start.sh`. Порты: gateway 19100/19101, gateway2 19110, relay 19300/19301.
 - Живые тесты:
-  - `CYPHER_LIVE_GATEWAY=localhost:19100 CYPHER_LIVE_CA=<it>/stack.pem cargo test --release -p cypher-client --test live`;
+  - `CYPHER_LIVE_GATEWAY=localhost:19100 CYPHER_LIVE_CA=<it>/stack.pem cargo test --release -p e2e --test live`;
+  - стек в процессе: отдельный NATS без других сервисов (`cypher-e2e-nats` на 24222, та же ACL), затем `CYPHER_TEST_REDIS=redis://:itpass@127.0.0.1:16379 CYPHER_TEST_NATS=nats://127.0.0.1:24222 {GATEWAY,SIGNALING,RELAY}_NATS_PASSWORD=… just cov`;
   - `node apps/pwa/scripts/live.mjs` с `CYPHER_WS_*`;
   - браузерные сценарии `scratchpad/browser/{journey,media}.mjs` (puppeteer-core + Chrome) против `vite` на 5174. В фазе G переносятся в Playwright.
 

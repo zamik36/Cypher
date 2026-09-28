@@ -1,14 +1,8 @@
-#![expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test helpers fail loudly on broken fixtures"
-)]
-
-//! End-to-end against a running stack (gateway, signaling, relay, NATS,
-//! Redis). Enabled by `CYPHER_LIVE_GATEWAY=host:port` and
-//! `CYPHER_LIVE_CA=<pem bundle pinning gateway and relay>`.
+//! The user journey: pair through a link, chat, send a file, voice and video
+//! notes, then deliver while the recipient is offline.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cypher_client::{Client, Config, Content};
@@ -22,16 +16,47 @@ const WAIT: Duration = Duration::from_secs(20);
 /// Lets the IO thread flush a finished sink before the file is read back.
 const SETTLE: Duration = Duration::from_millis(200);
 
-fn live_config(dir: &Path) -> Option<Config> {
-    let gateway = std::env::var("CYPHER_LIVE_GATEWAY").ok()?;
-    let pem = std::fs::read_to_string(std::env::var("CYPHER_LIVE_CA").ok()?).ok()?;
-    Some(Config {
-        gateway_addr: gateway,
-        tls: cypher_tls::make_client_config_with_pem(&pem).ok()?,
-        data_dir: dir.to_owned(),
-        require_onion: true,
-        tor: None,
-    })
+/// Where clients connect: a gateway and the certificates they pin.
+#[derive(Clone)]
+pub struct Target {
+    pub gateway_addr: String,
+    pub tls: Arc<rustls::ClientConfig>,
+}
+
+impl Target {
+    fn client_config(&self, dir: &Path) -> Config {
+        Config {
+            gateway_addr: self.gateway_addr.clone(),
+            tls: Arc::clone(&self.tls),
+            data_dir: dir.to_owned(),
+            require_onion: true,
+            tor: None,
+        }
+    }
+}
+
+/// Runs the whole journey with two fresh identities.
+pub async fn run(target: &Target) {
+    let mut a = Peer::start(
+        target,
+        IdentitySeed::generate(),
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+    let mut b = Peer::start(
+        target,
+        IdentitySeed::generate(),
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+
+    pair_through_a_link(&mut a, &mut b).await;
+    chat_both_ways(&mut a, &mut b).await;
+    send_a_file(&mut a, &mut b).await;
+    play_back_a_voice_note(&a, &mut b).await;
+    stream_a_video_note(&mut a, &b).await;
+    deliver_offline_through_the_inbox(target, &mut a, b).await;
+    a.client.shutdown().await;
 }
 
 /// A running client with its identity, event stream and data directory.
@@ -43,8 +68,8 @@ struct Peer {
 }
 
 impl Peer {
-    async fn start(seed: IdentitySeed, dir: TempDir) -> Self {
-        let (client, events) = Client::start(&seed, live_config(dir.path()).unwrap())
+    async fn start(target: &Target, seed: IdentitySeed, dir: TempDir) -> Self {
+        let (client, events) = Client::start(&seed, target.client_config(dir.path()))
             .await
             .unwrap();
         let mut peer = Self {
@@ -58,17 +83,21 @@ impl Peer {
         peer
     }
 
+    /// Waits for the first event `pick` accepts; on timeout the panic lists
+    /// what arrived instead.
     async fn wait<T>(&mut self, mut pick: impl FnMut(&Event) -> Option<T>) -> T {
-        tokio::time::timeout(WAIT, async {
+        let mut skipped = Vec::new();
+        let found = tokio::time::timeout(WAIT, async {
             loop {
                 let event = self.events.recv().await.expect("client running");
                 if let Some(v) = pick(&event) {
                     return v;
                 }
+                skipped.push(format!("{event:?}"));
             }
         })
-        .await
-        .expect("event within timeout")
+        .await;
+        found.unwrap_or_else(|_| panic!("no matching event within {WAIT:?}; got {skipped:#?}"))
     }
 
     async fn transfer_complete(&mut self, id: FileId) {
@@ -92,25 +121,6 @@ impl Peer {
 
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251).to_le_bytes()[0]).collect()
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn full_user_journey_against_live_stack() {
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    if live_config(dir_a.path()).is_none() {
-        eprintln!("CYPHER_LIVE_* not set; skipping");
-        return;
-    }
-    let mut a = Peer::start(IdentitySeed::generate(), dir_a).await;
-    let mut b = Peer::start(IdentitySeed::generate(), dir_b).await;
-
-    pair_through_a_link(&mut a, &mut b).await;
-    chat_both_ways(&mut a, &mut b).await;
-    send_a_file(&mut a, &mut b).await;
-    play_back_a_voice_note(&a, &mut b).await;
-    stream_a_video_note(&mut a, &b).await;
-    deliver_offline_through_the_inbox(&mut a, b).await;
-    a.client.shutdown().await;
 }
 
 async fn pair_through_a_link(a: &mut Peer, b: &mut Peer) {
@@ -261,7 +271,7 @@ async fn stream_a_video_note(a: &mut Peer, b: &Peer) {
     assert!(!staged.exists(), "staged plaintext is deleted once sent");
 }
 
-async fn deliver_offline_through_the_inbox(a: &mut Peer, b: Peer) {
+async fn deliver_offline_through_the_inbox(target: &Target, a: &mut Peer, b: Peer) {
     let b_id = b.client.peer_id();
     b.client.shutdown().await;
     let (seed, dir) = (b.seed, b.dir);
@@ -280,7 +290,7 @@ async fn deliver_offline_through_the_inbox(a: &mut Peer, b: Peer) {
     })
     .await;
 
-    let mut b = Peer::start(seed, dir).await;
+    let mut b = Peer::start(target, seed, dir).await;
     assert_eq!(b.text_from_peer().await, "пока тебя не было");
     b.client.shutdown().await;
 }

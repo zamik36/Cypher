@@ -1,5 +1,6 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Runtime, State};
 
+use crate::dto;
 use crate::session::{AppState, CmdResult, Endpoint, err};
 
 fn clean_bridges(lines: Vec<String>) -> Vec<String> {
@@ -12,8 +13,8 @@ fn clean_bridges(lines: Vec<String>) -> Vec<String> {
 
 /// Starts (or restarts) the client against `addr` and returns our peer id.
 #[tauri::command]
-pub(crate) async fn connect_to_gateway(
-    app: AppHandle,
+pub(crate) async fn connect_to_gateway<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     addr: String,
     anonymous: bool,
@@ -26,13 +27,13 @@ pub(crate) async fn connect_to_gateway(
         anonymous,
         bridges: clean_bridges(bridges),
     };
-    state.connect(&app, endpoint).await
+    state.connect(endpoint, dto::emitter(app)).await
 }
 
 /// Switching anonymity changes the transport, so the session restarts.
 #[tauri::command]
-pub(crate) async fn apply_anonymous_settings(
-    app: AppHandle,
+pub(crate) async fn apply_anonymous_settings<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     anonymous: bool,
     bridges: Vec<String>,
@@ -42,7 +43,7 @@ pub(crate) async fn apply_anonymous_settings(
         bridges: clean_bridges(bridges),
         ..state.endpoint().await
     };
-    state.connect(&app, endpoint).await.map(|_| ())
+    state.connect(endpoint, dto::emitter(app)).await.map(|_| ())
 }
 
 #[tauri::command]

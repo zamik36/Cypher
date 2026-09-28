@@ -53,18 +53,40 @@ fn default_nats_url() -> String {
     "nats://127.0.0.1:4222".into()
 }
 
-pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Client> {
-    let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
-    let options = match (
-        non_empty(&config.user),
-        non_empty(&config.password),
-        non_empty(&config.token),
-    ) {
-        (Some(user), Some(password), _) => {
-            async_nats::ConnectOptions::with_user_and_password(user, password)
+/// How a service authenticates to NATS.
+#[derive(Debug, PartialEq, Eq)]
+enum NatsAuth<'a> {
+    UserPassword(&'a str, &'a str),
+    Token(&'a str),
+    Anonymous,
+}
+
+impl NatsConfig {
+    /// A user with a password wins over a token; empty values (unset
+    /// variables in compose files) count as absent.
+    fn auth(&self) -> NatsAuth<'_> {
+        fn set(v: Option<&String>) -> Option<&str> {
+            v.map(String::as_str).filter(|s| !s.is_empty())
         }
-        (_, _, Some(token)) => async_nats::ConnectOptions::with_token(token),
-        _ => async_nats::ConnectOptions::new(),
+        match (
+            set(self.user.as_ref()),
+            set(self.password.as_ref()),
+            set(self.token.as_ref()),
+        ) {
+            (Some(user), Some(password), _) => NatsAuth::UserPassword(user, password),
+            (_, _, Some(token)) => NatsAuth::Token(token),
+            _ => NatsAuth::Anonymous,
+        }
+    }
+}
+
+pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Client> {
+    let options = match config.auth() {
+        NatsAuth::UserPassword(user, password) => {
+            async_nats::ConnectOptions::with_user_and_password(user.to_owned(), password.to_owned())
+        }
+        NatsAuth::Token(token) => async_nats::ConnectOptions::with_token(token.to_owned()),
+        NatsAuth::Anonymous => async_nats::ConnectOptions::new(),
     };
     Ok(options
         .retry_on_initial_connect()
@@ -172,6 +194,33 @@ mod tests {
         assert_eq!(cfg.limit, 42);
         assert_eq!(cfg.nats.user.as_deref(), Some("gateway"));
         assert_eq!(cfg.nats.url, "nats://127.0.0.1:4222");
+    }
+
+    #[test]
+    fn nats_auth_precedence() {
+        let config = |user: &str, password: &str, token: &str| {
+            let opt = |v: &str| (!v.is_empty()).then(|| v.to_owned());
+            NatsConfig {
+                url: default_nats_url(),
+                user: opt(user),
+                password: opt(password),
+                token: opt(token),
+            }
+        };
+        let both = config("gateway", "pw", "tok");
+        assert_eq!(both.auth(), NatsAuth::UserPassword("gateway", "pw"));
+        assert_eq!(config("gateway", "", "tok").auth(), NatsAuth::Token("tok"));
+        assert_eq!(config("", "pw", "").auth(), NatsAuth::Anonymous);
+        let empty = NatsConfig {
+            user: Some(String::new()),
+            password: Some(String::new()),
+            ..config("", "", "")
+        };
+        assert_eq!(
+            empty.auth(),
+            NatsAuth::Anonymous,
+            "empty env values are unset"
+        );
     }
 
     #[test]

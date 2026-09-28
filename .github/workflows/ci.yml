@@ -51,16 +51,63 @@ jobs:
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-nextest@0.9.146
+      # Default members: everything but the desktop app, tested in its own job.
       - name: cargo nextest
-        run: cargo nextest run --workspace --all-features --profile ci
+        run: cargo nextest run --all-features --profile ci
       - name: Doctests
-        run: cargo test --doc --workspace --all-features
+        run: cargo test --doc --all-features
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: junit
           path: target/nextest/ci/junit.xml
+
+  coverage:
+    name: Coverage ratchet
+    runs-on: ubuntu-latest
+    # The in-process stack test (tests/e2e) runs against these, so services
+    # and the client driver count too.
+    env:
+      CYPHER_TEST_REDIS: redis://:ci@127.0.0.1:6379
+      CYPHER_TEST_NATS: nats://127.0.0.1:4222
+      GATEWAY_NATS_PASSWORD: gw
+      SIGNALING_NATS_PASSWORD: sig
+      RELAY_NATS_PASSWORD: rel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146,cargo-llvm-cov@0.9.1
+      - name: Start Redis and NATS
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:7-alpine redis-server --requirepass ci
+          docker run -d --name nats -p 4222:4222 -v "$PWD/deploy/nats.conf:/etc/nats/nats.conf:ro" \
+            -e GATEWAY_NATS_PASSWORD=gw -e SIGNALING_NATS_PASSWORD=sig -e RELAY_NATS_PASSWORD=rel \
+            nats:2-alpine -c /etc/nats/nats.conf
+      # The desktop crate embeds the frontend; its Rust tests need only the directory.
+      - name: Measure
+        run: |
+          mkdir -p apps/desktop/dist
+          cargo llvm-cov nextest --workspace --all-features --json --summary-only --output-path target/cov.json
+          cargo llvm-cov report --lcov --output-path target/lcov.info
+      - name: Gate
+        run: cargo run -p xtask -- coverage-gate
+      - name: Upload lcov
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: lcov
+          path: target/lcov.info
 
   hygiene:
     name: Hygiene (TOML, typos, deps, features)
@@ -177,7 +224,7 @@ jobs:
           cat e2e/gw1.pem e2e/relay.pem > e2e/stack.pem
           cat e2e/gw1.pem e2e/gw2.pem > e2e/gateways.pem
       - name: User journey
-        run: CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA=e2e/stack.pem cargo test --release -p cypher-client --test live
+        run: CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA=e2e/stack.pem cargo test --release -p e2e --test live
       - name: Web client journey (WebAssembly over WebSocket)
         run: |
           cargo install wasm-bindgen-cli --version 0.2.129 --locked
@@ -213,6 +260,8 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: cargo clippy (desktop)
         run: cargo clippy -p cypher-desktop --all-targets -- -D warnings
+      - name: Desktop tests
+        run: cargo test -p cypher-desktop
 
   pwa-build:
     name: PWA Build

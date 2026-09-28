@@ -22,15 +22,19 @@ pub(crate) fn handle<R: Runtime>(
 ) {
     let app = ctx.app_handle().clone();
     tauri::async_runtime::spawn(async move {
-        let response = match app.state::<AppState>().client().await {
-            Ok(client) => serve(&client, &request).await,
-            Err(_) => status(StatusCode::SERVICE_UNAVAILABLE),
+        let client = match app.try_state::<AppState>() {
+            Some(state) => state.client().await.ok(),
+            None => None,
+        };
+        let response = match client {
+            Some(client) => serve(&client, &request).await,
+            None => status(StatusCode::SERVICE_UNAVAILABLE),
         };
         responder.respond(response);
     });
 }
 
-async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     let Some(file_id) = FileId::from_hex(request.uri().path().trim_matches('/')) else {
         return status(StatusCode::NOT_FOUND);
     };

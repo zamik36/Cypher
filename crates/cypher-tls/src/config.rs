@@ -1,161 +1,104 @@
 //! TLS `ServerConfig` and `ClientConfig` builders.
 
+use std::io::BufReader;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use cypher_types::{Error, Result};
 use rustls::crypto::ring::default_provider;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tracing::debug;
 
 use crate::cert::SelfSignedCert;
+
+/// How long a service waits for certificates another container writes
+/// (e.g. Caddy with auto-HTTPS) before giving up.
+const PEM_ATTEMPTS: u32 = 30;
+const PEM_RETRY: Duration = Duration::from_secs(2);
 
 /// Ensure a process-level `CryptoProvider` is installed (idempotent).
 fn ensure_crypto_provider() {
     let _ = default_provider().install_default();
 }
 
+fn transport(context: &str, e: impl std::fmt::Display) -> Error {
+    Error::Transport(format!("{context}: {e}"))
+}
+
 /// Build a TLS [`ServerConfig`] from a [`SelfSignedCert`].
 pub fn make_server_config_from_cert(cert: SelfSignedCert) -> Result<Arc<ServerConfig>> {
+    server_config(vec![cert.cert_der], cert.key_der)
+}
+
+fn server_config(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<Arc<ServerConfig>> {
     ensure_crypto_provider();
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(vec![cert.cert_der], cert.key_der)
-        .map_err(|e| Error::Transport(format!("TLS server config error: {e}")))?;
-
+        .with_single_cert(certs, key)
+        .map_err(|e| transport("TLS server config error", e))?;
     debug!("TLS server config created");
     Ok(Arc::new(config))
 }
 
-/// Build a TLS [`ServerConfig`] from PEM certificate and key files on disk.
-///
-/// Suitable for production use with CA-signed certificates (e.g. from Let's Encrypt).
-pub fn make_server_config_from_pem(cert_path: &str, key_path: &str) -> Result<Arc<ServerConfig>> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use std::io::BufReader;
-
-    ensure_crypto_provider();
-
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| Error::Transport(format!("failed to open cert {cert_path}: {e}")))?;
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| Error::Transport(format!("failed to open key {key_path}: {e}")))?;
-
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
-        .filter_map(|r| match r {
-            Ok(cert) => Some(cert),
-            Err(e) => {
-                tracing::warn!("skipping invalid certificate entry in {}: {}", cert_path, e);
-                None
-            }
-        })
-        .collect();
+/// Server config from CA-issued PEM files (e.g. Let's Encrypt).
+fn server_config_from_pem(cert_path: &str, key_path: &str) -> Result<Arc<ServerConfig>> {
+    let open = |path: &str| {
+        std::fs::File::open(path)
+            .map(BufReader::new)
+            .map_err(|e| transport(&format!("failed to open {path}"), e))
+    };
+    let certs = rustls_pemfile::certs(&mut open(cert_path)?)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| transport(&format!("invalid certificate in {cert_path}"), e))?;
     if certs.is_empty() {
-        return Err(Error::Transport("no certificates found in PEM file".into()));
+        return Err(Error::Transport(format!("no certificate in {cert_path}")));
     }
-
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-        .map_err(|e| Error::Transport(format!("failed to read private key: {e}")))?
-        .ok_or_else(|| Error::Transport("no private key found in PEM file".into()))?;
-
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| Error::Transport(format!("TLS server config error: {e}")))?;
-
-    debug!("TLS server config created from PEM files");
-    Ok(Arc::new(config))
+    let key = rustls_pemfile::private_key(&mut open(key_path)?)
+        .map_err(|e| transport(&format!("invalid private key in {key_path}"), e))?
+        .ok_or_else(|| Error::Transport(format!("no private key in {key_path}")))?;
+    server_config(certs, key)
 }
 
-/// Load TLS server config from PEM files, retrying if files are not yet available.
-///
-/// Useful when certificates are provided by another container (e.g. Caddy with
-/// auto-HTTPS) that may not have written them to disk at the moment this
-/// service starts.
-pub async fn load_pem_with_retry(
+/// Loads PEM files, waiting while they do not exist yet; any other error
+/// (unreadable, malformed) fails at once or after the last attempt.
+async fn load_pem_with_retry(
     cert_path: &str,
     key_path: &str,
-    max_attempts: u32,
-    interval: std::time::Duration,
+    attempts: u32,
+    interval: Duration,
 ) -> Result<Arc<ServerConfig>> {
-    let mut last_err = None;
-
-    for attempt in 1..=max_attempts {
-        // Fail fast on permanent errors (wrong permissions, not a file, etc.).
-        // Only retry when the file simply does not exist yet (ENOENT).
+    let mut attempt = 1;
+    loop {
         for path in [cert_path, key_path] {
-            match std::fs::metadata(path) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // File not yet written — transient, worth retrying.
-                }
-                Err(e) => {
-                    return Err(Error::Transport(format!(
-                        "permanent I/O error for {path}: {e}"
-                    )));
-                }
+            if let Err(e) = std::fs::metadata(path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(transport(&format!("cannot access {path}"), e));
             }
         }
-
-        match make_server_config_from_pem(cert_path, key_path) {
+        match server_config_from_pem(cert_path, key_path) {
             Ok(config) => {
-                tracing::info!(
-                    attempt,
-                    max_attempts,
-                    "TLS certificates loaded from PEM files"
-                );
+                tracing::info!(attempt, "TLS certificates loaded from PEM files");
                 return Ok(config);
             }
-            Err(e) if attempt < max_attempts => {
-                tracing::warn!(
-                    attempt,
-                    max_attempts,
-                    %e,
-                    "TLS cert not ready, retrying in {:?}…",
-                    interval
-                );
-                last_err = Some(e);
+            Err(e) if attempt < attempts => {
+                tracing::warn!(attempt, attempts, %e, "TLS certificates not ready, retrying");
+                attempt += 1;
                 tokio::time::sleep(interval).await;
             }
             Err(e) => {
-                return Err(Error::Transport(format!(
-                    "failed to load TLS certs after {max_attempts} attempts: {e}"
-                )));
+                return Err(transport(
+                    &format!("no TLS certificates after {attempts} attempts"),
+                    e,
+                ));
             }
         }
     }
-
-    Err(last_err.unwrap_or_else(|| Error::Transport("no retry attempts made".into())))
-}
-
-/// Build a TLS [`ServerConfig`] using a freshly generated self-signed certificate.
-///
-/// Intended for development and testing. In production, use
-/// [`make_server_config_from_cert`] with certificates loaded from disk.
-pub fn make_server_config(hostnames: &[&str]) -> Result<Arc<ServerConfig>> {
-    let cert = SelfSignedCert::generate(hostnames)?;
-    make_server_config_from_cert(cert)
-}
-
-/// Build a TLS [`ClientConfig`] that trusts exactly one certificate: used to
-/// pin a development server's self-signed certificate instead of disabling
-/// verification.
-///
-/// In production, use [`make_client_config`] which validates against the
-/// system's trusted roots.
-pub fn make_client_config_with_cert(
-    ca_cert: rustls::pki_types::CertificateDer<'static>,
-) -> Result<Arc<ClientConfig>> {
-    ensure_crypto_provider();
-    let mut roots = RootCertStore::empty();
-    roots
-        .add(ca_cert)
-        .map_err(|e| Error::Transport(format!("failed to add CA cert: {e}")))?;
-
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-
-    Ok(Arc::new(config))
 }
 
 /// Build a TLS [`ClientConfig`] using both native OS certificates and the
@@ -168,27 +111,19 @@ pub fn make_client_config() -> Arc<ClientConfig> {
     ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
 
-    // Native OS trust store (works on Android, Windows, macOS, Linux).
     let native = rustls_native_certs::load_native_certs();
-    let count = native.certs.len();
-    for cert in native.certs {
-        let _ = roots.add(cert);
-    }
-    if count > 0 {
-        debug!("loaded {} native CA certificates", count);
-    }
+    let (added, _) = roots.add_parsable_certificates(native.certs);
+    debug!("loaded {added} native CA certificates");
     for e in native.errors {
         tracing::warn!("native cert load error: {e}");
     }
-
-    // Always include webpki-roots as baseline fallback.
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-
-    Arc::new(config)
+    Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
 }
 
 /// Client config pinning every certificate in a PEM bundle.
@@ -196,10 +131,10 @@ pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
     ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
-        let cert = cert.map_err(|e| Error::Transport(format!("invalid certificate PEM: {e}")))?;
+        let cert = cert.map_err(|e| transport("invalid certificate PEM", e))?;
         roots
             .add(cert)
-            .map_err(|e| Error::Transport(format!("failed to add certificate: {e}")))?;
+            .map_err(|e| transport("failed to add certificate", e))?;
     }
     if roots.is_empty() {
         return Err(Error::Transport("no certificate in PEM".into()));
@@ -218,15 +153,13 @@ pub async fn load_server_config(
     cert_path: Option<&str>,
     key_path: Option<&str>,
     dev_hostnames: &[&str],
-    dev_cert_out: Option<&std::path::Path>,
+    dev_cert_out: Option<&Path>,
 ) -> Result<Arc<ServerConfig>> {
-    fn non_empty(p: Option<&str>) -> Option<&str> {
-        p.filter(|p| !p.is_empty())
-    }
-    match (non_empty(cert_path), non_empty(key_path)) {
-        (Some(cert), Some(key)) => {
-            load_pem_with_retry(cert, key, 30, std::time::Duration::from_secs(2)).await
-        }
+    match (
+        cert_path.filter(|p| !p.is_empty()),
+        key_path.filter(|p| !p.is_empty()),
+    ) {
+        (Some(cert), Some(key)) => load_pem_with_retry(cert, key, PEM_ATTEMPTS, PEM_RETRY).await,
         (None, None) => {
             let cert = SelfSignedCert::generate(dev_hostnames)?;
             if let Some(out) = dev_cert_out {
@@ -238,5 +171,136 @@ pub async fn load_server_config(
         _ => Err(Error::Config(
             "tls_cert_path and tls_key_path must be set together".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PemFiles {
+        dir: tempfile::TempDir,
+        cert_pem: String,
+        key_pem: String,
+    }
+
+    impl PemFiles {
+        fn new() -> Self {
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+            Self {
+                dir: tempfile::tempdir().unwrap(),
+                cert_pem: cert.pem(),
+                key_pem: key.serialize_pem(),
+            }
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.dir.path().join(name).to_string_lossy().into_owned()
+        }
+
+        fn write(&self, name: &str, contents: &str) -> String {
+            let path = self.path(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    async fn load(cert: &str, key: &str) -> Result<Arc<ServerConfig>> {
+        load_pem_with_retry(cert, key, 2, Duration::from_millis(1)).await
+    }
+
+    #[tokio::test]
+    async fn dev_certificate_is_written_for_clients_to_pin() {
+        let files = PemFiles::new();
+        let out = files.dir.path().join("dev.pem");
+        load_server_config(None, Some(""), &["localhost"], Some(&out))
+            .await
+            .unwrap();
+        let pem = std::fs::read_to_string(&out).unwrap();
+        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        make_client_config_with_pem(&pem).unwrap();
+    }
+
+    #[tokio::test]
+    async fn half_configured_pem_paths_are_rejected() {
+        let only_cert = load_server_config(Some("cert.pem"), None, &[], None).await;
+        assert!(matches!(only_cert, Err(Error::Config(_))));
+        let only_key = load_server_config(Some(""), Some("key.pem"), &[], None).await;
+        assert!(matches!(only_key, Err(Error::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn ca_issued_pem_files_load() {
+        let files = PemFiles::new();
+        let cert = files.write("cert.pem", &files.cert_pem);
+        let key = files.write("key.pem", &files.key_pem);
+        load_server_config(Some(&cert), Some(&key), &[], None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_pem_files_fail_with_the_reason() {
+        let files = PemFiles::new();
+        let cert = files.write("cert.pem", &files.cert_pem);
+        let key = files.write("key.pem", &files.key_pem);
+        let empty = files.write("empty.pem", "");
+        let broken = files.write(
+            "broken.pem",
+            "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+        );
+        let reason = |r: Result<Arc<ServerConfig>>| r.unwrap_err().to_string();
+        assert!(reason(load(&empty, &key).await).contains("no certificate"));
+        assert!(reason(load(&broken, &key).await).contains("invalid certificate"));
+        assert!(reason(load(&cert, &empty).await).contains("no private key"));
+        assert!(reason(load(&cert, &cert).await).contains("no private key"));
+        assert!(reason(load(&key, &cert).await).contains("no certificate"));
+    }
+
+    #[tokio::test]
+    async fn missing_files_are_awaited_then_reported() {
+        let files = PemFiles::new();
+        let (cert, key) = (files.path("cert.pem"), files.path("key.pem"));
+        let err = load(&cert, &key).await.unwrap_err().to_string();
+        assert!(err.contains("after 2 attempts"), "{err}");
+
+        let writer = {
+            let (cert, key) = (cert.clone(), key.clone());
+            let (cert_pem, key_pem) = (files.cert_pem.clone(), files.key_pem.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                std::fs::write(key, key_pem).unwrap();
+                std::fs::write(cert, cert_pem).unwrap();
+            })
+        };
+        load_pem_with_retry(&cert, &key, 100, Duration::from_millis(10))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+    }
+
+    #[test]
+    fn pinned_bundle_needs_valid_certificates() {
+        let files = PemFiles::new();
+        let bundle = [files.cert_pem.as_str(), PemFiles::new().cert_pem.as_str()].concat();
+        make_client_config_with_pem(&bundle).unwrap();
+        make_client_config_with_pem("").unwrap_err();
+        make_client_config_with_pem(&files.key_pem).unwrap_err();
+        make_client_config_with_pem(
+            "-----BEGIN CERTIFICATE-----
+!!!
+-----END CERTIFICATE-----
+",
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn system_client_config_builds() {
+        make_client_config();
     }
 }

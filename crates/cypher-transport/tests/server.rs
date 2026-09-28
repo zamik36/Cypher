@@ -134,3 +134,75 @@ async fn shutdown_stops_accepting_and_closes_open_connections() {
         .await
         .unwrap_err();
 }
+
+#[cfg(feature = "ws")]
+mod websocket {
+    use tokio::io::AsyncWriteExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::*;
+
+    async fn start_ws() -> (String, CancellationToken) {
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Upgrade::WebSocket)
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve(
+            vec![listener],
+            Arc::new(Echo::default()),
+            8,
+            shutdown.clone(),
+        ));
+        (addr, shutdown)
+    }
+
+    async fn next(
+        ws: &mut (impl StreamExt<Item = Result<Message, impl std::fmt::Debug>> + Unpin),
+    ) -> Option<Message> {
+        tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .unwrap()
+            .and_then(Result::ok)
+    }
+
+    #[tokio::test]
+    async fn binary_messages_are_frames_and_others_are_skipped() {
+        let (addr, _shutdown) = start_ws().await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        ws.send(Message::text("not a frame")).await.unwrap();
+        ws.send(Message::binary(b"frame".to_vec())).await.unwrap();
+        assert_eq!(
+            next(&mut ws).await,
+            Some(Message::binary(b"frame".to_vec()))
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_message_closes_the_connection() {
+        let (addr, _shutdown) = start_ws().await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        let _ = ws
+            .send(Message::binary(vec![0u8; cypher_types::MAX_FRAME_SIZE + 1]))
+            .await;
+        assert!(!matches!(next(&mut ws).await, Some(Message::Binary(_))));
+    }
+
+    #[tokio::test]
+    async fn failed_handshake_leaves_other_clients_served() {
+        let (addr, _shutdown) = start_ws().await;
+        let mut raw = TcpStream::connect(&addr).await.unwrap();
+        raw.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        ws.send(Message::binary(b"ok".to_vec())).await.unwrap();
+        assert_eq!(next(&mut ws).await, Some(Message::binary(b"ok".to_vec())));
+    }
+}

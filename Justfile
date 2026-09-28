@@ -91,13 +91,19 @@ miri profile="miri" *args:
     MIRIFLAGS=-Zmiri-strict-provenance cargo +{{nightly}} miri nextest run --profile {{profile}} \
         -p cypher-types -p cypher-wire -p cypher-crypto -p cypher-core -p cypher-media {{args}}
 
+# Line-coverage ratchet (.config/coverage.toml); `just cov --bump` raises floors.
+# Set CYPHER_TEST_REDIS / CYPHER_TEST_NATS to include the in-process stack test.
+cov *args:
+    cargo llvm-cov nextest --workspace --all-features --json --summary-only --output-path target/cov.json
+    cargo run -q -p xtask -- coverage-gate {{args}}
+
 # Run lint + hygiene + tests
 check: lint hygiene test
 
 # Live end-to-end journeys against locally running services (`just infra services`)
 e2e:
     cat {{certs}}/gateway.pem {{certs}}/relay.pem > {{certs}}/stack.pem
-    CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA={{certs}}/stack.pem cargo test --release -p cypher-client --test live
+    CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA={{certs}}/stack.pem cargo test --release -p e2e --test live
     npm run build:wasm -w apps/pwa
     CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 npm run test:live -w apps/pwa
 

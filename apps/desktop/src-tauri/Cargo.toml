@@ -33,6 +33,12 @@ qrcode = "0.14"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[dev-dependencies]
+e2e = { path = "../../../tests/e2e" }
+serde_json.workspace = true
+tauri = { version = "2", features = ["test"] }
+tempfile = "3"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0"
 

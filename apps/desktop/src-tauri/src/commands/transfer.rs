@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use cypher_core::{Command, MediaKind};
 use cypher_types::FileId;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::chat::parse_peer;
 use crate::session::{AppState, CmdResult, err};
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct TransferInfo {
     file_id: String,
     msg_id: String,
@@ -59,11 +59,7 @@ pub(crate) async fn browse_and_send(
 /// Saves into the user's downloads folder under the (already sanitized)
 /// offered name, never overwriting an existing file.
 #[tauri::command]
-pub(crate) async fn accept_file(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    file_id: String,
-) -> CmdResult<()> {
+pub(crate) async fn accept_file(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
     let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
     let name = state
         .offers
@@ -71,8 +67,12 @@ pub(crate) async fn accept_file(
         .map_err(err)?
         .remove(&id)
         .ok_or("unknown offer")?;
-    let dir = app.path().download_dir().map_err(err)?;
-    let dest = unique_path(&dir, &name).ok_or("too many files with this name")?;
+    let dir = state
+        .paths()
+        .downloads
+        .as_deref()
+        .ok_or("no downloads folder")?;
+    let dest = unique_path(dir, &name).ok_or("too many files with this name")?;
     state
         .client()
         .await?

@@ -1,0 +1,27 @@
+[package]
+name = "e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cypher-client.workspace = true
+cypher-core.workspace = true
+cypher-crypto.workspace = true
+cypher-types.workspace = true
+cypher-tls.workspace = true
+cypher-server-kit.workspace = true
+gateway = { path = "../../services/gateway" }
+signaling = { path = "../../services/signaling" }
+relay = { path = "../../services/relay" }
+tokio.workspace = true
+tokio-util.workspace = true
+rustls.workspace = true
+bytes.workspace = true
+anyhow.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -2,8 +2,11 @@ mod commands;
 mod dto;
 mod media_scheme;
 mod session;
+#[cfg(test)]
+mod tests;
 
 use commands::{chat, identity, link, media, qr, settings, transfer};
+use tauri::Manager;
 
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
@@ -26,7 +29,11 @@ pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(session::AppState::default())
+        .setup(|app| {
+            let paths = session::Paths::resolve(app.handle())?;
+            app.manage(session::AppState::new(paths, session::tls_from_env()?));
+            Ok(())
+        })
         .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::handle)
         .on_page_load(|webview, _| allow_user_media(webview))
         .invoke_handler(tauri::generate_handler![

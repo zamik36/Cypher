@@ -115,3 +115,48 @@ async fn connection_gauge_tracks_open_connections() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(relay.metrics.connections.get(), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn frames_beyond_the_rate_limit_are_dropped() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    // The bucket holds a two-second burst.
+    for corr in 0..FRAMES_PER_SEC * 3 {
+        conn.send(corr, b"burst").await;
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        relay.metrics.dropped.get() > 0,
+        "a burst over the limit is shed"
+    );
+    assert!(relay.metrics.forwarded.get() >= FRAMES_PER_SEC * 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_connections_are_closed() {
+    let relay = relay();
+    let _conn = connect(&relay);
+    tokio::task::yield_now().await;
+    assert_eq!(relay.metrics.connections.get(), 1);
+    tokio::time::sleep(IDLE_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(relay.metrics.connections.get(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_is_disconnected() {
+    let relay = relay();
+    let Conn { mut tx, rx } = connect(&relay);
+    drop(rx);
+    tx.send(Ok([1u64.to_le_bytes().as_slice(), b"x"].concat().into()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(relay.metrics.connections.get(), 0);
+}
+
+#[test]
+fn refused_connections_are_counted() {
+    let relay = relay();
+    relay.rejected();
+    assert_eq!(relay.metrics.rejected.get(), 1);
+}

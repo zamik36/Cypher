@@ -53,6 +53,8 @@ pub enum ClientError {
     InvalidMnemonic,
     #[error("invalid input")]
     InvalidInput,
+    #[error("not found")]
+    NotFound,
 }
 
 #[derive(Clone)]
@@ -288,7 +290,7 @@ impl Client {
             .store
             .get(Table::Media.name(), file_id.to_vec())
             .await?
-            .ok_or(ClientError::InvalidInput)?;
+            .ok_or(ClientError::NotFound)?;
         let key = self.vault.open_media(&file_id, &raw)?;
         let path = self.config.media_path(&file_id);
         tokio::task::spawn_blocking(move || media::read_range(&path, &key, start, end))

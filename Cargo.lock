@@ -1569,6 +1569,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "x25519-dalek",
  "zeroize",
@@ -1609,14 +1610,17 @@ dependencies = [
  "cypher-tls",
  "cypher-transport",
  "cypher-types",
+ "e2e",
  "image",
  "qrcode",
  "rustls",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1660,6 +1664,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
+ "tempfile",
  "tokio",
  "tracing",
  "webpki-roots 1.0.6",
@@ -2186,6 +2191,27 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "e2e"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "cypher-client",
+ "cypher-core",
+ "cypher-crypto",
+ "cypher-server-kit",
+ "cypher-tls",
+ "cypher-types",
+ "gateway",
+ "relay",
+ "rustls",
+ "signaling",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "ecdsa"
@@ -10045,6 +10071,16 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.18",
  "time",
+]
+
+[[package]]
+name = "xtask"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]

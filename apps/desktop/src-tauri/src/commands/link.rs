@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::session::{AppState, CmdResult, await_event, err};
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct LinkInfo {
     link_id: String,
 }

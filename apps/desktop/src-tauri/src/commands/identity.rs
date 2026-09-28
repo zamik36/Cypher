@@ -1,16 +1,16 @@
 use cypher_client::{IdentityStore, Unlocked};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::State;
 
-use crate::session::{AppState, CmdResult, data_dir, err};
+use crate::session::{AppState, CmdResult, err};
 use cypher_core::ui::{self, UiMessage};
 
 /// Argon2id is deliberately slow; keep it off the async runtime.
 async fn with_store<T: Send + 'static>(
-    app: &AppHandle,
+    state: &AppState,
     f: impl FnOnce(IdentityStore) -> Result<T, cypher_client::ClientError> + Send + 'static,
 ) -> CmdResult<T> {
-    let store = IdentityStore::new(&data_dir(app)?);
+    let store = IdentityStore::new(&state.paths().data);
     tokio::task::spawn_blocking(move || f(store))
         .await
         .map_err(err)?
@@ -24,54 +24,54 @@ async fn activate(state: &AppState, unlocked: Unlocked) -> String {
 }
 
 #[tauri::command]
-pub(crate) async fn has_identity(app: AppHandle) -> CmdResult<bool> {
-    Ok(IdentityStore::new(&data_dir(&app)?).exists())
+pub(crate) async fn has_identity(state: State<'_, AppState>) -> CmdResult<bool> {
+    Ok(IdentityStore::new(&state.paths().data).exists())
 }
 
 #[tauri::command]
 pub(crate) async fn create_identity(
-    app: AppHandle,
     state: State<'_, AppState>,
     nickname: String,
     passphrase: String,
 ) -> CmdResult<String> {
-    let unlocked = with_store(&app, move |s| s.create(&nickname, &passphrase)).await?;
+    let unlocked = with_store(&state, move |s| s.create(&nickname, &passphrase)).await?;
     Ok(activate(&state, unlocked).await)
 }
 
 #[tauri::command]
 pub(crate) async fn unlock_identity(
-    app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
 ) -> CmdResult<(String, String)> {
-    let unlocked = with_store(&app, move |s| s.unlock(&passphrase)).await?;
+    let unlocked = with_store(&state, move |s| s.unlock(&passphrase)).await?;
     let nickname = unlocked.nickname.clone();
     Ok((activate(&state, unlocked).await, nickname))
 }
 
 #[tauri::command]
 pub(crate) async fn import_mnemonic(
-    app: AppHandle,
     state: State<'_, AppState>,
     mnemonic: String,
     nickname: String,
     passphrase: String,
 ) -> CmdResult<String> {
-    let unlocked = with_store(&app, move |s| s.import(&mnemonic, &nickname, &passphrase)).await?;
+    let unlocked = with_store(&state, move |s| s.import(&mnemonic, &nickname, &passphrase)).await?;
     Ok(activate(&state, unlocked).await)
 }
 
 /// Re-verifies the passphrase before revealing the recovery phrase.
 #[tauri::command]
-pub(crate) async fn export_mnemonic(app: AppHandle, passphrase: String) -> CmdResult<String> {
-    with_store(&app, move |s| {
+pub(crate) async fn export_mnemonic(
+    state: State<'_, AppState>,
+    passphrase: String,
+) -> CmdResult<String> {
+    with_store(&state, move |s| {
         s.unlock(&passphrase).map(|u| u.seed.to_mnemonic())
     })
     .await
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct Conversation {
     peer_id: String,
     display_name: Option<String>,

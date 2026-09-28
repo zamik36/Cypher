@@ -30,7 +30,8 @@ pub(crate) fn spawn(
     tokio::spawn(async move {
         match cypher_transport::connect_tls(&addr, tls).await {
             Ok(conn) => pump(link, conn, events).await,
-            Err(_) => {
+            Err(e) => {
+                tracing::warn!(?link, %addr, "connect failed: {e}");
                 let _ = events.send(NetEvent::Down(link));
             }
         }

@@ -1,0 +1,22 @@
+# Line-coverage ratchet, checked by `cargo run -p xtask -- coverage-gate`.
+# floor: CI fails below it. `--bump` raises it to one point under the measured
+# value (run-to-run noise) and never lowers it. target: where the floor has to
+# end up. Floors come from the Linux CI job.
+# Rewritten by `--bump`; edit targets and `excluded` by hand.
+
+excluded = ["cypher-wasm", "e2e", "load-test", "xtask"]
+
+[crates]
+cypher-client = { floor = 87.0, target = 80 }
+cypher-core = { floor = 91.0, target = 90 }
+cypher-crypto = { floor = 96.6, target = 90 }
+cypher-desktop = { floor = 73.4, target = 80 }
+cypher-media = { floor = 88.3, target = 80 }
+cypher-server-kit = { floor = 84.7, target = 80 }
+cypher-tls = { floor = 95.2, target = 80 }
+cypher-transport = { floor = 95.6, target = 80 }
+cypher-types = { floor = 95.5, target = 90 }
+cypher-wire = { floor = 96.1, target = 90 }
+gateway = { floor = 86.7, target = 80 }
+relay = { floor = 80.0, target = 80 }
+signaling = { floor = 90.6, target = 80 }

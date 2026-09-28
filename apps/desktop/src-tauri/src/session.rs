@@ -10,11 +10,9 @@ use cypher_core::Event;
 use cypher_crypto::IdentitySeed;
 use cypher_media::Recorder;
 use cypher_types::FileId;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
-
-use crate::dto;
 
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -47,8 +45,39 @@ pub(crate) struct Endpoint {
     pub bridges: Vec<String>,
 }
 
-#[derive(Default)]
+/// Where the app keeps its data, saves accepted files and finds Lyrebird;
+/// resolved once at startup.
+pub(crate) struct Paths {
+    pub data: PathBuf,
+    /// `None` on platforms without a downloads folder.
+    pub downloads: Option<PathBuf>,
+    /// Lyrebird shipped next to the executable, if the build bundles it.
+    pub transport: Option<PathBuf>,
+}
+
+impl Paths {
+    pub(crate) fn resolve<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Self> {
+        let path = app.path();
+        let name = if cfg!(windows) {
+            "lyrebird.exe"
+        } else {
+            "lyrebird"
+        };
+        Ok(Self {
+            data: path.app_data_dir()?,
+            downloads: path.download_dir().ok(),
+            transport: path
+                .resource_dir()
+                .ok()
+                .map(|dir| dir.join(name))
+                .filter(|p| p.exists()),
+        })
+    }
+}
+
 pub(crate) struct AppState {
+    paths: Paths,
+    tls: Arc<rustls::ClientConfig>,
     identity: Mutex<Option<Identity>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
@@ -58,6 +87,22 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn new(paths: Paths, tls: Arc<rustls::ClientConfig>) -> Self {
+        Self {
+            paths,
+            tls,
+            identity: Mutex::default(),
+            session: Mutex::default(),
+            endpoint: Mutex::default(),
+            offers: Offers::default(),
+            voice: StdMutex::default(),
+        }
+    }
+
+    pub(crate) fn paths(&self) -> &Paths {
+        &self.paths
+    }
+
     pub(crate) async fn set_identity(&self, seed: IdentitySeed, nickname: String) {
         self.stop().await;
         *self.identity.lock().await = Some(Identity { seed, nickname });
@@ -75,25 +120,30 @@ impl AppState {
         self.endpoint.lock().await.clone()
     }
 
-    /// (Re)starts the client for the unlocked identity.
-    pub(crate) async fn connect(&self, app: &AppHandle, endpoint: Endpoint) -> CmdResult<String> {
+    /// (Re)starts the client for the unlocked identity; every event is also
+    /// handed to `emit` (the webview in the app).
+    pub(crate) async fn connect(
+        &self,
+        endpoint: Endpoint,
+        emit: impl Fn(&Event) + Send + 'static,
+    ) -> CmdResult<String> {
         self.stop().await;
         let identity = self.identity.lock().await;
         let identity = identity.as_ref().ok_or("identity is locked")?;
         let config = Config {
             gateway_addr: endpoint.gateway_addr.clone(),
-            tls: tls_config()?,
-            data_dir: data_dir(app)?,
+            tls: Arc::clone(&self.tls),
+            data_dir: self.paths.data.clone(),
             require_onion: endpoint.anonymous,
             tor: endpoint.anonymous.then(|| TorConfig {
                 bridges: endpoint.bridges.clone(),
-                transport_binary: bundled_transport(app),
+                transport_binary: self.paths.transport.clone(),
             }),
         };
         *self.endpoint.lock().await = endpoint;
         let (client, mut rx) = Client::start(&identity.seed, config).await.map_err(err)?;
         let (events, _) = broadcast::channel(256);
-        let (tx, app, offers) = (events.clone(), app.clone(), Arc::clone(&self.offers));
+        let (tx, offers) = (events.clone(), Arc::clone(&self.offers));
         let pump = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 if let Event::TransferOffered { file_id, name, .. } = &event
@@ -101,7 +151,7 @@ impl AppState {
                 {
                     offers.insert(*file_id, name.clone());
                 }
-                dto::emit(&app, &event);
+                emit(&event);
                 let _ = tx.send(event);
             }
         });
@@ -164,26 +214,8 @@ pub(crate) async fn await_event<T>(
     .unwrap_or_else(|_| Err("timed out".to_owned()))
 }
 
-pub(crate) fn data_dir(app: &AppHandle) -> CmdResult<PathBuf> {
-    app.path().app_data_dir().map_err(err)
-}
-
-/// Lyrebird shipped next to the executable, if the build bundles it.
-fn bundled_transport(app: &AppHandle) -> Option<PathBuf> {
-    let name = if cfg!(windows) {
-        "lyrebird.exe"
-    } else {
-        "lyrebird"
-    };
-    app.path()
-        .resource_dir()
-        .ok()
-        .map(|dir| dir.join(name))
-        .filter(|p| p.exists())
-}
-
 /// System trust roots; `CYPHER_DEV_CA` pins development certificates instead.
-fn tls_config() -> CmdResult<Arc<rustls::ClientConfig>> {
+pub(crate) fn tls_from_env() -> CmdResult<Arc<rustls::ClientConfig>> {
     match std::env::var("CYPHER_DEV_CA") {
         Ok(path) => {
             let pem = std::fs::read_to_string(path).map_err(err)?;
