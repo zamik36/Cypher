@@ -116,12 +116,11 @@ bench *args:
 # Run lint + hygiene + tests
 check: lint hygiene test
 
-# Live end-to-end journeys against locally running services (`just infra services`)
-e2e:
+# Needs locally running services (`just infra services`).
+# Live journeys: the native client, then the browser (web-e2e)
+e2e: && web-e2e
     cat {{certs}}/gateway.pem {{certs}}/relay.pem > {{certs}}/stack.pem
     CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA={{certs}}/stack.pem cargo test --release -p e2e --test live
-    npm run build:wasm -w apps/pwa
-    CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 npm run test:live -w apps/pwa
 
 # Native TLS load (tools/load-test) against a local gateway
 load connections="1000" duration="30":

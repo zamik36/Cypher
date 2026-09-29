@@ -217,11 +217,10 @@ jobs:
         run: .github/scripts/start-stack.sh
       - name: User journey
         run: CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA=e2e/stack.pem cargo test --release -p e2e --test live
-      - name: Web client journey (WebAssembly over WebSocket)
+      - name: Build WebAssembly core
         run: |
           cargo install wasm-bindgen-cli --version 0.2.129 --locked
           npm run build:wasm -w apps/pwa
-          CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 node apps/pwa/scripts/live.mjs
       # The production bundle in Chromium (fake camera and microphone), driven
       # through the UI: pairing, receipts, a file, reload, notes, recovery.
       - name: Browser journeys (Playwright)

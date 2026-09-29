@@ -10,7 +10,6 @@
     "build": "tsc --noEmit -p . && vite build && node scripts/precompress.mjs",
     "preview": "vite preview",
     "e2e": "playwright test",
-    "test:live": "node scripts/live.mjs",
     "generate-icons": "node scripts/generate-icons.js"
   },
   "dependencies": {
