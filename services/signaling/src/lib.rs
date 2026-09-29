@@ -4,6 +4,8 @@
 mod handler;
 mod onion;
 mod store;
+#[cfg(test)]
+mod tests;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
