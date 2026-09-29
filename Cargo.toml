@@ -50,6 +50,8 @@ license = "MIT"
 publish = false
 
 [workspace.lints.rust]
+# tokio_unstable: set by `just console` for tokio-console builds.
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(tokio_unstable)'] }
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
@@ -208,3 +210,4 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 opt-level = 3
+

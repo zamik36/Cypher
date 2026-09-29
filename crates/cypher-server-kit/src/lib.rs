@@ -142,9 +142,13 @@ pub fn init_tracing() {
         fmt::layer().with_target(true).boxed()
     };
     let subscriber = tracing_subscriber::registry().with(logs.with_filter(filter));
-    #[cfg(feature = "console")]
+    #[cfg(all(feature = "console", tokio_unstable))]
     let subscriber = subscriber.with(console_subscriber::spawn());
     subscriber.init();
+    // console-subscriber panics on a runtime built without the cfg flag, so
+    // `--all-features` builds (CI, coverage) run without the console.
+    #[cfg(all(feature = "console", not(tokio_unstable)))]
+    tracing::warn!("tokio-console needs RUSTFLAGS=\"--cfg tokio_unstable\"; not started");
 }
 
 /// Hides credentials in URLs before they are logged.
