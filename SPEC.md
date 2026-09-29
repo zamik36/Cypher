@@ -28,8 +28,8 @@
 | E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ✅ `f044c26` (desktop 74% из 80 — остаток в G) |
 | F | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ✅ `e884ca1`…`8849b9f` |
 | F2 | Перепроверка индустриальными инструментами: k6 (WebSocket), wrk (HTTP), perf/flamegraph, pprof-rs, hotpath, tokio-console, Valgrind, gungraun, criterion; метрики рантайма tokio и проверка утечки задач в CI | ✅ `57ec020`…`55fae25` |
-| G ⏭ | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
-| H | Документация: заново `architecture.md`, `protocol-v2.md`, `threat-model.md`; удалить `onion-routing.md`; обновить README, deploy, commands; новый `CONTRIBUTING.md`; обновить roadmap и report | ⏳ |
+| G | Фронтенд: строгий tsconfig, ESLint (strict-type-checked + solid) и Prettier, типизированная граница wasm, vitest с храповиком покрытия, Playwright на продакшен-сборке; desktop-тесты через настоящую таблицу команд | ✅ `8074b25`…`2479bed` |
+| H ⏭ | Документация: заново `architecture.md`, `protocol-v2.md`, `threat-model.md`; удалить `onion-routing.md`; обновить README, deploy, commands; новый `CONTRIBUTING.md`; обновить roadmap и report | ⏳ |
 
 Полный текст плана: `C:\Users\Ilya\.claude\plans\async-spinning-neumann.md`.
 
@@ -269,13 +269,51 @@
 - AEAD из ring вместо aes-gcm;
 - один `select` на соединение вместо отдельного опроса токена.
 
-## Следующий шаг — фаза G (фронтенд)
-По плану:
-- строгий `tsconfig`;
-- ESLint (strict-type-checked) и Prettier;
-- vitest: сторы, i18n, idb на fake-indexeddb, `effects.ts`;
-- Playwright из сценариев journey и media;
-- WebDriver-тесты desktop для запуска приложения, микрофона и файлового диалога — это закроет цель покрытия desktop.
+## Фаза G — итог
+**Встроено:**
+- **TypeScript.** В `tsconfig.base.json` включены `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noPropertyAccessFromIndexSignature` и `noImplicitReturns`. Для vite- и playwright-конфигов заведён отдельный `tsconfig.node.json`.
+- **ESLint 10 и Prettier.** ESLint работает с конфигами typescript-eslint `strictTypeChecked` и `stylisticTypeChecked` и с eslint-plugin-solid, запуск с `--max-warnings 0`. Prettier: `printWidth` 120. Команды `npm run lint`, `npm run format`, `npm run format:check`.
+- **Граница wasm.** `cypher-wasm` сам пишет типы в свой `.d.ts` (`Effect`, `Op`, `Row`, `CommandOutcome`, `OpenedMedia`) рядом с сериализатором, поэтому в воркере нет `any` и приведений. `Platform.on` типизирован картой `Events`.
+- **vitest** (jsdom, 70 тестов):
+  - все сторы;
+  - уведомления и буфер обмена;
+  - паритет en/ru и таблицы множественного числа;
+  - порядок эффектов: пакет записи становится durable раньше передачи;
+  - idb на fake-indexeddb;
+  - dBFS-шкала индикатора громкости.
+
+  Порог покрытия — храповик: измеренное значение минус 1 (строки 99, ветки 94).
+- **Playwright** (`apps/pwa/e2e`). Тесты гоняют продакшен-сборку через `vite preview` с тем же прокси `/ws` и `/relay`, в Chromium с фейковыми камерой и микрофоном, и всё проходят через UI:
+  - пары и чат с квитанциями о прочтении;
+  - файл 3 МиБ со сверкой SHA-256;
+  - перезагрузка, неверный и верный пароль, сообщение, пришедшее офлайн;
+  - голосовые сообщения и кружочки с воспроизведением;
+  - восстановление по фразе.
+
+  15 из 15 при `--repeat-each 5`. В CI тесты запускаются в job `e2e` на живом стеке, локально — `just web-e2e`.
+- **Desktop.** `run()` и тесты делят `wire()` — таблицу команд и схему `cypher-media`. Тесты вызывают команды по имени через IPC с camelCase-аргументами из `tauri.ts`. Голосовой путь покрыт через `Recorder::from_samples` (фича `test-util` в `cypher-media`). Покрытие desktop выросло с 74,4 до 83,5 % при цели 80.
+
+**Найдено и исправлено:**
+- **История чата пропадала**, если после разблокировки сообщение приходило раньше, чем открывался чат. История грузилась только для пустого чата. Теперь она сливается с живыми сообщениями один раз, с дедупликацией по id.
+- **Восстановить личность на новом устройстве было нельзя.** Ссылка «Импорт» была только на экране разблокировки, где личность уже есть. Кроме того, подписи называли фразу «64 hex-символами», хотя это 24 слова BIP39.
+- **Неверное множественное число:** «0 active chat», «21 активных чатов». Русские формы теперь берутся из `Intl.PluralRules`.
+- **Ошибки буфера обмена** были необработанным rejection, и «Скопировано» показывалось даже при отказе.
+- **Ошибки IndexedDB** могли отклоняться с `null` вместо `Error`.
+
+**Не покрыто тестами, по устройству платформы:**
+- открытие настоящего микрофона;
+- нативный диалог выбора файла;
+- `run()` и `main`;
+- хук разрешений WebKitGTK.
+
+WebDriver (tauri-driver) не управляет нативным диалогом, а в CI нет аудиоустройства, поэтому этот путь не выбран.
+
+## Следующий шаг — фаза H (документация)
+- Заново написать `architecture.md`, `protocol-v2.md` и `threat-model.md`.
+- Удалить `onion-routing.md`.
+- Обновить README, deploy и commands.
+- Написать `CONTRIBUTING.md`: проверки из `just check` и `just web-check`, храповики покрытия, e2e.
+- Обновить roadmap и report.
 
 ### Полезные команды
 ```sh
@@ -304,7 +342,7 @@ cargo nextest run --workspace --all-features
   - `CYPHER_LIVE_GATEWAY=localhost:19100 CYPHER_LIVE_CA=<it>/stack.pem cargo test --release -p e2e --test live`;
   - стек в процессе: отдельный NATS без других сервисов (`cypher-e2e-nats` на 24222, та же ACL), затем `CYPHER_TEST_REDIS=redis://:itpass@127.0.0.1:16379 CYPHER_TEST_NATS=nats://127.0.0.1:24222 {GATEWAY,SIGNALING,RELAY}_NATS_PASSWORD=… just cov`;
   - `node apps/pwa/scripts/live.mjs` с `CYPHER_WS_*`;
-  - браузерные сценарии `scratchpad/browser/{journey,media}.mjs` (puppeteer-core + Chrome) против `vite` на 5174. В фазе G переносятся в Playwright.
+  - браузерные сценарии: `just web-e2e` — Playwright против `vite preview` на 4173. Прокси смотрит на WebSocket-порты 9101 и 9301; другие адреса задаются через `CYPHER_DEV_GATEWAY_WS` и `CYPHER_DEV_RELAY_WS`.
 
 ## Открытые вопросы и хвосты вне фаз
 - Завести в GitHub секреты `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD`.
