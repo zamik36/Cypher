@@ -45,6 +45,22 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
       await expect(alice.locator(".message-group").getByText(text)).toBeVisible();
     }
   });
+
+  await test.step("clearing history removes it from the screen and the device", async () => {
+    await navigate(alice, "Settings");
+    await alice.getByRole("button", { name: "Clear chat history" }).click();
+    await alice.getByRole("button", { name: "Confirm delete" }).click();
+    await navigate(alice, "Chat");
+    await alice.locator(".peer-item").first().click();
+    await expect(alice.locator(".message-group")).toHaveCount(0);
+
+    await alice.reload();
+    await unlock(alice);
+    await navigate(alice, "Chat");
+    await alice.locator(".peer-item").first().click();
+    await expect(alice.getByText("No messages yet. Say hello!")).toBeVisible();
+    await expect(alice.locator(".message-group")).toHaveCount(0);
+  });
 });
 
 test("a recovery phrase restores the identity on a new device", async ({ browser, baseURL }) => {

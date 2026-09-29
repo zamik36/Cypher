@@ -1,6 +1,7 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { connection, setConnection, setGatewayAddr } from "../stores/connection";
 import { api } from "../platform";
+import { clearAllMessages } from "../stores/chat";
 import { addToast } from "../stores/toasts";
 import { t } from "../i18n";
 import { copyText } from "../utils/clipboard";
@@ -97,6 +98,7 @@ export default function SettingsView(props: SettingsViewProps) {
   async function handleClearHistory() {
     try {
       await api.clearChatHistory();
+      clearAllMessages();
       addToast(t().toast_history_cleared, "success");
     } catch (e) {
       addToast(t().toast_clear_failed(String(e)), "error");
