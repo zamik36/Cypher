@@ -154,11 +154,16 @@ export default function IdentityView(props: IdentityViewProps) {
               >
                 {busy() ? t().identity_creating : t().identity_create}
               </button>
-              <Show when={hasId()}>
-                <button class="link-btn" onClick={() => setMode("unlock")}>
-                  {t().identity_back_unlock}
+              <div class="identity-links">
+                <Show when={hasId()}>
+                  <button class="link-btn" onClick={() => setMode("unlock")}>
+                    {t().identity_back_unlock}
+                  </button>
+                </Show>
+                <button class="link-btn" onClick={() => setMode("import")}>
+                  {t().identity_import}
                 </button>
-              </Show>
+              </div>
             </div>
           </Show>
 

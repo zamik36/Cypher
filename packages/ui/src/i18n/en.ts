@@ -27,7 +27,7 @@ const en = {
   identity_new: "New identity",
   identity_back_unlock: "Back to unlock",
   identity_back: "Back",
-  identity_seed_placeholder: "Seed (64 hex characters)",
+  identity_seed_placeholder: "Recovery phrase (24 words)",
 
   // -- Home --
   home_connecting: "Connecting to network...",
@@ -118,7 +118,7 @@ const en = {
   settings_bridges_label: "Tor bridge lines",
   settings_bridges_placeholder: "One bridge per line, for example: obfs4 1.2.3.4:443 ...",
   settings_bridges_help: "Leave empty to use the default transport path. Duplicate and blank lines are ignored.",
-  settings_export: "Export Seed (Backup)",
+  settings_export: "Export recovery phrase (backup)",
   settings_export_placeholder: "Enter passphrase to export",
   settings_export_btn: "Export",
   settings_copy: "Copy",
@@ -143,7 +143,7 @@ const en = {
   toast_notif_disabled: "Notifications disabled",
   toast_history_cleared: "Chat history cleared",
   toast_clear_failed: (e: string) => `Failed to clear: ${e}`,
-  toast_seed_copied: "Seed copied!",
+  toast_seed_copied: "Recovery phrase copied!",
   toast_copy_failed: "Couldn't copy to the clipboard",
   toast_anonymous_saved: "Anonymous transport settings applied",
   toast_anonymous_saved_local: "Anonymous transport settings saved locally",

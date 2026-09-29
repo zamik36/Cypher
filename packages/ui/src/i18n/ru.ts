@@ -37,7 +37,7 @@ const ru: TranslationKeys = {
   identity_new: "Новая личность",
   identity_back_unlock: "Назад к разблокировке",
   identity_back: "Назад",
-  identity_seed_placeholder: "Seed (64 hex символа)",
+  identity_seed_placeholder: "Фраза восстановления (24 слова)",
 
   // -- Home --
   home_connecting: "Подключение к сети...",
@@ -129,7 +129,7 @@ const ru: TranslationKeys = {
   settings_bridges_placeholder: "По одной строке на мост, например: obfs4 1.2.3.4:443 ...",
   settings_bridges_help:
     "Оставьте пустым, чтобы использовать маршрут по умолчанию. Дубли и пустые строки игнорируются.",
-  settings_export: "Экспорт Seed (Резервная копия)",
+  settings_export: "Экспорт фразы восстановления (резервная копия)",
   settings_export_placeholder: "Введите пароль для экспорта",
   settings_export_btn: "Экспорт",
   settings_copy: "Копировать",
@@ -154,7 +154,7 @@ const ru: TranslationKeys = {
   toast_notif_disabled: "Уведомления выключены",
   toast_history_cleared: "История чатов очищена",
   toast_clear_failed: (e: string) => `Ошибка очистки: ${e}`,
-  toast_seed_copied: "Seed скопирован!",
+  toast_seed_copied: "Фраза восстановления скопирована!",
   toast_copy_failed: "Не удалось скопировать в буфер обмена",
   toast_anonymous_saved: "Настройки анонимного транспорта применены",
   toast_anonymous_saved_local: "Настройки анонимного транспорта сохранены локально",

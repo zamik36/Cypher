@@ -28,7 +28,7 @@ export default function SettingsView(props: SettingsViewProps) {
   const [confirmClear, setConfirmClear] = createSignal(false);
   const [clearCountdown, setClearCountdown] = createSignal(0);
   const [exportPass, setExportPass] = createSignal("");
-  const [seedHex, setSeedHex] = createSignal<string | null>(null);
+  const [recoveryPhrase, setRecoveryPhrase] = createSignal<string | null>(null);
   const [anonymousEnabled, setAnonymousEnabled] = createSignal(anonymousSettings.enabled);
   const [bridgeLines, setBridgeLines] = createSignal(anonymousSettings.bridgeLines.join("\n"));
   const [savingAnonymous, setSavingAnonymous] = createSignal(false);
@@ -107,9 +107,9 @@ export default function SettingsView(props: SettingsViewProps) {
   async function handleExportSeed() {
     if (!exportPass()) return;
     try {
-      const hex = await api.exportMnemonic(exportPass());
-      setSeedHex(hex);
-      setTimeout(() => setSeedHex(null), 30_000);
+      const phrase = await api.exportMnemonic(exportPass());
+      setRecoveryPhrase(phrase);
+      setTimeout(() => setRecoveryPhrase(null), 30_000);
     } catch (e) {
       addToast(String(e), "error");
     }
@@ -300,14 +300,14 @@ export default function SettingsView(props: SettingsViewProps) {
               {t().settings_export_btn}
             </button>
           </div>
-          <Show when={seedHex()}>
-            {(seed) => (
+          <Show when={recoveryPhrase()}>
+            {(phrase) => (
               <div class="seed-display">
-                <code>{seed()}</code>
+                <code>{phrase()}</code>
                 <button
                   class="btn-sm btn-secondary"
                   onClick={async () => {
-                    if (await copyText(seed())) addToast(t().toast_seed_copied, "success");
+                    if (await copyText(phrase())) addToast(t().toast_seed_copied, "success");
                   }}
                 >
                   {t().settings_copy}
