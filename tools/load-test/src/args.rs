@@ -49,4 +49,8 @@ pub(crate) struct Args {
     /// Fail when one connection costs the gateway more memory than this.
     #[arg(long)]
     pub assert_max_bytes_per_conn: Option<u64>,
+    /// Fail unless, once every client has left, the gateway runs at most this
+    /// many more tasks than before the run: a leaked connection task.
+    #[arg(long)]
+    pub assert_tasks_return: Option<u64>,
 }

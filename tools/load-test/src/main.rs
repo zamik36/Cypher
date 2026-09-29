@@ -17,14 +17,26 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use clap::Parser;
+use tokio::task::JoinHandle;
 
 use args::Args;
 use client::{PairOutcome, Plan, Stage};
+use probe::Snapshot;
 use report::{Limits, Report};
 use stats::Percentiles;
 
 /// Lets the last connections of the ramp finish before memory is sampled.
 const SETTLE: Duration = Duration::from_secs(1);
+/// How long the gateway may take to notice every client left.
+const DRAIN: Duration = Duration::from_secs(15);
+
+/// What the gateway's metrics said around the run.
+#[derive(Debug, Default)]
+struct Gateway {
+    before: Snapshot,
+    after_ramp: Snapshot,
+    tasks_after_close: Option<u64>,
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -43,7 +55,10 @@ async fn run(args: Args) -> Result<bool> {
         Some(path) => cypher_tls::make_client_config_with_pem(&std::fs::read_to_string(path)?)?,
         None => cypher_tls::make_client_config(),
     };
-    let rss_before = rss(args.metrics_addr.as_deref()).await;
+    let mut gateway = Gateway {
+        before: snapshot(args.metrics_addr.as_deref()).await,
+        ..Gateway::default()
+    };
     let pairs = args.connections.div_ceil(2).max(1);
     let ramp = Duration::from_secs(args.ramp);
     let started = Instant::now();
@@ -59,36 +74,18 @@ async fn run(args: Args) -> Result<bool> {
         load_end: started + ramp + Duration::from_secs(args.duration),
     });
 
-    let spacing = ramp / u32::try_from(pairs).unwrap_or(u32::MAX);
-    let mut tasks = Vec::with_capacity(pairs);
-    for i in 0..pairs {
-        let src = args.src_ips.get(i % args.src_ips.len().max(1)).copied();
-        let plan = Arc::clone(&plan);
-        tasks.push(tokio::spawn(
-            async move { client::run_pair(&plan, src).await },
-        ));
-        tokio::time::sleep_until(
-            (started + spacing * u32::try_from(i + 1).unwrap_or(u32::MAX)).into(),
-        )
-        .await;
-    }
+    let tasks = ramp_up(&args, &plan, pairs, started + ramp).await;
     tokio::time::sleep(SETTLE).await;
-    let rss_after = rss(args.metrics_addr.as_deref()).await;
-
-    let mut outcomes = Vec::with_capacity(pairs);
-    for task in tasks {
-        outcomes.push(task.await.unwrap_or_else(|_| PairOutcome {
-            failed: Some(Stage::Relay),
-            ..PairOutcome::default()
-        }));
+    gateway.after_ramp = snapshot(args.metrics_addr.as_deref()).await;
+    let outcomes = join(tasks).await;
+    let elapsed = started.elapsed();
+    if let (Some(addr), Some(base)) = (args.metrics_addr.as_deref(), gateway.before.alive_tasks) {
+        let limit = base.saturating_add(args.assert_tasks_return.unwrap_or(0));
+        gateway.tasks_after_close = probe::tasks_settled(addr, limit, DRAIN).await;
     }
-    let report = summarize(&args, outcomes, started.elapsed(), rss_before, rss_after);
+    let report = summarize(&args, outcomes, elapsed, &gateway);
     print(&args, &report)?;
-    let limits = Limits {
-        max_errors: args.max_errors,
-        p99_ms: args.assert_p99_ms,
-        bytes_per_conn: args.assert_max_bytes_per_conn,
-    };
+    let limits = Limits::from(&args);
     let violations = report.violations(&limits);
     let mut err = std::io::stderr().lock();
     for v in &violations {
@@ -97,19 +94,56 @@ async fn run(args: Args) -> Result<bool> {
     Ok(violations.is_empty())
 }
 
-async fn rss(addr: Option<&str>) -> Option<u64> {
-    let bytes = probe::resident_bytes(addr?).await;
-    bytes
-        .inspect_err(|e| tracing::warn!("gateway memory not measured: {e:#}"))
-        .ok()
+/// Starts one pair per spacing interval so all are connecting by `ramp_end`.
+async fn ramp_up(
+    args: &Args,
+    plan: &Arc<Plan>,
+    pairs: usize,
+    ramp_end: Instant,
+) -> Vec<JoinHandle<PairOutcome>> {
+    let started = Instant::now();
+    let spacing =
+        ramp_end.saturating_duration_since(started) / u32::try_from(pairs).unwrap_or(u32::MAX);
+    let mut tasks = Vec::with_capacity(pairs);
+    for i in 0..pairs {
+        let src = args.src_ips.get(i % args.src_ips.len().max(1)).copied();
+        let plan = Arc::clone(plan);
+        tasks.push(tokio::spawn(
+            async move { client::run_pair(&plan, src).await },
+        ));
+        let next = started + spacing * u32::try_from(i + 1).unwrap_or(u32::MAX);
+        tokio::time::sleep_until(next.into()).await;
+    }
+    tasks
+}
+
+/// A pair whose task panicked counts as failed while relaying.
+async fn join(tasks: Vec<JoinHandle<PairOutcome>>) -> Vec<PairOutcome> {
+    let mut outcomes = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        outcomes.push(task.await.unwrap_or_else(|_| PairOutcome {
+            failed: Some(Stage::Relay),
+            ..PairOutcome::default()
+        }));
+    }
+    outcomes
+}
+
+async fn snapshot(addr: Option<&str>) -> Snapshot {
+    let Some(addr) = addr else {
+        return Snapshot::default();
+    };
+    probe::scrape(addr)
+        .await
+        .inspect_err(|e| tracing::warn!("gateway metrics not read: {e:#}"))
+        .unwrap_or_default()
 }
 
 fn summarize(
     args: &Args,
     outcomes: Vec<PairOutcome>,
     elapsed: Duration,
-    rss_before: Option<u64>,
-    rss_after: Option<u64>,
+    gateway: &Gateway,
 ) -> Report {
     let (mut connect_us, mut relay_us) = (Vec::new(), Vec::new());
     let (mut connected, mut on_primary) = (0u64, 0u64);
@@ -136,9 +170,15 @@ fn summarize(
         relayed_per_sec: relayed / elapsed.as_secs().max(1),
         connect_us: Percentiles::of(connect_us),
         relay_us: Percentiles::of(relay_us),
-        gateway_rss_before: rss_before,
-        gateway_rss_after: rss_after,
-        bytes_per_connection: Report::per_connection(rss_before, rss_after, on_primary),
+        gateway_rss_before: gateway.before.resident_bytes,
+        gateway_rss_after: gateway.after_ramp.resident_bytes,
+        bytes_per_connection: Report::per_connection(
+            gateway.before.resident_bytes,
+            gateway.after_ramp.resident_bytes,
+            on_primary,
+        ),
+        gateway_tasks_before: gateway.before.alive_tasks,
+        gateway_tasks_after_close: gateway.tasks_after_close,
     }
 }
 

@@ -19,6 +19,8 @@ pub(crate) struct Report {
     pub gateway_rss_before: Option<u64>,
     pub gateway_rss_after: Option<u64>,
     pub bytes_per_connection: Option<u64>,
+    pub gateway_tasks_before: Option<u64>,
+    pub gateway_tasks_after_close: Option<u64>,
 }
 
 /// Pass/fail thresholds from the command line.
@@ -27,6 +29,18 @@ pub(crate) struct Limits {
     pub max_errors: Option<u64>,
     pub p99_ms: Option<u64>,
     pub bytes_per_conn: Option<u64>,
+    pub tasks_slack: Option<u64>,
+}
+
+impl From<&crate::args::Args> for Limits {
+    fn from(args: &crate::args::Args) -> Self {
+        Self {
+            max_errors: args.max_errors,
+            p99_ms: args.assert_p99_ms,
+            bytes_per_conn: args.assert_max_bytes_per_conn,
+            tasks_slack: args.assert_tasks_return,
+        }
+    }
 }
 
 impl Report {
@@ -68,6 +82,14 @@ impl Report {
                 self.gateway_connections
             )?;
         }
+        if let (Some(before), Some(after)) =
+            (self.gateway_tasks_before, self.gateway_tasks_after_close)
+        {
+            writeln!(
+                out,
+                "gateway tasks: {before} before, {after} after every client left"
+            )?;
+        }
         Ok(out)
     }
 
@@ -91,6 +113,15 @@ impl Report {
             }
             (Some(_), None) => broken.push("gateway memory was not measured".to_owned()),
             _ => {}
+        }
+        if let Some(slack) = limits.tasks_slack {
+            match (self.gateway_tasks_before, self.gateway_tasks_after_close) {
+                (Some(before), Some(after)) if after > before.saturating_add(slack) => broken.push(
+                    format!("gateway kept {after} tasks after every client left (was {before})"),
+                ),
+                (Some(_), Some(_)) => {}
+                _ => broken.push("gateway tasks were not measured".to_owned()),
+            }
         }
         broken
     }
@@ -117,6 +148,8 @@ mod tests {
             gateway_rss_before: Some(1_000),
             gateway_rss_after: Some(21_000),
             bytes_per_connection: Some(2_000),
+            gateway_tasks_before: Some(40),
+            gateway_tasks_after_close: Some(42),
         }
     }
 
@@ -128,12 +161,14 @@ mod tests {
             max_errors: Some(0),
             p99_ms: Some(10),
             bytes_per_conn: Some(1_000),
+            tasks_slack: Some(1),
         };
-        assert_eq!(r.violations(&strict).len(), 3);
+        assert_eq!(r.violations(&strict).len(), 4);
         let loose = Limits {
             max_errors: Some(1),
             p99_ms: Some(50),
             bytes_per_conn: Some(4_096),
+            tasks_slack: Some(2),
         };
         assert!(r.violations(&loose).is_empty());
         let unmeasured = Report {
@@ -143,6 +178,14 @@ mod tests {
         assert_eq!(
             unmeasured.violations(&loose),
             ["gateway memory was not measured"]
+        );
+        let tasks_unknown = Report {
+            gateway_tasks_after_close: None,
+            ..report()
+        };
+        assert_eq!(
+            tasks_unknown.violations(&loose),
+            ["gateway tasks were not measured"]
         );
     }
 
@@ -162,6 +205,7 @@ mod tests {
         let text = report().render().unwrap();
         assert!(text.contains("errors:      0 connect, 1 relay"));
         assert!(text.contains("2000 per each of 10 connections"));
+        assert!(text.contains("gateway tasks: 40 before, 42 after"));
         let unmeasured = Report {
             gateway_rss_before: None,
             ..report()

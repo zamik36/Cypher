@@ -108,7 +108,7 @@ jobs:
           target/release/load-test --connections 10000 --ramp 20 --duration 60 --msg-rate 5 \
             --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
             --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
-            --assert-max-bytes-per-conn 40000 --json | tee e2e/load.json
+            --assert-max-bytes-per-conn 40000 --assert-tasks-return 5 --json | tee e2e/load.json
       - name: Upload report and logs
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

@@ -224,7 +224,7 @@ jobs:
           target/release/load-test --connections 5000 --ramp 10 --duration 15 --msg-rate 5 \
             --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
             --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
-            --assert-max-bytes-per-conn 40000
+            --assert-max-bytes-per-conn 40000 --assert-tasks-return 5
       - name: Service logs
         if: failure()
         run: tail -n 100 e2e/*.log
