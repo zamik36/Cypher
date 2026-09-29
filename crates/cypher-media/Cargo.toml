@@ -9,6 +9,9 @@ publish.workspace = true
 [features]
 opus = ["dep:opus"]
 capture = ["opus", "dep:cpal", "dep:rtrb"]
+# `Recorder::from_samples`: a recorder without a microphone, for tests of
+# code that drives one.
+test-util = ["capture"]
 
 # Benchmarks are criterion targets; the library has none for libtest.
 [lib]

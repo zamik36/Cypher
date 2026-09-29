@@ -34,6 +34,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
+cypher-media = { workspace = true, features = ["test-util"] }
 e2e = { path = "../../../tests/e2e" }
 serde_json.workspace = true
 tauri = { version = "2", features = ["test"] }

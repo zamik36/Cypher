@@ -69,6 +69,19 @@ impl Recorder {
     }
 }
 
+#[cfg(feature = "test-util")]
+impl Recorder {
+    /// A recorder that hears `samples` (mono, at `rate`) instead of the
+    /// microphone.
+    pub fn from_samples(rate: u32, samples: &[f32]) -> Result<Self, MediaError> {
+        let (mut producer, consumer) = RingBuffer::new(samples.len().max(1));
+        for &sample in samples {
+            producer.push(sample).map_err(|_| MediaError::Aborted)?;
+        }
+        Self::start_with(move || Ok((producer, rate, consumer)), |_| {})
+    }
+}
+
 fn run<S>(
     open: impl FnOnce() -> Result<Source<S>, MediaError>,
     on_level: impl FnMut(f32),

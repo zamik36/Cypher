@@ -8,6 +8,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cypher_media::Recorder;
 use cypher_types::FileId;
 use serde_json::{Value, json};
 use tauri::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
@@ -24,6 +25,8 @@ use crate::session::{self, AppState, Paths};
 
 const PASS: &str = "correct horse battery";
 const WAIT: Duration = Duration::from_secs(20);
+/// The sample rate of the stand-in microphone.
+const RATE: u32 = 48_000;
 
 /// One desktop app: mock runtime and webview, its own data and downloads
 /// folders.
@@ -106,6 +109,14 @@ impl Desktop {
 
 fn text(value: &Value) -> String {
     value.as_str().expect("a string").to_owned()
+}
+
+/// A recorder that hears `samples` of a square wave instead of a microphone.
+fn recorder(samples: usize) -> Recorder {
+    let wave: Vec<f32> = (0..samples)
+        .map(|i| if i % 96 < 48 { 0.3 } else { -0.3 })
+        .collect();
+    Recorder::from_samples(RATE, &wave).unwrap()
 }
 
 /// Polls `probe` until it yields a value or the wait runs out.
@@ -234,6 +245,12 @@ async fn commands_fail_cleanly_before_connecting() {
     assert_eq!(stop.unwrap_err(), "not recording");
     assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
 
+    *desktop.state().voice.lock().unwrap() = Some(recorder(4_800));
+    let again = call("voice_start", json!({})).await;
+    assert_eq!(again.unwrap_err(), "already recording");
+    assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
+    assert!(desktop.state().voice.lock().unwrap().is_none());
+
     let note = media_request(&FileId([3; 16]).to_hex(), None);
     let offline = media_scheme::answer(desktop.app.handle(), &note).await;
     assert_eq!(offline.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -295,6 +312,7 @@ async fn two_desktops_against_in_process_stack() {
 
     pair(&a, &b, &b_id).await;
     chat(&a, &b, &a_id, &b_id).await;
+    send_a_voice_note(&a, &b, &a_id, &b_id).await;
     play_a_video_note(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
 
@@ -338,6 +356,31 @@ async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
     assert_eq!(received["msg_id"], msg_id);
     let read = json!({ "peerId": a_id, "msgIds": [msg_id, "zz"] });
     b.call("mark_read", read).await.unwrap();
+}
+
+/// Everything after the microphone: stop, encode, send, and the peer's copy.
+async fn send_a_voice_note(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
+    let stop = || a.call("voice_stop", json!({ "peerId": b_id }));
+    *a.state().voice.lock().unwrap() = Some(recorder(4_800));
+    assert_eq!(stop().await, Ok(Value::Null), "100 ms is too short to send");
+
+    *a.state().voice.lock().unwrap() = Some(recorder(48_000));
+    let sent = stop().await.unwrap();
+    let duration = sent["duration_ms"].as_u64().unwrap();
+    assert!((980..=1020).contains(&duration), "{duration} ms");
+    assert_eq!(sent["waveform"].as_array().map(Vec::len), Some(64));
+
+    let kind = eventually(|| async {
+        let history = json!({ "peerId": a_id, "limit": 10, "before": null });
+        let list = b.call("get_history", history).await.unwrap();
+        let note = list
+            .as_array()?
+            .iter()
+            .find(|m| m["msg_id"] == sent["msg_id"])?;
+        Some(note["file"]["kind"].clone())
+    })
+    .await;
+    assert_eq!(kind, "voice");
 }
 
 /// Sends `poster ‖ video` the way the webview does; returns the file id.
