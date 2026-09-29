@@ -19,11 +19,14 @@ export function addMessage(peerId: string, msg: ChatMessage) {
   }
   setChatsByPeer(peerId, list.length, msg);
   if (list.length > MAX_IN_MEMORY) {
-    setChatsByPeer(peerId, produce((list) => {
-      for (const evicted of list.splice(0, list.length - MAX_IN_MEMORY)) {
-        if (evicted.msg_id) peerOfMessage.delete(evicted.msg_id);
-      }
-    }));
+    setChatsByPeer(
+      peerId,
+      produce((list) => {
+        for (const evicted of list.splice(0, list.length - MAX_IN_MEMORY)) {
+          if (evicted.msg_id) peerOfMessage.delete(evicted.msg_id);
+        }
+      }),
+    );
   }
 }
 

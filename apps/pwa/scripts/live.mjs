@@ -32,14 +32,26 @@ class Peer {
     this.client = new Client(this.identity, ...rows, Date.now());
     this.apply(this.client.startupEffects());
     this.apply(this.client.command({ type: "set_anonymity", require_onion: this.anonymous }, Date.now()).effects);
-    this.open("gateway", GATEWAY, (c, d, now) => c.frame(d, now), (c, now) => c.connected(now), (c, now) => c.disconnected(now));
-    this.open("relay", RELAY, (c, d, now) => c.anonymousFrame(d, now), (c, now) => c.anonymousChannel(true, now), (c, now) => c.anonymousChannel(false, now));
+    this.open(
+      "gateway",
+      GATEWAY,
+      (c, d, now) => c.frame(d, now),
+      (c, now) => c.connected(now),
+      (c, now) => c.disconnected(now),
+    );
+    this.open(
+      "relay",
+      RELAY,
+      (c, d, now) => c.anonymousFrame(d, now),
+      (c, now) => c.anonymousChannel(true, now),
+      (c, now) => c.anonymousChannel(false, now),
+    );
     this.ticker = setInterval(() => this.feed((c, now) => c.tick(now)), 250);
   }
 
   stop() {
     clearInterval(this.ticker);
-    for (const ws of Object.values(this.sockets)) ws.onclose = null, ws.close();
+    for (const ws of Object.values(this.sockets)) ((ws.onclose = null), ws.close());
     this.sockets = {};
     this.client.free();
     this.client = null;
@@ -124,7 +136,9 @@ const t0 = Date.now();
 alice.start();
 bob.start();
 await Promise.all(
-  [alice, bob].map((p) => p.waitFor("connected", (e) => (e.kind === "event" && e.channel === "connected" ? true : undefined))),
+  [alice, bob].map((p) =>
+    p.waitFor("connected", (e) => (e.kind === "event" && e.channel === "connected" ? true : undefined)),
+  ),
 );
 step("both clients authenticated", t0);
 
@@ -153,7 +167,9 @@ await bob.waitFor("queued", (e) =>
 );
 alice.log = [];
 alice.start();
-await alice.waitFor("onion", (e) => (e.kind === "event" && e.channel === "anonymity_level" && e.payload.level === 1 ? true : undefined));
+await alice.waitFor("onion", (e) =>
+  e.kind === "event" && e.channel === "anonymity_level" && e.payload.level === 1 ? true : undefined,
+);
 alice.command({ type: "fetch_inbox" });
 await alice.message("while you were away");
 step("offline delivery via onion inbox", t);

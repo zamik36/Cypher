@@ -26,7 +26,15 @@ export default function Sidebar(props: SidebarProps) {
     <>
       {/* Hamburger button — visible only on mobile */}
       <button class="hamburger" onClick={() => props.setDrawerOpen(true)}>
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+        >
           <line x1="3" y1="6" x2="21" y2="6" />
           <line x1="3" y1="12" x2="21" y2="12" />
           <line x1="3" y1="18" x2="21" y2="18" />
@@ -34,10 +42,7 @@ export default function Sidebar(props: SidebarProps) {
       </button>
 
       {/* Overlay — click to close drawer */}
-      <div
-        class={`drawer-overlay ${props.drawerOpen ? "open" : ""}`}
-        onClick={() => props.setDrawerOpen(false)}
-      />
+      <div class={`drawer-overlay ${props.drawerOpen ? "open" : ""}`} onClick={() => props.setDrawerOpen(false)} />
 
       {/* Sidebar / Drawer */}
       <aside class={`sidebar ${props.drawerOpen ? "open" : ""}`}>
@@ -47,38 +52,33 @@ export default function Sidebar(props: SidebarProps) {
         </div>
 
         <nav class="sidebar-nav">
-          <button
-            class={`nav-item ${props.page === "home" ? "active" : ""}`}
-            onClick={() => navigate("home")}
-          >
+          <button class={`nav-item ${props.page === "home" ? "active" : ""}`} onClick={() => navigate("home")}>
             <HomeIcon /> {t().nav_home}
           </button>
-          <button
-            class={`nav-item ${props.page === "chat" ? "active" : ""}`}
-            onClick={() => navigate("chat")}
-          >
+          <button class={`nav-item ${props.page === "chat" ? "active" : ""}`} onClick={() => navigate("chat")}>
             <ChatIcon /> {t().nav_chat}
             <Show when={props.unread > 0}>
               <span class="nav-badge">{props.unread}</span>
             </Show>
           </button>
-          <button
-            class={`nav-item ${props.page === "files" ? "active" : ""}`}
-            onClick={() => navigate("files")}
-          >
+          <button class={`nav-item ${props.page === "files" ? "active" : ""}`} onClick={() => navigate("files")}>
             <FilesIcon /> {t().nav_files}
           </button>
         </nav>
 
         <div class="sidebar-footer">
-          <button
-            class={`nav-item ${props.page === "settings" ? "active" : ""}`}
-            onClick={() => navigate("settings")}
-          >
+          <button class={`nav-item ${props.page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}>
             <SettingsIcon /> {t().nav_settings}
           </button>
           <button class="nav-item" onClick={() => props.toggleTheme()}>
-            <Show when={props.theme === "dark"} fallback={<><MoonIcon /> {t().sidebar_dark_mode}</>}>
+            <Show
+              when={props.theme === "dark"}
+              fallback={
+                <>
+                  <MoonIcon /> {t().sidebar_dark_mode}
+                </>
+              }
+            >
               <SunIcon /> {t().sidebar_light_mode}
             </Show>
           </button>

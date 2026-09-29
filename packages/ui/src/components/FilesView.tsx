@@ -55,10 +55,14 @@ export default function FilesView() {
                   <div class={`progress-fill ${done() ? "complete" : ""}`} style={{ width: `${pct()}%` }} />
                 </div>
                 <Show when={tr.status === "offered"}>
-                  <button class="btn-primary btn-sm" onClick={() => accept(tr.file_id)}>{t().files_accept}</button>
+                  <button class="btn-primary btn-sm" onClick={() => accept(tr.file_id)}>
+                    {t().files_accept}
+                  </button>
                 </Show>
                 <Show when={tr.status === "offered" || tr.status === "active"}>
-                  <button class="btn-secondary btn-sm" onClick={() => cancel(tr.file_id)}>{t().settings_cancel}</button>
+                  <button class="btn-secondary btn-sm" onClick={() => cancel(tr.file_id)}>
+                    {t().settings_cancel}
+                  </button>
                 </Show>
               </div>
             );

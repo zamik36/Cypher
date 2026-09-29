@@ -228,7 +228,8 @@ async function sealedBlob(): Promise<Uint8Array> {
 }
 
 async function adopt(sealed: SealedIdentity): Promise<string> {
-  if ((await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined) throw new Error("an identity already exists");
+  if ((await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined)
+    throw new Error("an identity already exists");
   await put(db, "identity", IDENTITY_KEY, sealed.blob);
   identity?.free();
   identity = sealed.intoIdentity();

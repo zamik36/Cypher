@@ -46,7 +46,13 @@ export async function applyOps(db: IDBDatabase, ops: Op[]): Promise<void> {
   await done(tx);
 }
 
-export async function scan(db: IDBDatabase, table: string, range?: IDBKeyRange, limit?: number, newestFirst = false): Promise<Row[]> {
+export async function scan(
+  db: IDBDatabase,
+  table: string,
+  range?: IDBKeyRange,
+  limit?: number,
+  newestFirst = false,
+): Promise<Row[]> {
   const tx = db.transaction(table, "readonly");
   const rows: Row[] = [];
   await new Promise<void>((resolve, reject) => {

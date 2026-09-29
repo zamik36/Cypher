@@ -113,7 +113,8 @@ const en = {
   settings_anonymous_saving: "Applying...",
   settings_anonymous_save_local: "Save locally",
   settings_anonymous_web_only: "Web build only",
-  settings_anonymous_pwa_help: "The PWA stores these settings locally, but Tor transport is only active in supported native builds.",
+  settings_anonymous_pwa_help:
+    "The PWA stores these settings locally, but Tor transport is only active in supported native builds.",
   settings_bridges_label: "Tor bridge lines",
   settings_bridges_placeholder: "One bridge per line, for example: obfs4 1.2.3.4:443 ...",
   settings_bridges_help: "Leave empty to use the default transport path. Duplicate and blank lines are ignored.",
@@ -123,8 +124,9 @@ const en = {
   settings_copy: "Copy",
   settings_data: "Data",
   settings_clear: "Clear chat history",
-  settings_clear_warning: "All messages and chat history will be permanently deleted. Ratchet sessions will be reset — reconnecting to peers will require a new key exchange.",
-  settings_clear_confirm: (s: number) => s > 0 ? `Confirm (${s}s)` : "Confirm delete",
+  settings_clear_warning:
+    "All messages and chat history will be permanently deleted. Ratchet sessions will be reset — reconnecting to peers will require a new key exchange.",
+  settings_clear_confirm: (s: number) => (s > 0 ? `Confirm (${s}s)` : "Confirm delete"),
   settings_cancel: "Cancel",
   settings_about: "About",
   settings_version: "Cypher v0.2.0",
@@ -147,12 +149,11 @@ const en = {
   toast_anonymous_saved_local: "Anonymous transport settings saved locally",
   toast_anonymous_save_failed: (e: string) => `Failed to apply anonymous settings: ${e}`,
 
-
   // -- Install prompt --
   install_text: "Install Cypher for the best experience",
   install_btn: "Install",
-  install_ios: "Share, then \"Add to Home Screen\"",
-  install_android: "Menu \u2630 then \"Add to Home Screen\" or \"Install app\"",
+  install_ios: 'Share, then "Add to Home Screen"',
+  install_android: 'Menu \u2630 then "Add to Home Screen" or "Install app"',
 
   // -- Sidebar --
   sidebar_light_mode: "Light mode",
@@ -160,9 +161,7 @@ const en = {
 };
 
 export type TranslationKeys = {
-  [K in keyof typeof en]: (typeof en)[K] extends (...args: infer A) => string
-    ? (...args: A) => string
-    : string;
+  [K in keyof typeof en]: (typeof en)[K] extends (...args: infer A) => string ? (...args: A) => string : string;
 };
 
 export default en;

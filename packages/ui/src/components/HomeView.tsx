@@ -32,7 +32,9 @@ export default function HomeView(props: HomeViewProps) {
       try {
         const qr = await api.generateQr(result.link_id);
         setQrDataUri(qr);
-      } catch { /* QR is optional */ }
+      } catch {
+        /* QR is optional */
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -106,7 +108,9 @@ export default function HomeView(props: HomeViewProps) {
       <Show when={isError()}>
         <div class="home-error">
           <p class="error-msg">{connection.gatewayError}</p>
-          <button class="btn-primary" onClick={handleRetry}>{t().home_retry}</button>
+          <button class="btn-primary" onClick={handleRetry}>
+            {t().home_retry}
+          </button>
           <Show when={api.kind === "desktop"}>
             <button class="advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced())}>
               {showAdvanced() ? t().home_advanced_hide : t().home_advanced_show}
@@ -120,7 +124,9 @@ export default function HomeView(props: HomeViewProps) {
                 onInput={(e) => setAdvancedAddr(e.currentTarget.value)}
                 placeholder={t().home_host_port}
               />
-              <button class="btn-secondary" onClick={handleRetry}>{t().home_connect}</button>
+              <button class="btn-secondary" onClick={handleRetry}>
+                {t().home_connect}
+              </button>
             </div>
           </Show>
         </div>
@@ -131,7 +137,9 @@ export default function HomeView(props: HomeViewProps) {
         <Show when={connection.peers.length > 0}>
           <div class="active-peers-bar">
             <span>{t().status_active_chats(connection.peers.length)}</span>
-            <button class="btn-secondary btn-sm" onClick={() => props.onNavigate("chat")}>{t().home_open_chats}</button>
+            <button class="btn-secondary btn-sm" onClick={() => props.onNavigate("chat")}>
+              {t().home_open_chats}
+            </button>
           </div>
         </Show>
 
@@ -142,11 +150,20 @@ export default function HomeView(props: HomeViewProps) {
             <div class="room-code">{pendingCode()}</div>
             <div class="room-actions">
               <button class="btn-secondary" onClick={copyCode}>
-                <Show when={copied()} fallback={<><CopyIcon width="16" height="16" /> {t().home_copy_code}</>}>
+                <Show
+                  when={copied()}
+                  fallback={
+                    <>
+                      <CopyIcon width="16" height="16" /> {t().home_copy_code}
+                    </>
+                  }
+                >
                   <CheckIcon width="16" height="16" /> {t().home_copied}
                 </Show>
               </button>
-              <button class="btn-secondary" onClick={handleNewRoom}>{t().home_new_room}</button>
+              <button class="btn-secondary" onClick={handleNewRoom}>
+                {t().home_new_room}
+              </button>
             </div>
             <Show when={qrDataUri()}>
               <div class="qr-code">
@@ -194,7 +211,9 @@ export default function HomeView(props: HomeViewProps) {
         </Show>
 
         <Show when={error()}>
-          <p class="error" style={{ "margin-top": "16px", "text-align": "center" }}>{error()}</p>
+          <p class="error" style={{ "margin-top": "16px", "text-align": "center" }}>
+            {error()}
+          </p>
         </Show>
       </Show>
     </div>

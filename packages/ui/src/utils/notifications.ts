@@ -36,8 +36,6 @@ export async function notifyMessage(_senderName: string, text: string): Promise<
   if (!notificationsEnabled()) return;
   if ((await api.notifications.permission()) !== "granted") return;
   if (document.visibilityState === "visible" && document.hasFocus()) return;
-  const body = previewEnabled()
-    ? (text.length > 100 ? `${text.slice(0, 100)}...` : text)
-    : "New encrypted message";
+  const body = previewEnabled() ? (text.length > 100 ? `${text.slice(0, 100)}...` : text) : "New encrypted message";
   await api.notifications.send("Cypher", body);
 }

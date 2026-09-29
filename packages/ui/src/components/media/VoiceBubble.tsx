@@ -72,9 +72,21 @@ export default function VoiceBubble(props: { file: UiFile }) {
   return (
     <div class="voice-bubble">
       <button class="voice-play" onClick={toggle} aria-label={playing() ? "pause" : "play"}>
-        <Show when={mediaReady(props.file.file_id)} fallback={<span class="voice-loading">{Math.round(mediaProgress(props.file.file_id) * 100)}%</span>}>
-          <Show when={playing()} fallback={<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8 5v14l11-7z" /></svg>}>
-            <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z" /></svg>
+        <Show
+          when={mediaReady(props.file.file_id)}
+          fallback={<span class="voice-loading">{Math.round(mediaProgress(props.file.file_id) * 100)}%</span>}
+        >
+          <Show
+            when={playing()}
+            fallback={
+              <svg viewBox="0 0 24 24" width="18" height="18">
+                <path fill="currentColor" d="M8 5v14l11-7z" />
+              </svg>
+            }
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18">
+              <path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z" />
+            </svg>
           </Show>
         </Show>
       </button>
@@ -91,7 +103,9 @@ export default function VoiceBubble(props: { file: UiFile }) {
         </div>
         <div class="voice-meta">
           <span>{formatDuration(playing() || position() > 0 ? position() * durationMs() : durationMs())}</span>
-          <button class="voice-speed" onClick={cycleSpeed}>{speed()}×</button>
+          <button class="voice-speed" onClick={cycleSpeed}>
+            {speed()}×
+          </button>
         </div>
       </div>
     </div>

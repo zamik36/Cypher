@@ -2,7 +2,9 @@
 
 export type MessageStatus = "pending" | "sent" | "queued" | "delivered" | "read" | "failed";
 
-export interface LinkInfo { link_id: string; }
+export interface LinkInfo {
+  link_id: string;
+}
 
 export interface UiFile {
   file_id: string;
@@ -65,8 +67,18 @@ export interface ConversationEntry {
   last_message_at: number;
 }
 
-export interface AnonymityLevelPayload { level: number; label: string; description: string; }
-export interface FileOffer { from: string; file_id: string; name: string; size: number; mime: string; }
+export interface AnonymityLevelPayload {
+  level: number;
+  label: string;
+  description: string;
+}
+export interface FileOffer {
+  from: string;
+  file_id: string;
+  name: string;
+  size: number;
+  mime: string;
+}
 
 export type Unsubscribe = () => void;
 

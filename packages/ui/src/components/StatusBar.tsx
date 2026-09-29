@@ -16,9 +16,7 @@ export default function StatusBar() {
       </Show>
       <Show when={connection.peers.length > 0}>
         <span style={{ color: "var(--text-muted)" }}>&harr;</span>
-        <span class="peer-pill">
-          {t().status_peers(connection.peers.length)}
-        </span>
+        <span class="peer-pill">{t().status_peers(connection.peers.length)}</span>
       </Show>
     </footer>
   );

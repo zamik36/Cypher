@@ -66,7 +66,13 @@ export default function RoundVideoBubble(props: { file: UiFile }) {
         onTimeUpdate={(e) => setPosition(Math.min(1, (e.currentTarget.currentTime * 1000) / (durationMs() || 1)))}
       />
       <svg class="round-ring" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r={RADIUS} stroke-dasharray={`${CIRCUMFERENCE}`} stroke-dashoffset={`${CIRCUMFERENCE * (1 - ring())}`} />
+        <circle
+          cx="50"
+          cy="50"
+          r={RADIUS}
+          stroke-dasharray={`${CIRCUMFERENCE}`}
+          stroke-dashoffset={`${CIRCUMFERENCE * (1 - ring())}`}
+        />
       </svg>
       <Show when={!playing()}>
         <span class="round-duration">{formatDuration(durationMs())}</span>

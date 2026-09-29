@@ -34,8 +34,7 @@ export default function SettingsView(props: SettingsViewProps) {
   const [savingAnonymous, setSavingAnonymous] = createSignal(false);
   const [notifEnabled, setNotifEnabled] = createSignal(notificationsEnabled());
   const [prevEnabled, setPrevEnabled] = createSignal(previewEnabled());
-  const [notificationPermission, setNotificationPermission] =
-    createSignal<NotificationPermission>("default");
+  const [notificationPermission, setNotificationPermission] = createSignal<NotificationPermission>("default");
 
   onMount(() => {
     void notificationPermissionState().then(setNotificationPermission);
@@ -76,14 +75,20 @@ export default function SettingsView(props: SettingsViewProps) {
   }
 
   let clearIntervalId: ReturnType<typeof setInterval> | undefined;
-  onCleanup(() => { if (clearIntervalId) clearInterval(clearIntervalId); });
+  onCleanup(() => {
+    if (clearIntervalId) clearInterval(clearIntervalId);
+  });
 
   function startClearConfirmation() {
     setConfirmClear(true);
     setClearCountdown(3);
     clearIntervalId = setInterval(() => {
       setClearCountdown((n: number) => {
-        if (n <= 1) { clearInterval(clearIntervalId); clearIntervalId = undefined; return 0; }
+        if (n <= 1) {
+          clearInterval(clearIntervalId);
+          clearIntervalId = undefined;
+          return 0;
+        }
         return n - 1;
       });
     }, 1000);
@@ -140,8 +145,10 @@ export default function SettingsView(props: SettingsViewProps) {
         <div class="settings-group">
           <label>{t().settings_identity}</label>
           <div class="about-info">
-            <p>{t().settings_nickname} <strong>{props.nickname}</strong></p>
-            <p style={{ "font-size": "12px", "opacity": "0.7" }}>
+            <p>
+              {t().settings_nickname} <strong>{props.nickname}</strong>
+            </p>
+            <p style={{ "font-size": "12px", opacity: "0.7" }}>
               {t().settings_peerid} {connection.peerId?.slice(0, 12)}...
             </p>
           </div>
@@ -186,16 +193,10 @@ export default function SettingsView(props: SettingsViewProps) {
       <div class="settings-group">
         <label>{t().settings_language}</label>
         <div class="theme-options">
-          <button
-            class={`theme-option ${locale() === "en" ? "active" : ""}`}
-            onClick={() => setLocale("en")}
-          >
+          <button class={`theme-option ${locale() === "en" ? "active" : ""}`} onClick={() => setLocale("en")}>
             English
           </button>
-          <button
-            class={`theme-option ${locale() === "ru" ? "active" : ""}`}
-            onClick={() => setLocale("ru")}
-          >
+          <button class={`theme-option ${locale() === "ru" ? "active" : ""}`} onClick={() => setLocale("ru")}>
             Русский
           </button>
         </div>
@@ -223,9 +224,7 @@ export default function SettingsView(props: SettingsViewProps) {
           <Show when={notifEnabled()}>
             <div class="settings-row" style={{ "margin-top": "8px" }}>
               <span style={{ flex: 1, "font-size": "13px" }}>
-                {prevEnabled()
-                  ? t().settings_preview_shown
-                  : t().settings_preview_hidden}
+                {prevEnabled() ? t().settings_preview_shown : t().settings_preview_hidden}
               </span>
               <button
                 class="btn-secondary"
@@ -328,14 +327,8 @@ export default function SettingsView(props: SettingsViewProps) {
             </button>
           ) : (
             <div class="clear-confirm">
-              <p class="clear-warning">
-                {t().settings_clear_warning}
-              </p>
-              <button
-                class="btn-danger"
-                onClick={handleClearHistory}
-                disabled={clearCountdown() > 0}
-              >
+              <p class="clear-warning">{t().settings_clear_warning}</p>
+              <button class="btn-danger" onClick={handleClearHistory} disabled={clearCountdown() > 0}>
                 {t().settings_clear_confirm(clearCountdown())}
               </button>
               <button class="btn-secondary" onClick={() => setConfirmClear(false)}>

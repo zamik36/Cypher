@@ -12,17 +12,11 @@ interface BottomNavProps {
 export default function BottomNav(props: BottomNavProps) {
   return (
     <nav class="bottom-nav">
-      <button
-        class={`bottom-nav-item ${props.page === "home" ? "active" : ""}`}
-        onClick={() => props.setPage("home")}
-      >
+      <button class={`bottom-nav-item ${props.page === "home" ? "active" : ""}`} onClick={() => props.setPage("home")}>
         <HomeIcon width="22" height="22" />
         <span>{t().nav_home}</span>
       </button>
-      <button
-        class={`bottom-nav-item ${props.page === "chat" ? "active" : ""}`}
-        onClick={() => props.setPage("chat")}
-      >
+      <button class={`bottom-nav-item ${props.page === "chat" ? "active" : ""}`} onClick={() => props.setPage("chat")}>
         <span class="bottom-nav-icon-wrap">
           <ChatIcon width="22" height="22" />
           <Show when={props.unread > 0}>

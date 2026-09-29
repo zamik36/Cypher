@@ -121,7 +121,11 @@ export const webPlatform: Platform = {
   getHistory: (peerId, limit, before) => call("history", peerId, limit, before) as Promise<UiMessage[]>,
   clearChatHistory: async () => {
     await call("clearHistory");
-    for (const url of mediaUrls.values()) void url.then((u) => URL.revokeObjectURL(u), () => undefined);
+    for (const url of mediaUrls.values())
+      void url.then(
+        (u) => URL.revokeObjectURL(u),
+        () => undefined,
+      );
     mediaUrls.clear();
   },
   on: (channel, cb) => {

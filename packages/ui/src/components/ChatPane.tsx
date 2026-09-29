@@ -72,14 +72,20 @@ export default function ChatPane(props: ChatPaneProps) {
     if (!peer || getMessages(peer).length > 0) return;
     loadingForPeer = peer;
     setLoadingHistory(true);
-    api.getHistory(peer, HISTORY_PAGE)
+    api
+      .getHistory(peer, HISTORY_PAGE)
       .then((history) => {
         if (loadingForPeer === peer && history.length > 0) {
-          setMessages(peer, history.reverse().map((m) => fromHistory(peer, m)));
+          setMessages(
+            peer,
+            history.reverse().map((m) => fromHistory(peer, m)),
+          );
         }
       })
       .catch((e: unknown) => console.warn("Failed to load history:", e))
-      .finally(() => { if (loadingForPeer === peer) setLoadingHistory(false); });
+      .finally(() => {
+        if (loadingForPeer === peer) setLoadingHistory(false);
+      });
   });
 
   createEffect(() => {
@@ -97,7 +103,10 @@ export default function ChatPane(props: ChatPaneProps) {
   createEffect(
     on(
       () => activeMessages().length,
-      () => queueMicrotask(() => { if (messagesRef) messagesRef.scrollTop = messagesRef.scrollHeight; }),
+      () =>
+        queueMicrotask(() => {
+          if (messagesRef) messagesRef.scrollTop = messagesRef.scrollHeight;
+        }),
     ),
   );
 
@@ -163,7 +172,9 @@ export default function ChatPane(props: ChatPaneProps) {
         <div class="empty-state">
           <ChatIcon width="48" height="48" />
           <p>{t().chat_empty}</p>
-          <button class="btn-primary" onClick={() => props.onNavigate("home")}>{t().chat_go_home}</button>
+          <button class="btn-primary" onClick={() => props.onNavigate("home")}>
+            {t().chat_go_home}
+          </button>
         </div>
       </Show>
 
@@ -197,84 +208,94 @@ export default function ChatPane(props: ChatPaneProps) {
           </div>
 
           <div class="chat-area" ref={chatAreaRef}>
-            <Show when={activePeer()} fallback={
-              <div class="empty-state">
-                <ChatIcon width="48" height="48" />
-                <p>{t().chat_select}</p>
-              </div>
-            }>
-              {(peer) => (<>
-              <div class="chat-header">
-                <div class="peer-avatar small">
-                  {shortName(peer()).slice(0, 2).toUpperCase()}
-                  <span class={`online-dot ${activePeerInfo()?.online ? "online" : "offline"}`} />
-                </div>
-                <span>{shortName(peer())}</span>
-              </div>
-
-              <Show when={loadingHistory()}>
-                <div class="empty-state"><p>{t().chat_loading}</p></div>
-              </Show>
-              <Show when={!loadingHistory() && activeMessages().length === 0}>
+            <Show
+              when={activePeer()}
+              fallback={
                 <div class="empty-state">
                   <ChatIcon width="48" height="48" />
-                  <p>{t().chat_say_hello}</p>
+                  <p>{t().chat_select}</p>
                 </div>
-              </Show>
+              }
+            >
+              {(peer) => (
+                <>
+                  <div class="chat-header">
+                    <div class="peer-avatar small">
+                      {shortName(peer()).slice(0, 2).toUpperCase()}
+                      <span class={`online-dot ${activePeerInfo()?.online ? "online" : "offline"}`} />
+                    </div>
+                    <span>{shortName(peer())}</span>
+                  </div>
 
-              <div class="messages" ref={messagesRef}>
-                <For each={activeMessages()}>
-                  {(msg) => {
-                    const isMine = msg.from === "me";
-                    return (
-                      <div class={`message-group ${isMine ? "mine" : "theirs"}`}>
-                        <div class={`avatar ${isMine ? "me" : "peer"}`}>
-                          {isMine ? t().chat_me : t().chat_peer}
-                        </div>
-                        <div class="message-content">
-                          <Show when={noteOf(msg)} fallback={<div class="bubble">{msg.text}</div>}>
-                            {(note) => (
-                              <Show when={note().kind === "voice"} fallback={<RoundVideoBubble file={note()} />}>
-                                <div class="bubble media"><VoiceBubble file={note()} /></div>
+                  <Show when={loadingHistory()}>
+                    <div class="empty-state">
+                      <p>{t().chat_loading}</p>
+                    </div>
+                  </Show>
+                  <Show when={!loadingHistory() && activeMessages().length === 0}>
+                    <div class="empty-state">
+                      <ChatIcon width="48" height="48" />
+                      <p>{t().chat_say_hello}</p>
+                    </div>
+                  </Show>
+
+                  <div class="messages" ref={messagesRef}>
+                    <For each={activeMessages()}>
+                      {(msg) => {
+                        const isMine = msg.from === "me";
+                        return (
+                          <div class={`message-group ${isMine ? "mine" : "theirs"}`}>
+                            <div class={`avatar ${isMine ? "me" : "peer"}`}>{isMine ? t().chat_me : t().chat_peer}</div>
+                            <div class="message-content">
+                              <Show when={noteOf(msg)} fallback={<div class="bubble">{msg.text}</div>}>
+                                {(note) => (
+                                  <Show when={note().kind === "voice"} fallback={<RoundVideoBubble file={note()} />}>
+                                    <div class="bubble media">
+                                      <VoiceBubble file={note()} />
+                                    </div>
+                                  </Show>
+                                )}
                               </Show>
-                            )}
-                          </Show>
-                          <span class="message-time">
-                            {formatTime(msg.timestamp)}
-                            <Show when={isMine && msg.status}>
-                              {(status) => (<>
-                                {" "}<span class={`message-status ${status()}`}>{STATUS_MARK[status()]}</span>
-                              </>)}
-                            </Show>
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  }}
-                </For>
-              </div>
+                              <span class="message-time">
+                                {formatTime(msg.timestamp)}
+                                <Show when={isMine && msg.status}>
+                                  {(status) => (
+                                    <>
+                                      {" "}
+                                      <span class={`message-status ${status()}`}>{STATUS_MARK[status()]}</span>
+                                    </>
+                                  )}
+                                </Show>
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </div>
 
-              <div class="input-row">
-                <button class="btn-icon" onClick={attach} title={t().files_choose}>
-                  <UploadIcon />
-                </button>
-                <input
-                  type="text"
-                  value={draft()}
-                  onInput={(e) => setDraft(e.currentTarget.value)}
-                  onKeyDown={(e) => e.key === "Enter" && send()}
-                  placeholder={t().chat_placeholder}
-                />
-                <Show
-                  when={draft().trim()}
-                  fallback={<RecordButton peer={peer()} onSent={(sent, file) => mediaSent(peer(), sent, file)} />}
-                >
-                  <button class="btn-icon" onClick={send}>
-                    <SendIcon />
-                  </button>
-                </Show>
-              </div>
-              </>)}
+                  <div class="input-row">
+                    <button class="btn-icon" onClick={attach} title={t().files_choose}>
+                      <UploadIcon />
+                    </button>
+                    <input
+                      type="text"
+                      value={draft()}
+                      onInput={(e) => setDraft(e.currentTarget.value)}
+                      onKeyDown={(e) => e.key === "Enter" && send()}
+                      placeholder={t().chat_placeholder}
+                    />
+                    <Show
+                      when={draft().trim()}
+                      fallback={<RecordButton peer={peer()} onSent={(sent, file) => mediaSent(peer(), sent, file)} />}
+                    >
+                      <button class="btn-icon" onClick={send}>
+                        <SendIcon />
+                      </button>
+                    </Show>
+                  </div>
+                </>
+              )}
             </Show>
           </div>
         </div>

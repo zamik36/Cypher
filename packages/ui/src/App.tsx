@@ -9,13 +9,20 @@ import StatusBar from "./components/StatusBar";
 import ToastContainer from "./components/ToastContainer";
 import IdentityView from "./components/IdentityView";
 import {
-  onConnected, onDisconnected, onPeerConnected, onMessage, onMessageStatus,
-  onFileOffered, onFileProgress, onFileComplete, onFileFailed, onError, onAnonymityLevel,
+  onConnected,
+  onDisconnected,
+  onPeerConnected,
+  onMessage,
+  onMessageStatus,
+  onFileOffered,
+  onFileProgress,
+  onFileComplete,
+  onFileFailed,
+  onError,
+  onAnonymityLevel,
   api,
 } from "./platform";
-import {
-  connection, setConnection, addPeer, shortName, setPeerOnline, markAllPeersOffline,
-} from "./stores/connection";
+import { connection, setConnection, addPeer, shortName, setPeerOnline, markAllPeersOffline } from "./stores/connection";
 import { addMessage, peerOf, setMessageStatus } from "./stores/chat";
 import { hasTransfer, upsertTransfer } from "./stores/transfers";
 import { setMediaProgress, trackMedia } from "./stores/media";
@@ -85,7 +92,13 @@ export default function App() {
       }),
       // eslint-disable-next-line solid/reactivity -- an event callback: it samples page() per message on purpose.
       onMessage((msg) => {
-        addPeer({ peerId: msg.from, roomCode: "direct", role: "guest", displayName: shortName(msg.from), online: true });
+        addPeer({
+          peerId: msg.from,
+          roomCode: "direct",
+          role: "guest",
+          displayName: shortName(msg.from),
+          online: true,
+        });
         if (msg.file && msg.file.kind !== "file") trackMedia(msg.file.file_id);
         const text = previewText(msg.text, msg.file);
         addMessage(msg.from, { ...msg, text });
@@ -157,8 +170,12 @@ export default function App() {
           <Show when={page() === "home"}>
             <HomeView onNavigate={navigateTo} />
           </Show>
-          <Show when={page() === "chat"}><ChatPane onNavigate={navigateTo} /></Show>
-          <Show when={page() === "files"}><FilesView /></Show>
+          <Show when={page() === "chat"}>
+            <ChatPane onNavigate={navigateTo} />
+          </Show>
+          <Show when={page() === "files"}>
+            <FilesView />
+          </Show>
           <Show when={page() === "settings"}>
             <SettingsView theme={theme()} setTheme={applyTheme} nickname={nickname()} />
           </Show>

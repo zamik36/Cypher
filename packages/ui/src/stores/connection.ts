@@ -45,9 +45,7 @@ export function normalizeGatewayAddr(raw: string): string {
   return /:\d+$/.test(value) ? value : `${value}:9100`;
 }
 
-const initialGatewayAddr = normalizeGatewayAddr(
-  localStorage.getItem(GATEWAY_STORAGE_KEY) || DEFAULT_GATEWAY_ADDR,
-);
+const initialGatewayAddr = normalizeGatewayAddr(localStorage.getItem(GATEWAY_STORAGE_KEY) || DEFAULT_GATEWAY_ADDR);
 
 localStorage.setItem(GATEWAY_STORAGE_KEY, initialGatewayAddr);
 
@@ -65,9 +63,7 @@ const [connection, setConnection] = createStore<ConnectionState>({
 export function addPeer(peer: PeerInfo) {
   setConnection("peers", (prev) =>
     prev.some((p) => p.peerId === peer.peerId)
-      ? prev.map((p) =>
-          p.peerId === peer.peerId ? { ...p, online: peer.online, displayName: peer.displayName } : p,
-        )
+      ? prev.map((p) => (p.peerId === peer.peerId ? { ...p, online: peer.online, displayName: peer.displayName } : p))
       : [...prev, peer],
   );
   // Auto-select if first peer
@@ -77,9 +73,7 @@ export function addPeer(peer: PeerInfo) {
 }
 
 export function setPeerOnline(peerId: string, online: boolean) {
-  setConnection("peers", (prev) =>
-    prev.map((p) => p.peerId === peerId ? { ...p, online } : p),
-  );
+  setConnection("peers", (prev) => prev.map((p) => (p.peerId === peerId ? { ...p, online } : p)));
 }
 
 export function markAllPeersOffline() {

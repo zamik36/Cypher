@@ -33,10 +33,7 @@ test("auth signs the context and nonce with the identity key", () => {
   const bytes = new Uint8Array(p.auth(id.secret, nonce));
   assert.equal(bytes.length, 69);
   assert.equal(bytes[0], p.Kind.Auth);
-  const signed = new Uint8Array([
-    ...Array.from("cypher-session-auth-v2", (c) => c.charCodeAt(0)),
-    ...nonce,
-  ]);
+  const signed = new Uint8Array([...Array.from("cypher-session-auth-v2", (c) => c.charCodeAt(0)), ...nonce]);
   assert.ok(ed.verify(bytes.subarray(5), signed, id.peer));
   assert.ok(!ed.verify(bytes.subarray(5), new Uint8Array(54), id.peer));
 });

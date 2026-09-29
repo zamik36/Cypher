@@ -17,7 +17,8 @@ export default function IdentityView(props: IdentityViewProps) {
   const [busy, setBusy] = createSignal(false);
 
   onMount(() => {
-    api.hasIdentity()
+    api
+      .hasIdentity()
       .then((exists) => {
         setHasId(exists);
         if (!exists) setMode("create");
@@ -112,8 +113,12 @@ export default function IdentityView(props: IdentityViewProps) {
                 {busy() ? t().identity_unlocking : t().identity_unlock}
               </button>
               <div class="identity-links">
-                <button class="link-btn" onClick={() => setMode("create")}>{t().identity_new}</button>
-                <button class="link-btn" onClick={() => setMode("import")}>{t().identity_import}</button>
+                <button class="link-btn" onClick={() => setMode("create")}>
+                  {t().identity_new}
+                </button>
+                <button class="link-btn" onClick={() => setMode("import")}>
+                  {t().identity_import}
+                </button>
               </div>
             </div>
           </Show>
@@ -150,7 +155,9 @@ export default function IdentityView(props: IdentityViewProps) {
                 {busy() ? t().identity_creating : t().identity_create}
               </button>
               <Show when={hasId()}>
-                <button class="link-btn" onClick={() => setMode("unlock")}>{t().identity_back_unlock}</button>
+                <button class="link-btn" onClick={() => setMode("unlock")}>
+                  {t().identity_back_unlock}
+                </button>
               </Show>
             </div>
           </Show>
@@ -188,7 +195,9 @@ export default function IdentityView(props: IdentityViewProps) {
               >
                 {busy() ? t().identity_importing : t().identity_import}
               </button>
-              <button class="link-btn" onClick={() => setMode(hasId() ? "unlock" : "create")}>{t().identity_back}</button>
+              <button class="link-btn" onClick={() => setMode(hasId() ? "unlock" : "create")}>
+                {t().identity_back}
+              </button>
             </div>
           </Show>
 

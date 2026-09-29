@@ -123,18 +123,21 @@ const ru: TranslationKeys = {
   settings_anonymous_saving: "Применение...",
   settings_anonymous_save_local: "Сохранить локально",
   settings_anonymous_web_only: "Только web-сборка",
-  settings_anonymous_pwa_help: "PWA сохраняет эти настройки локально, но Tor-транспорт активен только в поддерживаемых нативных сборках.",
+  settings_anonymous_pwa_help:
+    "PWA сохраняет эти настройки локально, но Tor-транспорт активен только в поддерживаемых нативных сборках.",
   settings_bridges_label: "Tor bridge lines",
   settings_bridges_placeholder: "По одной строке на мост, например: obfs4 1.2.3.4:443 ...",
-  settings_bridges_help: "Оставьте пустым, чтобы использовать маршрут по умолчанию. Дубли и пустые строки игнорируются.",
+  settings_bridges_help:
+    "Оставьте пустым, чтобы использовать маршрут по умолчанию. Дубли и пустые строки игнорируются.",
   settings_export: "Экспорт Seed (Резервная копия)",
   settings_export_placeholder: "Введите пароль для экспорта",
   settings_export_btn: "Экспорт",
   settings_copy: "Копировать",
   settings_data: "Данные",
   settings_clear: "Очистить историю",
-  settings_clear_warning: "Все сообщения и история чатов будут удалены безвозвратно. Сессии шифрования будут сброшены — для переподключения потребуется новый обмен ключами.",
-  settings_clear_confirm: (s: number) => s > 0 ? `Подтвердить (${s}с)` : "Подтвердить удаление",
+  settings_clear_warning:
+    "Все сообщения и история чатов будут удалены безвозвратно. Сессии шифрования будут сброшены — для переподключения потребуется новый обмен ключами.",
+  settings_clear_confirm: (s: number) => (s > 0 ? `Подтвердить (${s}с)` : "Подтвердить удаление"),
   settings_cancel: "Отмена",
   settings_about: "О приложении",
   settings_version: "Шифр v0.2.0",
@@ -157,12 +160,11 @@ const ru: TranslationKeys = {
   toast_anonymous_saved_local: "Настройки анонимного транспорта сохранены локально",
   toast_anonymous_save_failed: (e: string) => `Не удалось применить настройки анонимного транспорта: ${e}`,
 
-
   // -- Install prompt --
   install_text: "Установите Шифр для лучшего опыта",
   install_btn: "Установить",
-  install_ios: "Поделиться, затем \"На экран Домой\"",
-  install_android: "Меню \u2630, затем \"На экран Домой\" или \"Установить\"",
+  install_ios: 'Поделиться, затем "На экран Домой"',
+  install_android: 'Меню \u2630, затем "На экран Домой" или "Установить"',
 
   // -- Sidebar --
   sidebar_light_mode: "Светлая тема",
