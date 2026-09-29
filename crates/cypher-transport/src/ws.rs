@@ -12,9 +12,16 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::{FrameSink, FrameStream, HANDSHAKE_TIMEOUT};
 
+/// tungstenite zero-fills up to this many bytes before every socket read
+/// (128 KiB by default): with chat-sized frames that memset was a tenth of
+/// the gateway's CPU and every connection's buffer became resident memory.
+/// Larger frames still arrive, in more reads.
+const READ_BUFFER: usize = 8 * 1024;
+
 pub async fn accept_ws(tcp: TcpStream) -> Result<(FrameStream, FrameSink)> {
     tcp.set_nodelay(true)?;
     let config = WebSocketConfig::default()
+        .read_buffer_size(READ_BUFFER)
         .max_message_size(Some(MAX_FRAME_SIZE))
         .max_frame_size(Some(MAX_FRAME_SIZE));
     let ws = timeout(

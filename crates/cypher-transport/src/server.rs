@@ -102,8 +102,13 @@ async fn accept_loop<H: Handler>(
             handler.rejected();
             continue;
         };
-        let (upgrade, handler, shutdown) =
-            (upgrade.clone(), Arc::clone(&handler), shutdown.clone());
+        // A child token per connection: polling one shared token from every
+        // connection task serialises all workers on its waiter lock.
+        let (upgrade, handler, shutdown) = (
+            upgrade.clone(),
+            Arc::clone(&handler),
+            shutdown.child_token(),
+        );
         tokio::spawn(async move {
             let _permit = permit;
             let connection = async {

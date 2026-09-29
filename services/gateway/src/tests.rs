@@ -216,6 +216,24 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
     ));
 }
 
+#[tokio::test(start_paused = true)]
+async fn idle_sessions_close_and_activity_extends_them() {
+    let gw = gateway(&MemBus::default());
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    a.send(1, ClientMsg::Ping).await;
+    assert!(matches!(a.recv().await.unwrap().msg, ServerMsg::Pong));
+    tokio::time::sleep(Duration::from_secs(45)).await;
+    a.send(2, ClientMsg::Ping).await;
+    assert!(
+        matches!(a.recv().await.unwrap().msg, ServerMsg::Pong),
+        "a frame at 30 s keeps the session past the first 60 s"
+    );
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert!(a.closed().await, "a minute without frames closes it");
+}
+
 #[tokio::test]
 async fn second_login_supersedes_the_first() {
     let gw = gateway(&MemBus::default());

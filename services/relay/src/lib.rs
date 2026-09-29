@@ -17,6 +17,7 @@ use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use prometheus::{IntCounter, IntGauge};
 use serde::Deserialize;
+use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -102,10 +103,22 @@ impl<U: OnionUpstream> Relay<U> {
     async fn relay(&self, mut stream: FrameStream, mut sink: FrameSink) {
         let mut limiter = ConnLimiter::new(FRAMES_PER_SEC, BYTES_PER_SEC);
         let mut in_flight = FuturesUnordered::new();
+        // Re-armed only when it fires, not per frame (see the gateway session).
+        let idle = tokio::time::sleep(IDLE_TIMEOUT);
+        tokio::pin!(idle);
+        let mut last_frame = Instant::now();
         loop {
             tokio::select! {
-                frame = tokio::time::timeout(IDLE_TIMEOUT, stream.next()), if in_flight.len() < PIPELINE => {
-                    let Ok(Some(Ok(frame))) = frame else { break };
+                () = &mut idle => {
+                    let deadline = last_frame + IDLE_TIMEOUT;
+                    if deadline <= Instant::now() {
+                        break;
+                    }
+                    idle.as_mut().reset(deadline);
+                }
+                frame = stream.next(), if in_flight.len() < PIPELINE => {
+                    let Some(Ok(frame)) = frame else { break };
+                    last_frame = Instant::now();
                     if frame.len() <= CORR_LEN || frame.len() > MAX_REQUEST || !limiter.admit(frame.len()) {
                         self.metrics.dropped.inc();
                         continue;

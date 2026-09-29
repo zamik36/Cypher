@@ -17,7 +17,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use rand::RngCore;
 use tokio::sync::Semaphore;
-use tokio::time::{Instant, sleep_until, timeout};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -101,6 +101,8 @@ struct Session<B> {
 enum Next {
     Frame(Bytes),
     Relayed(BusMsg),
+    /// The idle timer fired; the connection may have been active since.
+    Idle,
     Kicked,
     Closed,
 }
@@ -115,11 +117,19 @@ impl<B: Bus> Session<B> {
             .await
             .ok()
             .flatten()?;
-        let hex = peer.to_hex();
+        if let Some((relayed, kick)) = self.attach(&peer).await {
+            self.out.try_push(frame(0, ServerMsg::Ready));
+            self.pump(&peer, stream, relayed, &kick).await;
+        }
+        Some(peer)
+    }
 
+    /// Registers the session, evicting older ones of the same identity here
+    /// and on other nodes, and subscribes to frames relayed to it.
+    async fn attach(&self, peer: &PeerId) -> Option<(B::Sub, CancellationToken)> {
         let kick = CancellationToken::new();
         if let Some(old) = self.gw.registry.insert(
-            peer,
+            *peer,
             ConnHandle {
                 conn_id: self.conn_id,
                 outbox: self.out.clone(),
@@ -131,14 +141,28 @@ impl<B: Bus> Session<B> {
         }
         // An empty message evicts an older session on another node; it goes
         // out before this session subscribes, so it never reaches itself.
-        let subject = peer_subject(&hex);
+        let subject = peer_subject(&peer.to_hex());
         self.gw.bus.publish(subject.clone(), Bytes::new()).await;
-        let Ok(mut relayed) = self.gw.bus.subscribe(subject).await else {
-            return Some(peer);
-        };
-        self.out.try_push(frame(0, ServerMsg::Ready));
+        let relayed = self.gw.bus.subscribe(subject).await.ok()?;
+        Some((relayed, kick))
+    }
 
-        let mut deadline = Instant::now() + IDLE_TIMEOUT;
+    /// Moves frames both ways until the client leaves, idles, is evicted or
+    /// the gateway shuts down.
+    async fn pump<S>(
+        &mut self,
+        peer: &PeerId,
+        mut stream: S,
+        mut relayed: B::Sub,
+        kick: &CancellationToken,
+    ) where
+        S: Stream<Item = io::Result<Bytes>> + Unpin + Send,
+    {
+        // One timer per session, re-armed only when it fires: resetting it on
+        // every frame put a timer-wheel insert and removal on the hot path.
+        let idle = sleep(IDLE_TIMEOUT);
+        tokio::pin!(idle);
+        let mut last_frame = Instant::now();
         loop {
             let next = tokio::select! {
                 biased;
@@ -156,20 +180,26 @@ impl<B: Bus> Session<B> {
                     Some(Ok(bytes)) => Next::Frame(bytes),
                     _ => Next::Closed,
                 },
-                () = sleep_until(deadline) => Next::Closed,
+                () = &mut idle => Next::Idle,
             };
             match next {
                 Next::Frame(bytes) => {
-                    deadline = Instant::now() + IDLE_TIMEOUT;
-                    if !self.on_frame(&peer, bytes).await {
+                    last_frame = Instant::now();
+                    if !self.on_frame(peer, bytes).await {
                         break;
                     }
                 }
                 Next::Relayed(msg) => self.on_relayed(msg).await,
+                Next::Idle => {
+                    let deadline = last_frame + IDLE_TIMEOUT;
+                    if deadline <= Instant::now() {
+                        break;
+                    }
+                    idle.as_mut().reset(deadline);
+                }
                 Next::Kicked | Next::Closed => break,
             }
         }
-        Some(peer)
     }
 
     /// `Hello` → `Challenge` → `Auth` proof-of-possession of the identity key.
