@@ -1,0 +1,39 @@
+import { defineConfig, devices } from "@playwright/test";
+
+const CI = Boolean(process.env["CI"]);
+
+/**
+ * End-to-end tests of the production bundle (`vite preview`) against a
+ * running stack: the preview server forwards `/ws` and `/relay` to the
+ * gateway and relay WebSocket listeners (see vite.config.ts).
+ */
+export default defineConfig({
+  testDir: "e2e",
+  timeout: 90_000,
+  expect: { timeout: 20_000 },
+  forbidOnly: CI,
+  // Every test brings its own identities, so they share the stack safely.
+  fullyParallel: true,
+  ...(CI && { workers: 2 }),
+  reporter: CI ? [["github"], ["html", { open: "never" }]] : "list",
+  use: {
+    baseURL: "http://localhost:4173",
+    trace: "retain-on-failure",
+  },
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        launchOptions: {
+          args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
+        },
+      },
+    },
+  ],
+  webServer: {
+    command: "npm run preview",
+    url: "http://localhost:4173",
+    reuseExistingServer: !CI,
+  },
+});

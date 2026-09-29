@@ -8,6 +8,8 @@ _photo_b64.txt
 node_modules/
 dist/
 coverage/
+test-results/
+playwright-report/
 
 .env
 .env.*

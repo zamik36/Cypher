@@ -145,6 +145,20 @@ deps:
 wasm:
     npm run build:wasm -w apps/pwa
 
+# Typecheck, lint (--max-warnings 0), formatting and unit tests with coverage
+web-check:
+    npm run typecheck
+    npm run lint
+    npm run format:check
+    npm run coverage
+
+# Needs `just wasm`, a running stack (`just services`) and, once,
+# `npx playwright install chromium`.
+# Browser journeys (Playwright) on the production bundle
+web-e2e:
+    npm run build -w apps/pwa
+    npm run e2e -w apps/pwa
+
 # ─── Desktop (Windows/Linux/macOS) ──────────────────────────────────────────
 
 # Run desktop app in dev mode (hot-reload)

@@ -205,6 +205,12 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install npm dependencies
+        run: npm ci
       - name: Build services
         run: cargo build --release -p gateway -p signaling -p relay -p load-test
       - name: Start stack
@@ -216,6 +222,19 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.129 --locked
           npm run build:wasm -w apps/pwa
           CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 node apps/pwa/scripts/live.mjs
+      # The production bundle in Chromium (fake camera and microphone), driven
+      # through the UI: pairing, receipts, a file, reload, notes, recovery.
+      - name: Browser journeys (Playwright)
+        run: |
+          npx playwright install --with-deps chromium
+          npm run build -w apps/pwa
+          npm run e2e -w apps/pwa
+      - name: Playwright report
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: playwright-report
+          path: apps/pwa/playwright-report/
       # 5k clients across two gateway nodes (NATS). The memory budget is ~1.6x
       # the measured cost of a connection (docs/performance.md).
       - name: Cross-node load
@@ -232,7 +251,6 @@ jobs:
       # script (tests/load); then every connection task must be gone.
       - name: WebSocket load (k6)
         run: |
-          npm ci -w tests/load --ignore-scripts
           npm run build -w tests/load
           tasks() { curl -s 127.0.0.1:9090/ | awk '/^tokio_alive_tasks /{print $2}'; }
           before=$(tasks)

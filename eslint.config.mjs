@@ -36,7 +36,7 @@ export default defineConfig(
   },
   {
     // Build configs live outside the apps' browser tsconfigs.
-    files: ["apps/*/vite.config.ts", "vitest.config.ts"],
+    files: ["apps/*/vite.config.ts", "apps/pwa/playwright.config.ts", "vitest.config.ts"],
     languageOptions: { parserOptions: { projectService: false, project: "./tsconfig.node.json" } },
   },
   {

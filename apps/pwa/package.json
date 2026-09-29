@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build:wasm": "cargo build -p cypher-wasm --release --target wasm32-unknown-unknown && wasm-bindgen --target web --out-dir src/wasm ../../target/wasm32-unknown-unknown/release/cypher_wasm.wasm",
-    "typecheck": "tsc --noEmit -p .",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p e2e",
     "build": "tsc --noEmit -p . && vite build && node scripts/precompress.mjs",
     "preview": "vite preview",
+    "e2e": "playwright test",
     "test:live": "node scripts/live.mjs",
     "generate-icons": "node scripts/generate-icons.js"
   },

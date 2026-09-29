@@ -19,18 +19,17 @@ function swCacheVersion(): Plugin {
 
 const gatewayWs = process.env["CYPHER_DEV_GATEWAY_WS"] ?? "ws://127.0.0.1:9101";
 const relayWs = process.env["CYPHER_DEV_RELAY_WS"] ?? "ws://127.0.0.1:9301";
+/** The client always talks to its own origin; dev and preview forward to a local stack. */
+const proxy = {
+  "/ws": { target: gatewayWs, ws: true },
+  "/relay": { target: relayWs, ws: true },
+};
 
 export default defineConfig({
   plugins: [solid(), swCacheVersion()],
   build: { target: ["es2022", "chrome102", "safari16"] },
   worker: { format: "es" },
   clearScreen: false,
-  server: {
-    port: 5174,
-    strictPort: true,
-    proxy: {
-      "/ws": { target: gatewayWs, ws: true },
-      "/relay": { target: relayWs, ws: true },
-    },
-  },
+  server: { port: 5174, strictPort: true, proxy },
+  preview: { port: 4173, strictPort: true, proxy },
 });
