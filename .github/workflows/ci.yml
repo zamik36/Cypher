@@ -234,7 +234,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: playwright-report
-          path: apps/pwa/playwright-report/
+          path: target/playwright/
       # 5k clients across two gateway nodes (NATS). The memory budget is ~1.6x
       # the measured cost of a connection (docs/performance.md).
       - name: Cross-node load
@@ -256,7 +256,7 @@ jobs:
           before=$(tasks)
           k6 run --quiet --summary-export e2e/k6.json \
             -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
-            -e PAIRS=1000 -e RAMP=10s -e HOLD=20s -e SESSION=20 tests/load/dist/gateway-ws.js
+            -e PAIRS=1000 -e RAMP=10s -e HOLD=20s -e SESSION=20 target/k6/gateway-ws.js
           sleep 5
           after=$(tasks)
           echo "gateway tasks: $before before, $after after"

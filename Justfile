@@ -133,7 +133,7 @@ load connections="1000" duration="30":
 load-ws pairs="100" hold="30s":
     npm run build -w tests/load
     k6 run --summary-export target/k6-summary.json -e PAIRS={{pairs}} -e HOLD={{hold}} \
-        -e GATEWAY_WS=ws://127.0.0.1:9101 tests/load/dist/gateway-ws.js
+        -e GATEWAY_WS=ws://127.0.0.1:9101 target/k6/gateway-ws.js
 
 # ─── Frontend ────────────────────────────────────────────────────────────────
 

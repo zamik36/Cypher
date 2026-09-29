@@ -22,7 +22,8 @@ export default defineConfig({
       exclude: ["**/*.test.*"],
       // A ratchet like `.config/coverage.toml`: measured minus one; raise, never lower.
       thresholds: { lines: 99, functions: 93, branches: 94, statements: 97 },
-      reporter: ["text", "lcov"],
+      reporter: ["text", "html"],
+      reportsDirectory: "target/coverage/web",
     },
   },
 });

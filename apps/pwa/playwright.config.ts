@@ -1,6 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const CI = Boolean(process.env["CI"]);
+/** Traces and reports go next to every other build artifact. */
+const OUT = "../../target/playwright";
 
 /**
  * End-to-end tests of the production bundle (`vite preview`) against a
@@ -15,7 +17,8 @@ export default defineConfig({
   // Every test brings its own identities, so they share the stack safely.
   fullyParallel: true,
   ...(CI && { workers: 2 }),
-  reporter: CI ? [["github"], ["html", { open: "never" }]] : "list",
+  outputDir: `${OUT}/results`,
+  reporter: CI ? [["github"], ["html", { open: "never", outputFolder: `${OUT}/report` }]] : "list",
   use: {
     baseURL: "http://localhost:4173",
     trace: "retain-on-failure",

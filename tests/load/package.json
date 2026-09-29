@@ -4,7 +4,7 @@
   "type": "module",
   "description": "k6 load scenarios for the gateway's WebSocket protocol",
   "scripts": {
-    "build": "esbuild src/gateway-ws.js --bundle --format=esm --platform=neutral --target=es2020 --external:k6 --external:k6/* --outfile=dist/gateway-ws.js",
+    "build": "esbuild src/gateway-ws.js --bundle --format=esm --platform=neutral --target=es2020 --external:k6 --external:k6/* --outfile=../../target/k6/gateway-ws.js",
     "test": "node --test src/*.test.js"
   },
   "devDependencies": {
