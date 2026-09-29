@@ -10,7 +10,7 @@ const en = {
   status_disconnected: "Disconnected",
   status_offline: "Offline",
   status_peers: (n: number) => `${n} ${n === 1 ? "peer" : "peers"}`,
-  status_active_chats: (n: number) => `${n} active chat${n > 1 ? "s" : ""}`,
+  status_active_chats: (n: number) => `${n} active chat${n === 1 ? "" : "s"}`,
 
   // -- Identity --
   identity_title: "Cypher",

@@ -1,5 +1,13 @@
 import type { TranslationKeys } from "./en";
 
+const rules = new Intl.PluralRules("ru");
+
+/** `n` with the noun form Russian grammar picks for it: 1 пир, 3 пира, 11 пиров, 21 пир. */
+function plural(n: number, one: string, few: string, many: string): string {
+  const form = rules.select(n);
+  return `${n} ${form === "one" ? one : form === "few" ? few : many}`;
+}
+
 const ru: TranslationKeys = {
   // -- Navigation --
   nav_home: "Главная",
@@ -11,16 +19,8 @@ const ru: TranslationKeys = {
   status_connected: "Подключен",
   status_disconnected: "Отключен",
   status_offline: "Не в сети",
-  status_peers: (n: number) => {
-    if (n % 10 === 1 && n % 100 !== 11) return `${n} пир`;
-    if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) return `${n} пира`;
-    return `${n} пиров`;
-  },
-  status_active_chats: (n: number) => {
-    if (n === 1) return `${n} активный чат`;
-    if (n >= 2 && n <= 4) return `${n} активных чата`;
-    return `${n} активных чатов`;
-  },
+  status_peers: (n: number) => plural(n, "пир", "пира", "пиров"),
+  status_active_chats: (n: number) => plural(n, "активный чат", "активных чата", "активных чатов"),
 
   // -- Identity --
   identity_title: "Шифр",
