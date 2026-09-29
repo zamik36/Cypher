@@ -273,7 +273,7 @@ jobs:
         run: cargo test -p cypher-desktop
 
   pwa-build:
-    name: PWA Build
+    name: Frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -301,6 +301,8 @@ jobs:
         run: npm run lint
       - name: Formatting
         run: npm run format:check
+      - name: Unit tests with coverage
+        run: npm run coverage
       - name: Load-script protocol tests
         run: npm test -w tests/load
       - name: Build PWA

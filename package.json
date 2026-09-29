@@ -1,6 +1,7 @@
 {
   "name": "cypher",
   "private": true,
+  "type": "module",
   "workspaces": [
     "packages/*",
     "apps/desktop",
@@ -10,20 +11,25 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.node.json && npm run typecheck --workspaces --if-present",
     "lint": "eslint . --max-warnings 0",
-    "format": "prettier --write apps packages tests/load *.json *.mjs",
-    "format:check": "prettier --check apps packages tests/load *.json *.mjs",
+    "format": "prettier --write apps packages tests/load *.json *.mjs *.ts",
+    "format:check": "prettier --check apps packages tests/load *.json *.mjs *.ts",
     "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "vitest run && npm run test --workspaces --if-present",
+    "coverage": "vitest run --coverage"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^5.0.2",
     "eslint": "^10.11.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-solid": "^0.18.0",
+    "fake-indexeddb": "^6.2.5",
     "globals": "^17.12.0",
+    "jsdom": "^29.1.1",
     "prettier": "^3.9.9",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.71.0"
+    "typescript-eslint": "^8.71.0",
+    "vitest": "^5.0.2"
   }
 }

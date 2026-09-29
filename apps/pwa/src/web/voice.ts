@@ -13,7 +13,7 @@ export interface VoiceClip {
 }
 
 /** Same dBFS mapping as the native meter: -60 dB → 0, 0 dB → 1. */
-function level(rms: number): number {
+export function level(rms: number): number {
   return rms <= 0 ? 0 : Math.min(1, Math.max(0, (20 * Math.log10(rms) + 60) / 60));
 }
 
