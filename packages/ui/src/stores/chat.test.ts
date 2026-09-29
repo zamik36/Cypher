@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ChatMessage } from "../platform";
-import { addMessage, clearAllMessages, getMessages, peerOf, setMessageStatus, setMessages } from "./chat";
+import {
+  addMessage,
+  clearAllMessages,
+  getMessages,
+  historyLoaded,
+  mergeHistory,
+  peerOf,
+  setMessageStatus,
+  setMessages,
+} from "./chat";
 
 const msg = (id: string | undefined, text = id ?? "local"): ChatMessage => ({
   ...(id && { msg_id: id }),
@@ -53,10 +62,25 @@ describe("chat store", () => {
     expect(getMessages("alice")[1]?.status).toBe("read");
   });
 
+  it("merges stored history before messages that arrived live", () => {
+    addMessage("alice", msg("m3", "while you were away"));
+    addMessage("alice", msg(undefined, "local only"));
+    setMessageStatus("m3", "read");
+    expect(historyLoaded("alice")).toBe(false);
+
+    mergeHistory("alice", [msg("m1"), msg("m2"), { ...msg("m3", "while you were away"), status: "delivered" }]);
+    expect(historyLoaded("alice")).toBe(true);
+    expect(getMessages("alice").map((m) => m.text)).toEqual(["m1", "m2", "while you were away", "local only"]);
+    expect(getMessages("alice")[2]?.status).toBe("read");
+    expect(peerOf("m1")).toBe("alice");
+  });
+
   it("clears every conversation", () => {
     addMessage("alice", msg("m1"));
+    mergeHistory("alice", []);
     clearAllMessages();
     expect(getMessages("alice")).toEqual([]);
+    expect(historyLoaded("alice")).toBe(false);
     expect(peerOf("m1")).toBeUndefined();
   });
 });

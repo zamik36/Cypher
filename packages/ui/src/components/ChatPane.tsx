@@ -1,6 +1,6 @@
 import { createSignal, createEffect, on, onMount, onCleanup, For, Show } from "solid-js";
 import { api, type ChatMessage, type MediaSent, type MessageStatus, type UiFile, type UiMessage } from "../platform";
-import { chatsByPeer, addMessage, getMessages, setMessages } from "../stores/chat";
+import { chatsByPeer, addMessage, getMessages, historyLoaded, mergeHistory } from "../stores/chat";
 import { connection, setActivePeer, shortName } from "../stores/connection";
 import { upsertTransfer } from "../stores/transfers";
 import { trackMedia } from "../stores/media";
@@ -69,18 +69,17 @@ export default function ChatPane(props: ChatPaneProps) {
   let loadingForPeer: string | null = null;
   createEffect(() => {
     const peer = activePeer();
-    if (!peer || getMessages(peer).length > 0) return;
+    // Not "no messages yet": some may have arrived live before the chat opened.
+    if (!peer || historyLoaded(peer)) return;
     loadingForPeer = peer;
     setLoadingHistory(true);
     api
       .getHistory(peer, HISTORY_PAGE)
       .then((history) => {
-        if (loadingForPeer === peer && history.length > 0) {
-          setMessages(
-            peer,
-            history.reverse().map((m) => fromHistory(peer, m)),
-          );
-        }
+        mergeHistory(
+          peer,
+          history.reverse().map((m) => fromHistory(peer, m)),
+        );
       })
       .catch((e: unknown) => console.warn("Failed to load history:", e))
       .finally(() => {
