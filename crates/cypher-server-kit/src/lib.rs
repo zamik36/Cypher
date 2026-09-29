@@ -127,20 +127,24 @@ pub async fn shutdown_signal() {
 }
 
 /// Text logs by default, JSON with `LOG_FORMAT=json`; level from `RUST_LOG`.
+/// With the `console` feature the runtime is also served to tokio-console
+/// on `127.0.0.1:6669` (`TOKIO_CONSOLE_BIND`); `RUST_LOG` filters only logs.
 pub fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    use tracing_subscriber::{EnvFilter, Layer as _, fmt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let json = std::env::var("LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
-    if json {
-        fmt()
-            .json()
-            .with_env_filter(filter)
-            .with_target(true)
-            .init();
+    let logs = if json {
+        fmt::layer().json().with_target(true).boxed()
     } else {
-        fmt().with_env_filter(filter).with_target(true).init();
-    }
+        fmt::layer().with_target(true).boxed()
+    };
+    let subscriber = tracing_subscriber::registry().with(logs.with_filter(filter));
+    #[cfg(feature = "console")]
+    let subscriber = subscriber.with(console_subscriber::spawn());
+    subscriber.init();
 }
 
 /// Hides credentials in URLs before they are logged.

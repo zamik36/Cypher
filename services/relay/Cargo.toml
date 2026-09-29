@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+console = ["cypher-server-kit/console"]
+
 [dependencies]
 cypher-tls.workspace = true
 cypher-transport = { workspace = true, features = ["ws"] }

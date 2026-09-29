@@ -37,22 +37,28 @@ build-release:
     cargo build --workspace --release
 
 # Run gateway service (TLS :9100, WebSocket :9101)
-gateway:
+gateway *cargo_args:
     mkdir -p {{certs}}
     P2P_NATS_URL={{nats_url}} P2P_NATS_USER=gateway P2P_NATS_PASSWORD="$GATEWAY_NATS_PASSWORD" \
-    P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT={{certs}}/gateway.pem cargo run -p gateway
+    P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT={{certs}}/gateway.pem cargo run -p gateway {{cargo_args}}
 
 # Run signaling service (NATS + Redis only)
-signaling:
+signaling *cargo_args:
     P2P_NATS_URL={{nats_url}} P2P_NATS_USER=signaling P2P_NATS_PASSWORD="$SIGNALING_NATS_PASSWORD" \
     P2P_REDIS_URL="redis://:$REDIS_PASSWORD@127.0.0.1:6379" P2P_RELAY_PUBLIC_ADDR=localhost:9300 \
-    cargo run -p signaling
+    cargo run -p signaling {{cargo_args}}
 
 # Run relay service (TLS :9300, WebSocket :9301)
-relay:
+relay *cargo_args:
     mkdir -p {{certs}}
     P2P_NATS_URL={{nats_url}} P2P_NATS_USER=relay P2P_NATS_PASSWORD="$RELAY_NATS_PASSWORD" \
-    P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT={{certs}}/relay.pem cargo run -p relay
+    P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT={{certs}}/relay.pem cargo run -p relay {{cargo_args}}
+
+# A service with tokio-console instrumentation; then run `tokio-console`
+# (cargo install --locked tokio-console). Own target dir: the cfg flag
+# rebuilds everything.
+console service:
+    RUSTFLAGS="--cfg tokio_unstable" CARGO_TARGET_DIR=target/console just {{service}} --features console
 
 # Run all 3 backend services
 services:
