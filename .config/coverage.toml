@@ -7,11 +7,11 @@
 excluded = ["cypher-wasm", "e2e", "load-test", "xtask"]
 
 [crates]
-cypher-client = { floor = 87.0, target = 80 }
+cypher-client = { floor = 88.5, target = 80 }
 cypher-core = { floor = 91.0, target = 90 }
 cypher-crypto = { floor = 96.6, target = 90 }
-cypher-desktop = { floor = 73.4, target = 80 }
-cypher-media = { floor = 88.3, target = 80 }
+cypher-desktop = { floor = 82.4, target = 80 }
+cypher-media = { floor = 88.6, target = 80 }
 cypher-server-kit = { floor = 87.6, target = 80 }
 cypher-tls = { floor = 95.2, target = 80 }
 cypher-transport = { floor = 95.6, target = 80 }
