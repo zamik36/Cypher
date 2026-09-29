@@ -54,6 +54,12 @@ relay *cargo_args:
     P2P_NATS_URL={{nats_url}} P2P_NATS_USER=relay P2P_NATS_PASSWORD="$RELAY_NATS_PASSWORD" \
     P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT={{certs}}/relay.pem cargo run -p relay {{cargo_args}}
 
+# CPU flamegraph of a running service on Linux (perf + inferno), e.g. under
+# `just load-ws`: `just flamegraph gateway 30`. Build first with
+# `scripts/flamegraph.sh build` and run target/profiling/<service>.
+flamegraph service seconds="30":
+    scripts/flamegraph.sh {{service}} {{seconds}}
+
 # A service with tokio-console instrumentation; then run `tokio-console`
 # (cargo install --locked tokio-console). Own target dir: the cfg flag
 # rebuilds everything.
@@ -117,10 +123,17 @@ e2e:
     npm run build:wasm -w apps/pwa
     CYPHER_WS_GATEWAY=ws://127.0.0.1:9101 CYPHER_WS_RELAY=ws://127.0.0.1:9301 npm run test:live -w apps/pwa
 
-# Gateway load test against a local gateway
+# Native TLS load (tools/load-test) against a local gateway
 load connections="1000" duration="30":
     cargo run --release -p load-test -- --connections {{connections}} --duration {{duration}} \
-        --gateway-addr localhost:9100 --ca-cert {{certs}}/gateway.pem
+        --gateway-addr localhost:9100 --ca-cert {{certs}}/gateway.pem --metrics-addr 127.0.0.1:9090
+
+# WebSocket load with k6 (tests/load) against a local gateway; install k6
+# first (winget install k6 / apt install k6). Summary: target/k6-summary.json
+load-ws pairs="100" hold="30s":
+    npm run build -w tests/load
+    k6 run --summary-export target/k6-summary.json -e PAIRS={{pairs}} -e HOLD={{hold}} \
+        -e GATEWAY_WS=ws://127.0.0.1:9101 tests/load/dist/gateway-ws.js
 
 # ─── Frontend ────────────────────────────────────────────────────────────────
 

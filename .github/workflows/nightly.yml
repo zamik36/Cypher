@@ -109,6 +109,17 @@ jobs:
             --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
             --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
             --assert-max-bytes-per-conn 40000 --assert-tasks-return 5 --json | tee e2e/load.json
+      - uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1 # v1.2.2
+        with:
+          k6-version: "2.3.0"
+      - name: WebSocket load (k6)
+        run: |
+          ulimit -n 65536
+          npm ci -w tests/load --ignore-scripts
+          npm run build -w tests/load
+          k6 run --quiet --summary-export e2e/k6.json \
+            -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
+            -e PAIRS=2000 -e RAMP=20s -e HOLD=60s -e SESSION=60 tests/load/dist/gateway-ws.js
       - name: Upload report and logs
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

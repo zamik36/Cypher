@@ -4,7 +4,7 @@
 # the development certificates go to e2e/:
 #   stack.pem     gateway 1 + relay (client journeys)
 #   gateways.pem  both gateways (cross-node load)
-# Ports: gateway 9100 (WS 9101, metrics 9090), gateway 9110 (metrics 9095),
+# Ports: gateway 9100 (WS 9101, metrics 9090), gateway 9110 (WS 9111, metrics 9095),
 # relay 9300 (WS 9301).
 set -euo pipefail
 
@@ -23,7 +23,7 @@ P2P_NATS_USER=signaling P2P_NATS_PASSWORD=sig P2P_REDIS_URL=redis://:ci@127.0.0.
 P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9100 P2P_WS_ADDR=127.0.0.1:9101 \
   P2P_METRICS_ADDR=127.0.0.1:9090 P2P_DEV_CERT_OUT=e2e/gw1.pem \
   "$bin/gateway" > e2e/gateway1.log 2>&1 &
-P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9110 \
+P2P_NATS_USER=gateway P2P_NATS_PASSWORD=gw P2P_GATEWAY_ADDR=127.0.0.1:9110 P2P_WS_ADDR=127.0.0.1:9111 \
   P2P_METRICS_ADDR=127.0.0.1:9095 P2P_DEV_CERT_OUT=e2e/gw2.pem \
   "$bin/gateway" > e2e/gateway2.log 2>&1 &
 P2P_NATS_USER=relay P2P_NATS_PASSWORD=rel P2P_RELAY_ADDR=127.0.0.1:9300 P2P_WS_ADDR=127.0.0.1:9301 \
@@ -31,7 +31,7 @@ P2P_NATS_USER=relay P2P_NATS_PASSWORD=rel P2P_RELAY_ADDR=127.0.0.1:9300 P2P_WS_A
   "$bin/relay" > e2e/relay.log 2>&1 &
 
 # Every listener up (certificates are written before binding).
-for port in 9090 9091 9100 9101 9110 9300 9301; do
+for port in 9090 9091 9100 9101 9110 9111 9300 9301; do
   for _ in $(seq 100); do
     (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
     sleep 0.1

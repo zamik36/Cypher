@@ -1,7 +1,12 @@
 {
   "name": "cypher",
   "private": true,
-  "workspaces": ["packages/*", "apps/desktop", "apps/pwa"],
+  "workspaces": [
+    "packages/*",
+    "apps/desktop",
+    "apps/pwa",
+    "tests/load"
+  ],
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",

@@ -8,14 +8,22 @@
 	root * /srv
 	encode zstd gzip
 	try_files {path} /index.html
-	file_server
+	# Siblings written by scripts/precompress.mjs at build: smaller than
+	# on-the-fly encoding and free per request. `encode` covers the rest.
+	file_server {
+		precompressed br zstd gzip
+	}
 
 	header {
 		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 		Cross-Origin-Opener-Policy "same-origin"
 		Referrer-Policy "no-referrer"
 		X-Content-Type-Options "nosniff"
-		Cache-Control "no-cache"
 	}
-	header /assets/* Cache-Control "public, max-age=31536000, immutable"
+	# Disjoint matchers: Caddy orders same-named directives by matcher
+	# specificity, so an unmatched `Cache-Control` would override this one.
+	@hashed path /assets/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	@shell not path /assets/*
+	header @shell Cache-Control "no-cache"
 }

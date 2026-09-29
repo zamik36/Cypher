@@ -1,0 +1,15 @@
+{
+  "name": "@cypher/load",
+  "private": true,
+  "type": "module",
+  "description": "k6 load scenarios for the gateway's WebSocket protocol",
+  "scripts": {
+    "build": "esbuild src/gateway-ws.js --bundle --format=esm --platform=neutral --target=es2020 --external:k6 --external:k6/* --outfile=dist/gateway-ws.js",
+    "test": "node --test src/*.test.js"
+  },
+  "devDependencies": {
+    "@noble/ed25519": "3.2.0",
+    "@noble/hashes": "2.4.0",
+    "esbuild": "0.28.2"
+  }
+}

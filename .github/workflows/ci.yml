@@ -225,6 +225,24 @@ jobs:
             --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
             --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
             --assert-max-bytes-per-conn 40000 --assert-tasks-return 5
+      - uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1 # v1.2.2
+        with:
+          k6-version: "2.3.0"
+      # The browser path: WebSocket clients on both nodes, thresholds in the
+      # script (tests/load); then every connection task must be gone.
+      - name: WebSocket load (k6)
+        run: |
+          npm ci -w tests/load --ignore-scripts
+          npm run build -w tests/load
+          tasks() { curl -s 127.0.0.1:9090/ | awk '/^tokio_alive_tasks /{print $2}'; }
+          before=$(tasks)
+          k6 run --quiet --summary-export e2e/k6.json \
+            -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
+            -e PAIRS=1000 -e RAMP=10s -e HOLD=20s -e SESSION=20 tests/load/dist/gateway-ws.js
+          sleep 5
+          after=$(tasks)
+          echo "gateway tasks: $before before, $after after"
+          [ "$after" -le $((before + 5)) ]
       - name: Service logs
         if: failure()
         run: tail -n 100 e2e/*.log
@@ -279,6 +297,8 @@ jobs:
         run: npm run build:wasm -w apps/pwa
       - name: Typecheck
         run: npm run typecheck
+      - name: Load-script protocol tests
+        run: npm test -w tests/load
       - name: Build PWA
         run: npm run build -w apps/pwa
       - name: Upload PWA artifact
