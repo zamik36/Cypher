@@ -27,6 +27,7 @@
 | D | Инструменты и CI: nextest (+ doctest), Miri, machete, typos, taplo, cargo-hack, ужесточение deny, nightly-workflow (Miri, fuzz 10 мин, mutants); Opus на эталонном libopus, `unsafe_code = "forbid"` | ✅ `66ae1e7` |
 | E | Покрытие: `cargo llvm-cov nextest` + `tools/xtask coverage-gate` + `.config/coverage.toml` (floor/target, `--bump`); тесты для tls, transport, relay, signaling (живой Redis, env `CYPHER_TEST_REDIS`), gateway, wasm, desktop (`tauri::test`), ветки ошибок | ✅ `f044c26` (desktop 74% из 80 — остаток в G) |
 | F | Производительность (бенчмарки и нагрузка 10k в nightly — здесь): criterion (crypto, wire, core, gateway, media); load-test по модулям с `--json`, `--src-ips`, `--metrics-url`, `--assert-*`, байтами на соединение из `process_resident_memory_bytes`; профилирование; `docs/performance.md` с честными целями | ✅ `e884ca1`…`8849b9f` |
+| F2 | Перепроверка индустриальными инструментами: k6 (WebSocket), wrk (HTTP), perf/flamegraph, pprof-rs, hotpath, tokio-console, Valgrind, gungraun, criterion; метрики рантайма tokio и проверка утечки задач в CI | ✅ `57ec020`…`55fae25` |
 | G ⏭ | Фронтенд: строгий tsconfig (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` и др.), ESLint и Prettier, vitest (сторы, i18n, idb на fake-indexeddb, `effects.ts`), Playwright из scratch-сценариев journey и media | ⏳ |
 | H | Документация: заново `architecture.md`, `protocol-v2.md`, `threat-model.md`; удалить `onion-routing.md`; обновить README, deploy, commands; новый `CONTRIBUTING.md`; обновить roadmap и report | ⏳ |
 
@@ -231,6 +232,42 @@
 **Не сделано:**
 - прогон на 100k — это ручная процедура на отдельной машине, описана в `docs/performance.md`;
 - CPU-профиль под нагрузкой — узких мест по задержкам и пропускной способности не видно.
+
+## Фаза F2 — итог
+Подробности и все числа — в `docs/performance.md`, раздел «Инструменты и что они показали».
+
+**Найдено и исправлено:**
+- **Лишняя работа gateway на горячем пути** (perf):
+  - tungstenite обнулял 128 КиБ перед каждым чтением — 10% CPU, и каждое WebSocket-соединение занимало около 100 КБ. Теперь буфер чтения 8 КиБ.
+  - все соединения опрашивали один токен остановки, и воркеры конкурировали за его блокировку. Теперь у каждого соединения дочерний токен.
+  - таймер простоя пересоздавался на каждый кадр. Теперь у сессии один таймер, который перевзводится, только когда срабатывает.
+
+  Итог: CPU на сообщение 56 → 42 мкс (узел отправителя) и 51 → 33 мкс (узел получателя), RSS 152 → 62 МБ, WebSocket-соединение ≈24 КБ.
+- **Статика PWA** (wrk):
+  - хэшированные ассеты отдавались с `no-cache`;
+  - сжатие шло на каждый запрос. Теперь при сборке кладутся готовые brotli, zstd и gzip: wasm 823 → 257 КБ, JS-бандл 7 → 36 тыс. запросов/с.
+- **Фича `console` роняла все сборки с `--all-features`.** Теперь слой включается только при `cfg(tokio_unstable)`.
+- **`cargo bench --benches` (nightly и `just bench`) падал на флагах criterion.** Исправлено через `[lib] bench = false`.
+- **Покрытие signaling плавало между прогонами** — отказные пути срабатывали через раз. Добавлены детерминированные тесты обработчика на живом Redis.
+
+**Встроено в проект:**
+- **Метрики рантайма tokio в Prometheus** (`tokio_alive_tasks`, `tokio_worker_busy_seconds_total` и др.). В load-test добавлен `--assert-tasks-return`: задачи gateway должны вернуться к исходному числу. Проверка включена в CI.
+- **k6** (`tests/load`, подпись Ed25519 через `@noble/ed25519`, `node --test`). В CI e2e — 1000 пар, в nightly — 2000; рецепт `just load-ws`.
+- **tokio-console:** фича `console` и рецепт `just console <service>`.
+- **Профиль `profiling`**, скрипт `scripts/flamegraph.sh` и рецепт `just flamegraph <service>`.
+
+**Проверено разово, без изменений в репозитории:**
+- tokio-console — нет lost-waker, self-wake, never-yielded;
+- Valgrind memcheck на FFI (libopus, SQLite) — 0 ошибок;
+- massif — 17 КБ кучи на соединение;
+- hotpath — 1.8 КБ на межузловой кадр, это задача ожидания ответа NATS;
+- gungraun — `peek_send` 217 инструкций, AES-GCM 8.2 инструкции на байт;
+- pprof — стоимость сообщения — DH-шаги ratchet, стоимость файла — AES-GCM и GHASH.
+
+**Записано как возможности, не сделано** (см. `docs/performance.md`):
+- общий reply-субъект NATS вместо задачи на каждый запрос;
+- AEAD из ring вместо aes-gcm;
+- один `select` на соединение вместо отдельного опроса токена.
 
 ## Следующий шаг — фаза G (фронтенд)
 По плану:

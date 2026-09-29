@@ -3,6 +3,8 @@
 pn = "pn"
 # Retransmission timeout.
 rto = "rto"
+# The HTTP load generator (github.com/wg/wrk).
+wrk = "wrk"
 
 [files]
 extend-exclude = ["*.lock", "apps/pwa/src/wasm/", "**/fuzz/corpus/"]
