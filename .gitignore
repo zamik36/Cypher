@@ -1,15 +1,17 @@
-docs/architecture.md
-RESUME.md
-assets/photo.png
-assets/photo_b64.txt
-_photo_b64.txt
+# Build output: cargo, Tauri, vite; tests and profiling write under target/ too.
 **/target/
 **/gen/
 node_modules/
 dist/
+apps/pwa/src/wasm/
+**/fuzz/Cargo.lock
+**/fuzz/corpus/
+**/fuzz/artifacts/
 
+# Local settings and secrets. `.env.example` is the committed template.
 .env
 .env.*
+!.env.example
 /config.toml
 .cargo/
 *.pem
@@ -18,33 +20,23 @@ dist/
 *.p12
 *.keystore
 
+# Mobile packages
+*.apk
+*.aab
+
+# Editors and OS
 .vscode/
 .idea/
 *.swp
 *.swo
-
 .DS_Store
 Thumbs.db
 
+# Local AI tooling
+CLAUDE.md
 .claude/*
 .claude_cache
-.direnv/
-result
-
-*.apk
-*.aab
-.aidesigner/*
 .mcp.json
 .agents/*
-
-# Added by code-review-graph
+.aidesigner/*
 .code-review-graph/
-
-CLAUDE.md
-
-**/fuzz/Cargo.lock
-**/fuzz/corpus/
-**/fuzz/artifacts/
-
-# Generated WebAssembly bindings
-apps/pwa/src/wasm/
