@@ -211,3 +211,9 @@ strip = "symbols"
 panic = "abort"
 opt-level = 3
 
+# Release code with symbols and line tables for perf / flamegraphs
+# (scripts/flamegraph.sh); build with frame pointers, see that script.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
