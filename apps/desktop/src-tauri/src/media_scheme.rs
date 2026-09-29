@@ -5,7 +5,7 @@
 use cypher_client::{Client, ClientError, MediaSlice};
 use cypher_types::FileId;
 use tauri::http::{Request, Response, StatusCode, header};
-use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
+use tauri::{AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
 use crate::session::AppState;
 
@@ -21,17 +21,21 @@ pub(crate) fn handle<R: Runtime>(
     responder: UriSchemeResponder,
 ) {
     let app = ctx.app_handle().clone();
-    tauri::async_runtime::spawn(async move {
-        let client = match app.try_state::<AppState>() {
-            Some(state) => state.client().await.ok(),
-            None => None,
-        };
-        let response = match client {
-            Some(client) => serve(&client, &request).await,
-            None => status(StatusCode::SERVICE_UNAVAILABLE),
-        };
-        responder.respond(response);
-    });
+    tauri::async_runtime::spawn(async move { responder.respond(answer(&app, &request).await) });
+}
+
+/// The response to `request`; 503 until a session is up.
+pub(crate) async fn answer<R: Runtime>(
+    app: &AppHandle<R>,
+    request: &Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
+    let Some(state) = app.try_state::<AppState>() else {
+        return status(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    match state.client().await {
+        Ok(client) => serve(&client, request).await,
+        Err(_) => status(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
 pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {

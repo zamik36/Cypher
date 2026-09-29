@@ -6,7 +6,7 @@ mod session;
 mod tests;
 
 use commands::{chat, identity, link, media, qr, settings, transfer};
-use tauri::Manager;
+use tauri::{Manager, Runtime};
 
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
@@ -26,7 +26,7 @@ pub fn run() -> tauri::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    tauri::Builder::default()
+    wire(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -34,8 +34,15 @@ pub fn run() -> tauri::Result<()> {
             app.manage(session::AppState::new(paths, session::tls_from_env()?));
             Ok(())
         })
-        .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::handle)
         .on_page_load(|webview, _| allow_user_media(webview))
+        .run(tauri::generate_context!())
+}
+
+/// The commands and the media scheme, shared with the tests' mock runtime so
+/// they exercise exactly what the webview can reach.
+fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
+        .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::handle)
         .invoke_handler(tauri::generate_handler![
             identity::has_identity,
             identity::create_identity,
@@ -61,7 +68,6 @@ pub fn run() -> tauri::Result<()> {
             media::send_video_note,
             qr::generate_qr,
         ])
-        .run(tauri::generate_context!())
 }
 
 /// `WebKitGTK` denies camera and microphone requests unless the embedder

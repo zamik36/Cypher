@@ -1,7 +1,7 @@
 //! The unlocked identity and the running client, shared by all commands.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -216,11 +216,17 @@ pub(crate) async fn await_event<T>(
 
 /// System trust roots; `CYPHER_DEV_CA` pins development certificates instead.
 pub(crate) fn tls_from_env() -> CmdResult<Arc<rustls::ClientConfig>> {
-    match std::env::var("CYPHER_DEV_CA") {
-        Ok(path) => {
-            let pem = std::fs::read_to_string(path).map_err(err)?;
-            cypher_tls::make_client_config_with_pem(&pem).map_err(err)
-        }
-        Err(_) => Ok(cypher_tls::make_client_config()),
-    }
+    tls(std::env::var_os("CYPHER_DEV_CA")
+        .map(PathBuf::from)
+        .as_deref())
+}
+
+/// Trusts only the certificates in the `dev_ca` PEM file when given, the
+/// system roots otherwise.
+pub(crate) fn tls(dev_ca: Option<&Path>) -> CmdResult<Arc<rustls::ClientConfig>> {
+    let Some(path) = dev_ca else {
+        return Ok(cypher_tls::make_client_config());
+    };
+    let pem = std::fs::read_to_string(path).map_err(err)?;
+    cypher_tls::make_client_config_with_pem(&pem).map_err(err)
 }

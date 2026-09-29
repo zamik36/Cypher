@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use cypher_core::{Command, MediaKind};
 use cypher_types::FileId;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::chat::parse_peer;
@@ -23,8 +23,8 @@ pub(crate) struct TransferInfo {
 /// The backend owns path selection: the webview can never make the client
 /// read an arbitrary file.
 #[tauri::command]
-pub(crate) async fn browse_and_send(
-    app: AppHandle,
+pub(crate) async fn browse_and_send<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     peer_id: String,
 ) -> CmdResult<Vec<TransferInfo>> {

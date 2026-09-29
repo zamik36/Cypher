@@ -1,13 +1,15 @@
-//! Commands driven through Tauri's mock runtime, the way the webview calls
-//! them. The two-desktop scenario needs `CYPHER_TEST_REDIS` and
-//! `CYPHER_TEST_NATS` (see `tests/e2e`).
+//! Commands driven through Tauri's mock runtime by name, with the same
+//! camelCase arguments the webview sends (`apps/desktop/src/tauri.ts`), so a
+//! renamed parameter or a command missing from the handler list fails here.
+//! The two-desktop scenario needs `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS`
+//! (see `tests/e2e`).
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use cypher_types::FileId;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tauri::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{
@@ -17,9 +19,8 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 
-use crate::commands::{chat, identity, link, media, qr, settings, transfer};
 use crate::media_scheme;
-use crate::session::{AppState, Paths};
+use crate::session::{self, AppState, Paths};
 
 const PASS: &str = "correct horse battery";
 const WAIT: Duration = Duration::from_secs(20);
@@ -41,8 +42,7 @@ impl Desktop {
             transport: None,
         };
         std::fs::create_dir_all(dir.path().join("downloads")).unwrap();
-        let app = mock_builder()
-            .invoke_handler(tauri::generate_handler![media::send_video_note])
+        let app = crate::wire(mock_builder())
             .build(mock_context(noop_assets()))
             .unwrap();
         app.manage(AppState::new(paths, tls));
@@ -82,26 +82,30 @@ impl Desktop {
             .map(|body| body.deserialize().unwrap())
     }
 
+    /// `invoke(cmd, args)` from the webview; an error is the command's message.
+    async fn call(&self, cmd: &str, args: Value) -> Result<Value, String> {
+        self.invoke(cmd, InvokeBody::Json(args), HeaderMap::new())
+            .await
+            .map_err(|e| e.as_str().map_or_else(|| e.to_string(), str::to_owned))
+    }
+
     fn state(&self) -> State<'_, AppState> {
         self.app.state()
     }
 
     async fn create(&self, nickname: &str) -> String {
-        identity::create_identity(self.state(), nickname.into(), PASS.into())
-            .await
-            .unwrap()
+        let args = json!({ "nickname": nickname, "passphrase": PASS });
+        text(&self.call("create_identity", args).await.unwrap())
     }
 
     async fn connect(&self, gateway: &str) -> String {
-        let handle = self.app.handle().clone();
-        settings::connect_to_gateway(handle, self.state(), gateway.into(), false, Vec::new())
-            .await
-            .unwrap()
+        let args = json!({ "addr": gateway, "anonymous": false, "bridges": [] });
+        text(&self.call("connect_to_gateway", args).await.unwrap())
     }
 }
 
-fn json(value: impl serde::Serialize) -> Value {
-    serde_json::to_value(value).unwrap()
+fn text(value: &Value) -> String {
+    value.as_str().expect("a string").to_owned()
 }
 
 /// Polls `probe` until it yields a value or the wait runs out.
@@ -139,41 +143,47 @@ async fn once_online<T, F: Future<Output = Result<T, String>>>(
 #[tokio::test]
 async fn identity_lifecycle_without_a_server() {
     let desktop = Desktop::new(cypher_tls::make_client_config());
-    let state = || desktop.state();
-    assert!(!identity::has_identity(state()).await.unwrap());
-    assert_eq!(settings::get_nickname(state()).await.unwrap(), None);
+    let no_args = || json!({});
+    assert_eq!(
+        desktop.call("has_identity", no_args()).await,
+        Ok(json!(false))
+    );
+    assert_eq!(
+        desktop.call("get_nickname", no_args()).await,
+        Ok(Value::Null)
+    );
 
     let peer = desktop.create("alice").await;
-    assert!(identity::has_identity(state()).await.unwrap());
     assert_eq!(
-        settings::get_nickname(state()).await.unwrap().as_deref(),
-        Some("alice")
+        desktop.call("has_identity", no_args()).await,
+        Ok(json!(true))
+    );
+    assert_eq!(
+        desktop.call("get_nickname", no_args()).await,
+        Ok(json!("alice"))
     );
 
-    identity::unlock_identity(state(), "wrong".into())
+    let with_pass = |passphrase: &str| json!({ "passphrase": passphrase });
+    desktop
+        .call("unlock_identity", with_pass("wrong"))
         .await
         .unwrap_err();
-    let (unlocked, nickname) = identity::unlock_identity(state(), PASS.into())
-        .await
-        .unwrap();
-    assert_eq!(
-        (unlocked.as_str(), nickname.as_str()),
-        (peer.as_str(), "alice")
-    );
+    let unlocked = desktop.call("unlock_identity", with_pass(PASS)).await;
+    assert_eq!(unlocked, Ok(json!([peer, "alice"])));
 
-    identity::export_mnemonic(state(), "wrong".into())
+    desktop
+        .call("export_mnemonic", with_pass("wrong"))
         .await
         .unwrap_err();
-    let mnemonic = identity::export_mnemonic(state(), PASS.into())
+    let mnemonic = desktop
+        .call("export_mnemonic", with_pass(PASS))
         .await
         .unwrap();
     let restored = Desktop::new(cypher_tls::make_client_config());
-    let imported =
-        identity::import_mnemonic(restored.state(), mnemonic, "alice".into(), PASS.into())
-            .await
-            .unwrap();
+    let args = json!({ "mnemonic": mnemonic, "nickname": "alice", "passphrase": PASS });
     assert_eq!(
-        imported, peer,
+        restored.call("import_mnemonic", args).await,
+        Ok(json!(peer)),
         "the recovery phrase restores the same identity"
     );
 }
@@ -181,55 +191,83 @@ async fn identity_lifecycle_without_a_server() {
 #[tokio::test]
 async fn commands_fail_cleanly_before_connecting() {
     let desktop = Desktop::new(cypher_tls::make_client_config());
-    let state = || desktop.state();
-    let handle = || desktop.app.handle().clone();
+    let call = |cmd: &'static str, args: Value| desktop.call(cmd, args);
     let peer = cypher_types::PeerId([1; 32]).to_hex();
+    let connect = |addr: &str| json!({ "addr": addr, "anonymous": false, "bridges": [] });
 
-    let locked =
-        settings::connect_to_gateway(handle(), state(), "localhost:1".into(), false, vec![]);
-    assert_eq!(locked.await.unwrap_err(), "identity is locked");
+    let locked = call("connect_to_gateway", connect("localhost:1")).await;
+    assert_eq!(locked.unwrap_err(), "identity is locked");
     desktop.create("bob").await;
-    let bad_addr = settings::connect_to_gateway(handle(), state(), "no port".into(), false, vec![]);
-    bad_addr.await.unwrap_err();
+    call("connect_to_gateway", connect("no port"))
+        .await
+        .unwrap_err();
 
+    let not_connected = Err("not connected".to_owned());
+    assert_eq!(call("get_conversations", json!({})).await, not_connected);
+    let send = |peer_id: &str| json!({ "peerId": peer_id, "text": "x" });
+    assert_eq!(call("send_message", send(&peer)).await, not_connected);
     assert_eq!(
-        identity::get_conversations(state()).await.unwrap_err(),
-        "not connected"
-    );
-    assert_eq!(
-        chat::send_message(state(), peer.clone(), "x".into())
-            .await
-            .unwrap_err(),
-        "not connected"
-    );
-    assert_eq!(
-        chat::send_message(state(), "zz".into(), "x".into())
-            .await
-            .unwrap_err(),
+        call("send_message", send("zz")).await.unwrap_err(),
         "invalid peer id"
     );
-    identity::get_history(state(), "zz".into(), None, 10)
-        .await
-        .unwrap_err();
-    identity::clear_chat_history(state()).await.unwrap_err();
-    link::create_link(state()).await.unwrap_err();
-    transfer::accept_file(state(), FileId([2; 16]).to_hex())
-        .await
-        .unwrap_err();
-    transfer::cancel_transfer(state(), "zz".into())
-        .await
-        .unwrap_err();
-    assert_eq!(
-        media::voice_stop(state(), peer).await.unwrap_err(),
-        "not recording"
+    let snake_case = call("send_message", json!({ "peer_id": peer, "text": "x" }));
+    assert!(
+        snake_case.await.unwrap_err().contains("peerId"),
+        "the webview sends camelCase"
     );
-    media::voice_cancel(state()).await.unwrap();
+
+    let history = json!({ "peerId": "zz", "limit": 10, "before": null });
+    call("get_history", history).await.unwrap_err();
+    call("clear_chat_history", json!({})).await.unwrap_err();
+    call("create_link", json!({})).await.unwrap_err();
+    let file = |id: String| json!({ "fileId": id });
+    call("accept_file", file(FileId([2; 16]).to_hex()))
+        .await
+        .unwrap_err();
+    call("cancel_transfer", file("zz".into()))
+        .await
+        .unwrap_err();
+    // The peer is checked before the native file dialog opens.
+    let browse = call("browse_and_send", json!({ "peerId": "zz" }));
+    assert_eq!(browse.await.unwrap_err(), "invalid peer id");
+    let stop = call("voice_stop", json!({ "peerId": peer })).await;
+    assert_eq!(stop.unwrap_err(), "not recording");
+    assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
+
+    let note = media_request(&FileId([3; 16]).to_hex(), None);
+    let offline = media_scheme::answer(desktop.app.handle(), &note).await;
+    assert_eq!(offline.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
 async fn qr_codes_are_png_data_uris() {
-    let uri = qr::generate_qr("cypher-link".into()).await.unwrap();
-    assert!(uri.starts_with("data:image/png;base64,"));
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    let uri = desktop
+        .call("generate_qr", json!({ "linkId": "cypher-link" }))
+        .await;
+    assert!(text(&uri.unwrap()).starts_with("data:image/png;base64,"));
+}
+
+#[test]
+fn a_development_ca_replaces_the_system_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = dir.path().join("dev.pem");
+    let cert = cypher_tls::SelfSignedCert::generate(&["localhost"]).unwrap();
+    std::fs::write(&ca, cert.cert_pem).unwrap();
+    session::tls(Some(&ca)).unwrap();
+    session::tls(None).unwrap();
+
+    session::tls(Some(&dir.path().join("missing.pem"))).unwrap_err();
+    std::fs::write(&ca, "not a certificate").unwrap();
+    session::tls(Some(&ca)).unwrap_err();
+}
+
+#[test]
+fn paths_come_from_the_platform() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    let paths = Paths::resolve(desktop.app.handle()).unwrap();
+    assert!(paths.data.ends_with(&desktop.app.config().identifier));
+    assert!(paths.transport.is_none(), "tests bundle no Lyrebird");
 }
 
 fn media_request(file_id: &str, range: Option<&str>) -> Request<Vec<u8>> {
@@ -260,46 +298,46 @@ async fn two_desktops_against_in_process_stack() {
     play_a_video_note(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
 
-    settings::apply_anonymous_settings(a.app.handle().clone(), a.state(), false, vec![" ".into()])
-        .await
-        .unwrap();
-    identity::clear_chat_history(a.state()).await.unwrap();
+    let anonymity = json!({ "anonymous": false, "bridges": [" "] });
+    a.call("apply_anonymous_settings", anonymity).await.unwrap();
+    a.call("clear_chat_history", json!({})).await.unwrap();
     stack.stop().await;
 }
 
 async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {
-    let created = once_online(|| link::create_link(a.state())).await.unwrap();
-    let link = json(created)["link_id"].as_str().unwrap().to_owned();
-    let joined = once_online(|| link::join_link(b.state(), format!("  {link} ")))
+    let created = once_online(|| a.call("create_link", json!({})))
         .await
         .unwrap();
-    assert_eq!(joined.len(), 64);
+    let link = text(&created["link_id"]);
+    let join = |link: String| json!({ "linkId": link });
+    let joined = once_online(|| b.call("join_link", join(format!("  {link} ")))).await;
+    assert_eq!(text(&joined.unwrap()).len(), 64);
     let conversations = eventually(|| async {
-        let list = json(identity::get_conversations(a.state()).await.unwrap());
+        let list = a.call("get_conversations", json!({})).await.unwrap();
         (list.as_array().map(Vec::len) == Some(1)).then_some(list)
     })
     .await;
     assert_eq!(conversations[0]["peer_id"], b_id);
-    link::join_link(b.state(), "not-a-link".into())
+    b.call("join_link", join("not-a-link".into()))
         .await
         .unwrap_err();
 }
 
 async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
-    let msg_id = chat::send_message(a.state(), b_id.into(), "привет".into())
-        .await
-        .unwrap();
+    let sent = a.call("send_message", json!({ "peerId": b_id, "text": "привет" }));
+    let msg_id = text(&sent.await.unwrap());
     let received = eventually(|| async {
-        let history = identity::get_history(b.state(), a_id.into(), None, 10)
-            .await
-            .unwrap();
-        history.into_iter().find(|m| m.text == "привет")
+        let history = json!({ "peerId": a_id, "limit": 10, "before": null });
+        let list = b.call("get_history", history).await.unwrap();
+        list.as_array()?
+            .iter()
+            .find(|m| m["text"] == "привет")
+            .cloned()
     })
     .await;
-    assert_eq!(received.msg_id, msg_id);
-    chat::mark_read(b.state(), a_id.into(), vec![msg_id, "zz".into()])
-        .await
-        .unwrap();
+    assert_eq!(received["msg_id"], msg_id);
+    let read = json!({ "peerId": a_id, "msgIds": [msg_id, "zz"] });
+    b.call("mark_read", read).await.unwrap();
 }
 
 /// Sends `poster ‖ video` the way the webview does; returns the file id.
@@ -333,36 +371,38 @@ async fn send_video_note_over_ipc(a: &Desktop, b_id: &str, video: &[u8]) -> Stri
 }
 
 async fn play_a_video_note(a: &Desktop, b: &Desktop, b_id: &str) {
-    let video: Vec<u8> = (0..200_000u32).map(|i| i.to_le_bytes()[0]).collect();
+    // Larger than one ranged read (1 MiB), so a full read takes several.
+    let video: Vec<u8> = (0..1_300_000u32).map(|i| i.to_le_bytes()[0]).collect();
     let file = send_video_note_over_ipc(a, b_id, &video).await;
-    let client = b.state().client().await.unwrap();
+    let serve = |request| async move { media_scheme::answer(b.app.handle(), &request).await };
 
     let whole = eventually(|| async {
-        let response = media_scheme::serve(&client, &media_request(&file, None)).await;
+        let response = serve(media_request(&file, None)).await;
         (response.status() == StatusCode::OK).then_some(response)
     })
     .await;
     assert_eq!(whole.body(), &video);
     assert_eq!(whole.headers()[header::CONTENT_TYPE], "video/webm");
 
-    let ranged = media_scheme::serve(&client, &media_request(&file, Some("bytes=10-19"))).await;
+    let ranged = serve(media_request(&file, Some("bytes=10-19"))).await;
     assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(ranged.body().as_slice(), &video[10..20]);
     assert_eq!(
         ranged.headers()[header::CONTENT_RANGE],
-        "bytes 10-19/200000"
+        format!("bytes 10-19/{}", video.len())
     );
 
-    let tail = media_scheme::serve(&client, &media_request(&file, Some("bytes=-5"))).await;
+    let tail = serve(media_request(&file, Some("bytes=-5"))).await;
     assert_eq!(tail.body().as_slice(), &video[video.len() - 5..]);
 
+    let past_the_end = format!("bytes={}-", video.len());
     let statuses = [
         (
             media_request(&file, Some("bytes=5-1")),
             StatusCode::RANGE_NOT_SATISFIABLE,
         ),
         (
-            media_request(&file, Some("bytes=999999-")),
+            media_request(&file, Some(&past_the_end)),
             StatusCode::RANGE_NOT_SATISFIABLE,
         ),
         (media_request("not-an-id", None), StatusCode::NOT_FOUND),
@@ -373,11 +413,7 @@ async fn play_a_video_note(a: &Desktop, b: &Desktop, b_id: &str) {
     ];
     for (request, expected) in statuses {
         let uri = request.uri().clone();
-        assert_eq!(
-            media_scheme::serve(&client, &request).await.status(),
-            expected,
-            "{uri}"
-        );
+        assert_eq!(serve(request).await.status(), expected, "{uri}");
     }
 }
 
@@ -404,9 +440,8 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
             .then_some(())
     });
     offered.await;
-    transfer::accept_file(b.state(), file_id.to_hex())
-        .await
-        .unwrap();
+    let file = json!({ "fileId": file_id.to_hex() });
+    b.call("accept_file", file.clone()).await.unwrap();
     // The receiver pre-sizes the file and fills it chunk by chunk.
     let downloads = b.dir.path().join("downloads");
     let saved = downloads.join("report (1).txt");
@@ -417,10 +452,6 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
         b"older",
         "never overwrites the existing file"
     );
-    transfer::accept_file(b.state(), file_id.to_hex())
-        .await
-        .unwrap_err();
-    transfer::cancel_transfer(b.state(), file_id.to_hex())
-        .await
-        .unwrap();
+    b.call("accept_file", file.clone()).await.unwrap_err();
+    b.call("cancel_transfer", file).await.unwrap();
 }
