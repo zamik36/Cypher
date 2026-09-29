@@ -1,7 +1,17 @@
 /// <reference lib="webworker" />
-import init, { Client, historyRange, Identity, qrSvg, waveformFromRms, type SealedIdentity } from "../wasm/cypher_wasm.js";
+import init, {
+  Client,
+  historyRange,
+  Identity,
+  qrSvg,
+  waveformFromRms,
+  type Effect,
+  type ReadChunk,
+  type Reply,
+  type SealedIdentity,
+} from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan } from "./idb";
-import { applyEffects, type Effect, type EffectSinks, type ReadChunk, type Reply } from "./effects";
+import { applyEffects, type EffectSinks } from "./effects";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -218,7 +228,7 @@ async function sealedBlob(): Promise<Uint8Array> {
 }
 
 async function adopt(sealed: SealedIdentity): Promise<string> {
-  if (await get(db, "identity", IDENTITY_KEY)) throw new Error("an identity already exists");
+  if ((await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined) throw new Error("an identity already exists");
   await put(db, "identity", IDENTITY_KEY, sealed.blob);
   identity?.free();
   identity = sealed.intoIdentity();
@@ -240,8 +250,7 @@ async function startClient(): Promise<Client> {
 }
 
 async function run(cmd: Record<string, unknown>) {
-  const out = requireClient().command(cmd, Date.now()) as { effects: Effect[]; msgId?: string; fileId?: string };
-  const { effects, ...ids } = out;
+  const { effects, ...ids } = requireClient().command(cmd, Date.now());
   await apply(effects);
   return ids;
 }
@@ -288,13 +297,13 @@ async function mediaBlob(fileId: string): Promise<Blob> {
   if (!record) throw new Error("media not found");
   const file = await (await (await sinkDir(true)).getFileHandle(fileId)).getFile();
   const sealed = new Uint8Array(await file.arrayBuffer());
-  const { mime, bytes } = requireClient().openMedia(fileId, record, sealed) as { mime: string; bytes: Uint8Array };
-  return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime });
+  const { mime, bytes } = requireClient().openMedia(fileId, record, sealed);
+  return new Blob([bytes], { type: mime });
 }
 
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
-  const [from, to] = historyRange(peer, before) as [Uint8Array, Uint8Array];
+  const [from, to] = historyRange(peer, before);
   const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true), limit, true);
   const statuses = await Promise.all(
     rows.map(([key]) => get<Uint8Array>(db, "message_status", key.subarray(key.length - 16))),
@@ -305,7 +314,7 @@ async function history(peer: string, limit: number, before?: number) {
 type Handlers = { [M in Method]: (...args: Parameters<Methods[M]>) => Promise<ReturnType<Methods[M]>> };
 
 const handlers: Handlers = {
-  hasIdentity: async () => Boolean(await get(db, "identity", IDENTITY_KEY)),
+  hasIdentity: async () => (await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined,
   createIdentity: (nickname, passphrase) => adopt(Identity.create(nickname, passphrase)),
   importMnemonic: (mnemonic, nickname, passphrase) => adopt(Identity.import(mnemonic, nickname, passphrase)),
   unlockIdentity: async (passphrase) => {
@@ -373,7 +382,7 @@ const handlers: Handlers = {
   releaseDownload: async (fileId) => {
     await (await sinkDir(false)).removeEntry(fileId).catch(() => undefined);
   },
-  qr: async (text) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg(text))}`,
+  qr: (text) => Promise.resolve(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg(text))}`),
   conversations: async () => {
     const peers = await scan(db, "peers");
     const out = await Promise.all(
@@ -397,7 +406,7 @@ const handlers: Handlers = {
 
 self.onmessage = async ({ data: { id, method, args } }: MessageEvent<Request>) => {
   try {
-    db ??= await ready;
+    db = await ready;
     const handler = handlers[method] as (...a: unknown[]) => Promise<unknown>;
     post({ id, ok: true, result: await handler(...args) });
   } catch (err) {

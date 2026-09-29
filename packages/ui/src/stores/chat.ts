@@ -1,4 +1,4 @@
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile } from "solid-js/store";
 import type { ChatMessage, MessageStatus } from "../platform";
 
 /** Max messages kept in memory per peer; older ones are reloaded on demand. */
@@ -38,7 +38,7 @@ export function peerOf(msgId: string): string | undefined {
 }
 
 export function getMessages(peerId: string): ChatMessage[] {
-  return chatsByPeer[peerId] || [];
+  return chatsByPeer[peerId] ?? [];
 }
 
 export function setMessages(peerId: string, msgs: ChatMessage[]) {
@@ -48,9 +48,7 @@ export function setMessages(peerId: string, msgs: ChatMessage[]) {
 
 export function clearAllMessages() {
   peerOfMessage.clear();
-  setChatsByPeer(produce((all) => {
-    for (const key of Object.keys(all)) delete all[key];
-  }));
+  setChatsByPeer(reconcile({}));
 }
 
 export { chatsByPeer };

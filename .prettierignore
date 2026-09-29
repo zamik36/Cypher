@@ -1,0 +1,7 @@
+dist/
+target/
+node_modules/
+apps/pwa/src/wasm/
+apps/desktop/src-tauri/
+package-lock.json
+*.md

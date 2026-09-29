@@ -1,26 +1,5 @@
 /** Core effects as `cypher-wasm` emits them and the order they are applied in. */
-import type { Op } from "./idb";
-
-export type Reply = { kind: "reply"; op: string; value: string; link?: string };
-export type ReadChunk = {
-  kind: "read_chunk";
-  file_id: string;
-  index: number;
-  offset: number;
-  len: number;
-  headroom: number;
-};
-
-export type Effect =
-  | { kind: "transmit" | "anonymous"; data: Uint8Array }
-  | Op
-  | { kind: "event"; channel: string; payload: unknown }
-  | Reply
-  | ReadChunk
-  | { kind: "open_sink"; file_id: string; len: number; sealed: boolean }
-  | { kind: "write_chunk"; file_id: string; offset: number; data: Uint8Array }
-  | { kind: "close_sink"; file_id: string; complete: boolean }
-  | { kind: "disconnect"; reconnect: boolean };
+import type { Effect, Op, ReadChunk, Reply } from "../wasm/cypher_wasm.js";
 
 /** Where each kind of effect goes; the worker wires these to IndexedDB, sockets and OPFS. */
 export interface EffectSinks {

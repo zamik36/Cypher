@@ -16,7 +16,7 @@ export default function VoiceBubble(props: { file: UiFile }) {
   const durationMs = () => props.file.duration_ms ?? 0;
   const bars = () => {
     const w = props.file.waveform ?? [];
-    return w.length > 0 ? w : new Array(64).fill(0);
+    return w.length > 0 ? w : new Array<number>(64).fill(0);
   };
 
   async function element(): Promise<HTMLAudioElement> {

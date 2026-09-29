@@ -70,6 +70,21 @@ export interface FileOffer { from: string; file_id: string; name: string; size: 
 
 export type Unsubscribe = () => void;
 
+/** Core event channels and their payloads (see `cypher_core::ui::event`). */
+export interface Events {
+  connected: null;
+  disconnected: null;
+  peer_connected: string;
+  message: UiMessage;
+  message_status: { msg_id: string; status: MessageStatus };
+  file_offered: FileOffer;
+  file_progress: { file_id: string; progress: number };
+  file_complete: string;
+  file_failed: { file_id: string; reason: string };
+  error: string;
+  anonymity_level: AnonymityLevelPayload;
+}
+
 export interface Notifications {
   supported(): boolean;
   permission(): Promise<NotificationPermission>;
@@ -106,8 +121,8 @@ export interface Platform {
   getConversations(): Promise<ConversationEntry[]>;
   getHistory(peerId: string, limit: number, before?: number): Promise<UiMessage[]>;
   clearChatHistory(): Promise<void>;
-  /** Subscribes to a core event channel (see `cypher_core::ui::event`). */
-  on<T>(channel: string, cb: (payload: T) => void): Promise<Unsubscribe>;
+  /** Subscribes to a core event channel. */
+  on<K extends keyof Events>(channel: K, cb: (payload: Events[K]) => void): Promise<Unsubscribe>;
   readonly notifications: Notifications;
 }
 
@@ -122,22 +137,18 @@ export const api: Platform = new Proxy({} as Platform, {
   get(_target, key) {
     if (!current) throw new Error("platform not registered");
     const value = (current as unknown as Record<PropertyKey, unknown>)[key];
-    return typeof value === "function" ? value.bind(current) : value;
+    return typeof value === "function" ? (value as () => unknown).bind(current) : value;
   },
 });
 
-export const onConnected = (cb: () => void) => api.on<void>("connected", () => cb());
-export const onDisconnected = (cb: () => void) => api.on<void>("disconnected", () => cb());
-export const onPeerConnected = (cb: (peerId: string) => void) => api.on<string>("peer_connected", cb);
-export const onMessage = (cb: (msg: UiMessage) => void) => api.on<UiMessage>("message", cb);
-export const onMessageStatus = (cb: (p: { msg_id: string; status: MessageStatus }) => void) =>
-  api.on<{ msg_id: string; status: MessageStatus }>("message_status", cb);
-export const onFileOffered = (cb: (info: FileOffer) => void) => api.on<FileOffer>("file_offered", cb);
-export const onFileProgress = (cb: (info: { file_id: string; progress: number }) => void) =>
-  api.on<{ file_id: string; progress: number }>("file_progress", cb);
-export const onFileComplete = (cb: (fileId: string) => void) => api.on<string>("file_complete", cb);
-export const onFileFailed = (cb: (info: { file_id: string; reason: string }) => void) =>
-  api.on<{ file_id: string; reason: string }>("file_failed", cb);
-export const onError = (cb: (msg: string) => void) => api.on<string>("error", cb);
-export const onAnonymityLevel = (cb: (payload: AnonymityLevelPayload) => void) =>
-  api.on<AnonymityLevelPayload>("anonymity_level", cb);
+export const onConnected = (cb: () => void) => api.on("connected", () => cb());
+export const onDisconnected = (cb: () => void) => api.on("disconnected", () => cb());
+export const onPeerConnected = (cb: (peerId: string) => void) => api.on("peer_connected", cb);
+export const onMessage = (cb: (msg: UiMessage) => void) => api.on("message", cb);
+export const onMessageStatus = (cb: (p: Events["message_status"]) => void) => api.on("message_status", cb);
+export const onFileOffered = (cb: (info: FileOffer) => void) => api.on("file_offered", cb);
+export const onFileProgress = (cb: (info: Events["file_progress"]) => void) => api.on("file_progress", cb);
+export const onFileComplete = (cb: (fileId: string) => void) => api.on("file_complete", cb);
+export const onFileFailed = (cb: (info: Events["file_failed"]) => void) => api.on("file_failed", cb);
+export const onError = (cb: (msg: string) => void) => api.on("error", cb);
+export const onAnonymityLevel = (cb: (payload: AnonymityLevelPayload) => void) => api.on("anonymity_level", cb);

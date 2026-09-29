@@ -22,7 +22,7 @@ export default function IdentityView(props: IdentityViewProps) {
         setHasId(exists);
         if (!exists) setMode("create");
       })
-      .catch((e) => {
+      .catch((e: unknown) => {
         setHasId(false);
         setMode("create");
         setError(String(e));
@@ -84,8 +84,8 @@ export default function IdentityView(props: IdentityViewProps) {
     return 0;
   });
 
-  function onKeyDown(e: KeyboardEvent, handler: () => void) {
-    if (e.key === "Enter") handler();
+  function onKeyDown(e: KeyboardEvent, handler: () => Promise<void>) {
+    if (e.key === "Enter") void handler();
   }
 
   return (

@@ -20,7 +20,7 @@ export default function InstallPrompt() {
   }
 
   function isAndroid() {
-    return /Android/.test(navigator.userAgent);
+    return navigator.userAgent.includes("Android");
   }
 
   function isInStandaloneMode() {
@@ -57,7 +57,7 @@ export default function InstallPrompt() {
   async function install() {
     const prompt = deferredPrompt();
     if (!prompt) return;
-    prompt.prompt();
+    await prompt.prompt();
     const result = await prompt.userChoice;
     if (result.outcome === "accepted") {
       setDeferredPrompt(null);

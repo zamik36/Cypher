@@ -128,10 +128,10 @@ impl Client {
     #[wasm_bindgen(constructor)]
     pub fn new(
         identity: &Identity,
-        meta: &Array,
-        peers: &Array,
-        outbox: &Array,
-        transfers: &Array,
+        #[wasm_bindgen(unchecked_param_type = "Row[]")] meta: &Array,
+        #[wasm_bindgen(unchecked_param_type = "Row[]")] peers: &Array,
+        #[wasm_bindgen(unchecked_param_type = "Row[]")] outbox: &Array,
+        #[wasm_bindgen(unchecked_param_type = "Row[]")] transfers: &Array,
         now_ms: f64,
     ) -> Result<Self, JsError> {
         let snapshot = Snapshot {
@@ -149,7 +149,7 @@ impl Client {
         })
     }
 
-    #[wasm_bindgen(js_name = startupEffects)]
+    #[wasm_bindgen(js_name = startupEffects, unchecked_return_type = "Effect[]")]
     pub fn startup_effects(&mut self) -> Result<Array, JsError> {
         effects_to_js(&std::mem::take(&mut self.startup))
     }
@@ -159,19 +159,22 @@ impl Client {
         self.core.peer_id().to_hex()
     }
 
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
     pub fn connected(&mut self, now_ms: f64) -> Result<Array, JsError> {
         self.feed(Input::Connected, now_ms)
     }
 
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
     pub fn disconnected(&mut self, now_ms: f64) -> Result<Array, JsError> {
         self.feed(Input::Disconnected, now_ms)
     }
 
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
     pub fn frame(&mut self, data: &[u8], now_ms: f64) -> Result<Array, JsError> {
         self.feed(Input::Frame(bytes::Bytes::copy_from_slice(data)), now_ms)
     }
 
-    #[wasm_bindgen(js_name = anonymousFrame)]
+    #[wasm_bindgen(js_name = anonymousFrame, unchecked_return_type = "Effect[]")]
     pub fn anonymous_frame(&mut self, data: &[u8], now_ms: f64) -> Result<Array, JsError> {
         self.feed(
             Input::AnonymousFrame(bytes::Bytes::copy_from_slice(data)),
@@ -179,17 +182,18 @@ impl Client {
         )
     }
 
-    #[wasm_bindgen(js_name = anonymousChannel)]
+    #[wasm_bindgen(js_name = anonymousChannel, unchecked_return_type = "Effect[]")]
     pub fn anonymous_channel(&mut self, up: bool, now_ms: f64) -> Result<Array, JsError> {
         self.feed(Input::AnonymousChannel { up }, now_ms)
     }
 
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
     pub fn tick(&mut self, now_ms: f64) -> Result<Array, JsError> {
         self.feed(Input::Tick, now_ms)
     }
 
     /// `buf` holds `headroom` reserved bytes followed by the chunk.
-    #[wasm_bindgen(js_name = chunkRead)]
+    #[wasm_bindgen(js_name = chunkRead, unchecked_return_type = "Effect[]")]
     pub fn chunk_read(
         &mut self,
         file_id: &str,
@@ -208,13 +212,14 @@ impl Client {
         )
     }
 
-    #[wasm_bindgen(js_name = chunkUnavailable)]
+    #[wasm_bindgen(js_name = chunkUnavailable, unchecked_return_type = "Effect[]")]
     pub fn chunk_unavailable(&mut self, file_id: &str, now_ms: f64) -> Result<Array, JsError> {
         let file_id = file(file_id)?;
         self.feed(Input::ChunkUnavailable { file_id }, now_ms)
     }
 
-    /// Runs a UI command. Returns `{ effects, msgId?, fileId? }`.
+    /// Runs a UI command.
+    #[wasm_bindgen(unchecked_return_type = "CommandOutcome")]
     pub fn command(&mut self, cmd: JsValue, now_ms: f64) -> Result<JsValue, JsError> {
         let cmd: JsCommand = serde_wasm_bindgen::from_value(cmd).map_err(js_err)?;
         let Prepared {
@@ -238,7 +243,7 @@ impl Client {
     }
 
     /// Decrypts a stored message, applying a newer status row if present.
-    #[wasm_bindgen(js_name = openMessage)]
+    #[wasm_bindgen(js_name = openMessage, unchecked_return_type = "unknown")]
     pub fn open_message(
         &self,
         key: &[u8],
@@ -257,8 +262,8 @@ impl Client {
     }
 
     /// Decrypts a sealed voice or video note: `record` is its row from the
-    /// `media` table, `sealed` the file from OPFS. Returns `{ mime, bytes }`.
-    #[wasm_bindgen(js_name = openMedia)]
+    /// `media` table, `sealed` the file from OPFS.
+    #[wasm_bindgen(js_name = openMedia, unchecked_return_type = "OpenedMedia")]
     pub fn open_media(
         &self,
         file_id: &str,
@@ -284,7 +289,7 @@ impl Client {
 }
 
 /// `[from, to)` `IndexedDB` key bounds of a conversation, oldest first.
-#[wasm_bindgen(js_name = historyRange)]
+#[wasm_bindgen(js_name = historyRange, unchecked_return_type = "[Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>]")]
 pub fn history_range(peer_hex: &str, before_ms: Option<f64>) -> Result<Array, JsError> {
     let p = peer(peer_hex)?;
     let before = before_ms.map_or(u64::MAX, now);

@@ -17,8 +17,8 @@ function swCacheVersion(): Plugin {
   };
 }
 
-const gatewayWs = process.env.CYPHER_DEV_GATEWAY_WS ?? "ws://127.0.0.1:9101";
-const relayWs = process.env.CYPHER_DEV_RELAY_WS ?? "ws://127.0.0.1:9301";
+const gatewayWs = process.env["CYPHER_DEV_GATEWAY_WS"] ?? "ws://127.0.0.1:9101";
+const relayWs = process.env["CYPHER_DEV_RELAY_WS"] ?? "ws://127.0.0.1:9301";
 
 export default defineConfig({
   plugins: [solid(), swCacheVersion()],

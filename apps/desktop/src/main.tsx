@@ -5,4 +5,6 @@ import "@cypher/ui/index.css";
 import { tauriPlatform } from "./tauri";
 
 registerPlatform(tauriPlatform);
-render(() => <App />, document.getElementById("root")!);
+const root = document.getElementById("root");
+if (!root) throw new Error("index.html has no #root");
+render(() => <App />, root);

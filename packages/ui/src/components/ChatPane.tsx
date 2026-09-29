@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
+import { createSignal, createEffect, on, onMount, onCleanup, For, Show } from "solid-js";
 import { api, type ChatMessage, type MediaSent, type MessageStatus, type UiFile, type UiMessage } from "../platform";
 import { chatsByPeer, addMessage, getMessages, setMessages } from "../stores/chat";
 import { connection, setActivePeer, shortName } from "../stores/connection";
@@ -39,6 +39,9 @@ export function previewText(text: string, file?: UiFile | null): string {
   return `📎 ${text}`;
 }
 
+/** The note a message carries, if it renders as a player rather than text. */
+const noteOf = (m: ChatMessage) => (m.file && m.file.kind !== "file" ? m.file : undefined);
+
 function fromHistory(peer: string, m: UiMessage): ChatMessage {
   return {
     msg_id: m.msg_id,
@@ -57,7 +60,10 @@ export default function ChatPane(props: ChatPaneProps) {
   let chatAreaRef: HTMLDivElement | undefined;
 
   const activePeer = () => connection.activePeerId;
-  const activeMessages = () => (activePeer() ? getMessages(activePeer()!) : []);
+  const activeMessages = () => {
+    const peer = activePeer();
+    return peer ? getMessages(peer) : [];
+  };
   const activePeerInfo = () => connection.peers.find((p) => p.peerId === activePeer());
 
   let loadingForPeer: string | null = null;
@@ -72,26 +78,28 @@ export default function ChatPane(props: ChatPaneProps) {
           setMessages(peer, history.reverse().map((m) => fromHistory(peer, m)));
         }
       })
-      .catch((e) => console.warn("Failed to load history:", e))
+      .catch((e: unknown) => console.warn("Failed to load history:", e))
       .finally(() => { if (loadingForPeer === peer) setLoadingHistory(false); });
   });
 
   createEffect(() => {
     const peer = activePeer();
     if (!peer) return;
-    const unread = getMessages(peer)
-      .filter((m) => m.from !== "me" && m.msg_id && m.status !== "read")
-      .map((m) => m.msg_id!);
+    const unread = getMessages(peer).flatMap((m) =>
+      m.from !== "me" && m.msg_id && m.status !== "read" ? [m.msg_id] : [],
+    );
     if (unread.length > 0) {
-      void api.markRead(peer, unread).catch(() => {});
+      // Best effort: the next visit retries whatever stayed unread.
+      api.markRead(peer, unread).catch(() => undefined);
     }
   });
 
-  createEffect(() => {
-    const peer = activePeer();
-    if (peer) void chatsByPeer[peer]?.length;
-    queueMicrotask(() => { if (messagesRef) messagesRef.scrollTop = messagesRef.scrollHeight; });
-  });
+  createEffect(
+    on(
+      () => activeMessages().length,
+      () => queueMicrotask(() => { if (messagesRef) messagesRef.scrollTop = messagesRef.scrollHeight; }),
+    ),
+  );
 
   onMount(() => {
     const vv = window.visualViewport;
@@ -166,7 +174,7 @@ export default function ChatPane(props: ChatPaneProps) {
             <For each={connection.peers}>
               {(peer) => {
                 const lastMsg = () => {
-                  const msgs = chatsByPeer[peer.peerId] || [];
+                  const msgs = chatsByPeer[peer.peerId] ?? [];
                   return msgs[msgs.length - 1];
                 };
                 return (
@@ -180,7 +188,7 @@ export default function ChatPane(props: ChatPaneProps) {
                     </div>
                     <div class="peer-info">
                       <span class="peer-name">{peer.displayName}</span>
-                      <span class="peer-last-msg">{lastMsg()?.text?.slice(0, 30) || t().chat_no_messages}</span>
+                      <span class="peer-last-msg">{lastMsg()?.text.slice(0, 30) || t().chat_no_messages}</span>
                     </div>
                   </button>
                 );
@@ -195,12 +203,13 @@ export default function ChatPane(props: ChatPaneProps) {
                 <p>{t().chat_select}</p>
               </div>
             }>
+              {(peer) => (<>
               <div class="chat-header">
                 <div class="peer-avatar small">
-                  {shortName(activePeer()!).slice(0, 2).toUpperCase()}
+                  {shortName(peer()).slice(0, 2).toUpperCase()}
                   <span class={`online-dot ${activePeerInfo()?.online ? "online" : "offline"}`} />
                 </div>
-                <span>{shortName(activePeer()!)}</span>
+                <span>{shortName(peer())}</span>
               </div>
 
               <Show when={loadingHistory()}>
@@ -223,18 +232,19 @@ export default function ChatPane(props: ChatPaneProps) {
                           {isMine ? t().chat_me : t().chat_peer}
                         </div>
                         <div class="message-content">
-                          <Show
-                            when={msg.file?.kind === "voice" || msg.file?.kind === "video_note"}
-                            fallback={<div class="bubble">{msg.text}</div>}
-                          >
-                            <Show when={msg.file!.kind === "voice"} fallback={<RoundVideoBubble file={msg.file!} />}>
-                              <div class="bubble media"><VoiceBubble file={msg.file!} /></div>
-                            </Show>
+                          <Show when={noteOf(msg)} fallback={<div class="bubble">{msg.text}</div>}>
+                            {(note) => (
+                              <Show when={note().kind === "voice"} fallback={<RoundVideoBubble file={note()} />}>
+                                <div class="bubble media"><VoiceBubble file={note()} /></div>
+                              </Show>
+                            )}
                           </Show>
                           <span class="message-time">
                             {formatTime(msg.timestamp)}
                             <Show when={isMine && msg.status}>
-                              {" "}<span class={`message-status ${msg.status}`}>{STATUS_MARK[msg.status!]}</span>
+                              {(status) => (<>
+                                {" "}<span class={`message-status ${status()}`}>{STATUS_MARK[status()]}</span>
+                              </>)}
                             </Show>
                           </span>
                         </div>
@@ -257,13 +267,14 @@ export default function ChatPane(props: ChatPaneProps) {
                 />
                 <Show
                   when={draft().trim()}
-                  fallback={<RecordButton peer={activePeer()!} onSent={(sent, file) => mediaSent(activePeer()!, sent, file)} />}
+                  fallback={<RecordButton peer={peer()} onSent={(sent, file) => mediaSent(peer(), sent, file)} />}
                 >
                   <button class="btn-icon" onClick={send}>
                     <SendIcon />
                   </button>
                 </Show>
               </div>
+              </>)}
             </Show>
           </div>
         </div>

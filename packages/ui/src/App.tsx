@@ -49,7 +49,7 @@ export default function App() {
     setPage(p);
   }
 
-  let cleanupFns: Array<() => void> = [];
+  let cleanupFns: (() => void)[] = [];
   onCleanup(() => cleanupFns.forEach((fn) => fn()));
 
   async function loadConversations() {
@@ -83,6 +83,7 @@ export default function App() {
         addToast(t().toast_peer_connected, "success");
         navigateTo("chat");
       }),
+      // eslint-disable-next-line solid/reactivity -- an event callback: it samples page() per message on purpose.
       onMessage((msg) => {
         addPeer({ peerId: msg.from, roomCode: "direct", role: "guest", displayName: shortName(msg.from), online: true });
         if (msg.file && msg.file.kind !== "file") trackMedia(msg.file.file_id);

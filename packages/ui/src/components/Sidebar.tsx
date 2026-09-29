@@ -77,7 +77,7 @@ export default function Sidebar(props: SidebarProps) {
           >
             <SettingsIcon /> {t().nav_settings}
           </button>
-          <button class="nav-item" onClick={props.toggleTheme}>
+          <button class="nav-item" onClick={() => props.toggleTheme()}>
             <Show when={props.theme === "dark"} fallback={<><MoonIcon /> {t().sidebar_dark_mode}</>}>
               <SunIcon /> {t().sidebar_light_mode}
             </Show>

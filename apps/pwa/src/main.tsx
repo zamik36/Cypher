@@ -12,6 +12,8 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => undefined);
 }
 
+const root = document.getElementById("root");
+if (!root) throw new Error("index.html has no #root");
 render(
   () => (
     <>
@@ -19,5 +21,5 @@ render(
       <InstallPrompt />
     </>
   ),
-  document.getElementById("root")!,
+  root,
 );

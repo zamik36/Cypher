@@ -152,6 +152,7 @@ const ru: TranslationKeys = {
   toast_history_cleared: "История чатов очищена",
   toast_clear_failed: (e: string) => `Ошибка очистки: ${e}`,
   toast_seed_copied: "Seed скопирован!",
+  toast_copy_failed: "Не удалось скопировать в буфер обмена",
   toast_anonymous_saved: "Настройки анонимного транспорта применены",
   toast_anonymous_saved_local: "Настройки анонимного транспорта сохранены локально",
   toast_anonymous_save_failed: (e: string) => `Не удалось применить настройки анонимного транспорта: ${e}`,

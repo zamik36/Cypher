@@ -297,6 +297,10 @@ jobs:
         run: npm run build:wasm -w apps/pwa
       - name: Typecheck
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Formatting
+        run: npm run format:check
       - name: Load-script protocol tests
         run: npm test -w tests/load
       - name: Build PWA

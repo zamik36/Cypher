@@ -142,6 +142,7 @@ const en = {
   toast_history_cleared: "Chat history cleared",
   toast_clear_failed: (e: string) => `Failed to clear: ${e}`,
   toast_seed_copied: "Seed copied!",
+  toast_copy_failed: "Couldn't copy to the clipboard",
   toast_anonymous_saved: "Anonymous transport settings applied",
   toast_anonymous_saved_local: "Anonymous transport settings saved locally",
   toast_anonymous_save_failed: (e: string) => `Failed to apply anonymous settings: ${e}`,
@@ -164,4 +165,4 @@ export type TranslationKeys = {
     : string;
 };
 
-export default en as TranslationKeys;
+export default en;

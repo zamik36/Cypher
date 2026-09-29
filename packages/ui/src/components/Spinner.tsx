@@ -1,9 +1,9 @@
 export default function Spinner(props: { size?: number }) {
-  const s = props.size ?? 40;
+  const size = () => `${props.size ?? 40}px`;
   return (
     <div
       class="spinner"
-      style={{ width: `${s}px`, height: `${s}px` }}
+      style={{ width: size(), height: size() }}
     />
   );
 }

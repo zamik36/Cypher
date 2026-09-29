@@ -1,4 +1,4 @@
-import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage, Unsubscribe } from "@cypher/ui/platform";
+import type { LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 import type { Method, Methods, WorkerMessage } from "./protocol";
 import { WebVoiceRecorder } from "./voice";
 
@@ -101,9 +101,10 @@ export const webPlatform: Platform = {
     if (clip.durationMs < MIN_VOICE_MS) return null;
     return call("sendMedia", peerId, clip.blob, clip.mime, "voice", clip.durationMs, { frames: clip.frames });
   },
-  cancelVoice: async () => {
+  cancelVoice: () => {
     voice?.cancel();
     voice = null;
+    return Promise.resolve();
   },
   sendVideoNote: (peerId, note) =>
     call("sendMedia", peerId, note.blob, note.mime, "video_note", note.durationMs, { poster: note.poster }),
@@ -116,26 +117,30 @@ export const webPlatform: Platform = {
     }
     return url;
   },
-  getConversations: () => call("conversations") as Promise<ConversationEntry[]>,
+  getConversations: () => call("conversations"),
   getHistory: (peerId, limit, before) => call("history", peerId, limit, before) as Promise<UiMessage[]>,
   clearChatHistory: async () => {
     await call("clearHistory");
-    for (const url of mediaUrls.values()) void url.then(URL.revokeObjectURL, () => undefined);
+    for (const url of mediaUrls.values()) void url.then((u) => URL.revokeObjectURL(u), () => undefined);
     mediaUrls.clear();
   },
-  on: async <T>(channel: string, cb: (payload: T) => void): Promise<Unsubscribe> => {
+  on: (channel, cb) => {
     const set = listeners.get(channel) ?? new Set();
+    // The worker forwards core events verbatim; `Events` is their contract.
     const handler = cb as (payload: unknown) => void;
     set.add(handler);
     listeners.set(channel, set);
-    return () => set.delete(handler);
+    return Promise.resolve(() => {
+      set.delete(handler);
+    });
   },
   notifications: {
     supported: () => "Notification" in self,
-    permission: async () => Notification.permission,
+    permission: () => Promise.resolve(Notification.permission),
     request: () => Notification.requestPermission(),
     send: async (title, body) => {
-      const reg = await navigator.serviceWorker?.getRegistration();
+      // `serviceWorker` is missing outside secure contexts, despite the DOM typings.
+      const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
       if (reg) await reg.showNotification(title, { body, tag: "messages" });
       else new Notification(title, { body, tag: "messages" });
     },

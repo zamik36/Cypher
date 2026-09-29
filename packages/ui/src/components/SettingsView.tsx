@@ -3,6 +3,7 @@ import { connection, setConnection, setGatewayAddr } from "../stores/connection"
 import { api } from "../platform";
 import { addToast } from "../stores/toasts";
 import { t } from "../i18n";
+import { copyText } from "../utils/clipboard";
 import { locale, setLocale } from "../i18n";
 import { anonymousSettings, anonymityStatus, setAnonymousSettings } from "../stores/anonymity";
 import {
@@ -82,7 +83,7 @@ export default function SettingsView(props: SettingsViewProps) {
     setClearCountdown(3);
     clearIntervalId = setInterval(() => {
       setClearCountdown((n: number) => {
-        if (n <= 1) { clearInterval(clearIntervalId!); clearIntervalId = undefined; return 0; }
+        if (n <= 1) { clearInterval(clearIntervalId); clearIntervalId = undefined; return 0; }
         return n - 1;
       });
     }, 1000);
@@ -300,20 +301,21 @@ export default function SettingsView(props: SettingsViewProps) {
               {t().settings_export_btn}
             </button>
           </div>
-          {seedHex() && (
-            <div class="seed-display">
-              <code>{seedHex()}</code>
-              <button
-                class="btn-sm btn-secondary"
-                onClick={() => {
-                  navigator.clipboard.writeText(seedHex()!);
-                  addToast(t().toast_seed_copied, "success");
-                }}
-              >
-                {t().settings_copy}
-              </button>
-            </div>
-          )}
+          <Show when={seedHex()}>
+            {(seed) => (
+              <div class="seed-display">
+                <code>{seed()}</code>
+                <button
+                  class="btn-sm btn-secondary"
+                  onClick={async () => {
+                    if (await copyText(seed())) addToast(t().toast_seed_copied, "success");
+                  }}
+                >
+                  {t().settings_copy}
+                </button>
+              </div>
+            )}
+          </Show>
         </div>
       )}
 

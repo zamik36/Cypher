@@ -1,24 +1,25 @@
 /** Minimal promise wrapper over IndexedDB for the worker's key-value tables. */
+import type { Op, Row } from "../wasm/cypher_wasm.js";
 
 const STORES = ["meta", "peers", "outbox", "transfers", "messages", "message_status", "media", "identity", "files"];
 /** Bumped whenever STORES grows; the upgrade creates any missing store. */
 const VERSION = 2;
 
-export type Bytes = Uint8Array<ArrayBuffer>;
-export type Row = [Bytes, Bytes];
+/** The request's or transaction's own error, or a generic one when it has none. */
+const failure = (source: IDBRequest | IDBTransaction) => source.error ?? new DOMException("aborted", "AbortError");
 
 function done(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(failure(tx));
+    tx.onabort = () => reject(failure(tx));
   });
 }
 
 function result<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(failure(req));
   });
 }
 
@@ -31,10 +32,6 @@ export function openDb(name: string): Promise<IDBDatabase> {
   };
   return result(req);
 }
-
-export type Op =
-  | { kind: "put"; table: string; key: Bytes; value: Bytes }
-  | { kind: "delete"; table: string; key: Bytes };
 
 /** Applies a batch atomically; resolves once the transaction is durable. */
 export async function applyOps(db: IDBDatabase, ops: Op[]): Promise<void> {
@@ -54,10 +51,13 @@ export async function scan(db: IDBDatabase, table: string, range?: IDBKeyRange, 
   const rows: Row[] = [];
   await new Promise<void>((resolve, reject) => {
     const req = tx.objectStore(table).openCursor(range, newestFirst ? "prev" : "next");
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(failure(req));
     req.onsuccess = () => {
       const cursor = req.result;
-      if (!cursor || (limit !== undefined && rows.length >= limit)) return resolve();
+      if (!cursor || (limit !== undefined && rows.length >= limit)) {
+        resolve();
+        return;
+      }
       rows.push([new Uint8Array(cursor.key as ArrayBuffer), new Uint8Array(cursor.value as ArrayBuffer)]);
       cursor.continue();
     };

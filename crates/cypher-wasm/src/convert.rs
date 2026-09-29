@@ -3,6 +3,39 @@ use js_sys::{Array, Uint8Array};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+/// TypeScript shapes of the values below, emitted into the generated `.d.ts`
+/// so the worker is typed from the same place the values are serialized.
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES: &str = r#"
+/** One `IndexedDB` row: key and value bytes. */
+export type Row = [Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>];
+
+/** A storage operation; a batch of them is applied atomically. */
+export type Op =
+  | { kind: "put"; table: string; key: Uint8Array<ArrayBuffer>; value: Uint8Array<ArrayBuffer> }
+  | { kind: "delete"; table: string; key: Uint8Array<ArrayBuffer> };
+
+/** Outcome of a pending `create_link` / `join_link` call. */
+export interface Reply { kind: "reply"; op: string; value: string; link?: string | undefined }
+
+export interface ReadChunk { kind: "read_chunk"; file_id: string; index: number; offset: number; len: number; headroom: number }
+
+export type Effect =
+  | { kind: "transmit" | "anonymous"; data: Uint8Array<ArrayBuffer> }
+  | Op
+  | { kind: "event"; channel: string; payload: unknown }
+  | Reply
+  | ReadChunk
+  | { kind: "open_sink"; file_id: string; len: number; sealed: boolean }
+  | { kind: "write_chunk"; file_id: string; offset: number; data: Uint8Array<ArrayBuffer> }
+  | { kind: "close_sink"; file_id: string; complete: boolean }
+  | { kind: "disconnect"; reconnect: boolean };
+
+export interface CommandOutcome { effects: Effect[]; msgId?: string; fileId?: string }
+
+export interface OpenedMedia { mime: string; bytes: Uint8Array<ArrayBuffer> }
+"#;
+
 // Each value is built and serialized immediately, one at a time; boxing the
 // large `Event` payload would only add an allocation per effect.
 #[cfg_attr(

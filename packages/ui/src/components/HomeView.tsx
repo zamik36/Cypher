@@ -6,6 +6,7 @@ import { UsersIcon, LinkIcon, CopyIcon, CheckIcon } from "./Icons";
 import type { Page } from "./Sidebar";
 import { anonymousSettings } from "../stores/anonymity";
 import { t } from "../i18n";
+import { copyText } from "../utils/clipboard";
 
 interface HomeViewProps {
   onNavigate: (p: Page) => void;
@@ -76,10 +77,9 @@ export default function HomeView(props: HomeViewProps) {
     }
   }
 
-  function copyCode() {
+  async function copyCode() {
     const code = pendingCode();
-    if (!code) return;
-    navigator.clipboard.writeText(code);
+    if (!code || !(await copyText(code))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
