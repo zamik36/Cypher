@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Benchmarks are criterion targets; the library has none for libtest.
+[lib]
+bench = false
+
 [dependencies]
 cypher-types.workspace = true
 cypher-wire.workspace = true

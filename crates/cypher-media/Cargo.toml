@@ -10,6 +10,10 @@ publish.workspace = true
 opus = ["dep:opus"]
 capture = ["opus", "dep:cpal", "dep:rtrb"]
 
+# Benchmarks are criterion targets; the library has none for libtest.
+[lib]
+bench = false
+
 [dependencies]
 thiserror.workspace = true
 opus = { version = "0.4", optional = true }
