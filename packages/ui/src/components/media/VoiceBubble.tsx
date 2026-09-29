@@ -62,7 +62,7 @@ export default function VoiceBubble(props: { file: UiFile }) {
   }
 
   function cycleSpeed() {
-    const next = SPEEDS[(SPEEDS.indexOf(speed()) + 1) % SPEEDS.length];
+    const next = SPEEDS[(SPEEDS.indexOf(speed()) + 1) % SPEEDS.length] ?? 1;
     setSpeed(next);
     if (audio) audio.playbackRate = next;
   }

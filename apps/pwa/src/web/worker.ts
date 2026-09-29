@@ -227,9 +227,12 @@ async function adopt(sealed: SealedIdentity): Promise<string> {
 
 async function startClient(): Promise<Client> {
   if (!identity) throw new Error("identity is locked");
-  const [meta, peers, outbox, transfers] = await Promise.all(
-    ["meta", "peers", "outbox", "transfers"].map((t) => scan(db, t)),
-  );
+  const [meta, peers, outbox, transfers] = await Promise.all([
+    scan(db, "meta"),
+    scan(db, "peers"),
+    scan(db, "outbox"),
+    scan(db, "transfers"),
+  ]);
   client?.free();
   client = new Client(identity, meta, peers, outbox, transfers, Date.now());
   await apply(client.startupEffects());
@@ -238,8 +241,9 @@ async function startClient(): Promise<Client> {
 
 async function run(cmd: Record<string, unknown>) {
   const out = requireClient().command(cmd, Date.now()) as { effects: Effect[]; msgId?: string; fileId?: string };
-  await apply(out.effects);
-  return { msgId: out.msgId, fileId: out.fileId };
+  const { effects, ...ids } = out;
+  await apply(effects);
+  return ids;
 }
 
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
@@ -275,7 +279,7 @@ async function sendMedia(
       sources.set(fileId, file);
       await put(db, "files", fileId, file);
     }
-    return { msg_id: msgId, file_id: fileId, duration_ms: durationMs, waveform };
+    return { msg_id: msgId, file_id: fileId, duration_ms: durationMs, ...(waveform && { waveform }) };
   });
 }
 

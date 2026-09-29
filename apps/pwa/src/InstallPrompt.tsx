@@ -25,7 +25,7 @@ export default function InstallPrompt() {
 
   function isInStandaloneMode() {
     return (
-      ("standalone" in navigator && (navigator as Record<string, unknown>).standalone === true) ||
+      ("standalone" in navigator && (navigator as Record<string, unknown>)["standalone"] === true) ||
       window.matchMedia("(display-mode: standalone)").matches
     );
   }

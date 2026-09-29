@@ -12,9 +12,13 @@ export function addMessage(peerId: string, msg: ChatMessage) {
     if (peerOfMessage.has(msg.msg_id)) return;
     peerOfMessage.set(msg.msg_id, peerId);
   }
-  if (!chatsByPeer[peerId]) setChatsByPeer(peerId, []);
-  setChatsByPeer(peerId, chatsByPeer[peerId].length, msg);
-  if (chatsByPeer[peerId].length > MAX_IN_MEMORY) {
+  const list = chatsByPeer[peerId];
+  if (!list) {
+    setChatsByPeer(peerId, [msg]);
+    return;
+  }
+  setChatsByPeer(peerId, list.length, msg);
+  if (list.length > MAX_IN_MEMORY) {
     setChatsByPeer(peerId, produce((list) => {
       for (const evicted of list.splice(0, list.length - MAX_IN_MEMORY)) {
         if (evicted.msg_id) peerOfMessage.delete(evicted.msg_id);

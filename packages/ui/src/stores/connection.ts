@@ -63,19 +63,13 @@ const [connection, setConnection] = createStore<ConnectionState>({
 });
 
 export function addPeer(peer: PeerInfo) {
-  setConnection("peers", (prev) => {
-    const idx = prev.findIndex((p) => p.peerId === peer.peerId);
-    if (idx >= 0) {
-      const updated = [...prev];
-      updated[idx] = {
-        ...updated[idx],
-        online: peer.online,
-        displayName: peer.displayName,
-      };
-      return updated;
-    }
-    return [...prev, peer];
-  });
+  setConnection("peers", (prev) =>
+    prev.some((p) => p.peerId === peer.peerId)
+      ? prev.map((p) =>
+          p.peerId === peer.peerId ? { ...p, online: peer.online, displayName: peer.displayName } : p,
+        )
+      : [...prev, peer],
+  );
   // Auto-select if first peer
   if (!connection.activePeerId) {
     setConnection("activePeerId", peer.peerId);

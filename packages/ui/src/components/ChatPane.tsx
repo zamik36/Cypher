@@ -125,7 +125,7 @@ export default function ChatPane(props: ChatPaneProps) {
       for (const tr of await api.pickAndSend(peer)) {
         upsertTransfer(tr);
         addMessage(peer, {
-          msg_id: tr.msg_id,
+          ...(tr.msg_id && { msg_id: tr.msg_id }),
           from: "me",
           text: `📎 ${tr.file_name}`,
           timestamp: Date.now(),

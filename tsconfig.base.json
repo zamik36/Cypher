@@ -3,7 +3,12 @@
     "target": "ES2021",
     "useDefineForClassFields": true,
     "module": "ESNext",
-    "lib": ["ES2021", "DOM", "DOM.Iterable", "WebWorker.ImportScripts"],
+    "lib": [
+      "ES2021",
+      "DOM",
+      "DOM.Iterable",
+      "WebWorker.ImportScripts"
+    ],
     "moduleResolution": "bundler",
     "jsxImportSource": "solid-js",
     "jsx": "preserve",
@@ -12,6 +17,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noImplicitReturns": true
   }
 }
