@@ -39,16 +39,13 @@ Set at least:
   strong random password per service; `deploy/nats.conf` gives each service
   only the subjects it needs.
 - `GRAFANA_PASSWORD=<strong random password>`
+- `RELAY_PUBLIC_ADDR=<domain>:9300` — the relay address signaling advertises to clients
 
 Generate each secret with `openssl rand -base64 32`. The GitHub deploy
 workflows read the same names from repository secrets and refuse to deploy
 when any of them is empty.
 
-Important:
-
-- Change default Redis and NATS secrets before production deployment.
-- Anonymous transport no longer needs separate onion-specific production env variables.
-- Relay bootstrap and inbox signing identity are stored on disk and must survive restarts.
+Change every default secret before a production deployment.
 
 ### 4. Start the stack
 
@@ -83,20 +80,17 @@ Internet
                        +--> Redis (signaling only)
 ```
 
-## Persistent Service Keys
+## Persistent State
 
-Relay and signaling now keep their cryptographic identity on disk:
+- **Signaling onion key** — `/data/signaling/onion_key.bin` in the `signaling-data`
+  volume, created on first start. Clients seal anonymous inbox requests to it,
+  so keep the volume across updates and include it in backups. Losing it only
+  forces clients to fetch the new key on their next bootstrap.
+- **Redis** (`redis-data` volume, append-only) — prekeys (30 days), share links
+  (24 h) and offline inboxes (14 days). Everything in it is either public or
+  end-to-end encrypted.
 
-- `data/relay/onion_identity.bin`
-- `data/signaling/inbox_signing.bin`
-- `data/signaling/inbox_hmac.bin`
-
-Recommendations:
-
-- Mount `./data` on persistent storage.
-- Include these files in backups.
-- Do not rotate or delete them casually.
-- Keep file permissions restricted to the service user.
+Gateway and relay are stateless.
 
 ## Updating
 

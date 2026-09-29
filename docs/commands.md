@@ -1,121 +1,91 @@
 # Commands Reference
 
+Everything runs through [`just`](https://github.com/casey/just); `just` with no arguments lists the recipes. Local services read secrets from `.env` (copy `.env.example`).
+
 ## Prerequisites
 
 | Tool | Install |
 |------|---------|
-| Rust | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| Rust | [rustup](https://rustup.rs); `rust-toolchain.toml` pins the version |
 | Just | `cargo install just` |
-| Docker | [docker.com](https://docs.docker.com/get-docker/) |
-| Node.js | Required for desktop/PWA clients |
+| Docker | [docker.com](https://docs.docker.com/get-docker/) — Redis and NATS |
+| Node.js 22 | Desktop and PWA frontends (npm workspaces) |
+| wasm-bindgen | `cargo install wasm-bindgen-cli --version 0.2.129 --locked`, for the PWA |
 
----
+Quality tools (`cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`, `cargo-machete`, `cargo-hack`, `taplo`, `typos`) are installed the same way; CI pins their versions in `.github/workflows/ci.yml`.
 
-## Just (task runner)
-
-### Infrastructure
-
-```bash
-just infra              # Start Redis + NATS (docker compose up -d)
-just infra-down         # Stop Redis + NATS
-```
-
-### Build
+## Infrastructure and services
 
 ```bash
+just infra              # Redis + NATS in Docker
+just infra-down         # stop them
+just gateway            # TLS :9100, WebSocket :9101, metrics :9090
+just signaling          # NATS + Redis, metrics :9091
+just relay              # TLS :9300, WebSocket :9301, metrics :9092
+just services           # all three in parallel
 just build              # cargo build --workspace
-just build-release      # cargo build --workspace --release
+just build-release      # release build
 ```
 
-### Backend Services
+Development gateways and relays write self-signed certificates to `target/dev-certs`.
+
+## Quality
 
 ```bash
-just gateway            # Run gateway (TLS :9100, WS :9101, metrics :9090)
-just signaling          # Run signaling (NATS subscriber, metrics :9091)
-just relay              # Run relay (TLS :9300, metrics :9092)
-just services           # Run all 3 services in parallel
+just check              # lint + hygiene + test: what CI requires of Rust
+just lint               # rustfmt, clippy (workspace, desktop, wasm32)
+just hygiene            # taplo, typos, machete, every feature alone, cargo-deny
+just test               # nextest + doctests
+just miri               # undefined-behaviour check of types/wire/crypto/core/media
+just cov                # line-coverage ratchet; `just cov --bump` raises floors
+just web-check          # frontend: typecheck, ESLint, Prettier, vitest with coverage
 ```
 
-### Tests & Linting
+## End to end
 
 ```bash
-just test               # cargo test --workspace (45 tests)
-just lint               # cargo clippy --workspace -- -D warnings
-just check              # test + lint
+just e2e                # native journey against `just services`, then web-e2e
+just web-e2e            # Playwright on the production PWA bundle (needs `just wasm`)
 ```
 
-### Desktop App (Tauri)
+The in-process stack test runs inside `just test` / `just cov` when `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS` point at a Redis and a NATS that no other services use (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+## Performance
 
 ```bash
-just desktop-deps       # npm install (frontend deps)
-just desktop-dev        # Run desktop app with hot-reload
-just desktop-build      # Build release binary (.exe / .dmg / .AppImage)
+just bench              # criterion benchmarks; reports in target/criterion
+just load 1000 30       # native TLS load: connections, seconds
+just load-ws 100 30s    # WebSocket load with k6: pairs, hold time
+just flamegraph gateway 30   # CPU flamegraph on Linux (perf + inferno)
+just console gateway    # service with tokio-console instrumentation
 ```
 
-### Android
+Methods and results: [performance.md](performance.md).
+
+## Clients
 
 ```bash
-just android-dev        # Run on connected device/emulator
-just android-debug      # Build debug APK
-just android-release    # Build release APK (unsigned)
-just android-sign       # Build + sign release APK
+just deps               # npm install for all frontends
+just wasm               # WebAssembly core for the PWA
+just pwa-dev            # PWA dev server on :5174, proxying /ws and /relay
+just pwa-build          # production PWA in apps/pwa/dist
+just desktop-dev        # desktop app with hot reload
+just desktop-build      # desktop installer
+just android-dev        # Android on a device or emulator
+just android-debug      # debug APK
+just android-release    # unsigned release APK
+just android-sign       # signed release APK (local keystore)
+just test-local         # infra + services + PWA dev server
 ```
 
-### PWA
-
-```bash
-just pwa-deps           # npm install
-just pwa-dev            # Dev server on http://0.0.0.0:5174
-just pwa-build          # Production build to dist/
-just pwa-serve          # Serve built PWA on LAN
-```
-
-### Full Stack
-
-```bash
-just test-local         # Start everything: infra + services + PWA dev server
-```
-
----
-
-## Service Endpoints
+## Service endpoints
 
 | Service | Address | Metrics |
 |---------|---------|---------|
-| Gateway (TLS) | `0.0.0.0:9100` | `:9090/metrics` |
-| Gateway (WS) | `0.0.0.0:9101` | — |
+| Gateway (TLS) | `:9100` | `:9090/metrics` |
+| Gateway (WebSocket) | `:9101` | — |
 | Signaling | via NATS | `:9091/metrics` |
-| Relay (TLS) | `0.0.0.0:9300` | `:9092/metrics` |
+| Relay (TLS / WebSocket) | `:9300` / `:9301` | `:9092/metrics` |
 | Redis | `localhost:6379` | — |
 | NATS | `localhost:4222` | `:8222` |
-| PWA | `http://0.0.0.0:5174` | — |
-
----
-
-## Typical Workflows
-
-### First time setup
-```bash
-rustup show             # installs the pinned toolchain; cargo install just
-just infra              # start Redis + NATS
-just deps               # install frontend deps
-```
-
-### Daily development
-```bash
-just infra              # ensure infra is running
-just services &         # start backend
-just desktop-dev        # run desktop app with hot-reload
-```
-
-### Before commit
-```bash
-just check              # lint + hygiene + tests
-```
-
-### Build release
-```bash
-just build-release      # Rust binaries
-just desktop-build      # Desktop installer
-just android-sign       # Signed Android APK
-```
+| PWA dev server | `http://localhost:5174` | — |
