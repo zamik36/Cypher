@@ -5,6 +5,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY services/ services/
 COPY tools/ tools/
+COPY tests/ tests/
 COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
 
 RUN cargo build --release \
