@@ -166,7 +166,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "generates 2200 X25519 keys: over 20 minutes under Miri")]
+    #[cfg_attr(
+        miri,
+        ignore = "generates 2200 X25519 keys: over 20 minutes under Miri"
+    )]
     fn batches_are_bounded_and_record_roundtrips() {
         let mut pk = Prekeys::generate(0, &mut OsRng);
         let batches = MAX_RETAINED_OPKS / OPK_BATCH as usize + 2;
