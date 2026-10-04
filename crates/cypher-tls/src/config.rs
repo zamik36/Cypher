@@ -1,6 +1,5 @@
 //! TLS `ServerConfig` and `ClientConfig` builders.
 
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +11,7 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tracing::debug;
 
 use crate::cert::SelfSignedCert;
+use crate::reload::PemCert;
 
 /// How long a service waits for certificates another container writes
 /// (e.g. Caddy with auto-HTTPS) before giving up.
@@ -45,23 +45,19 @@ fn server_config(
     Ok(Arc::new(config))
 }
 
-/// Server config from CA-issued PEM files (e.g. Let's Encrypt).
-fn server_config_from_pem(cert_path: &str, key_path: &str) -> Result<Arc<ServerConfig>> {
-    let open = |path: &str| {
-        std::fs::File::open(path)
-            .map(BufReader::new)
-            .map_err(|e| transport(&format!("failed to open {path}"), e))
-    };
-    let certs = rustls_pemfile::certs(&mut open(cert_path)?)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| transport(&format!("invalid certificate in {cert_path}"), e))?;
-    if certs.is_empty() {
-        return Err(Error::Transport(format!("no certificate in {cert_path}")));
-    }
-    let key = rustls_pemfile::private_key(&mut open(key_path)?)
-        .map_err(|e| transport(&format!("invalid private key in {key_path}"), e))?
-        .ok_or_else(|| Error::Transport(format!("no private key in {key_path}")))?;
-    server_config(certs, key)
+/// Server config from CA-issued PEM files (e.g. Let's Encrypt). The
+/// certificate is served through [`PemCert`], which picks up renewals.
+fn server_config_from_pem(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<(Arc<ServerConfig>, Arc<PemCert>)> {
+    ensure_crypto_provider();
+    let cert = Arc::new(PemCert::load(cert_path, key_path)?);
+    let resolver: Arc<dyn rustls::server::ResolvesServerCert> = Arc::<PemCert>::clone(&cert);
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    Ok((Arc::new(config), cert))
 }
 
 /// Loads PEM files, waiting while they do not exist yet; any other error
@@ -82,8 +78,9 @@ async fn load_pem_with_retry(
             }
         }
         match server_config_from_pem(cert_path, key_path) {
-            Ok(config) => {
+            Ok((config, cert)) => {
                 tracing::info!(attempt, "TLS certificates loaded from PEM files");
+                PemCert::watch(&cert);
                 return Ok(config);
             }
             Err(e) if attempt < attempts => {

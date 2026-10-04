@@ -2,6 +2,7 @@
 
 pub mod cert;
 pub mod config;
+mod reload;
 
 pub use cert::SelfSignedCert;
 pub use config::{
