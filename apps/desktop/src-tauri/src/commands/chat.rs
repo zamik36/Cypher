@@ -21,6 +21,15 @@ pub(crate) async fn send_message(
     Ok(id.to_hex())
 }
 
+/// The number to compare with `peer_id` out of band (60 digits).
+#[tauri::command]
+pub(crate) async fn safety_number(
+    state: State<'_, AppState>,
+    peer_id: String,
+) -> CmdResult<String> {
+    state.safety_number(&parse_peer(&peer_id)?).await
+}
+
 #[tauri::command]
 pub(crate) async fn mark_read(
     state: State<'_, AppState>,

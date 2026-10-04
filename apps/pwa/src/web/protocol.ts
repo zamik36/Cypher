@@ -23,6 +23,7 @@ export interface Methods {
   mediaBlob(fileId: string): Blob;
   releaseDownload(fileId: string): void;
   qr(text: string): string;
+  safetyNumber(peer: string): string;
   conversations(): { peer_id: string; display_name: null; last_message_at: number }[];
   history(peer: string, limit: number, before?: number): unknown[];
   clearHistory(): void;

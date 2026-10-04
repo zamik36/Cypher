@@ -89,6 +89,7 @@ export const webPlatform: Platform = {
     await call("command", { type: "cancel_transfer", file_id: fileId });
   },
   generateQr: (linkId) => call("qr", linkId),
+  safetyNumber: (peerId) => call("safetyNumber", peerId),
   startVoice: async (onLevel) => {
     if (voice) throw new Error("already recording");
     voice = await WebVoiceRecorder.start(onLevel);

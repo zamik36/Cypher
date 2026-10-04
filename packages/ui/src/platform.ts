@@ -122,6 +122,8 @@ export interface Platform {
   acceptFile(fileId: string): Promise<void>;
   cancelTransfer(fileId: string): Promise<void>;
   generateQr(linkId: string): Promise<string>;
+  /** The 60 digits both sides of a conversation compare to rule out a man in the middle. */
+  safetyNumber(peerId: string): Promise<string>;
   /** Starts a voice note; `onLevel` receives 0..1 loudness for the meter. */
   startVoice(onLevel: (level: number) => void): Promise<void>;
   /** Stops and sends the voice note; `null` when it was too short. */

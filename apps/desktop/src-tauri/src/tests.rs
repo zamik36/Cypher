@@ -169,6 +169,13 @@ async fn identity_lifecycle_without_a_server() {
         desktop.call("has_identity", no_args()).await,
         Ok(json!(true))
     );
+    let bob = json!({ "peerId": cypher_types::PeerId([9; 32]).to_hex() });
+    let number = text(&desktop.call("safety_number", bob).await.unwrap());
+    assert!(number.len() == 60 && number.bytes().all(|d| d.is_ascii_digit()));
+    let invalid = desktop
+        .call("safety_number", json!({ "peerId": "zz" }))
+        .await;
+    assert_eq!(invalid.unwrap_err(), "invalid peer id");
     assert_eq!(
         desktop.call("get_nickname", no_args()).await,
         Ok(json!("alice"))
@@ -208,6 +215,8 @@ async fn commands_fail_cleanly_before_connecting() {
 
     let locked = call("connect_to_gateway", connect("localhost:1")).await;
     assert_eq!(locked.unwrap_err(), "identity is locked");
+    let no_identity = call("safety_number", json!({ "peerId": peer })).await;
+    assert_eq!(no_identity.unwrap_err(), "identity is locked");
     desktop.create("bob").await;
     call("connect_to_gateway", connect("no port"))
         .await

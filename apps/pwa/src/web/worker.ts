@@ -50,6 +50,11 @@ function feed(call: (c: Client, now: number) => Effect[]): Promise<void> {
   });
 }
 
+function requireIdentity(): Identity {
+  if (!identity) throw new Error("identity is locked");
+  return identity;
+}
+
 function requireClient(): Client {
   if (!client) throw new Error("not connected");
   return client;
@@ -384,6 +389,7 @@ const handlers: Handlers = {
     await (await sinkDir(false)).removeEntry(fileId).catch(() => undefined);
   },
   qr: (text) => Promise.resolve(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg(text))}`),
+  safetyNumber: (peer) => Promise.resolve(requireIdentity().safetyNumber(peer)),
   conversations: async () => {
     const peers = await scan(db, "peers");
     const out = await Promise.all(

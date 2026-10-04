@@ -9,7 +9,7 @@ use cypher_client::{Client, Config, TorConfig};
 use cypher_core::Event;
 use cypher_crypto::IdentitySeed;
 use cypher_media::Recorder;
-use cypher_types::FileId;
+use cypher_types::{FileId, PeerId};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -106,6 +106,18 @@ impl AppState {
     pub(crate) async fn set_identity(&self, seed: IdentitySeed, nickname: String) {
         self.stop().await;
         *self.identity.lock().await = Some(Identity { seed, nickname });
+    }
+
+    /// The safety number with `peer`; needs only the unlocked identity.
+    pub(crate) async fn safety_number(&self, peer: &PeerId) -> CmdResult<String> {
+        let identity = self.identity.lock().await;
+        let own = identity
+            .as_ref()
+            .ok_or("identity is locked")?
+            .seed
+            .derive_identity()
+            .peer_id();
+        Ok(cypher_core::ui::safety_number(&own, peer))
     }
 
     pub(crate) async fn nickname(&self) -> Option<String> {

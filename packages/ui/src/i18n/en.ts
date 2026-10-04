@@ -163,6 +163,12 @@ const en = {
   install_ios: 'Share, then "Add to Home Screen"',
   install_android: 'Menu \u2630 then "Add to Home Screen" or "Install app"',
 
+  verify_open: "Verify safety number",
+  verify_title: "Safety number",
+  verify_hint:
+    "Compare these digits with your contact in person or on a call. If they match, no one is between you. If not, stop and pair again with a new code.",
+  verify_close: "Close",
+
   // -- Sidebar --
   sidebar_light_mode: "Light mode",
   sidebar_dark_mode: "Dark mode",

@@ -108,6 +108,13 @@ impl Identity {
         self.nickname.clone()
     }
 
+    /// The 60-digit number to compare with `peer_hex` out of band.
+    #[wasm_bindgen(js_name = safetyNumber)]
+    pub fn safety_number(&self, peer_hex: &str) -> Result<String, JsError> {
+        let own = self.seed.derive_identity().peer_id();
+        Ok(ui::safety_number(&own, &peer(peer_hex)?))
+    }
+
     /// Recovery phrase; the UI must re-verify the passphrase (`unlock`) first.
     pub fn mnemonic(&self) -> String {
         self.seed.to_mnemonic()

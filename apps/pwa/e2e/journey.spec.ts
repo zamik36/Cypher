@@ -19,6 +19,21 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
     await expect(incoming(bob).getByText("hi bob")).toBeVisible();
   });
 
+  await test.step("both sides see the same safety number", async () => {
+    const readNumber = async (page: typeof alice) => {
+      await page.getByRole("button", { name: "Verify safety number" }).click();
+      const digits = page.locator(".safety-digits");
+      await expect(digits.locator("li")).toHaveCount(12);
+      const number = (await digits.getAttribute("aria-label")) ?? "";
+      await page.getByRole("button", { name: "Close" }).click();
+      await expect(page.locator(".safety-number")).toBeHidden();
+      return number;
+    };
+    const [fromAlice, fromBob] = [await readNumber(alice), await readNumber(bob)];
+    expect(fromAlice).toMatch(/^\d{60}$/);
+    expect(fromAlice).toBe(fromBob);
+  });
+
   await test.step("a 3 MiB file arrives intact", async () => {
     const payload = randomBytes(3 * 1024 * 1024 + 12_345);
     const chooser = bob.waitForEvent("filechooser");

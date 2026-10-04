@@ -1,6 +1,7 @@
 //! Presentation shapes shared by every frontend (Tauri and WebAssembly):
 //! hex ids, millisecond timestamps, one channel name per event.
 
+use cypher_types::PeerId;
 use serde::Serialize;
 
 use crate::api::{Content, Event, MediaKind, MessageStatus, StoredMessage};
@@ -177,6 +178,12 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         }
         Event::Message(_) | Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
     })
+}
+
+/// The 60-digit number `own` and `peer` compare out of band to verify that
+/// no one sits between them; both sides compute the same digits.
+pub fn safety_number(own: &PeerId, peer: &PeerId) -> String {
+    cypher_crypto::fingerprint::safety_number(own.as_bytes(), peer.as_bytes())
 }
 
 fn anonymity(up: bool) -> UiPayload {

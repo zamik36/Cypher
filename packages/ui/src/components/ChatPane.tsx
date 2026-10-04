@@ -8,7 +8,8 @@ import VoiceBubble from "./media/VoiceBubble";
 import RoundVideoBubble from "./media/RoundVideoBubble";
 import RecordButton from "./media/RecordButton";
 import { addToast } from "../stores/toasts";
-import { SendIcon, ChatIcon, UploadIcon } from "./Icons";
+import { SendIcon, ChatIcon, ShieldIcon, UploadIcon } from "./Icons";
+import SafetyNumber from "./SafetyNumber";
 import type { Page } from "./Sidebar";
 import { t } from "../i18n";
 
@@ -56,6 +57,7 @@ function fromHistory(peer: string, m: UiMessage): ChatMessage {
 export default function ChatPane(props: ChatPaneProps) {
   const [draft, setDraft] = createSignal("");
   const [loadingHistory, setLoadingHistory] = createSignal(false);
+  const [verifying, setVerifying] = createSignal(false);
   let messagesRef: HTMLDivElement | undefined;
   let chatAreaRef: HTMLDivElement | undefined;
 
@@ -224,7 +226,18 @@ export default function ChatPane(props: ChatPaneProps) {
                       <span class={`online-dot ${activePeerInfo()?.online ? "online" : "offline"}`} />
                     </div>
                     <span>{shortName(peer())}</span>
+                    <button
+                      class="btn-icon chat-verify"
+                      title={t().verify_open}
+                      aria-label={t().verify_open}
+                      onClick={() => setVerifying(true)}
+                    >
+                      <ShieldIcon width="18" height="18" />
+                    </button>
                   </div>
+                  <Show when={verifying()}>
+                    <SafetyNumber peerId={peer()} peerName={shortName(peer())} onClose={() => setVerifying(false)} />
+                  </Show>
 
                   <Show when={loadingHistory()}>
                     <div class="empty-state">
