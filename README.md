@@ -85,6 +85,7 @@ just desktop-dev              # или десктоп
 | [docs/deploy.md](docs/deploy.md) | Развёртывание и секреты |
 | [docs/commands.md](docs/commands.md) | Все команды `just` |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Проверки, правила кода, тесты, храповик покрытия |
+| [SECURITY.md](SECURITY.md) | Как сообщить об уязвимости |
 
 ## Лицензия
 

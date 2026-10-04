@@ -100,7 +100,7 @@
 | Linux-релиз, скорее всего, не соберётся: нет `libasound2-dev` | `release.yml` | важно | 2 |
 | Версии расходятся (0.1.1 в Tauri, 0.2.0 в остальном); нет CHANGELOG; Android-проект генерируется при каждом релизе, только APK aarch64 | `tauri.conf.json`, `release.yml` | важно | 2 |
 | Нет SBOM, подписи образов и provenance; релиз пересобирает образы вместо продвижения проверенных | `release.yml` | желательно | 2 |
-| Dependabot не видит корневой npm-lock и образы в compose | `.github/dependabot.yml` | желательно | 2 |
+| Dependabot не видит корневой npm-lock и образы в compose | `.github/dependabot.yml` | желательно | 2 · исправлено |
 
 ### Наблюдаемость
 

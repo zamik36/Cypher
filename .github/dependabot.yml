@@ -1,56 +1,52 @@
+# Reviewers come from .github/CODEOWNERS. Minor and patch updates of one
+# ecosystem arrive as a single pull request; major ones one by one.
 version: 2
 updates:
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    reviewers:
-      - zamik36
-    labels:
-      - dependencies
-      - docker
-
-  - package-ecosystem: docker
-    directory: /apps/pwa
-    schedule:
-      interval: weekly
-      day: monday
-    reviewers:
-      - zamik36
-    labels:
-      - dependencies
-      - docker
-
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
       day: monday
-    reviewers:
-      - zamik36
-    labels:
-      - dependencies
-      - rust
+    labels: [dependencies, rust]
+    groups:
+      rust:
+        update-types: [minor, patch]
 
+  # npm workspaces share the root lockfile.
   - package-ecosystem: npm
-    directory: /apps/pwa
+    directory: /
     schedule:
       interval: weekly
       day: monday
-    reviewers:
-      - zamik36
-    labels:
-      - dependencies
-      - npm
+    labels: [dependencies, npm]
+    groups:
+      npm:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories: [/, /apps/pwa]
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  # Images pinned in docker-compose*.yml (Redis, NATS, Caddy, monitoring).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+    groups:
+      compose:
+        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
       day: monday
-    reviewers:
-      - zamik36
-    labels:
-      - dependencies
-      - ci
+    labels: [dependencies, ci]
+    groups:
+      actions:
+        update-types: [minor, patch]

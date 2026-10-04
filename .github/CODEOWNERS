@@ -1,0 +1,9 @@
+# Every change needs the owner's review (with branch protection on main).
+*                       @zamik36
+
+# Cryptography, the wire protocol and deployment secrets: review with the
+# threat model (docs/threat-model.md) at hand.
+/crates/cypher-crypto/  @zamik36
+/crates/cypher-wire/    @zamik36
+/deploy/                @zamik36
+/.github/workflows/     @zamik36
