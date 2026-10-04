@@ -1,6 +1,6 @@
 # Развёртывание
 
-Как поднять серверную часть «Шифра» на одном VPS с Docker Compose. Известные ограничения текущего деплоя — откат, единые точки отказа, перечитывание сертификатов — перечислены в конце и закрываются этапом 2 [roadmap](roadmap.md).
+Как поднять серверную часть «Шифра» на одном VPS с Docker Compose. Известные ограничения текущего деплоя — единые точки отказа, права контейнеров, бэкапы и алерты — перечислены в конце и закрываются этапом 2 [roadmap](roadmap.md).
 
 ## Что нужно
 
@@ -46,6 +46,7 @@ cp .env.example .env
 | `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD` | Пароли пользователей NATS. Права каждого — в `deploy/nats.conf`. |
 | `GRAFANA_PASSWORD` | Пароль администратора Grafana. |
 | `GHCR_REPO` | Репозиторий образов, например `ghcr.io/zamik36/cypher`. |
+| `IMAGE_TAG` | Какие образы запускать: первые 8 символов sha коммита, который собрал CI. Деплой из GitHub пишет его сам. |
 
 В production-слое адрес relay для клиентов (`${DOMAIN}:9300`) и пути к сертификатам задаются самим overlay. `RELAY_PUBLIC_ADDR` и `TLS_*` из `.env` используются только без него, при локальном запуске.
 
@@ -57,50 +58,59 @@ Gateway и relay ограничивают число соединений все
 - **WebSocket за Caddy:** считается адрес из последней записи `X-Forwarded-For`, которую дописал Caddy. Заголовку верят, только если соединение пришло с loopback или из частной сети (сеть Docker). Порты WebSocket в production наружу не публикуются.
 - **IPv6 и Docker:** если сервер принимает IPv6, а сеть compose только IPv4, Docker проксирует такие соединения через `docker-proxy`, и все они приходят с адреса шлюза сети. Тогда либо включите IPv6 в сети compose, либо поднимите `P2P_MAX_CONNECTIONS_PER_IP`.
 
-Запуск:
+Запуск. Production-слой ничего не собирает на сервере: если образа с `IMAGE_TAG` нет в GHCR, `pull` завершится ошибкой.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
 docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
 ```
+
+`--wait` ждёт, пока healthcheck каждого сервиса станет зелёным. Healthcheck gateway, signaling и relay — команда `<сервис> health` внутри образа: она спрашивает `/ready` на порту метрик. Сервис готов, когда открыл свои порты и подключился к NATS (signaling — ещё и подписался на запросы), и остаётся готовым, пока NATS на связи.
 
 Проверка:
 
 ```bash
-curl -s localhost:9090/metrics | head -3   # gateway
-curl -s localhost:9091/metrics | head -3   # signaling
-curl -s localhost:9092/metrics | head -3   # relay
-docker compose exec redis sh -c 'redis-cli -a "$REDIS_PASSWORD" ping'
+curl -s localhost:9090/ready   # gateway: ready
+curl -s localhost:9091/ready   # signaling
+curl -s localhost:9092/ready   # relay
+docker compose exec redis redis-cli ping   # PONG; пароль берётся из REDISCLI_AUTH
 ```
 
 ## Автоматический деплой из GitHub
 
 | Workflow | Когда | Что делает |
 |---|---|---|
-| `ci.yml` | push и PR | Проверки, тесты, e2e, нагрузка; на push в основные ветки — сборка и публикация образов в GHCR. |
-| `setup.yml` | вручную | Первая установка на VPS: клонирует репозиторий, пишет `.env` из секретов, поднимает стек. |
-| `deploy.yml` | после успешного CI на `main` | Обновляет код и образы на VPS, проверяет здоровье, при неудаче откатывается. |
-| `release.yml` | тег `v*` | Образы с версией, сборки десктопа и Android в GitHub Release. |
+| `ci.yml` | push и PR | Проверки, тесты, e2e, нагрузка; сборка Docker-образов. На PR образы только собираются, на push публикуются с тегом коммита (`<sha8>`). Подвижные теги `latest` (main) и `dev` переставляются, только когда прошли все job'ы. |
+| `setup.yml` | вручную | Первая установка: клонирует репозиторий на VPS. Стек поднимает деплой. |
+| `deploy.yml` | после успешного CI на push в `main` этого репозитория; вручную с sha | Пишет `.env` из секретов с `IMAGE_TAG=<sha8>`, скачивает образы этого коммита и обновляет только изменившиеся сервисы (`up -d --wait`, без `down`). Если сервисы не стали здоровыми за 3 минуты, возвращает последний здоровый деплой — и код, и образы. Деплои идут по одному. |
+| `release.yml` | тег `v*` | Ставит тег версии на образы, которые CI уже собрал и проверил для этого коммита; сборки десктопа и Android — в GitHub Release. |
 
 Секреты репозитория:
 
 | Секрет | Для чего |
 |---|---|
 | `VPS_HOST`, `VPS_USER`, `SSH_PRIVATE_KEY` | SSH-доступ к серверу. |
+| `VPS_FINGERPRINT` | SHA256-отпечаток ключа SSH-хоста (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` на сервере). Без него подлинность сервера не проверяется. |
 | `DEPLOY_PATH` | Каталог проекта на сервере (по умолчанию `~/cypher`). |
 | `GHCR_TOKEN` | Чтение образов из GHCR на сервере. |
 | `DOMAIN`, `REDIS_PASSWORD`, `GRAFANA_PASSWORD` | Как в `.env`. |
 | `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD` | Как в `.env`. Без них деплой откажется стартовать. |
 | `ANDROID_KEYSTORE_BASE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Подпись Android-сборки в релизе. |
 
-## Обновление вручную
+## Обновление и откат вручную
+
+Проще всего — запустить workflow **Deploy** вручную с полным sha нужного коммита: так же можно откатиться на любую версию, которую собрал CI. Без GitHub:
 
 ```bash
 cd ~/cypher
-git pull
+git fetch origin && git checkout --detach <sha>
+sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$(printf %.8s <sha>)/" .env
 docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
 ```
+
+Последний здоровый деплой записан в `.deployed-sha`.
 
 ## Что хранится и что бэкапить
 
@@ -131,8 +141,7 @@ docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d   # 
 
 ## Известные ограничения текущего деплоя
 
-Закрываются этапами 1 и 2 [roadmap](roadmap.md):
-- **Деплой и откат.** Сервисы работают на образах `:latest`, откат не возвращает предыдущие образы, деплой перезапускает весь стек.
-- **Проверка здоровья.** Деплой смотрит только на ответ `/metrics`, а не на готовность сервиса.
-- **Сертификаты.** Gateway и relay читают сертификат Let's Encrypt один раз при старте, поэтому после продления их нужно перезапустить. Они работают от root с доступом к тому Caddy.
+Закрываются этапом 2 [roadmap](roadmap.md):
+- **Права контейнеров.** Gateway и relay работают от root и монтируют весь том Caddy, чтобы читать сертификат (перечитывают его раз в минуту, рестарт после продления не нужен).
 - **Единые точки отказа.** Один хост, один Redis, один NATS, один gateway. Бэкапов и алертов нет; Grafana открыта наружу и защищена только паролем.
+- **Миграции между версиями.** Откат возвращает код и образы, но не данные: если новая версия успела записать в Redis данные нового формата, старая их не прочитает. Пока форматы Redis не менялись.

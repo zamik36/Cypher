@@ -1,5 +1,8 @@
 name: Setup VPS
 
+# First install: clones the repository on the server and checks its tools.
+# Starting the stack is the deploy's job (deploy.yml, run by hand with a sha
+# or by the next push to main), so both use one code path.
 on:
   workflow_dispatch:
 
@@ -8,62 +11,29 @@ permissions:
 
 jobs:
   setup:
-    name: Initial Project Setup
+    name: Prepare the server
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Init project on VPS
+      - name: Clone on VPS
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
-          DOMAIN: ${{ secrets.DOMAIN }}
-          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
-          GATEWAY_NATS_PASSWORD: ${{ secrets.GATEWAY_NATS_PASSWORD }}
-          SIGNALING_NATS_PASSWORD: ${{ secrets.SIGNALING_NATS_PASSWORD }}
-          RELAY_NATS_PASSWORD: ${{ secrets.RELAY_NATS_PASSWORD }}
-          GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           REPO_URL: https://github.com/${{ github.repository }}.git
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DOMAIN,REDIS_PASSWORD,GATEWAY_NATS_PASSWORD,SIGNALING_NATS_PASSWORD,RELAY_NATS_PASSWORD,GRAFANA_PASSWORD,DEPLOY_PATH,REPO_URL,GHCR_TOKEN,GHCR_USER
-          command_timeout: 15m
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
+          envs: DEPLOY_PATH,REPO_URL
           script: |
-            set -e
-            DEPLOY_DIR="${DEPLOY_PATH:-$HOME/cypher}"
-            if [ -d "$DEPLOY_DIR/.git" ]; then
-              cd "$DEPLOY_DIR" && git pull origin main
+            set -eu
+            # `up --wait` needs Compose v2.17 or newer.
+            docker compose version
+            dir="${DEPLOY_PATH:-$HOME/cypher}"
+            if [ -d "$dir/.git" ]; then
+              echo "$dir is already a clone"
             else
-              git clone "$REPO_URL" "$DEPLOY_DIR"
-              cd "$DEPLOY_DIR"
+              git clone --quiet "$REPO_URL" "$dir"
+              echo "Cloned into $dir; now run the Deploy workflow"
             fi
-            umask 077
-            export GHCR_REPO="ghcr.io/zamik36/cypher"
-            : > .env
-            # Refuse to deploy with a missing secret: services would start without
-            # credentials and NATS would reject its own config.
-            for var in DOMAIN REDIS_PASSWORD GATEWAY_NATS_PASSWORD SIGNALING_NATS_PASSWORD RELAY_NATS_PASSWORD GHCR_REPO GRAFANA_PASSWORD; do
-              value="$(printenv "$var")"
-              [ -n "$value" ] || { echo "secret $var is not set" >&2; exit 1; }
-              printf '%s=%s\n' "$var" "$value" >> .env
-            done
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate
-            echo "Waiting for services..."
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              sleep 5
-              if curl -sf http://localhost:9090/metrics > /dev/null 2>&1; then
-                echo "Services healthy"
-                break
-              fi
-              echo "Waiting... ($i)"
-            done
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
-            docker logout ghcr.io
-            echo "Setup complete!"

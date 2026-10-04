@@ -1,22 +1,48 @@
 name: Deploy
 
+# Production runs images pinned to the commit they were built from
+# (IMAGE_TAG = first 8 hex digits of its sha). A deploy that does not become
+# healthy returns to the last one that did, images included.
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
     branches: [main]
+  # Redeploy a commit CI has built, e.g. to roll back by hand.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit sha whose images to deploy
+        required: true
 
 permissions:
   contents: read
+
+# One deploy at a time; a newer one waits instead of interrupting.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
     name: Deploy to VPS
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: production
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only a push to this repository's main that passed CI: never a pull
+    # request, and never a fork's branch that happens to be called main.
+    if: >-
+      github.event_name == 'workflow_dispatch' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
+    env:
+      DEPLOY_SHA: ${{ inputs.sha || github.event.workflow_run.head_sha }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Check the commit
+        run: |
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "not a commit sha: $DEPLOY_SHA" >&2; exit 1; }
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -28,93 +54,76 @@ jobs:
           RELAY_NATS_PASSWORD: ${{ secrets.RELAY_NATS_PASSWORD }}
           GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
           envs: DOMAIN,REDIS_PASSWORD,GATEWAY_NATS_PASSWORD,SIGNALING_NATS_PASSWORD,RELAY_NATS_PASSWORD,GRAFANA_PASSWORD,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
           command_timeout: 10m
           script: |
-            set -e
+            set -eu
             cd "${DEPLOY_PATH:-$HOME/cypher}"
+            compose() { docker compose -f docker-compose.yml -f docker-compose.prod.yml "$@"; }
 
-            PREV_SHA=$(git rev-parse --short=8 HEAD)
-            echo "Previous SHA: $PREV_SHA"
+            echo "Last healthy deploy: $(cat .deployed-sha 2>/dev/null || echo none)"
+            git fetch --quiet origin "$DEPLOY_SHA"
+            git checkout --quiet --detach "$DEPLOY_SHA"
+            echo "Deploying $DEPLOY_SHA"
 
-            git fetch origin main
-            git checkout "$DEPLOY_SHA"
-            echo "Deploying SHA: $(git rev-parse --short=8 HEAD)"
-
-            # Generate .env — secrets come from envs parameter, values stay in-file only
+            # Secrets come from the envs parameter and stay in this file only.
+            # A missing one would start services without credentials, so refuse.
             umask 077
             export GHCR_REPO="ghcr.io/zamik36/cypher"
-            : > .env
-            # Refuse to deploy with a missing secret: services would start without
-            # credentials and NATS would reject its own config.
-            for var in DOMAIN REDIS_PASSWORD GATEWAY_NATS_PASSWORD SIGNALING_NATS_PASSWORD RELAY_NATS_PASSWORD GHCR_REPO GRAFANA_PASSWORD; do
-              value="$(printenv "$var")"
+            export IMAGE_TAG="$(printf %.8s "$DEPLOY_SHA")"
+            : > .env.next
+            for var in DOMAIN REDIS_PASSWORD GATEWAY_NATS_PASSWORD SIGNALING_NATS_PASSWORD RELAY_NATS_PASSWORD GHCR_REPO GRAFANA_PASSWORD IMAGE_TAG; do
+              value="$(printenv "$var" || true)"
               [ -n "$value" ] || { echo "secret $var is not set" >&2; exit 1; }
-              printf '%s=%s\n' "$var" "$value" >> .env
+              printf '%s=%s\n' "$var" "$value" >> .env.next
             done
+            mv .env.next .env
 
-            # Pull pre-built images from ghcr.io
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-
-            # Restart
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml down --remove-orphans
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate
-
-            # Health checks
-            echo "Waiting for services..."
-            for i in 1 2 3 4 5 6; do
-              sleep 5
-              if curl -sf http://localhost:9090/metrics > /dev/null 2>&1 \
-                && curl -sf http://localhost:9091/metrics > /dev/null 2>&1 \
-                && curl -sf http://localhost:9092/metrics > /dev/null 2>&1; then
-                break
-              fi
-              if [ "$i" = "6" ]; then
-                echo "Services did not become healthy within 30s"
-                docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=30
-                exit 1
-              fi
-              echo "Retry $i..."
-            done
-
-            curl -sf http://localhost:9090/metrics > /dev/null && echo "gateway: OK"
-            curl -sf http://localhost:9091/metrics > /dev/null && echo "signaling: OK"
-            curl -sf http://localhost:9092/metrics > /dev/null && echo "relay: OK"
-
-            echo "$PREV_SHA" > .prev-deploy-sha
+            compose pull --quiet
             docker logout ghcr.io
-            echo "Deploy successful"
+            # Recreates only what changed; --wait fails unless every service
+            # with a healthcheck reports healthy in time.
+            compose up -d --remove-orphans --wait --wait-timeout 180
 
-      - name: Rollback on failure
+            printf '%s\n' "$DEPLOY_SHA" > .deployed-sha
+            docker image prune -f > /dev/null
+            echo "Deployed $DEPLOY_SHA"
+
+      - name: Roll back to the last healthy deploy
         if: failure()
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DEPLOY_PATH
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
+          envs: DEPLOY_PATH,GHCR_TOKEN,GHCR_USER
+          command_timeout: 10m
           script: |
-            set -e
+            set -eu
             cd "${DEPLOY_PATH:-$HOME/cypher}"
+            compose() { docker compose -f docker-compose.yml -f docker-compose.prod.yml "$@"; }
 
-            if [ -f .prev-deploy-sha ]; then
-              PREV_SHA=$(cat .prev-deploy-sha)
-              echo "Rolling back to SHA: $PREV_SHA"
-              git checkout "$PREV_SHA"
-            else
-              echo "No previous SHA recorded, rolling back one commit"
-              git checkout HEAD~1
-            fi
+            [ -f .deployed-sha ] || { echo "no healthy deploy recorded; nothing to return to" >&2; exit 1; }
+            good="$(cat .deployed-sha)"
+            echo "Returning to $good"
+            git checkout --quiet --detach "$good"
+            sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$(printf %.8s "$good")/" .env
 
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate
-            echo "Rolled back successfully"
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            compose pull --quiet
+            docker logout ghcr.io
+            compose up -d --remove-orphans --wait --wait-timeout 180
+            echo "Rolled back to $good"

@@ -1,7 +1,8 @@
 # Production overlay — use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-# Uses pre-built images from ghcr.io. Set GHCR_REPO in .env (e.g. ghcr.io/zamik36/cypher).
-# Falls back to local build if image is not available.
+# Runs images CI built from one commit: GHCR_REPO (e.g. ghcr.io/zamik36/cypher)
+# and IMAGE_TAG (the first 8 hex digits of its sha) come from .env, which the
+# deploy writes. Nothing is built on the server: a missing image fails the pull.
 services:
   caddy:
     image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
@@ -118,7 +119,8 @@ services:
   # NOTE: user "0:0" is required to read TLS certs from the shared caddy-data volume;
   # root is heavily constrained via cap_drop, read_only, and no-new-privileges.
   gateway:
-    image: ${GHCR_REPO}/cypher-gateway:latest
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-gateway:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
     user: "0:0"
     read_only: true
     security_opt: !override
@@ -141,7 +143,8 @@ services:
           cpus: "1.0"
 
   signaling:
-    image: ${GHCR_REPO}/cypher-signaling:latest
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-signaling:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
     read_only: true
     security_opt: !override
       - no-new-privileges:true
@@ -161,7 +164,8 @@ services:
           cpus: "0.5"
 
   relay:
-    image: ${GHCR_REPO}/cypher-relay:latest
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-relay:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
     user: "0:0"
     read_only: true
     security_opt: !override
@@ -184,7 +188,8 @@ services:
           cpus: "1.0"
 
   pwa:
-    image: ${GHCR_REPO}/cypher-pwa:latest
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-pwa:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
     ports: !override []
 
   redis:
