@@ -57,6 +57,10 @@ impl Upgrade {
 
     /// Whether a connection from `peer` may name another client: only a
     /// WebSocket from our own reverse proxy does.
+    #[cfg_attr(
+        not(feature = "ws"),
+        expect(unused_variables, reason = "only WebSocket connections are proxied")
+    )]
     fn forwards_for(&self, peer: IpAddr) -> bool {
         match self {
             Self::Tls(_) => false,

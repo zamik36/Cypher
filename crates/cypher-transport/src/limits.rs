@@ -87,6 +87,7 @@ fn client_key(ip: IpAddr) -> IpAddr {
 /// Whether `peer` is this deployment's own reverse proxy (loopback or a
 /// private network such as Docker's), whose forwarded client address can
 /// be believed. Anyone else could put any address in the header.
+#[cfg(feature = "ws")]
 pub(crate) fn is_trusted_proxy(peer: IpAddr) -> bool {
     match peer.to_canonical() {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
@@ -96,6 +97,7 @@ pub(crate) fn is_trusted_proxy(peer: IpAddr) -> bool {
 
 /// The client address a trusted proxy put in `X-Forwarded-For`: the last
 /// entry, the one our proxy appended (earlier ones come from the client).
+#[cfg(feature = "ws")]
 pub(crate) fn forwarded_client(header: &str) -> Option<IpAddr> {
     header.rsplit(',').next()?.trim().parse().ok()
 }
@@ -144,6 +146,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ws")]
     fn only_the_deployments_own_proxy_is_trusted_with_client_addresses() {
         for trusted in [
             "127.0.0.1",
