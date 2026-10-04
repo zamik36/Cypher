@@ -31,6 +31,23 @@ const en = {
   identity_back_unlock: "Back to unlock",
   identity_back: "Back",
   identity_seed_placeholder: "Recovery phrase (24 words)",
+  identity_passphrase_repeat: "Repeat passphrase",
+  identity_passphrase_mismatch: "The passphrases do not match.",
+  identity_err_wrong_passphrase: "Wrong passphrase.",
+  identity_err_short: "The passphrase must be at least 12 characters long.",
+  identity_err_corrupt: "The identity saved on this device is damaged. Restore it from your recovery phrase.",
+  identity_err_bad_phrase: "This is not a valid recovery phrase. Check the words and their order.",
+  identity_err_exists: "This device already has an identity.",
+  identity_err_nickname: "The nickname is too long.",
+  backup_title: "Your recovery phrase",
+  backup_hint:
+    "These 24 words are the only way to get your identity back on a new device or after losing this one. Write them down on paper, in order, and keep them private: whoever has them can be you.",
+  backup_written: "I have written it down",
+  backup_check_title: "Check your phrase",
+  backup_check_hint: "Enter the words with these numbers.",
+  backup_word: (n: number) => `Word #${n}`,
+  backup_continue: "Continue",
+  backup_show_again: "Show the phrase again",
 
   // -- Home --
   home_connecting: "Connecting to network...",

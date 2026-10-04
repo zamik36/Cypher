@@ -18,6 +18,14 @@ export function reasonText(error: unknown): string {
     UpdateRequired: tr.error_update_required,
     StorageFailed: tr.error_storage_failed,
     Corrupted: tr.error_corrupted,
+    // Identity file and recovery phrase, as both platforms word them.
+    "wrong passphrase": tr.identity_err_wrong_passphrase,
+    "passphrase is too short": tr.identity_err_short,
+    "identity file is corrupt": tr.identity_err_corrupt,
+    "identity data is corrupt": tr.identity_err_corrupt,
+    "invalid recovery phrase": tr.identity_err_bad_phrase,
+    "an identity already exists": tr.identity_err_exists,
+    "nickname is too long": tr.identity_err_nickname,
   };
   return known[raw] ?? raw;
 }

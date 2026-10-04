@@ -11,6 +11,7 @@ import {
   pair,
   PASSPHRASE,
   say,
+  setPassphrase,
   unlock,
 } from "./users";
 
@@ -91,7 +92,7 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
 
 test("a recovery phrase restores the identity on a new device", async ({ browser, baseURL }) => {
   const original = await newUser(browser, baseURL ?? "");
-  await createIdentity(original, "carol");
+  const shown = await createIdentity(original, "carol");
   const peerId = await original.locator(".status-bar .peer-pill").getAttribute("title");
 
   await navigate(original, "Settings");
@@ -99,12 +100,13 @@ test("a recovery phrase restores the identity on a new device", async ({ browser
   await original.getByRole("button", { name: "Export", exact: true }).click();
   const phrase = (await original.locator(".seed-display code").textContent()) ?? "";
   expect(phrase.split(" ")).toHaveLength(24);
+  expect(phrase).toBe(shown);
 
   const restored = await newUser(browser, baseURL ?? "");
   await restored.getByRole("button", { name: "Import" }).click();
   await restored.getByPlaceholder("Recovery phrase (24 words)").fill(phrase);
   await restored.getByPlaceholder("Nickname").fill("carol");
-  await restored.getByPlaceholder("Passphrase", { exact: true }).fill("a different passphrase");
+  await setPassphrase(restored, "a different passphrase");
   await restored.getByRole("button", { name: "Import" }).click();
   await expect(restored.locator(".status-bar .peer-pill")).toHaveAttribute("title", peerId ?? "");
 

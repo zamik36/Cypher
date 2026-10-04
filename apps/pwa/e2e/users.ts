@@ -13,11 +13,35 @@ export async function newUser(browser: Browser, baseURL: string): Promise<Page> 
   return page;
 }
 
-export async function createIdentity(page: Page, nickname: string): Promise<void> {
+export async function createIdentity(page: Page, nickname: string): Promise<string> {
   await page.getByPlaceholder("Nickname").fill(nickname);
-  await page.getByPlaceholder("Passphrase (min 12 chars)").fill(PASSPHRASE);
+  await setPassphrase(page, PASSPHRASE);
   await page.getByRole("button", { name: "Create identity" }).click();
+  const phrase = await confirmRecoveryPhrase(page);
   await expectConnected(page);
+  return phrase;
+}
+
+/** Types a new passphrase and its repetition. */
+export async function setPassphrase(page: Page, passphrase: string): Promise<void> {
+  await page.getByPlaceholder("Passphrase (min 12 chars)").fill(passphrase);
+  await page.getByPlaceholder("Repeat passphrase").fill(passphrase);
+}
+
+/** Reads the phrase shown after creating an identity and answers the check. */
+async function confirmRecoveryPhrase(page: Page): Promise<string> {
+  const list = page.locator(".recovery-words li");
+  await expect(list).toHaveCount(24);
+  const words = await list.allTextContents();
+  await page.getByRole("button", { name: "I have written it down" }).click();
+  const continueButton = page.getByRole("button", { name: "Continue" });
+  await expect(continueButton).toBeDisabled();
+  for (const input of await page.getByRole("textbox", { name: /^Word #\d+$/ }).all()) {
+    const label = (await input.getAttribute("aria-label")) ?? "";
+    await input.fill(words[Number(label.replace("Word #", "")) - 1] ?? "");
+  }
+  await continueButton.click();
+  return words.join(" ");
 }
 
 export async function unlock(page: Page, passphrase = PASSPHRASE): Promise<void> {

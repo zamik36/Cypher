@@ -1663,6 +1663,30 @@ textarea {
   color: var(--accent);
   text-decoration: underline;
 }
+.identity-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* The recovery phrase, numbered, in columns to copy onto paper. */
+.recovery-words {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 16px;
+  margin: 0;
+  padding: 12px 12px 12px 36px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 13px;
+  user-select: all;
+}
+@media (max-width: 420px) {
+  .recovery-words {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .identity-error {
   color: var(--red);
   background: var(--red-glow);

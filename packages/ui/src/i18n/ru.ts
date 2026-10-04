@@ -40,6 +40,23 @@ const ru: TranslationKeys = {
   identity_new: "Новая личность",
   identity_back_unlock: "Назад к разблокировке",
   identity_back: "Назад",
+  identity_passphrase_repeat: "Повторите пароль",
+  identity_passphrase_mismatch: "Пароли не совпадают.",
+  identity_err_wrong_passphrase: "Неверный пароль.",
+  identity_err_short: "Пароль должен быть не короче 12 символов.",
+  identity_err_corrupt: "Личность на этом устройстве повреждена. Восстановите её по фразе восстановления.",
+  identity_err_bad_phrase: "Это не фраза восстановления. Проверьте слова и их порядок.",
+  identity_err_exists: "На этом устройстве уже есть личность.",
+  identity_err_nickname: "Слишком длинный ник.",
+  backup_title: "Ваша фраза восстановления",
+  backup_hint:
+    "Эти 24 слова — единственный способ вернуть личность на новом устройстве или после потери этого. Запишите их на бумаге по порядку и никому не показывайте: кто знает фразу, тот может стать вами.",
+  backup_written: "Я записал(а) фразу",
+  backup_check_title: "Проверьте фразу",
+  backup_check_hint: "Введите слова с этими номерами.",
+  backup_word: (n: number) => `Слово №${n}`,
+  backup_continue: "Продолжить",
+  backup_show_again: "Показать фразу ещё раз",
   identity_seed_placeholder: "Фраза восстановления (24 слова)",
 
   // -- Home --
