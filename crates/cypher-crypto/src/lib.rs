@@ -9,6 +9,7 @@ pub mod aead;
 pub mod chunk;
 pub mod double_ratchet;
 mod error;
+pub mod fingerprint;
 pub mod handshake;
 pub mod identity;
 pub mod identity_file;

@@ -755,11 +755,15 @@ textarea {
 }
 .room-code {
   font-family: "JetBrains Mono", "Fira Code", monospace;
-  font-size: 28px;
+  /* A full share link (code + identity fingerprint) is ~53 characters. */
+  font-size: 18px;
   font-weight: 700;
-  letter-spacing: 2px;
+  letter-spacing: 1px;
   color: var(--accent);
-  padding: 16px 32px;
+  padding: 16px 24px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
   background: var(--surface);
   border-radius: var(--radius-md);
   border: 2px solid transparent;

@@ -201,6 +201,9 @@ pub enum FailReason {
     Unauthorized,
     ServerError,
     DecryptFailed,
+    /// The server answered a share link with an identity other than the one
+    /// the link was made for: possibly a key substitution.
+    KeyMismatch,
     /// The driver could not make state durable and stopped the client.
     StorageFailed,
 }

@@ -49,6 +49,14 @@ const en = {
   home_join_desc: "Enter a room code from someone to establish a secure connection.",
   home_join_placeholder: "Enter room code",
   home_join_btn: "Join",
+  join_invalid_link: "That is not a valid room code. Copy the whole code, including the part after the dash.",
+  join_not_found: "This room code has expired or does not exist. Ask for a new one.",
+  join_self_link: "This is your own room code.",
+  join_key_mismatch:
+    "The server answered this code with a different identity than the one who made it. Do not continue: ask for a new code over another channel.",
+  join_invalid_keys: "The other side's keys are invalid. Ask them for a new code.",
+  join_timeout: "No answer from the server. Check the connection and try again.",
+  join_offline: "Not connected to the server yet. Try again in a moment.",
   home_host_port: "host:port",
 
   // -- Chat --

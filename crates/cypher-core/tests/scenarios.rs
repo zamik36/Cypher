@@ -19,6 +19,7 @@ use harness::World;
 
 const A: usize = 0;
 const B: usize = 1;
+const C: usize = 2;
 
 fn paired() -> World {
     let mut w = World::new(2);
@@ -81,7 +82,21 @@ fn link_errors_are_reported_not_hung() {
     w.command(
         B,
         Command::JoinLink {
-            link: "abcdefghijklmnopqrstuvwxyz".into(),
+            link: "not-a-link".into(),
+        },
+    );
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::JoinFailed {
+            reason: FailReason::InvalidLink,
+            ..
+        }
+    )));
+
+    w.command(
+        B,
+        Command::JoinLink {
+            link: format!("{}-{}", "a".repeat(26), "b".repeat(26)),
         },
     );
     assert!(w.has_event(B, |e| matches!(
@@ -519,4 +534,23 @@ fn inbox_falls_back_to_session_only_when_allowed() {
         w.server.session_inbox_ops, before,
         "no leak once onion is required"
     );
+}
+
+/// A server that answers a share link with another identity (its own, or
+/// someone it wants in the middle) is caught by the link's fingerprint.
+#[test]
+fn a_link_answered_with_another_identity_is_refused() {
+    let mut w = World::new(3);
+    let link = w.create_link(A);
+    w.hijack_link(&link, C);
+    w.command(B, Command::JoinLink { link });
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::JoinFailed {
+            reason: FailReason::KeyMismatch,
+            ..
+        }
+    )));
+    let peers = w.clients[B].core.as_ref().unwrap().peers().count();
+    assert_eq!(peers, 0, "no session with the impostor");
 }

@@ -93,7 +93,7 @@ impl LinkId {
     pub fn random(rng: &mut impl CryptoRngCore) -> Self {
         let mut b = [0u8; 16];
         rng.fill_bytes(&mut b);
-        Self(base32_encode(&b))
+        Self(base32(&b))
     }
 
     /// Accepts only well-formed identifiers so untrusted input can never be
@@ -115,7 +115,8 @@ impl fmt::Display for LinkId {
     }
 }
 
-fn base32_encode(data: &[u8]) -> String {
+/// Lowercase RFC 4648 base32 without padding, as used in share links.
+pub fn base32(data: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut out = String::with_capacity(data.len().div_ceil(5) * 8);
     let mut bits = 0u32;
@@ -152,7 +153,7 @@ mod tests {
 
     #[test]
     fn base32_known_vector() {
-        assert_eq!(base32_encode(b"foobar"), "mzxw6ytboi");
+        assert_eq!(base32(b"foobar"), "mzxw6ytboi");
     }
 
     #[test]

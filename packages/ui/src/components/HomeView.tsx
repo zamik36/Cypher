@@ -7,6 +7,7 @@ import type { Page } from "./Sidebar";
 import { anonymousSettings } from "../stores/anonymity";
 import { t } from "../i18n";
 import { copyText } from "../utils/clipboard";
+import { joinErrorText } from "../utils/joinError";
 
 interface HomeViewProps {
   onNavigate: (p: Page) => void;
@@ -61,7 +62,7 @@ export default function HomeView(props: HomeViewProps) {
       setJoinCode("");
       props.onNavigate("chat");
     } catch (e) {
-      setError(String(e));
+      setError(joinErrorText(e));
     } finally {
       setBusy(false);
     }

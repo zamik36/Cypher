@@ -51,7 +51,7 @@ Auth {Ed25519(nonce)}          ──►      подпись по "cypher-sessio
 |---|---|---|
 | `0x20` → `0x23` | `PublishKeys{base[164], opks[], replace}` → `KeysAck{opks_left}` | Публикация prekey-бандла: личность, X25519-ключ, подписанный prekey, подпись; до 200 одноразовых ключей за раз. Чужой бандл отклоняется. |
 | `0x21` → `0x22` | `FetchKeys{peer}` → `Keys{base, opk?}` | Бандл собеседника и один одноразовый ключ; ключ выдаётся один раз. |
-| `0x30` → `0x32` | `CreateLink` → `LinkCreated{link}` | Ссылка-приглашение, живёт 24 ч. |
+| `0x30` → `0x32` | `CreateLink` → `LinkCreated{link}` | Код ссылки-приглашения, живёт 24 ч. Пользователю показывается `<код>-<отпечаток>`, где отпечаток — первые 16 байт `SHA-256("cypher/v2/link-fingerprint" ‖ PeerId)` в base32. Сервер отпечаток не видит. |
 | `0x31` → `0x33` | `ResolveLink{link}` → `LinkResolved{peer}` | Кому принадлежит ссылка. |
 | `0x50` → `0x51` | `Bootstrap` → `BootstrapInfo{relay_addr, onion_key, capabilities}` | Где relay и чем запечатывать onion-запросы. |
 

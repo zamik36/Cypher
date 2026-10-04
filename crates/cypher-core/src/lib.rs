@@ -14,6 +14,7 @@ mod media;
 mod peer;
 mod prekeys;
 pub mod relay;
+mod share;
 mod store;
 mod transfer;
 pub mod ui;
@@ -23,6 +24,7 @@ pub use api::{
 };
 pub use core::{Core, Rows, Snapshot};
 pub use media::MediaKey;
+pub use share::ShareLink;
 pub use store::{Record, StoreOp, Table, Vault, message_key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

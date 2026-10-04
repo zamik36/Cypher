@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use cypher_crypto::{IdentityKeyPair, IdentitySeed};
-use cypher_types::{FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
@@ -15,6 +15,7 @@ use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
 use crate::peer::{Peer, PeerRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
+use crate::share::ShareLink;
 use crate::store::{META_PREKEYS, Record, StoreOp, Table, Vault};
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
@@ -38,7 +39,7 @@ enum Conn {
 enum Pending {
     CreateLink,
     Resolve {
-        link: String,
+        link: ShareLink,
     },
     FetchKeys {
         link: String,
@@ -330,11 +331,11 @@ impl<R: CryptoRngCore> Core<R> {
         match (pending, msg) {
             (Pending::CreateLink, ServerMsg::LinkCreated { link }) => {
                 self.emit(Event::LinkCreated {
-                    link: link.to_string(),
+                    link: ShareLink::new(link, &self.peer_id).to_string(),
                 });
             }
             (Pending::Resolve { link }, ServerMsg::LinkResolved { peer }) => {
-                self.on_link_resolved(link, peer);
+                self.on_link_resolved(&link, peer);
             }
             (Pending::FetchKeys { link, peer }, ServerMsg::Keys { base, opk }) => {
                 self.on_keys(link, peer, &base, opk);
@@ -374,9 +375,11 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn fail_request(&mut self, pending: Pending, reason: FailReason) {
         match pending {
-            Pending::Resolve { link } | Pending::FetchKeys { link, .. } => {
-                self.emit(Event::JoinFailed { link, reason });
-            }
+            Pending::Resolve { link } => self.emit(Event::JoinFailed {
+                link: link.to_string(),
+                reason,
+            }),
+            Pending::FetchKeys { link, .. } => self.emit(Event::JoinFailed { link, reason }),
             Pending::Bootstrap => {
                 self.anon.on_bootstrap(None, self.now);
                 self.fetch_inbox();
@@ -539,10 +542,12 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn join_link(&mut self, link: String) {
-        match LinkId::parse(link.trim()) {
-            Some(id) => self.request(
-                ClientMsg::ResolveLink { link: id },
-                Pending::Resolve { link },
+        match ShareLink::parse(&link) {
+            Some(share) => self.request(
+                ClientMsg::ResolveLink {
+                    link: share.link().clone(),
+                },
+                Pending::Resolve { link: share },
                 false,
             ),
             None => self.emit(Event::JoinFailed {
@@ -552,12 +557,19 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    fn on_link_resolved(&mut self, link: String, peer: PeerId) {
-        if peer == self.peer_id {
-            self.emit(Event::JoinFailed {
-                link,
-                reason: FailReason::SelfLink,
-            });
+    /// The server says who made the link; only its fingerprint, which the
+    /// server never saw, says whether to believe it.
+    fn on_link_resolved(&mut self, share: &ShareLink, peer: PeerId) {
+        let reason = if peer == self.peer_id {
+            Some(FailReason::SelfLink)
+        } else if !share.is_host(&peer) {
+            Some(FailReason::KeyMismatch)
+        } else {
+            None
+        };
+        let link = share.to_string();
+        if let Some(reason) = reason {
+            self.emit(Event::JoinFailed { link, reason });
             return;
         }
         self.request(

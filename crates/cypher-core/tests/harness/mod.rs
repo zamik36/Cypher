@@ -195,6 +195,13 @@ impl World {
             .expect("link created")
     }
 
+    /// Makes the server answer `share` with `impostor`'s identity.
+    pub(crate) fn hijack_link(&mut self, share: &str, impostor: usize) {
+        let link = share.split_once('-').map_or(share, |(l, _)| l).to_owned();
+        let peer = self.peer(impostor);
+        self.server.links.insert(link, peer);
+    }
+
     /// `joiner` joins a fresh link created by `host`.
     pub(crate) fn pair(&mut self, host: usize, joiner: usize) {
         let link = self.create_link(host);

@@ -5,7 +5,7 @@ mod error;
 mod id;
 
 pub use error::{Error, Result};
-pub use id::{FileId, LinkId, MsgId, PeerId};
+pub use id::{FileId, LinkId, MsgId, PeerId, base32};
 
 /// Domain-separation prefix for the gateway session proof-of-possession.
 pub const SESSION_AUTH_CONTEXT: &[u8] = b"cypher-session-auth-v2";
