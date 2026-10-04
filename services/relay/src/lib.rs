@@ -47,6 +47,9 @@ pub struct Config {
     pub metrics_addr: SocketAddr,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Connections one client address (IPv4, or IPv6 /64) may hold.
+    #[serde(default = "default_max_connections_per_ip")]
+    pub max_connections_per_ip: usize,
 }
 
 fn default_relay_addr() -> SocketAddr {
@@ -54,6 +57,9 @@ fn default_relay_addr() -> SocketAddr {
 }
 fn default_metrics_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9092))
+}
+fn default_max_connections_per_ip() -> usize {
+    128
 }
 fn default_max_connections() -> usize {
     20_000
@@ -189,7 +195,11 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         listeners.push(Listener::bind(addr, Upgrade::WebSocket).await?);
         info!(%addr, "relay WebSocket listening");
     }
-    server::serve(listeners, relay, config.max_connections, shutdown).await;
+    let limits = cypher_transport::ConnectionLimits {
+        total: config.max_connections,
+        per_ip: config.max_connections_per_ip,
+    };
+    server::serve(listeners, relay, limits, shutdown).await;
     Ok(())
 }
 

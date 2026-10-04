@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use cypher_transport::ConnectionLimits;
 use cypher_transport::server::{Handler, Listener, Upgrade, serve};
 use cypher_transport::{ClientConn, FrameSink, FrameStream, connect_tls};
 use futures::{SinkExt, StreamExt};
@@ -43,7 +44,7 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
 }
 
-async fn start(max_connections: usize) -> Server {
+async fn start(total: usize, per_ip: usize) -> Server {
     let cert = cypher_tls::SelfSignedCert::generate(&["localhost"]).unwrap();
     let client = cypher_tls::make_client_config_with_pem(&cert.cert_pem).unwrap();
     let acceptor = TlsAcceptor::from(cypher_tls::make_server_config_from_cert(cert).unwrap());
@@ -55,7 +56,7 @@ async fn start(max_connections: usize) -> Server {
     let task = tokio::spawn(serve(
         vec![listener],
         Arc::clone(&echo),
-        max_connections,
+        ConnectionLimits { total, per_ip },
         shutdown.clone(),
     ));
     Server {
@@ -79,7 +80,7 @@ async fn echo_roundtrip(conn: &mut ClientConn, payload: &'static [u8]) -> bool {
 
 #[tokio::test]
 async fn connections_beyond_the_limit_are_refused_and_counted() {
-    let server = start(1).await;
+    let server = start(1, 8).await;
     let mut first = connect_tls(&server.addr, Arc::clone(&server.client))
         .await
         .unwrap();
@@ -104,8 +105,26 @@ async fn connections_beyond_the_limit_are_refused_and_counted() {
 }
 
 #[tokio::test]
+async fn one_address_cannot_take_every_slot() {
+    let server = start(8, 1).await;
+    let mut first = connect_tls(&server.addr, Arc::clone(&server.client))
+        .await
+        .unwrap();
+    assert!(echo_roundtrip(&mut first, b"one").await);
+    let refused = match connect_tls(&server.addr, Arc::clone(&server.client)).await {
+        Ok(mut conn) => !echo_roundtrip(&mut conn, b"two").await,
+        Err(_) => true,
+    };
+    assert!(
+        refused,
+        "a second connection from the same address is refused"
+    );
+    assert_eq!(server.echo.rejected.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn a_stalled_handshake_does_not_block_other_clients() {
-    let server = start(8).await;
+    let server = start(8, 8).await;
     let port = server.addr.rsplit_once(':').unwrap().1;
     let _silent = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
@@ -118,7 +137,7 @@ async fn a_stalled_handshake_does_not_block_other_clients() {
 
 #[tokio::test]
 async fn shutdown_stops_accepting_and_closes_open_connections() {
-    let server = start(8).await;
+    let server = start(8, 8).await;
     let mut conn = connect_tls(&server.addr, Arc::clone(&server.client))
         .await
         .unwrap();
@@ -151,7 +170,10 @@ mod websocket {
         tokio::spawn(serve(
             vec![listener],
             Arc::new(Echo::default()),
-            8,
+            ConnectionLimits {
+                total: 8,
+                per_ip: 1,
+            },
             shutdown.clone(),
         ));
         (addr, shutdown)
@@ -164,6 +186,37 @@ mod websocket {
             .await
             .unwrap()
             .and_then(Result::ok)
+    }
+
+    /// Connects as if through our reverse proxy, which names the client.
+    async fn connect_as(
+        addr: &str,
+        client: &str,
+    ) -> Option<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>
+    {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", client.parse().unwrap());
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await.ok()?;
+        ws.send(Message::binary(b"ping".to_vec())).await.ok()?;
+        matches!(next(&mut ws).await, Some(Message::Binary(_))).then_some(ws)
+    }
+
+    #[tokio::test]
+    async fn clients_behind_the_proxy_are_limited_by_their_own_address() {
+        let (addr, _shutdown) = start_ws().await;
+        let _a = connect_as(&addr, "203.0.113.1")
+            .await
+            .expect("first client");
+        let _b = connect_as(&addr, "203.0.113.2")
+            .await
+            .expect("another client behind the same proxy");
+        assert!(
+            connect_as(&addr, "203.0.113.1").await.is_none(),
+            "the first client is at its limit"
+        );
     }
 
     #[tokio::test]

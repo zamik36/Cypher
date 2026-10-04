@@ -13,6 +13,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector, client};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 mod dial;
+mod limits;
+
+pub use limits::ConnectionLimits;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);

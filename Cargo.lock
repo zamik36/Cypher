@@ -2394,6 +2394,7 @@ dependencies = [
  "cypher-server-kit",
  "cypher-tls",
  "cypher-types",
+ "futures",
  "gateway",
  "relay",
  "rustls",
