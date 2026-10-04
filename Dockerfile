@@ -8,7 +8,7 @@ COPY tools/ tools/
 COPY tests/ tests/
 COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
 
-RUN cargo build --release \
+RUN cargo build --release --locked \
     -p gateway \
     -p signaling \
     -p relay

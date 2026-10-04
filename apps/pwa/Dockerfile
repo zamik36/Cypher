@@ -10,7 +10,7 @@ COPY services/ services/
 COPY tools/ tools/
 COPY tests/ tests/
 COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
-RUN cargo build -p cypher-wasm --release --target wasm32-unknown-unknown \
+RUN cargo build -p cypher-wasm --release --locked --target wasm32-unknown-unknown \
     && wasm-bindgen --target web --out-dir /wasm target/wasm32-unknown-unknown/release/cypher_wasm.wasm
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build

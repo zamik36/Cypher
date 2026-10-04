@@ -17,10 +17,17 @@ env:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the run in progress; runs on
+# main and dev always finish, since deploys and image tags follow them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master
@@ -40,6 +47,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master
@@ -66,6 +74,7 @@ jobs:
   coverage:
     name: Coverage ratchet
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # The in-process stack test (tests/e2e) runs against these, so services
     # and the client driver count too.
     env:
@@ -112,6 +121,7 @@ jobs:
   hygiene:
     name: Hygiene (TOML, typos, deps, features)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master
@@ -138,6 +148,7 @@ jobs:
   miri:
     name: Miri (UB check)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # No target cache and no secrets: Miri keeps the build environment in target/
     # (Rust security advisory, 2026-09-21), so nothing from this job is reused.
     steps:
@@ -161,6 +172,7 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -187,6 +199,7 @@ jobs:
   deny:
     name: Deny (license & advisories)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
@@ -197,6 +210,7 @@ jobs:
   e2e:
     name: End-to-end (live stack)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [check]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -267,6 +281,7 @@ jobs:
   desktop:
     name: Desktop (Tauri)
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Install system dependencies
@@ -292,6 +307,7 @@ jobs:
   pwa-build:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
@@ -330,18 +346,31 @@ jobs:
           name: pwa-dist
           path: apps/pwa/dist/
 
+  # Every pull request builds the images, so a broken Dockerfile fails CI;
+  # pushes also publish them, tagged with the commit (first 8 hex digits).
   docker-build:
-    name: Docker Build & Push
+    name: Docker ${{ matrix.image.name }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    timeout-minutes: 45
     needs: [check, test]
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { name: gateway, target: gateway, file: Dockerfile }
+          - { name: signaling, target: signaling, file: Dockerfile }
+          - { name: relay, target: relay, file: Dockerfile }
+          - { name: pwa, target: "", file: apps/pwa/Dockerfile }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        if: github.event_name == 'push'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -349,62 +378,45 @@ jobs:
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v3
 
-      - name: Determine tag
-        id: tag
+      - name: Image name
+        id: image
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=dev" >> "$GITHUB_OUTPUT"
-          fi
-          echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${repo}/cypher-${{ matrix.image.name }}:${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
-      - name: Build & push gateway
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+      - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
-          target: gateway
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-gateway:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-gateway:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: ${{ matrix.image.file }}
+          target: ${{ matrix.image.target }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.image.outputs.ref }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
 
-      - name: Build & push signaling
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+  # The moving tags (latest for main, dev for dev) point at a commit's images
+  # only once everything above has passed for it.
+  promote:
+    name: Promote images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push'
+    needs: [check, test, coverage, hygiene, miri, fuzz, deny, e2e, desktop, pwa-build, docker-build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
-          context: .
-          target: signaling
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-signaling:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-signaling:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build & push relay
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          target: relay
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-relay:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-relay:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build & push PWA
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          file: ./apps/pwa/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-pwa:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-pwa:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v3
+      - name: Retag
+        run: |
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then moving=latest; else moving=dev; fi
+          for name in gateway signaling relay pwa; do
+            base="ghcr.io/${repo}/cypher-${name}"
+            docker buildx imagetools create --tag "${base}:${moving}" "${base}:${GITHUB_SHA::8}"
+          done

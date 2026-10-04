@@ -13,70 +13,27 @@ env:
   NIGHTLY: nightly-2026-09-20
 
 jobs:
+  # A release names images CI already built and tested for the tagged commit
+  # (the tag must point at a commit pushed to main or dev); nothing is rebuilt.
   docker-release:
-    name: Docker Release Images
+    name: Docker release tags
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v3
-
-      - name: Extract version and repo
-        id: version
+      - name: Tag the commit's images with the version
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-
-      - name: Build & push gateway
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          target: gateway
-          push: true
-          tags: |
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-gateway:${{ steps.version.outputs.version }}
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-gateway:latest
-          cache-from: type=gha
-
-      - name: Build & push signaling
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          target: signaling
-          push: true
-          tags: |
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-signaling:${{ steps.version.outputs.version }}
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-signaling:latest
-          cache-from: type=gha
-
-      - name: Build & push relay
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          target: relay
-          push: true
-          tags: |
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-relay:${{ steps.version.outputs.version }}
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-relay:latest
-          cache-from: type=gha
-
-      - name: Build & push PWA
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          file: ./apps/pwa/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-pwa:${{ steps.version.outputs.version }}
-            ghcr.io/${{ steps.version.outputs.repo }}/cypher-pwa:latest
-          cache-from: type=gha
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          version="${GITHUB_REF#refs/tags/}"
+          for name in gateway signaling relay pwa; do
+            base="ghcr.io/${repo}/cypher-${name}"
+            docker buildx imagetools create --tag "${base}:${version}" "${base}:${GITHUB_SHA::8}"
+          done
 
   desktop-release:
     name: Desktop (${{ matrix.os }})
