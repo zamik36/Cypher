@@ -31,6 +31,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const SIG_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SIG_IN_FLIGHT: usize = 32;
+/// Acknowledged sends to peers on other nodes awaiting their answer, per
+/// connection. Each holds its frame (up to 1 MiB) for up to
+/// `PEER_REQUEST_TIMEOUT`; beyond the limit the sender is told `Busy` at once.
+const MAX_ACKS_IN_FLIGHT: usize = 32;
 const WRITE_BATCH: usize = 64;
 
 const STATUS_DELIVERED: u8 = DeliveryStatus::Delivered as u8;
@@ -78,6 +82,7 @@ impl<B: Bus> Gateway<B> {
             cancel: cancel.clone(),
             limiter: ConnLimiter::new(self.limits.frames_per_sec, self.limits.bytes_per_sec),
             sig_permits: Arc::new(Semaphore::new(MAX_SIG_IN_FLIGHT)),
+            ack_permits: Arc::new(Semaphore::new(MAX_ACKS_IN_FLIGHT)),
         };
         let peer = session.run(stream).await;
         if let Some(peer) = peer {
@@ -96,6 +101,7 @@ struct Session<B> {
     cancel: CancellationToken,
     limiter: ConnLimiter,
     sig_permits: Arc<Semaphore>,
+    ack_permits: Arc<Semaphore>,
 }
 
 enum Next {
@@ -290,9 +296,15 @@ impl<B: Bus> Session<B> {
             self.gw.bus.publish(subject, relayed).await;
             return;
         }
+        let Ok(permit) = Arc::clone(&self.ack_permits).try_acquire_owned() else {
+            self.gw.metrics.busy.inc();
+            self.ack(req_id, DeliveryStatus::Busy);
+            return;
+        };
         let gw = Arc::clone(&self.gw);
         let out = self.out.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let status = match gw
                 .bus
                 .request(subject, None, relayed, PEER_REQUEST_TIMEOUT)

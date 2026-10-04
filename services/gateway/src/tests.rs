@@ -9,6 +9,7 @@ use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION,
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 
+use crate::bus::Bus as _;
 use crate::bus::mem::MemBus;
 use crate::metrics::Metrics;
 use crate::session::{Gateway, Limits};
@@ -274,6 +275,33 @@ async fn login_on_another_node_supersedes_the_first() {
         matches!(second.recv().await.unwrap().msg, ServerMsg::Recv { .. }),
         "the new session did not evict itself"
     );
+}
+
+/// A remote node that never answers must not let one sender pile up
+/// pending deliveries: past the limit the sender is told `Busy` at once.
+#[tokio::test]
+async fn acknowledged_sends_to_a_stalled_node_are_bounded() {
+    let bus = MemBus::default();
+    let gw = gateway(&bus);
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    let stalled = IdentityKeyPair::generate().peer_id();
+    // Subscribed but never replying: every delivery waits for its timeout.
+    let _remote = bus
+        .subscribe(cypher_server_kit::peer_subject(&stalled.to_hex()))
+        .await
+        .unwrap();
+    for req_id in 1..=33 {
+        a.send(req_id, send(stalled, true, b"x")).await;
+    }
+    let first = a.recv().await.unwrap();
+    assert_eq!(first.req_id, 33, "the one over the limit is answered first");
+    assert!(matches!(
+        first.msg,
+        ServerMsg::SendAck {
+            status: DeliveryStatus::Busy
+        }
+    ));
 }
 
 #[tokio::test]
