@@ -113,7 +113,7 @@ docker compose exec redis redis-cli ping   # PONG; пароль берётся �
 | `DOMAIN`, `REDIS_PASSWORD`, `GRAFANA_PASSWORD` | Как в `.env`. |
 | `ALERT_TELEGRAM_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | Куда слать алерты: токен бота и id чата. Необязательны. |
 | `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD` | Как в `.env`. Без них деплой откажется стартовать. |
-| `ANDROID_KEYSTORE_BASE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Подпись Android-сборки в релизе. |
+| `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Подпись Android-сборки в релизе. |
 
 ## Обновление и откат вручную
 
