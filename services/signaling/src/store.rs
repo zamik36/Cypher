@@ -9,6 +9,9 @@ const KEYS_TTL_SECS: u64 = 30 * 24 * 3600;
 const LINK_TTL_SECS: u64 = 24 * 3600;
 const INBOX_TTL_SECS: u64 = 14 * 24 * 3600;
 const CLAIM_TTL_SECS: u64 = 120;
+/// Onion requests are remembered for twice the accepted clock skew, so any
+/// replay still inside the timestamp window is recognised.
+pub(crate) const REPLAY_TTL_SECS: u64 = 240;
 pub(crate) const MAX_INBOX_ITEMS: usize = 1000;
 /// Keeps every inbox batch below the NATS and frame payload limits.
 pub(crate) const MAX_BATCH_BYTES: usize = 768 * 1024;
@@ -134,6 +137,20 @@ impl Store {
             .arg("NX")
             .arg("EX")
             .arg(LINK_TTL_SECS)
+            .query_async::<Option<String>>(&mut redis)
+            .await
+            .map(|r| r.is_some())
+    }
+
+    /// Remembers an onion request; `false` when it was already seen.
+    pub(crate) async fn first_seen(&self, replay_id: &[u8; 32]) -> redis::RedisResult<bool> {
+        let mut redis = self.redis.clone();
+        redis::cmd("SET")
+            .arg(key(b"r:", replay_id))
+            .arg(1)
+            .arg("NX")
+            .arg("EX")
+            .arg(REPLAY_TTL_SECS)
             .query_async::<Option<String>>(&mut redis)
             .await
             .map(|r| r.is_some())

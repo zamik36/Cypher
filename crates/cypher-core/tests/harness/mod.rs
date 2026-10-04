@@ -338,7 +338,8 @@ impl World {
         match &self.onion_ctx {
             Some((client, corr, reply)) => {
                 let mut out = corr.to_le_bytes().to_vec();
-                out.extend_from_slice(&onion::seal_response(reply, &frame.encode()));
+                let rng = self.server.rng.as_mut().unwrap();
+                out.extend_from_slice(&onion::seal_response(reply, &frame.encode(), rng));
                 self.clients[*client]
                     .inputs
                     .push_back(Input::AnonymousFrame(Bytes::from(out)));

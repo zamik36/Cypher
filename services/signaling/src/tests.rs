@@ -205,3 +205,43 @@ async fn undecodable_frames_get_bad_request() {
     assert_eq!(frame.req_id, 0);
     assert!(is_error(&frame.msg, ErrorCode::BadRequest));
 }
+
+#[tokio::test]
+async fn onion_requests_are_answered_once_and_only_while_fresh() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let Some(h) = handler(None).await else { return };
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret).to_bytes();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let put = Frame::new(
+        1,
+        ClientMsg::InboxPut {
+            inbox: random32(),
+            item: Bytes::from_static(b"sealed"),
+        },
+    )
+    .encode();
+    let seal = |at| cypher_crypto::onion::seal_request(&public, &put, at, &mut OsRng).unwrap();
+
+    let (fresh, reply) = seal(now);
+    let answer = crate::onion::handle(&h, &secret, &fresh)
+        .await
+        .expect("answered");
+    let opened = cypher_crypto::onion::open_response(&reply, &answer).unwrap();
+    assert!(matches!(
+        Frame::<ServerMsg>::decode(Bytes::from(opened)).unwrap().msg,
+        ServerMsg::Done
+    ));
+    assert!(
+        crate::onion::handle(&h, &secret, &fresh).await.is_none(),
+        "a replay gets no second answer"
+    );
+
+    let (stale, _) = seal(now - crate::onion::MAX_SKEW_SECS - 1);
+    assert!(crate::onion::handle(&h, &secret, &stale).await.is_none());
+}

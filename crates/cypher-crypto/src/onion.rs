@@ -1,7 +1,9 @@
 //! One-hop onion for anonymous requests: the relay learns the client's IP
 //! but not the request; the signaling service learns the request but not
 //! the IP. Requests are sealed to the signaling onion key and carry a fresh
-//! reply key; both directions are padded to fixed buckets.
+//! reply key; both directions are padded to fixed buckets. Every response
+//! has its own random nonce, so a replayed request that is answered twice
+//! never reuses a nonce under its reply key.
 
 use rand_core::CryptoRngCore;
 use x25519_dalek::StaticSecret;
@@ -26,6 +28,9 @@ pub struct OpenedRequest {
     pub frame: Vec<u8>,
     pub timestamp_secs: u64,
     pub reply: ReplyKey,
+    /// The sealing's ephemeral key: fresh for every request and covered by
+    /// its authentication, so a replay carries the same id.
+    pub replay_id: [u8; 32],
 }
 
 pub fn seal_request(
@@ -63,7 +68,11 @@ pub fn open_request(
     let mut plain = sealed::open(onion_secret, blob)?;
     let result = parse_request(&plain);
     plain.zeroize();
-    result
+    let replay_id = *blob.first_chunk::<32>().ok_or(CryptoError::Malformed)?;
+    result.map(|opened| OpenedRequest {
+        replay_id,
+        ..opened
+    })
 }
 
 fn parse_request(plain: &[u8]) -> Result<OpenedRequest, CryptoError> {
@@ -76,21 +85,31 @@ fn parse_request(plain: &[u8]) -> Result<OpenedRequest, CryptoError> {
         frame,
         timestamp_secs,
         reply,
+        replay_id: [0; 32],
     })
 }
 
-pub fn seal_response(reply: &ReplyKey, frame: &[u8]) -> Vec<u8> {
+/// `nonce ‖ AES-256-GCM(len ‖ frame ‖ padding)` under the request's reply key.
+pub fn seal_response(reply: &ReplyKey, frame: &[u8], rng: &mut impl CryptoRngCore) -> Vec<u8> {
+    let mut nonce = [0u8; aead::NONCE_LEN];
+    rng.fill_bytes(&mut nonce);
     let mut plain =
         Vec::with_capacity(bucket(frame.len().saturating_add(4)).saturating_add(aead::TAG_LEN));
     plain.extend_from_slice(&u32::try_from(frame.len()).unwrap_or(u32::MAX).to_le_bytes());
     plain.extend_from_slice(frame);
     plain.resize(bucket(plain.len()), 0);
-    aead::seal_in_place(&reply.0, &[0; 12], RESPONSE_AAD, &mut plain);
-    plain
+    aead::seal_in_place(&reply.0, &nonce, RESPONSE_AAD, &mut plain);
+    let mut out = Vec::with_capacity(aead::NONCE_LEN.saturating_add(plain.len()));
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&plain);
+    out
 }
 
 pub fn open_response(reply: &ReplyKey, blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let plain = aead::open(&reply.0, &[0; 12], RESPONSE_AAD, blob)?;
+    let (nonce, sealed) = blob
+        .split_first_chunk::<{ aead::NONCE_LEN }>()
+        .ok_or(CryptoError::Malformed)?;
+    let plain = aead::open(&reply.0, nonce, RESPONSE_AAD, sealed)?;
     let mut r = Reader::new(&plain);
     let len = r.u32()? as usize;
     Ok(r.take(len)?.to_vec())
@@ -126,9 +145,29 @@ mod tests {
         let opened = open_request(&sk, &blob_small).unwrap();
         assert_eq!(opened.frame, b"fetch");
         assert_eq!(opened.timestamp_secs, 1_700_000_000);
+        let again = open_request(&sk, &blob_small).unwrap();
+        let other = open_request(&sk, &blob_other).unwrap();
+        assert_eq!(opened.replay_id, again.replay_id, "a replay keeps its id");
+        assert_ne!(opened.replay_id, other.replay_id);
 
-        let resp = seal_response(&opened.reply, b"batch");
+        let resp = seal_response(&opened.reply, b"batch", &mut OsRng);
         assert_eq!(open_response(&reply, &resp).unwrap(), b"batch");
+    }
+
+    /// A relay may replay a request so that it is answered twice: the two
+    /// responses must not share a nonce, or AES-GCM would leak both.
+    #[test]
+    fn responses_under_one_reply_key_never_share_a_nonce() {
+        let (sk, pk) = keys();
+        let (blob, reply) = seal_request(&pk, b"fetch", 0, &mut OsRng).unwrap();
+        let opened = open_request(&sk, &blob).unwrap();
+        let first = seal_response(&opened.reply, b"batch", &mut OsRng);
+        let second = seal_response(&opened.reply, b"", &mut OsRng);
+        assert_eq!(first.len(), second.len(), "responses are bucketed");
+        assert_ne!(first[..aead::NONCE_LEN], second[..aead::NONCE_LEN]);
+        assert_eq!(open_response(&reply, &first).unwrap(), b"batch");
+        assert_eq!(open_response(&reply, &second).unwrap(), b"");
+        open_response(&reply, &first[..aead::NONCE_LEN - 1]).unwrap_err();
     }
 
     #[test]
@@ -140,7 +179,7 @@ mod tests {
         blob[40] ^= 1;
         assert!(open_request(&sk, &blob).is_err());
 
-        let resp = seal_response(&reply, b"y");
+        let resp = seal_response(&reply, b"y", &mut OsRng);
         let (_, other_reply) = seal_request(&pk, b"z", 0, &mut OsRng).unwrap();
         open_response(&other_reply, &resp).unwrap_err();
     }
