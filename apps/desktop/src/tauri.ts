@@ -5,12 +5,14 @@ import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, Ui
 
 let stopLevels: UnlistenFn | null = null;
 
+const isAndroid = /Android/i.test(navigator.userAgent);
+
 /**
  * Android grants RECORD_AUDIO through the WebView's permission prompt; the
  * native recorder can only open the microphone after that.
  */
 async function ensureMicPermission() {
-  if (!/Android/i.test(navigator.userAgent)) return;
+  if (!isAndroid) return;
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   for (const track of stream.getTracks()) track.stop();
 }
@@ -18,6 +20,19 @@ async function ensureMicPermission() {
 function releaseLevels() {
   stopLevels?.();
   stopLevels = null;
+}
+
+/** The blob's bytes as base64, encoded natively by the browser. */
+function base64Of(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result as string;
+      resolve(url.slice(url.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("cannot read the video note"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 /** Runs a command that returns nothing. */
@@ -68,11 +83,10 @@ export const tauriPlatform: Platform = {
     await command("voice_cancel");
   },
   sendVideoNote: async (peerId, note) => {
-    const video = new Uint8Array(await note.blob.arrayBuffer());
-    const body = new Uint8Array(note.poster.length + video.length);
-    body.set(note.poster);
-    body.set(video, note.poster.length);
-    return invoke<MediaSent>("send_video_note", body, {
+    const body = new Blob([note.poster.slice(), note.blob]);
+    // Android's IPC bridge carries only JSON, so the bytes travel as base64 there.
+    const payload = isAndroid ? { data: await base64Of(body) } : new Uint8Array(await body.arrayBuffer());
+    return invoke<MediaSent>("send_video_note", payload, {
       headers: {
         "x-peer": peerId,
         "x-mime": note.mime,

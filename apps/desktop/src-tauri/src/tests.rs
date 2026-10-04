@@ -8,6 +8,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use cypher_media::Recorder;
 use cypher_types::FileId;
 use serde_json::{Value, json};
@@ -406,8 +407,31 @@ async fn send_video_note_over_ipc(a: &Desktop, b_id: &str, video: &[u8]) -> Stri
     .collect();
     let body = [[0xFF, 0xD8].as_slice(), video].concat();
 
-    let json_body = a.invoke("send_video_note", InvokeBody::default(), headers.clone());
-    assert_eq!(json_body.await.unwrap_err(), "expected a binary body");
+    let no_body = a.invoke("send_video_note", InvokeBody::default(), headers.clone());
+    assert_eq!(
+        no_body.await.unwrap_err(),
+        "expected the video note as raw bytes or base64 data"
+    );
+    let not_base64 = a.invoke(
+        "send_video_note",
+        InvokeBody::Json(json!({ "data": "not base64!" })),
+        headers.clone(),
+    );
+    assert_eq!(
+        not_base64.await.unwrap_err(),
+        "the video note data is not valid base64"
+    );
+    // Android's webview sends the same bytes as base64 in JSON.
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
+    let from_android = a
+        .invoke(
+            "send_video_note",
+            InvokeBody::Json(json!({ "data": encoded })),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(from_android["duration_ms"], 3000);
     let no_headers = a.invoke(
         "send_video_note",
         InvokeBody::Raw(body.clone()),
