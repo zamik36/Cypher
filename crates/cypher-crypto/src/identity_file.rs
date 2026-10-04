@@ -4,6 +4,8 @@
 //! AES-256-GCM(seed(32) ‖ nickname)` keyed by Argon2id. The header is the
 //! AEAD associated data, so the KDF parameters cannot be downgraded.
 
+use std::ops::RangeInclusive;
+
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
@@ -22,7 +24,13 @@ pub const MAX_NICKNAME_BYTES: usize = 64;
 const M_KIB: u32 = 64 * 1024;
 const T_COST: u32 = 3;
 const P_COST: u32 = 1;
-const MAX_M_KIB: u32 = 1024 * 1024;
+
+/// Argon2 parameters a file may ask for. The floor keeps a passphrase
+/// expensive to guess (OWASP minimum); the ceiling keeps a crafted file from
+/// hanging the client or exhausting memory (a browser worker included).
+const M_KIB_RANGE: RangeInclusive<u32> = 19 * 1024..=256 * 1024;
+const T_COST_RANGE: RangeInclusive<u32> = 2..=8;
+const P_COST_RANGE: RangeInclusive<u32> = 1..=4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IdentityFileError {
@@ -91,7 +99,9 @@ pub fn open(data: &[u8], passphrase: &str) -> Result<(IdentitySeed, String), Ide
     );
     let nonce: [u8; aead::NONCE_LEN] = r.array().map_err(corrupt)?;
     r.finish().map_err(corrupt)?;
-    if m > MAX_M_KIB || ciphertext.len() < 32 + aead::TAG_LEN {
+    let params_allowed =
+        M_KIB_RANGE.contains(&m) && T_COST_RANGE.contains(&t) && P_COST_RANGE.contains(&p);
+    if !params_allowed || ciphertext.len() < 32 + aead::TAG_LEN {
         return Err(IdentityFileError::Corrupt);
     }
     let key = derive_key(passphrase, &salt, m, t, p)?;
@@ -160,6 +170,35 @@ mod tests {
         assert_eq!(
             open(&blob[..10], PASS).err(),
             Some(IdentityFileError::Corrupt)
+        );
+    }
+
+    /// Parameters outside the allowed range are refused before Argon2 runs:
+    /// too weak to protect the passphrase, or so costly the client would hang.
+    #[test]
+    #[cfg_attr(miri, ignore = "Argon2id over 64 MiB takes tens of minutes under Miri")]
+    fn refuses_kdf_parameters_out_of_range() {
+        const M_AT: usize = 1 + SALT_LEN;
+        let blob = seal(&IdentitySeed::generate(), "a", PASS, &mut OsRng).unwrap();
+        for (offset, value) in [
+            (M_AT, 8),
+            (M_AT, u32::MAX),
+            (M_AT + 4, 1),
+            (M_AT + 4, u32::MAX),
+            (M_AT + 8, 64),
+        ] {
+            let mut crafted = blob.clone();
+            crafted[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(
+                open(&crafted, PASS).err(),
+                Some(IdentityFileError::Corrupt),
+                "parameter at {offset} = {value}"
+            );
+        }
+        assert!(
+            M_KIB_RANGE.contains(&M_KIB)
+                && T_COST_RANGE.contains(&T_COST)
+                && P_COST_RANGE.contains(&P_COST)
         );
     }
 }
