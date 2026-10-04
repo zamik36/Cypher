@@ -77,10 +77,14 @@ impl NatsConfig {
     }
 }
 
+/// Connects to NATS. A named user gets replies on its own `_INBOX_<user>`
+/// prefix, which `deploy/nats.conf` lets only that user subscribe to: one
+/// service cannot read replies meant for another.
 pub async fn connect_nats(config: &NatsConfig) -> anyhow::Result<async_nats::Client> {
     let options = match config.auth() {
         NatsAuth::UserPassword(user, password) => {
             async_nats::ConnectOptions::with_user_and_password(user.to_owned(), password.to_owned())
+                .custom_inbox_prefix(format!("_INBOX_{user}"))
         }
         NatsAuth::Token(token) => async_nats::ConnectOptions::with_token(token.to_owned()),
         NatsAuth::Anonymous => async_nats::ConnectOptions::new(),

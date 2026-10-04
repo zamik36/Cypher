@@ -23,5 +23,8 @@ bytes.workspace = true
 anyhow.workspace = true
 tempfile = "3"
 
+[dev-dependencies]
+futures.workspace = true
+
 [lints]
 workspace = true
