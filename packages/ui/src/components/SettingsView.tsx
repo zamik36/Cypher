@@ -1,5 +1,5 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
-import { connection, setConnection, setGatewayAddr } from "../stores/connection";
+import { connection, setGatewayAddr, connectGateway } from "../stores/connection";
 import { api } from "../platform";
 import { clearAllMessages } from "../stores/chat";
 import { addToast } from "../stores/toasts";
@@ -64,12 +64,9 @@ export default function SettingsView(props: SettingsViewProps) {
     const normalizedAddr = setGatewayAddr(addr());
     setAddr(normalizedAddr);
     setReconnecting(true);
-    setConnection({ gatewayConnecting: true, gatewayError: null });
+    const anonymous = anonymousEnabled();
     try {
-      await api.connectToGateway(normalizedAddr, anonymousEnabled(), anonymousSettings.bridgeLines);
-      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
-    } catch (e) {
-      setConnection({ gatewayConnecting: false, gatewayError: String(e) });
+      await connectGateway(() => api.connectToGateway(normalizedAddr, anonymous, anonymousSettings.bridgeLines));
     } finally {
       setReconnecting(false);
     }

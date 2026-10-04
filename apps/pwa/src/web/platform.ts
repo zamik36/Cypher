@@ -90,6 +90,7 @@ export const webPlatform: Platform = {
   },
   generateQr: (linkId) => call("qr", linkId),
   safetyNumber: (peerId) => call("safetyNumber", peerId),
+  reconnect: () => call("reconnect"),
   startVoice: async (onLevel) => {
     if (voice) throw new Error("already recording");
     voice = await WebVoiceRecorder.start(onLevel);

@@ -7,11 +7,14 @@ import ChatPane, { previewText } from "./components/ChatPane";
 import FilesView from "./components/FilesView";
 import SettingsView from "./components/SettingsView";
 import StatusBar from "./components/StatusBar";
+import ConnectionBanner from "./components/ConnectionBanner";
 import ToastContainer from "./components/ToastContainer";
 import IdentityView from "./components/IdentityView";
 import {
   onConnected,
   onDisconnected,
+  onSuperseded,
+  onUpdateRequired,
   onPeerConnected,
   onMessage,
   onMessageStatus,
@@ -23,7 +26,16 @@ import {
   onAnonymityLevel,
   api,
 } from "./platform";
-import { connection, setConnection, addPeer, shortName, setPeerOnline, markAllPeersOffline } from "./stores/connection";
+import {
+  connection,
+  setConnection,
+  addPeer,
+  shortName,
+  setPeerOnline,
+  markAllPeersOffline,
+  linkEvent,
+  connectGateway,
+} from "./stores/connection";
 import { addMessage, peerOf, setMessageStatus } from "./stores/chat";
 import { hasTransfer, upsertTransfer } from "./stores/transfers";
 import { setMediaProgress, trackMedia } from "./stores/media";
@@ -78,16 +90,21 @@ export default function App() {
 
   async function startApp() {
     cleanupFns = await Promise.all([
-      onConnected(() => {
-        setConnection({ connected: true, status: "connected", gatewayConnecting: false, gatewayError: null });
-      }),
+      onConnected(() => linkEvent("connected")),
       onDisconnected(() => {
-        setConnection({ connected: false, status: "disconnected" });
+        linkEvent("disconnected");
+        markAllPeersOffline();
+      }),
+      onSuperseded(() => {
+        linkEvent("superseded");
+        markAllPeersOffline();
+      }),
+      onUpdateRequired(() => {
+        linkEvent("update_required");
         markAllPeersOffline();
       }),
       onPeerConnected((peerId) => {
         addPeer({ peerId, roomCode: "direct", role: "guest", displayName: shortName(peerId), online: true });
-        setConnection({ status: "peer connected" });
         addToast(t().toast_peer_connected, "success");
         navigateTo("chat");
       }),
@@ -144,13 +161,10 @@ export default function App() {
       }),
     ]);
 
-    setConnection({ gatewayConnecting: true, gatewayError: null });
-    try {
-      await api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines);
-      await loadConversations();
-    } catch (e) {
-      setConnection({ gatewayConnecting: false, gatewayError: String(e) });
-    }
+    await connectGateway(() =>
+      api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines),
+    );
+    await loadConversations();
   }
 
   return (
@@ -168,6 +182,7 @@ export default function App() {
         />
 
         <main class="content">
+          <ConnectionBanner />
           <Show when={page() === "home"}>
             <HomeView onNavigate={navigateTo} />
           </Show>

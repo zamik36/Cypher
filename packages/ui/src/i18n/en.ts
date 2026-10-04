@@ -7,8 +7,11 @@ const en = {
 
   // -- Status --
   status_connected: "Connected",
-  status_disconnected: "Disconnected",
   status_offline: "Offline",
+  status_connecting: "Connecting…",
+  status_reconnecting: "Reconnecting…",
+  status_superseded: "Open on another device",
+  status_update_required: "Update required",
   status_peers: (n: number) => `${n} ${n === 1 ? "peer" : "peers"}`,
   status_active_chats: (n: number) => `${n} active chat${n === 1 ? "" : "s"}`,
 
@@ -57,6 +60,10 @@ const en = {
   join_invalid_keys: "The other side's keys are invalid. Ask them for a new code.",
   join_timeout: "No answer from the server. Check the connection and try again.",
   join_offline: "Not connected to the server yet. Try again in a moment.",
+  banner_superseded_title: "Cypher is open on another device",
+  banner_superseded_text: "Your identity signed in somewhere else, so this window stopped receiving messages.",
+  banner_use_here: "Use here",
+  banner_update_title: "Update required",
   error_update_required: "This version of Cypher can no longer talk to the server. Please update the app.",
   error_storage_failed:
     "Cypher could not save its data and stopped to avoid losing messages. Free up disk space and restart the app.",

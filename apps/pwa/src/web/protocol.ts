@@ -24,6 +24,8 @@ export interface Methods {
   releaseDownload(fileId: string): void;
   qr(text: string): string;
   safetyNumber(peer: string): string;
+  /** Takes the session back after another device took it over. */
+  reconnect(): void;
   conversations(): { peer_id: string; display_name: null; last_message_at: number }[];
   history(peer: string, limit: number, before?: number): unknown[];
   clearHistory(): void;

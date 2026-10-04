@@ -1,6 +1,6 @@
 import { Show } from "solid-js";
 import { HomeIcon, ChatIcon, FilesIcon, SettingsIcon, SunIcon, MoonIcon, LinkIcon } from "./Icons";
-import { connection } from "../stores/connection";
+import LinkStatus from "./LinkStatus";
 import { t } from "../i18n";
 
 export type Page = "home" | "chat" | "files" | "settings";
@@ -88,8 +88,7 @@ export default function Sidebar(props: SidebarProps) {
             </div>
           </Show>
           <div class="sidebar-status">
-            <span class={`dot ${connection.connected ? "connected" : ""}`} />
-            <span>{connection.connected ? t().status_connected : t().status_offline}</span>
+            <LinkStatus />
           </div>
         </div>
       </aside>

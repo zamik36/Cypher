@@ -46,6 +46,12 @@ pub(crate) async fn apply_anonymous_settings<R: Runtime>(
     state.connect(endpoint, dto::emitter(app)).await.map(|_| ())
 }
 
+/// Takes the session back after another device took it over.
+#[tauri::command]
+pub(crate) async fn reconnect(state: State<'_, AppState>) -> CmdResult<()> {
+    state.client().await?.reconnect().await.map_err(err)
+}
+
 #[tauri::command]
 pub(crate) async fn get_nickname(state: State<'_, AppState>) -> CmdResult<Option<String>> {
     Ok(state.nickname().await)

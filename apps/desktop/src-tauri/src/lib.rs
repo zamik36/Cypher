@@ -55,6 +55,7 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             settings::connect_to_gateway,
             settings::apply_anonymous_settings,
             settings::get_nickname,
+            settings::reconnect,
             link::create_link,
             link::join_link,
             chat::send_message,

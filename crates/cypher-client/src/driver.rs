@@ -181,6 +181,10 @@ impl Driver {
                     self.feed(Input::Command(cmd)).await;
                 }
             }
+            Request::Reconnect => {
+                self.reconnect = true;
+                self.gateway_retry = Retry::new();
+            }
             Request::Shutdown => {}
         }
     }
@@ -580,6 +584,22 @@ mod tests {
             events.try_recv().is_err(),
             "a stopped client handles no input"
         );
+    }
+
+    /// After another device took the session over the client stays offline;
+    /// asking to reconnect dials again at once.
+    #[tokio::test]
+    async fn a_session_taken_over_comes_back_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut d, _events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
+        d.apply(vec![Effect::Disconnect { reconnect: false }]).await;
+        assert!(!d.reconnect);
+        d.gateway_retry.schedule();
+        assert!(!d.gateway_retry.due());
+
+        d.on_request(Request::Reconnect).await;
+        assert!(d.reconnect);
+        assert!(d.gateway_retry.due());
     }
 
     /// Entries from before stamps still load: downloads resume, while an

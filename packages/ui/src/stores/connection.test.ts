@@ -63,3 +63,39 @@ describe("peers", () => {
     expect(shortName("0123456789")).toBe("012345");
   });
 });
+
+describe("connection state", () => {
+  beforeEach(() => vi.resetModules());
+
+  it("is online only once the server accepted us", async () => {
+    const { nextLink } = await load();
+    expect(nextLink("idle", "start")).toBe("connecting");
+    expect(nextLink("connecting", "disconnected")).toBe("connecting");
+    expect(nextLink("connecting", "connected")).toBe("online");
+    expect(nextLink("online", "disconnected")).toBe("reconnecting");
+    expect(nextLink("reconnecting", "connected")).toBe("online");
+    expect(nextLink("connecting", "failed")).toBe("failed");
+    expect(nextLink("failed", "start")).toBe("connecting");
+  });
+
+  it("stays stopped until the user acts", async () => {
+    const { nextLink } = await load();
+    expect(nextLink("online", "superseded")).toBe("superseded");
+    expect(nextLink("superseded", "disconnected")).toBe("superseded");
+    expect(nextLink("superseded", "start")).toBe("connecting");
+    expect(nextLink("online", "update_required")).toBe("update_required");
+    expect(nextLink("update_required", "disconnected")).toBe("update_required");
+    expect(nextLink("update_required", "start")).toBe("update_required");
+  });
+
+  it("reports why it could not start, and forgets it on the next attempt", async () => {
+    const { connectGateway, connection } = await load();
+    await connectGateway(() => Promise.reject(new Error("identity is locked")));
+    expect(connection.link).toBe("failed");
+    expect(connection.linkError).toBe("identity is locked");
+
+    await connectGateway(() => Promise.resolve());
+    expect(connection.link).toBe("connecting");
+    expect(connection.linkError).toBeNull();
+  });
+});

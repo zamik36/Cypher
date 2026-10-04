@@ -103,6 +103,8 @@ pub(crate) enum Request {
         entry: FileEntry,
         then: Option<Command>,
     },
+    /// Connects again after the session was taken over by another device.
+    Reconnect,
     Shutdown,
 }
 
@@ -378,6 +380,12 @@ impl Client {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
         }
+    }
+
+    /// Takes the session back after another device took it over: connects
+    /// again, which in turn disconnects that device.
+    pub async fn reconnect(&self) -> Result<(), ClientError> {
+        self.send(Request::Reconnect).await
     }
 
     pub async fn shutdown(&self) {

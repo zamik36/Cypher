@@ -4,7 +4,7 @@
 use cypher_types::PeerId;
 use serde::Serialize;
 
-use crate::api::{Content, Event, MediaKind, MessageStatus, StoredMessage};
+use crate::api::{Content, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UiFile {
@@ -124,10 +124,12 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
     Some(match e {
         Event::Connected => ("connected", UiPayload::None),
         Event::Disconnected => ("disconnected", UiPayload::None),
-        Event::Superseded => (
-            "error",
-            UiPayload::Text("session opened on another device".into()),
-        ),
+        // Both stop the client until the user acts, so they get their own
+        // channels rather than a passing error.
+        Event::Superseded => ("superseded", UiPayload::None),
+        Event::Warning {
+            reason: FailReason::UpdateRequired,
+        } => ("update_required", UiPayload::None),
         Event::Onion { up } => ("anonymity_level", anonymity(*up)),
         Event::PeerAdded { peer, .. } => ("peer_connected", UiPayload::Text(peer.to_hex())),
         Event::Message(m) if !m.outgoing => ("message", UiPayload::Message(message(m))),
@@ -249,9 +251,18 @@ mod tests {
     fn connection_events_map_to_channels() {
         assert_eq!(ui(&Event::Connected), ("connected", Value::Null));
         assert_eq!(ui(&Event::Disconnected), ("disconnected", Value::Null));
+        assert_eq!(ui(&Event::Superseded), ("superseded", Value::Null));
         assert_eq!(
-            ui(&Event::Superseded),
-            ("error", json!("session opened on another device"))
+            ui(&Event::Warning {
+                reason: FailReason::UpdateRequired
+            }),
+            ("update_required", Value::Null)
+        );
+        assert_eq!(
+            ui(&Event::Warning {
+                reason: FailReason::StorageFailed
+            }),
+            ("error", json!("StorageFailed"))
         );
         let (channel, up) = ui(&Event::Onion { up: true });
         assert_eq!(

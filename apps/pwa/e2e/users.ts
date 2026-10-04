@@ -27,7 +27,7 @@ export async function unlock(page: Page, passphrase = PASSPHRASE): Promise<void>
 
 export async function expectConnected(page: Page): Promise<void> {
   await expect(page.locator(".status-bar")).toContainText("Connected");
-  await expect(page.locator(".status-bar .dot.connected")).toBeVisible();
+  await expect(page.locator(".status-bar .dot.online")).toBeVisible();
 }
 
 /** `host` opens a room, `guest` joins it; both end up in the chat. */

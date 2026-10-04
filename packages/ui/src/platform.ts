@@ -86,6 +86,10 @@ export type Unsubscribe = () => void;
 export interface Events {
   connected: null;
   disconnected: null;
+  /** Another device signed in with this identity; this one stopped. */
+  superseded: null;
+  /** The server speaks another protocol version; this client stopped. */
+  update_required: null;
   peer_connected: string;
   message: UiMessage;
   message_status: { msg_id: string; status: MessageStatus };
@@ -124,6 +128,8 @@ export interface Platform {
   generateQr(linkId: string): Promise<string>;
   /** The 60 digits both sides of a conversation compare to rule out a man in the middle. */
   safetyNumber(peerId: string): Promise<string>;
+  /** Takes the session back after another device took it over. */
+  reconnect(): Promise<void>;
   /** Starts a voice note; `onLevel` receives 0..1 loudness for the meter. */
   startVoice(onLevel: (level: number) => void): Promise<void>;
   /** Stops and sends the voice note; `null` when it was too short. */
@@ -157,6 +163,8 @@ export const api: Platform = new Proxy({} as Platform, {
 
 export const onConnected = (cb: () => void) => api.on("connected", () => cb());
 export const onDisconnected = (cb: () => void) => api.on("disconnected", () => cb());
+export const onSuperseded = (cb: () => void) => api.on("superseded", () => cb());
+export const onUpdateRequired = (cb: () => void) => api.on("update_required", () => cb());
 export const onPeerConnected = (cb: (peerId: string) => void) => api.on("peer_connected", cb);
 export const onMessage = (cb: (msg: UiMessage) => void) => api.on("message", cb);
 export const onMessageStatus = (cb: (p: Events["message_status"]) => void) => api.on("message_status", cb);

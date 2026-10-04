@@ -1,12 +1,12 @@
 import { Show } from "solid-js";
 import { connection } from "../stores/connection";
 import { t } from "../i18n";
+import LinkStatus from "./LinkStatus";
 
 export default function StatusBar() {
   return (
     <footer class="status-bar">
-      <span class={`dot ${connection.connected ? "connected" : ""}`} />
-      <span>{connection.connected ? t().status_connected : t().status_disconnected}</span>
+      <LinkStatus />
       <Show when={connection.peerId}>
         {(id) => (
           <span class="peer-pill" title={id()}>

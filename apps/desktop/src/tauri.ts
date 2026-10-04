@@ -44,6 +44,7 @@ export const tauriPlatform: Platform = {
   cancelTransfer: (fileId) => command("cancel_transfer", { fileId }),
   generateQr: (linkId) => invoke<string>("generate_qr", { linkId }),
   safetyNumber: (peerId) => invoke<string>("safety_number", { peerId }),
+  reconnect: () => command("reconnect"),
   startVoice: async (onLevel) => {
     await ensureMicPermission();
     releaseLevels();

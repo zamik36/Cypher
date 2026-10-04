@@ -1,7 +1,18 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import { createIdentity, incoming, navigate, newUser, outgoing, pair, PASSPHRASE, say, unlock } from "./users";
+import {
+  createIdentity,
+  expectConnected,
+  incoming,
+  navigate,
+  newUser,
+  outgoing,
+  pair,
+  PASSPHRASE,
+  say,
+  unlock,
+} from "./users";
 
 test("two people pair, chat, send a file and come back later", async ({ browser, baseURL }) => {
   const alice = await newUser(browser, baseURL ?? "");
@@ -96,4 +107,15 @@ test("a recovery phrase restores the identity on a new device", async ({ browser
   await restored.getByPlaceholder("Passphrase", { exact: true }).fill("a different passphrase");
   await restored.getByRole("button", { name: "Import" }).click();
   await expect(restored.locator(".status-bar .peer-pill")).toHaveAttribute("title", peerId ?? "");
+
+  // One identity, one session: the new device takes it over, and the old one
+  // says so instead of silently going quiet, until it takes the session back.
+  await expectConnected(restored);
+  const banner = original.getByRole("alert").filter({ hasText: "Cypher is open on another device" });
+  await expect(banner).toBeVisible();
+  await expect(original.locator(".status-bar")).toContainText("Open on another device");
+  await banner.getByRole("button", { name: "Use here" }).click();
+  await expectConnected(original);
+  await expect(banner).toBeHidden();
+  await expect(restored.locator(".status-bar")).toContainText("Open on another device");
 });

@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import { api } from "../platform";
-import { connection, setConnection, addPeer, shortName, setGatewayAddr } from "../stores/connection";
+import { connection, addPeer, shortName, setGatewayAddr, connectGateway, isOnline } from "../stores/connection";
 import Spinner from "./Spinner";
 import { UsersIcon, LinkIcon, CopyIcon, CheckIcon } from "./Icons";
 import type { Page } from "./Sidebar";
@@ -58,7 +58,6 @@ export default function HomeView(props: HomeViewProps) {
         displayName: shortName(remotePeerId),
         online: true,
       });
-      setConnection({ status: "peer connected" });
       setJoinCode("");
       props.onNavigate("chat");
     } catch (e) {
@@ -71,13 +70,9 @@ export default function HomeView(props: HomeViewProps) {
   async function handleRetry() {
     const normalizedAddr = setGatewayAddr(advancedAddr());
     setAdvancedAddr(normalizedAddr);
-    setConnection({ gatewayConnecting: true, gatewayError: null });
-    try {
-      await api.connectToGateway(normalizedAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines);
-      setConnection({ connected: true, gatewayConnecting: false, gatewayError: null, status: "connected" });
-    } catch (e) {
-      setConnection({ gatewayConnecting: false, gatewayError: String(e) });
-    }
+    await connectGateway(() =>
+      api.connectToGateway(normalizedAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines),
+    );
   }
 
   async function copyCode() {
@@ -93,9 +88,9 @@ export default function HomeView(props: HomeViewProps) {
     setError(null);
   }
 
-  const isConnecting = () => connection.gatewayConnecting && !connection.connected;
-  const isError = () => !connection.connected && !connection.gatewayConnecting && connection.gatewayError;
-  const isReady = () => connection.connected;
+  const isConnecting = () => connection.link === "connecting" || connection.link === "reconnecting";
+  const isError = () => connection.link === "failed";
+  const isReady = () => isOnline();
 
   return (
     <div class="home-view">
@@ -108,7 +103,7 @@ export default function HomeView(props: HomeViewProps) {
 
       <Show when={isError()}>
         <div class="home-error">
-          <p class="error-msg">{connection.gatewayError}</p>
+          <p class="error-msg">{reasonText(connection.linkError)}</p>
           <button class="btn-primary" onClick={handleRetry}>
             {t().home_retry}
           </button>

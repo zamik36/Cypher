@@ -224,6 +224,7 @@ async fn commands_fail_cleanly_before_connecting() {
 
     let not_connected = Err("not connected".to_owned());
     assert_eq!(call("get_conversations", json!({})).await, not_connected);
+    assert_eq!(call("reconnect", json!({})).await, not_connected);
     let send = |peer_id: &str| json!({ "peerId": peer_id, "text": "x" });
     assert_eq!(call("send_message", send(&peer)).await, not_connected);
     assert_eq!(

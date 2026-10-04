@@ -117,6 +117,8 @@ function awaitReply(pick: (r: Reply) => string | Error | undefined): Promise<str
 class Link {
   private ws: WebSocket | null = null;
   private url = "";
+  /** The address to resume after the core stopped reconnecting. */
+  private lastUrl = "";
   private backoff = MIN_BACKOFF_MS;
   private timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -129,6 +131,7 @@ class Link {
   start(url: string) {
     this.stop();
     this.url = url;
+    this.lastUrl = url;
     this.backoff = MIN_BACKOFF_MS;
     this.connect();
   }
@@ -146,6 +149,14 @@ class Link {
   restart(reconnect: boolean) {
     if (!reconnect) this.url = "";
     this.ws?.close();
+  }
+
+  /** Connects again after `restart(false)`; does nothing while connected. */
+  resume() {
+    if (this.url || !this.lastUrl) return;
+    this.url = this.lastUrl;
+    this.backoff = MIN_BACKOFF_MS;
+    this.connect();
   }
 
   send(data: Uint8Array) {
@@ -391,6 +402,10 @@ const handlers: Handlers = {
   },
   qr: (text) => Promise.resolve(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg(text))}`),
   safetyNumber: (peer) => Promise.resolve(requireIdentity().safetyNumber(peer)),
+  reconnect: () => {
+    gateway.resume();
+    return Promise.resolve();
+  },
   conversations: async () => {
     const peers = await scan(db, "peers");
     const out = await Promise.all(

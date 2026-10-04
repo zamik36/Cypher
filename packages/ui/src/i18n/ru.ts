@@ -17,8 +17,11 @@ const ru: TranslationKeys = {
 
   // -- Status --
   status_connected: "Подключен",
-  status_disconnected: "Отключен",
   status_offline: "Не в сети",
+  status_connecting: "Подключение…",
+  status_reconnecting: "Переподключение…",
+  status_superseded: "Открыт на другом устройстве",
+  status_update_required: "Нужно обновление",
   status_peers: (n: number) => plural(n, "пир", "пира", "пиров"),
   status_active_chats: (n: number) => plural(n, "активный чат", "активных чата", "активных чатов"),
 
@@ -67,6 +70,10 @@ const ru: TranslationKeys = {
   join_invalid_keys: "Ключи собеседника недействительны. Попросите новый код.",
   join_timeout: "Сервер не ответил. Проверьте соединение и попробуйте ещё раз.",
   join_offline: "Нет соединения с сервером. Попробуйте чуть позже.",
+  banner_superseded_title: "Шифр открыт на другом устройстве",
+  banner_superseded_text: "С вашей личностью вошли в другом месте, поэтому здесь сообщения больше не приходят.",
+  banner_use_here: "Использовать здесь",
+  banner_update_title: "Нужно обновление",
   error_update_required: "Эта версия Шифра больше не может работать с сервером. Обновите приложение.",
   error_storage_failed:
     "Шифр не смог сохранить данные и остановился, чтобы не потерять сообщения. Освободите место на диске и перезапустите приложение.",
