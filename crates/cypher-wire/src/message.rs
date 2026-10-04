@@ -133,6 +133,8 @@ pub enum ErrorCode {
     TooLarge = 5,
     Unavailable = 6,
     Internal = 7,
+    /// The server does not speak the client's protocol version.
+    UnsupportedVersion = 8,
 }
 
 mod kind {
@@ -501,6 +503,7 @@ impl Frame<ServerMsg> {
                     4 => ErrorCode::Unauthorized,
                     5 => ErrorCode::TooLarge,
                     6 => ErrorCode::Unavailable,
+                    8 => ErrorCode::UnsupportedVersion,
                     _ => ErrorCode::Internal,
                 },
             },

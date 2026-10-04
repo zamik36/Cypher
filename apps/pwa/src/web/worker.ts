@@ -168,7 +168,8 @@ class Link {
       this.ws = null;
       this.onClose();
       if (!this.url) return;
-      this.timer = setTimeout(() => this.connect(), this.backoff);
+      // Upper half of the backoff, at random, so a crowd does not reconnect in step.
+      this.timer = setTimeout(() => this.connect(), this.backoff * (0.5 + Math.random() / 2));
       this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF_MS);
     };
     this.ws = ws;

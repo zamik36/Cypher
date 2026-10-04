@@ -290,17 +290,34 @@ impl<R: CryptoRngCore> Core<R> {
             | ServerMsg::BootstrapInfo { .. }
             | ServerMsg::Error { .. }) => match self.pending.remove(&req_id) {
                 Some((pending, _)) => self.on_response(pending, msg),
-                None if matches!(
-                    msg,
-                    ServerMsg::Error {
-                        code: ErrorCode::Unauthorized
+                None => {
+                    if let ServerMsg::Error { code } = msg {
+                        self.on_unsolicited_error(code);
                     }
-                ) =>
-                {
-                    self.effects.push(Effect::Disconnect { reconnect: false });
                 }
-                None => {}
             },
+        }
+    }
+
+    /// An error outside any request concerns the session itself.
+    fn on_unsolicited_error(&mut self, code: ErrorCode) {
+        match code {
+            ErrorCode::Unauthorized => self.effects.push(Effect::Disconnect { reconnect: false }),
+            // Reconnecting cannot help: only a newer app can talk to this
+            // server.
+            ErrorCode::UnsupportedVersion => {
+                self.conn = Conn::Offline;
+                self.emit(Event::Warning {
+                    reason: FailReason::UpdateRequired,
+                });
+                self.effects.push(Effect::Disconnect { reconnect: false });
+            }
+            ErrorCode::NotFound
+            | ErrorCode::BadRequest
+            | ErrorCode::RateLimited
+            | ErrorCode::TooLarge
+            | ErrorCode::Unavailable
+            | ErrorCode::Internal => {}
         }
     }
 
@@ -324,6 +341,7 @@ impl<R: CryptoRngCore> Core<R> {
                 ErrorCode::BadRequest | ErrorCode::TooLarge | ErrorCode::Internal => {
                     FailReason::ServerError
                 }
+                ErrorCode::UnsupportedVersion => FailReason::UpdateRequired,
             };
             self.fail_request(pending, reason);
             return;

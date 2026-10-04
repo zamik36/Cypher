@@ -15,9 +15,14 @@ use crate::peer::Peer;
 use crate::relay::{self, RelayBody};
 use crate::store::{StoreOp, Table, message_key};
 
+/// First wait before retrying a message, by why it did not go out; each
+/// further attempt doubles it, up to [`MAX_RETRY_MS`].
 const RETRY_OFFLINE_MS: u64 = 30_000;
 const RETRY_BUSY_MS: u64 = 2_000;
 const RETRY_FAILED_MS: u64 = 5_000;
+const MAX_RETRY_MS: u64 = 10 * 60_000;
+/// Doublings before the backoff stops growing (2^10 × the base > the cap).
+const MAX_DOUBLINGS: u32 = 10;
 
 /// An end-to-end message waiting for server acceptance. Stored as padded
 /// plaintext and encrypted at send time, so a session reset never strands it.
@@ -32,6 +37,10 @@ pub(crate) struct OutboxItem {
     in_flight: bool,
     #[serde(skip)]
     next_try: u64,
+    /// Failed attempts since the app started; resets on restart, which is
+    /// a reasonable moment to try again promptly.
+    #[serde(skip)]
+    attempts: u32,
 }
 
 impl crate::Record for OutboxItem {
@@ -42,6 +51,17 @@ impl Drop for OutboxItem {
     fn drop(&mut self) {
         self.envelope.zeroize();
     }
+}
+
+/// Wait before the next attempt after `attempts` failures: `base` doubled
+/// per failure up to [`MAX_RETRY_MS`], then a point in its upper half picked
+/// by `roll`.
+fn retry_delay(base: u64, attempts: u32, roll: u64) -> u64 {
+    let backoff = base
+        .saturating_mul(1 << attempts.min(MAX_DOUBLINGS))
+        .min(MAX_RETRY_MS);
+    let half = backoff / 2;
+    half + roll % (half + 1)
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -132,6 +152,7 @@ impl<R: CryptoRngCore> Core<R> {
             tracked,
             in_flight: false,
             next_try: 0,
+            attempts: 0,
         };
         let op = self
             .vault
@@ -257,10 +278,15 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    fn retry_later(&mut self, msg_id: MsgId, delay: u64) {
+    /// Schedules another attempt: `base` doubled per earlier failure, capped,
+    /// then drawn from its upper half so that clients cut off together do
+    /// not all come back at the same moment.
+    fn retry_later(&mut self, msg_id: MsgId, base: u64) {
+        let roll = self.rng.next_u64();
         if let Some(item) = self.outbox.get_mut(&msg_id) {
             item.in_flight = false;
-            item.next_try = self.now + delay;
+            item.next_try = self.now + retry_delay(base, item.attempts, roll);
+            item.attempts = item.attempts.saturating_add(1);
         }
     }
 
@@ -554,5 +580,36 @@ impl<R: CryptoRngCore> Core<R> {
                 ids: vec![id],
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_back_off_exponentially_with_jitter_up_to_a_cap() {
+        // `roll` 0 gives the bottom of the range, `roll` = half its top.
+        let bounds = |attempts, half| {
+            (
+                retry_delay(RETRY_FAILED_MS, attempts, 0),
+                retry_delay(RETRY_FAILED_MS, attempts, half),
+            )
+        };
+        assert_eq!(
+            bounds(0, 2_500),
+            (2_500, 5_000),
+            "the first wait is the base, jittered"
+        );
+        assert_eq!(bounds(1, 5_000), (5_000, 10_000), "each failure doubles it");
+        assert_eq!(
+            bounds(30, MAX_RETRY_MS / 2),
+            (MAX_RETRY_MS / 2, MAX_RETRY_MS),
+            "until the cap"
+        );
+        for roll in [1, 7, 12_345, u64::MAX / 3, u64::MAX] {
+            let d = retry_delay(RETRY_BUSY_MS, 3, roll);
+            assert!((8_000..=16_000).contains(&d), "{d}");
+        }
     }
 }

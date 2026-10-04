@@ -57,6 +57,10 @@ const en = {
   join_invalid_keys: "The other side's keys are invalid. Ask them for a new code.",
   join_timeout: "No answer from the server. Check the connection and try again.",
   join_offline: "Not connected to the server yet. Try again in a moment.",
+  error_update_required: "This version of Cypher can no longer talk to the server. Please update the app.",
+  error_storage_failed:
+    "Cypher could not save its data and stopped to avoid losing messages. Free up disk space and restart the app.",
+  error_corrupted: "Some saved data could not be read and was skipped. The rest of your chats are intact.",
   home_host_port: "host:port",
 
   // -- Chat --

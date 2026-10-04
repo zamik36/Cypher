@@ -66,8 +66,11 @@ impl Retry {
         }
     }
 
+    /// Waits a random time in the upper half of the backoff, so clients
+    /// dropped together (e.g. by a server restart) do not reconnect in step.
     fn schedule(&mut self) {
-        self.at = Instant::now() + self.backoff;
+        let wait = rand::Rng::gen_range(&mut OsRng, self.backoff / 2..=self.backoff);
+        self.at = Instant::now() + wait;
         self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
     }
 

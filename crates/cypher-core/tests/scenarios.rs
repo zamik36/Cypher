@@ -569,7 +569,14 @@ fn reading_marks_messages_read_on_both_sides() {
             ids: vec![id],
         },
     );
-    assert_eq!(w.status_of(B, id), Some(MessageStatus::Read), "the reader's copy");
-    assert_eq!(w.status_of(A, id), Some(MessageStatus::Read), "the sender's copy");
+    assert_eq!(
+        w.status_of(B, id),
+        Some(MessageStatus::Read),
+        "the reader's copy"
+    );
+    assert_eq!(
+        w.status_of(A, id),
+        Some(MessageStatus::Read),
+        "the sender's copy"
+    );
 }
-

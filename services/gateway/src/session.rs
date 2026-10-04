@@ -213,7 +213,7 @@ impl<B: Bus> Session<B> {
         };
         if version != PROTOCOL_VERSION {
             self.out
-                .try_push(frame(hello.req_id, error(ErrorCode::BadRequest)));
+                .try_push(frame(hello.req_id, error(ErrorCode::UnsupportedVersion)));
             return None;
         }
         let key = VerifyingKey::from_bytes(peer.as_bytes()).ok()?;

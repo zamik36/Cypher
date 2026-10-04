@@ -1,4 +1,5 @@
 import { createSignal, onCleanup, Show } from "solid-js";
+import { reasonText } from "./utils/reasons";
 import Sidebar, { type Page } from "./components/Sidebar";
 import BottomNav from "./components/BottomNav";
 import HomeView from "./components/HomeView";
@@ -137,7 +138,7 @@ export default function App() {
         if (hasTransfer(file_id)) upsertTransfer({ file_id, status: "error" });
         addToast(reason, "error");
       }),
-      onError((msg) => addToast(msg, "error")),
+      onError((msg) => addToast(reasonText(msg), "error")),
       onAnonymityLevel((payload) => {
         setAnonymityStatus({ supported: true, label: payload.label, description: payload.description });
       }),

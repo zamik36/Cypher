@@ -1,11 +1,10 @@
 import { t } from "../i18n";
 
 /**
- * Why joining a room failed, in the user's language. Both platforms report
- * the core's `FailReason` name (e.g. `KeyMismatch`); anything else is shown
- * as is.
+ * A failure in the user's language. Both platforms report the core's
+ * `FailReason` name (e.g. `KeyMismatch`); anything else is shown as is.
  */
-export function joinErrorText(error: unknown): string {
+export function reasonText(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   const tr = t();
   const known: Record<string, string> = {
@@ -16,6 +15,9 @@ export function joinErrorText(error: unknown): string {
     InvalidKeys: tr.join_invalid_keys,
     Timeout: tr.join_timeout,
     Offline: tr.join_offline,
+    UpdateRequired: tr.error_update_required,
+    StorageFailed: tr.error_storage_failed,
+    Corrupted: tr.error_corrupted,
   };
   return known[raw] ?? raw;
 }

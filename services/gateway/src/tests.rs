@@ -147,7 +147,7 @@ async fn wrong_protocol_version_is_refused() {
     assert!(matches!(
         c.recv().await.unwrap().msg,
         ServerMsg::Error {
-            code: ErrorCode::BadRequest
+            code: ErrorCode::UnsupportedVersion
         }
     ));
     assert!(c.closed().await);

@@ -206,6 +206,8 @@ pub enum FailReason {
     KeyMismatch,
     /// The driver could not make state durable and stopped the client.
     StorageFailed,
+    /// The server speaks another protocol version: the app must be updated.
+    UpdateRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
