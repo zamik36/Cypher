@@ -13,12 +13,40 @@ env:
   NIGHTLY: nightly-2026-09-20
 
 jobs:
+  # The tag must name the version everything carries (xtask versions), and
+  # the changelog's section for it becomes the release notes.
+  versions:
+    name: Version and notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Versions agree with the tag
+        run: cargo run -p xtask -- versions --tag "$GITHUB_REF_NAME"
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "notes<<CHANGELOG_EOF"
+            awk -v head="## [$version]" 'index($0, head) == 1 { on = 1; next } on && /^## \[/ { exit } on' CHANGELOG.md
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
   # A release names images CI already built and tested for the tagged commit
   # (the tag must point at a commit pushed to main or dev); nothing is rebuilt.
   docker-release:
     name: Docker release tags
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: [versions]
     steps:
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
@@ -38,6 +66,8 @@ jobs:
   desktop-release:
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    needs: [versions]
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +93,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev libasound2-dev
       - name: Install desktop dependencies
         run: cd apps/desktop && npm install
       - name: Build Tauri app
@@ -74,13 +104,15 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
           releaseName: "Cypher ${{ github.ref_name }}"
-          releaseBody: "See the assets for platform-specific installers."
+          releaseBody: ${{ needs.versions.outputs.notes }}
           releaseDraft: false
           prerelease: false
 
   android-release:
     name: Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [versions]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master

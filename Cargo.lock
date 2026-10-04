@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arti-client",
  "bytes",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-crypto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "cypher-client",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "criterion",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-server-kit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-tls"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cypher-types",
  "rcgen",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-transport"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "cypher-tls",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-types"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "rand 0.8.5",
@@ -1888,7 +1888,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "cypher-core",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -2384,7 +2384,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cypher-client",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4293,7 +4293,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "load-test"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6115,7 +6115,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "relay"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -6885,7 +6885,7 @@ dependencies = [
 
 [[package]]
 name = "signaling"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -10491,7 +10491,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",

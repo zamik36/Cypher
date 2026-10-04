@@ -129,6 +129,14 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
 
 Последний здоровый деплой записан в `.deployed-sha`.
 
+**Подлинность образов.** CI подписывает каждый опубликованный образ без ключей, через Sigstore: подпись удостоверяет, что образ собрал workflow этого репозитория. К образу приложены SBOM и provenance. Проверка:
+
+```bash
+cosign verify ghcr.io/zamik36/cypher/cypher-gateway:<sha8> \
+  --certificate-identity-regexp '^https://github.com/zamik36/Cypher/\.github/workflows/ci\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Что хранится и бэкапы
 
 - **Onion-ключ signaling** — `/data/signaling/onion_key.bin` в томе `signaling-data`, создаётся при первом запуске. Им клиенты запечатывают анонимные запросы к inbox. Это секрет: кто его знает, тот может раскрыть, к каким inbox обращаются через relay.

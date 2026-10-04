@@ -140,6 +140,8 @@ jobs:
         run: typos
       - name: Unused dependencies
         run: cargo machete
+      - name: One version everywhere
+        run: cargo run -p xtask -- versions
       - name: Every feature on its own
         run: >-
           cargo hack clippy --each-feature --all-targets
@@ -366,6 +368,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless signing: Sigstore certifies this workflow as the signer.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -395,14 +399,28 @@ jobs:
           echo "ref=ghcr.io/${repo}/cypher-${{ matrix.image.name }}:${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        id: build
         with:
           context: .
           file: ${{ matrix.image.file }}
           target: ${{ matrix.image.target }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.image.outputs.ref }}
+          # Published images carry an SBOM and how they were built.
+          sbom: ${{ github.event_name == 'push' }}
+          provenance: ${{ github.event_name == 'push' && 'mode=max' || 'false' }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: github.event_name == 'push'
+
+      - name: Sign the image
+        if: github.event_name == 'push'
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${REF%:*}@${DIGEST}"
 
   # The moving tags (latest for main, dev for dev) point at a commit's images
   # only once everything above has passed for it.
