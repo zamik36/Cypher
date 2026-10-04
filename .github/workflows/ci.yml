@@ -205,8 +205,9 @@ jobs:
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-fuzz@0.13.1
+      # The prebuilt cargo-fuzz targets musl by default; the toolchain is glibc.
       - name: Run fuzzer
-        run: cd crates/${{ matrix.target.crate }} && cargo +${{ env.NIGHTLY }} fuzz run ${{ matrix.target.name }} -- -max_total_time=30
+        run: cd crates/${{ matrix.target.crate }} && cargo +${{ env.NIGHTLY }} fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target.name }} -- -max_total_time=30
 
   deny:
     name: Deny (license & advisories)
