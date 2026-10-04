@@ -9,6 +9,17 @@ use crate::store::{PutOutcome, Store};
 
 pub(crate) const CAPABILITY_ONION: u32 = 1;
 
+/// Rate limits per identity, in events per hour. Identities are free to
+/// create, so these bound one key's cost rather than an attacker's total;
+/// the per-target prekey limit is what protects a victim.
+const LINKS_PER_HOUR: u32 = 10;
+const KEY_FETCHES_PER_HOUR: u32 = 60;
+/// One-time prekeys handed out per target and hour. Beyond it the bundle
+/// comes without one: pairing still works (forward secrecy then rests on
+/// the signed prekey) but a victim's keys cannot be drained quickly.
+const OPKS_PER_TARGET_PER_HOUR: u32 = 20;
+const HOUR_SECS: u64 = 3600;
+
 pub(crate) struct Handler {
     pub store: Store,
     pub onion_public: [u8; 32],
@@ -36,7 +47,9 @@ impl Handler {
                 },
                 Some(peer),
             ) => self.publish_keys(&peer, &base, &opks, replace_opks).await,
-            (ClientMsg::FetchKeys { peer: target }, Some(_)) => self.fetch_keys(&target).await,
+            (ClientMsg::FetchKeys { peer: target }, Some(peer)) => {
+                self.fetch_keys(&peer, &target).await
+            }
             (ClientMsg::CreateLink, Some(peer)) => self.create_link(&peer).await,
             (ClientMsg::ResolveLink { link }, Some(_)) => self.resolve_link(&link).await,
             (ClientMsg::InboxPut { inbox, item }, _) => self.inbox_put(&inbox, &item).await,
@@ -82,14 +95,25 @@ impl Handler {
         Ok(ServerMsg::KeysAck { opks_left })
     }
 
-    async fn fetch_keys(&self, target: &PeerId) -> redis::RedisResult<ServerMsg> {
-        Ok(match self.store.fetch_keys(target).await? {
+    async fn fetch_keys(
+        &self,
+        requester: &PeerId,
+        target: &PeerId,
+    ) -> redis::RedisResult<ServerMsg> {
+        if !self.admit(b"fk:", requester, KEY_FETCHES_PER_HOUR).await? {
+            return Ok(error(ErrorCode::RateLimited));
+        }
+        let with_opk = self.admit(b"ok:", target, OPKS_PER_TARGET_PER_HOUR).await?;
+        Ok(match self.store.fetch_keys(target, with_opk).await? {
             Some((base, opk)) => ServerMsg::Keys { base, opk },
             None => error(ErrorCode::NotFound),
         })
     }
 
     async fn create_link(&self, peer: &PeerId) -> redis::RedisResult<ServerMsg> {
+        if !self.admit(b"cl:", peer, LINKS_PER_HOUR).await? {
+            return Ok(error(ErrorCode::RateLimited));
+        }
         let link = LinkId::random(&mut rand::rngs::OsRng);
         Ok(if self.store.create_link(&link, peer).await? {
             ServerMsg::LinkCreated { link }
@@ -105,10 +129,16 @@ impl Handler {
         })
     }
 
+    async fn admit(&self, kind: &[u8], peer: &PeerId, per_hour: u32) -> redis::RedisResult<bool> {
+        let bucket = [kind, peer.as_bytes()].concat();
+        self.store.admit(&bucket, per_hour, HOUR_SECS).await
+    }
+
     async fn inbox_put(&self, inbox: &[u8; 32], item: &[u8]) -> redis::RedisResult<ServerMsg> {
         Ok(match self.store.inbox_put(inbox, item).await? {
             PutOutcome::Stored => ServerMsg::Done,
             PutOutcome::Full => error(ErrorCode::TooLarge),
+            PutOutcome::Inactive => error(ErrorCode::NotFound),
         })
     }
 

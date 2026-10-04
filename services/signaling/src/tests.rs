@@ -41,6 +41,15 @@ fn base_bundle(id: &IdentityKeyPair) -> Bytes {
     Bytes::from(out)
 }
 
+/// The owner reads its (empty) inbox, which opens it for writers.
+async fn open_inbox(h: &Handler, secret: [u8; 32]) {
+    let ServerMsg::InboxBatch { items, .. } = ask(h, None, ClientMsg::InboxFetch { secret }).await
+    else {
+        panic!("no batch");
+    };
+    assert!(items.is_empty());
+}
+
 fn random32() -> [u8; 32] {
     let mut bytes = [0; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -125,6 +134,11 @@ async fn anonymous_inbox_put_fetch_and_ack() {
         inbox: inbox_id(&secret),
         item: item.clone(),
     };
+    assert!(
+        is_error(&ask(&h, None, put.clone()).await, ErrorCode::NotFound),
+        "an inbox its owner never read takes no writes"
+    );
+    open_inbox(&h, secret).await;
     assert!(matches!(ask(&h, None, put).await, ServerMsg::Done));
 
     let ServerMsg::InboxBatch { claim, items } =
@@ -218,15 +232,8 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let put = Frame::new(
-        1,
-        ClientMsg::InboxPut {
-            inbox: random32(),
-            item: Bytes::from_static(b"sealed"),
-        },
-    )
-    .encode();
-    let seal = |at| cypher_crypto::onion::seal_request(&public, &put, at, &mut OsRng).unwrap();
+    let fetch = Frame::new(1, ClientMsg::InboxFetch { secret: random32() }).encode();
+    let seal = |at| cypher_crypto::onion::seal_request(&public, &fetch, at, &mut OsRng).unwrap();
 
     let (fresh, reply) = seal(now);
     let answer = crate::onion::handle(&h, &secret, &fresh)
@@ -235,7 +242,7 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
     let opened = cypher_crypto::onion::open_response(&reply, &answer).unwrap();
     assert!(matches!(
         Frame::<ServerMsg>::decode(Bytes::from(opened)).unwrap().msg,
-        ServerMsg::Done
+        ServerMsg::InboxBatch { .. }
     ));
     assert!(
         crate::onion::handle(&h, &secret, &fresh).await.is_none(),
@@ -244,4 +251,95 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
 
     let (stale, _) = seal(now - crate::onion::MAX_SKEW_SECS - 1);
     assert!(crate::onion::handle(&h, &secret, &stale).await.is_none());
+}
+
+#[tokio::test]
+async fn an_inbox_holds_a_bounded_number_of_bytes_until_read() {
+    let Some(h) = handler(None).await else { return };
+    let secret = random32();
+    open_inbox(&h, secret).await;
+    let item = Bytes::from(vec![7u8; cypher_wire::MAX_INBOX_ITEM_LEN]);
+    let put = || ClientMsg::InboxPut {
+        inbox: inbox_id(&secret),
+        item: item.clone(),
+    };
+    let fit = crate::store::MAX_INBOX_BYTES / item.len();
+    for _ in 0..fit {
+        assert!(matches!(ask(&h, None, put()).await, ServerMsg::Done));
+    }
+    assert!(is_error(&ask(&h, None, put()).await, ErrorCode::TooLarge));
+
+    // Reading and acknowledging frees the quota again.
+    let ServerMsg::InboxBatch { claim, items } =
+        ask(&h, None, ClientMsg::InboxFetch { secret }).await
+    else {
+        panic!("no batch");
+    };
+    assert!(!items.is_empty());
+    ask(&h, None, ClientMsg::InboxAck { secret, claim }).await;
+    assert!(matches!(ask(&h, None, put()).await, ServerMsg::Done));
+}
+
+#[tokio::test]
+async fn writes_do_not_extend_an_inbox() {
+    let Some(h) = handler(None).await else { return };
+    let secret = random32();
+    open_inbox(&h, secret).await;
+    let put = ClientMsg::InboxPut {
+        inbox: inbox_id(&secret),
+        item: Bytes::from_static(b"x"),
+    };
+    ask(&h, None, put.clone()).await;
+    let first = h.store.ttl(b"i:", &inbox_id(&secret)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    ask(&h, None, put).await;
+    assert!(h.store.ttl(b"i:", &inbox_id(&secret)).await < first);
+}
+
+#[tokio::test]
+async fn links_are_rate_limited_per_identity() {
+    let Some(h) = handler(None).await else { return };
+    let host = Some(IdentityKeyPair::generate().peer_id());
+    for _ in 0..10 {
+        assert!(matches!(
+            ask(&h, host, ClientMsg::CreateLink).await,
+            ServerMsg::LinkCreated { .. }
+        ));
+    }
+    assert!(is_error(
+        &ask(&h, host, ClientMsg::CreateLink).await,
+        ErrorCode::RateLimited
+    ));
+}
+
+#[tokio::test]
+async fn one_time_prekeys_cannot_be_drained_or_hoarded() {
+    let Some(h) = handler(None).await else { return };
+    let victim = IdentityKeyPair::generate();
+    let opks = |n: u32| (0..n).map(|i| (i, random32())).collect::<Vec<_>>();
+    let publish = |opks, replace_opks| ClientMsg::PublishKeys {
+        base: base_bundle(&victim),
+        opks,
+        replace_opks,
+    };
+    let me = Some(victim.peer_id());
+    ask(&h, me, publish(opks(150), true)).await;
+    let ServerMsg::KeysAck { opks_left } = ask(&h, me, publish(opks(150), false)).await else {
+        panic!("no ack");
+    };
+    assert_eq!(usize::from(opks_left), 200, "stored prekeys are capped");
+
+    let mut handed_out = 0;
+    for _ in 0..25 {
+        // A fresh identity per fetch, as an attacker would use.
+        let thief = Some(IdentityKeyPair::generate().peer_id());
+        let fetch = ClientMsg::FetchKeys {
+            peer: victim.peer_id(),
+        };
+        let ServerMsg::Keys { opk, .. } = ask(&h, thief, fetch).await else {
+            panic!("no keys");
+        };
+        handed_out += usize::from(opk.is_some());
+    }
+    assert_eq!(handed_out, 20, "the bundle still comes, without a prekey");
 }

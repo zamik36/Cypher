@@ -7,7 +7,11 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
+    # noeviction: when full, writes fail loudly instead of silently dropping
+    # prekeys or inboxes; size the limit to the host and alert on it.
+    command: >-
+      redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
+      --maxmemory ${REDIS_MAXMEMORY:-512mb} --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

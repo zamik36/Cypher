@@ -80,6 +80,11 @@ impl Peer {
         };
         peer.wait(|e| matches!(e, Event::Connected).then_some(()))
             .await;
+        // The anonymous channel is up and the inbox read at least once, as
+        // for anyone who has been online: only then does the server accept
+        // offline messages for it.
+        peer.wait(|e| matches!(e, Event::Onion { up: true }).then_some(()))
+            .await;
         peer
     }
 

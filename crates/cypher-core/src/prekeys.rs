@@ -9,7 +9,11 @@ use zeroize::Zeroize;
 
 pub(crate) const OPK_BATCH: u32 = 100;
 pub(crate) const OPK_LOW_WATER: u16 = 20;
-const MAX_RETAINED_OPKS: usize = 300;
+/// Private one-time prekeys kept for initiators still on their way. The
+/// server hands out at most 20 of ours an hour (signaling's per-target
+/// limit), so even under a sustained drain this covers days of fetched but
+/// not yet used keys; normally it covers years.
+const MAX_RETAINED_OPKS: usize = 2000;
 const SPK_ROTATION_MS: u64 = 7 * 24 * 3600 * 1000;
 
 pub(crate) struct Prekeys {
@@ -164,13 +168,15 @@ mod tests {
     #[test]
     fn batches_are_bounded_and_record_roundtrips() {
         let mut pk = Prekeys::generate(0, &mut OsRng);
-        for _ in 0..5 {
+        let batches = MAX_RETAINED_OPKS / OPK_BATCH as usize + 2;
+        for _ in 0..batches {
             pk.new_batch(&mut OsRng);
         }
+        let last = u32::try_from(batches).unwrap() * OPK_BATCH;
         assert_eq!(pk.opks.len(), MAX_RETAINED_OPKS);
-        assert!(pk.opk(1).is_none() && pk.opk(500).is_some());
+        assert!(pk.opk(1).is_none() && pk.opk(last).is_some());
         let restored = Prekeys::from_record(&pk.to_record());
-        assert!(restored.opk(500).is_some());
-        assert_eq!(restored.next_opk_id, 501);
+        assert!(restored.opk(last).is_some());
+        assert_eq!(restored.next_opk_id, last + 1);
     }
 }
