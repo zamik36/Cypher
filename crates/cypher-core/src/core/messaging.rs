@@ -74,6 +74,8 @@ impl<R: CryptoRngCore> Core<R> {
         self.enqueue(peer, msg_id, Body::Text { text, reply_to }, true);
     }
 
+    /// Tells `peer` its messages were read and remembers that locally, so
+    /// the UI sees them as read and does not report them again.
     pub(super) fn mark_read(&mut self, peer: PeerId, ids: &[MsgId]) {
         for chunk in ids.chunks(MAX_RECEIPT_IDS) {
             self.send_control(
@@ -83,6 +85,9 @@ impl<R: CryptoRngCore> Core<R> {
                     ids: chunk.to_vec(),
                 },
             );
+        }
+        for &msg_id in ids {
+            self.set_status(msg_id, MessageStatus::Read);
         }
     }
 

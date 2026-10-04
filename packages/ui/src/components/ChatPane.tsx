@@ -4,6 +4,7 @@ import { chatsByPeer, addMessage, getMessages, historyLoaded, mergeHistory } fro
 import { connection, setActivePeer, shortName } from "../stores/connection";
 import { upsertTransfer } from "../stores/transfers";
 import { trackMedia } from "../stores/media";
+import { windowActive } from "../stores/presence";
 import VoiceBubble from "./media/VoiceBubble";
 import RoundVideoBubble from "./media/RoundVideoBubble";
 import RecordButton from "./media/RecordButton";
@@ -89,9 +90,11 @@ export default function ChatPane(props: ChatPaneProps) {
       });
   });
 
+  // Messages count as read only while the user can see them. The core then
+  // marks them read locally, so each one is reported once.
   createEffect(() => {
     const peer = activePeer();
-    if (!peer) return;
+    if (!peer || !windowActive()) return;
     const unread = getMessages(peer).flatMap((m) =>
       m.from !== "me" && m.msg_id && m.status !== "read" ? [m.msg_id] : [],
     );

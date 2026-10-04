@@ -554,3 +554,22 @@ fn a_link_answered_with_another_identity_is_refused() {
     let peers = w.clients[B].core.as_ref().unwrap().peers().count();
     assert_eq!(peers, 0, "no session with the impostor");
 }
+
+/// Reading a message tells the sender once and marks it read locally, so a
+/// frontend that asks again only for unread messages stops asking.
+#[test]
+fn reading_marks_messages_read_on_both_sides() {
+    let mut w = paired();
+    let id = w.send_text(A, B, "read me");
+    let sender = w.peer(A);
+    w.command(
+        B,
+        Command::MarkRead {
+            peer: sender,
+            ids: vec![id],
+        },
+    );
+    assert_eq!(w.status_of(B, id), Some(MessageStatus::Read), "the reader's copy");
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Read), "the sender's copy");
+}
+
