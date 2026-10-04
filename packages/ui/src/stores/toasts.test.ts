@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addToast, removeToast, toasts } from "./toasts";
+import { addToast, removeToast, toastError, toasts } from "./toasts";
 
 describe("toasts", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -16,6 +16,16 @@ describe("toasts", () => {
     expect(toasts).toHaveLength(2);
     vi.advanceTimersByTime(1);
     expect(toasts).toHaveLength(0);
+  });
+
+  it("shows failures in the user's language", () => {
+    toastError(new Error("Cancelled"));
+    toastError("something unknown");
+    expect(toasts.map((t) => [t.message, t.type])).toEqual([
+      ["Cancelled.", "error"],
+      ["something unknown", "error"],
+    ]);
+    vi.advanceTimersByTime(4000);
   });
 
   it("removes a toast on demand", () => {

@@ -1,7 +1,7 @@
 import { createSignal, onCleanup, Show } from "solid-js";
 import { api, type MediaSent, type UiFile } from "../../platform";
 import { MAX_VIDEO_NOTE_MS, VideoNoteRecorder } from "../../media/videoNote";
-import { addToast } from "../../stores/toasts";
+import { addToast, toastError } from "../../stores/toasts";
 import { t } from "../../i18n";
 import { formatDuration } from "./player";
 
@@ -57,7 +57,7 @@ export default function RecordButton(props: Props) {
       setPhase("recording");
     } catch (e) {
       setPhase("idle");
-      addToast(String(e), "error");
+      toastError(e);
     }
   }
 
@@ -109,7 +109,7 @@ export default function RecordButton(props: Props) {
         }
       }
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     } finally {
       finishing = false;
     }

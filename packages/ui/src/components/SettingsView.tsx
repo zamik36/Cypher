@@ -1,12 +1,15 @@
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { reasonText } from "../utils/reasons";
+import { APP_VERSION } from "../version";
+import { setThemePref, themePref, type ThemePref } from "../stores/theme";
 import { connection, setGatewayAddr, connectGateway } from "../stores/connection";
 import { api } from "../platform";
 import { clearAllMessages } from "../stores/chat";
-import { addToast } from "../stores/toasts";
+import { addToast, toastError } from "../stores/toasts";
 import { t } from "../i18n";
 import { copyText } from "../utils/clipboard";
 import { locale, setLocale } from "../i18n";
-import { anonymousSettings, anonymityStatus, setAnonymousSettings } from "../stores/anonymity";
+import { anonymousSettings, onionUp, setAnonymousSettings } from "../stores/anonymity";
 import {
   notificationPermissionState,
   notificationsEnabled,
@@ -18,9 +21,24 @@ import {
 } from "../utils/notifications";
 
 interface SettingsViewProps {
-  theme: string;
-  setTheme: (t: "dark" | "light") => void;
   nickname: string | null;
+}
+
+const THEME_CHOICES: readonly ThemePref[] = ["system", "dark", "light"];
+
+function themeLabel(choice: ThemePref): string {
+  const tr = t();
+  return { system: tr.settings_system, dark: tr.settings_dark, light: tr.settings_light }[choice];
+}
+
+function onionLabel(up: boolean | null): string {
+  const tr = t();
+  return up === null ? tr.anon_status_unknown : up ? tr.anon_status_onion : tr.anon_status_direct;
+}
+
+function onionDescription(up: boolean | null): string {
+  const tr = t();
+  return up === null ? tr.anon_desc_unknown : up ? tr.anon_desc_onion : tr.anon_desc_direct;
 }
 
 export default function SettingsView(props: SettingsViewProps) {
@@ -98,7 +116,7 @@ export default function SettingsView(props: SettingsViewProps) {
       clearAllMessages();
       addToast(t().toast_history_cleared, "success");
     } catch (e) {
-      addToast(t().toast_clear_failed(String(e)), "error");
+      addToast(t().toast_clear_failed(reasonText(e)), "error");
     }
     setConfirmClear(false);
   }
@@ -110,7 +128,7 @@ export default function SettingsView(props: SettingsViewProps) {
       setRecoveryPhrase(phrase);
       setTimeout(() => setRecoveryPhrase(null), 30_000);
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     }
     setExportPass("");
   }
@@ -130,7 +148,7 @@ export default function SettingsView(props: SettingsViewProps) {
       setAnonymousSettings(nextSettings);
       addToast(t().toast_anonymous_saved, "success");
     } catch (e) {
-      addToast(t().toast_anonymous_save_failed(String(e)), "error");
+      addToast(t().toast_anonymous_save_failed(reasonText(e)), "error");
     } finally {
       setSavingAnonymous(false);
     }
@@ -174,18 +192,17 @@ export default function SettingsView(props: SettingsViewProps) {
       <div class="settings-group">
         <label>{t().settings_theme}</label>
         <div class="theme-options">
-          <button
-            class={`theme-option ${props.theme === "dark" ? "active" : ""}`}
-            onClick={() => props.setTheme("dark")}
-          >
-            {t().settings_dark}
-          </button>
-          <button
-            class={`theme-option ${props.theme === "light" ? "active" : ""}`}
-            onClick={() => props.setTheme("light")}
-          >
-            {t().settings_light}
-          </button>
+          <For each={THEME_CHOICES}>
+            {(choice) => (
+              <button
+                class={`theme-option ${themePref() === choice ? "active" : ""}`}
+                aria-pressed={themePref() === choice}
+                onClick={() => setThemePref(choice)}
+              >
+                {themeLabel(choice)}
+              </button>
+            )}
+          </For>
         </div>
       </div>
 
@@ -244,8 +261,8 @@ export default function SettingsView(props: SettingsViewProps) {
         <label>{t().settings_anonymous_title}</label>
         <div class="anonymous-status-card">
           <div>
-            <strong>{anonymityStatus.label}</strong>
-            <p>{anonymityStatus.description}</p>
+            <strong>{onionLabel(onionUp())}</strong>
+            <p>{onionDescription(onionUp())}</p>
           </div>
           <span class={`status-chip ${anonymousEnabled() ? "enabled" : "disabled"}`}>
             {anonymousEnabled() ? t().settings_anonymous_enabled : t().settings_anonymous_disabled}
@@ -341,7 +358,7 @@ export default function SettingsView(props: SettingsViewProps) {
       <div class="settings-group">
         <label>{t().settings_about}</label>
         <div class="about-info">
-          <p>{t().settings_version}</p>
+          <p>{t().settings_version(APP_VERSION)}</p>
           <p>{t().settings_about_desc}</p>
           <p>{t().settings_about_motto}</p>
         </div>

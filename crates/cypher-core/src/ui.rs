@@ -56,10 +56,9 @@ pub enum UiPayload {
         file_id: String,
         reason: String,
     },
+    /// 1 while inbox traffic goes through the onion relay, 0 otherwise.
     Anonymity {
         level: u8,
-        label: &'static str,
-        description: &'static str,
     },
 }
 
@@ -191,12 +190,6 @@ pub fn safety_number(own: &PeerId, peer: &PeerId) -> String {
 fn anonymity(up: bool) -> UiPayload {
     UiPayload::Anonymity {
         level: u8::from(up),
-        label: if up { "Onion relay" } else { "Direct" },
-        description: if up {
-            "Inbox traffic is routed through the onion relay."
-        } else {
-            "Onion relay unavailable; inbox traffic waits or uses the session."
-        },
     }
 }
 
@@ -264,15 +257,13 @@ mod tests {
             }),
             ("error", json!("StorageFailed"))
         );
-        let (channel, up) = ui(&Event::Onion { up: true });
         assert_eq!(
-            (channel, &up["level"], &up["label"]),
-            ("anonymity_level", &json!(1), &json!("Onion relay"))
+            ui(&Event::Onion { up: true }),
+            ("anonymity_level", json!({ "level": 1 }))
         );
-        let (_, down) = ui(&Event::Onion { up: false });
         assert_eq!(
-            (&down["level"], &down["label"]),
-            (&json!(0), &json!("Direct"))
+            ui(&Event::Onion { up: false }),
+            ("anonymity_level", json!({ "level": 0 }))
         );
     }
 

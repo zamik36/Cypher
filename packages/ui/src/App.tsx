@@ -1,3 +1,4 @@
+import "./stores/theme";
 import { createSignal, onCleanup, Show } from "solid-js";
 import { reasonText } from "./utils/reasons";
 import Sidebar, { type Page } from "./components/Sidebar";
@@ -40,13 +41,12 @@ import { addMessage, peerOf, setMessageStatus } from "./stores/chat";
 import { hasTransfer, upsertTransfer } from "./stores/transfers";
 import { setMediaProgress, trackMedia } from "./stores/media";
 import { addToast } from "./stores/toasts";
-import { anonymousSettings, setAnonymityStatus } from "./stores/anonymity";
+import { anonymousSettings, setOnionUp } from "./stores/anonymity";
 import { t } from "./i18n";
 import { notifyMessage } from "./utils/notifications";
 
 export default function App() {
   const [page, setPage] = createSignal<Page>("home");
-  const [theme, setTheme] = createSignal<"dark" | "light">("dark");
   const [unread, setUnread] = createSignal(0);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [nickname, setNickname] = createSignal<string | null>(null);
@@ -57,11 +57,6 @@ export default function App() {
     setConnection({ peerId });
     setUnlocked(true);
     void startApp();
-  }
-
-  function applyTheme(next: "dark" | "light") {
-    setTheme(next);
-    document.documentElement.setAttribute("data-theme", next);
   }
 
   function navigateTo(p: Page) {
@@ -153,11 +148,11 @@ export default function App() {
       }),
       onFileFailed(({ file_id, reason }) => {
         if (hasTransfer(file_id)) upsertTransfer({ file_id, status: "error" });
-        addToast(reason, "error");
+        addToast(reasonText(reason), "error");
       }),
       onError((msg) => addToast(reasonText(msg), "error")),
       onAnonymityLevel((payload) => {
-        setAnonymityStatus({ supported: true, label: payload.label, description: payload.description });
+        setOnionUp(payload.level > 0);
       }),
     ]);
 
@@ -173,8 +168,6 @@ export default function App() {
         <Sidebar
           page={page()}
           setPage={navigateTo}
-          theme={theme()}
-          toggleTheme={() => applyTheme(theme() === "dark" ? "light" : "dark")}
           unread={unread()}
           drawerOpen={drawerOpen()}
           setDrawerOpen={setDrawerOpen}
@@ -193,7 +186,7 @@ export default function App() {
             <FilesView />
           </Show>
           <Show when={page() === "settings"}>
-            <SettingsView theme={theme()} setTheme={applyTheme} nickname={nickname()} />
+            <SettingsView nickname={nickname()} />
           </Show>
         </main>
 

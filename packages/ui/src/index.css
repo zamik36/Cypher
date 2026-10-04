@@ -1,3 +1,6 @@
+@import "@fontsource-variable/inter";
+@import "./styles/tokens.css";
+
 /* ── Reset ─────────────────────────────────────────────────────────── */
 *,
 *::before,
@@ -7,112 +10,53 @@
   padding: 0;
 }
 
-/* ── Theme variables ──────────────────────────────────────────────── */
-:root {
-  --bg: #0b0e14;
-  --surface: #141820;
-  --surface-hover: #1a1f2b;
-  --border: #252a35;
-  --text: #d1d5e0;
-  --text-muted: #6b7280;
-  --accent: #6c8cff;
-  --accent-hover: #8ba3ff;
-  --accent-glow: rgba(108, 140, 255, 0.12);
-  --green: #34d399;
-  --green-glow: rgba(52, 211, 153, 0.12);
-  --red: #f87171;
-  --red-glow: rgba(248, 113, 113, 0.12);
-  --yellow: #fbbf24;
+/* ── Legacy variables, mapped onto the design tokens ──────────────────
+ * The screens still use these names; they are removed screen by screen as
+ * the redesign replaces them. New code uses the --c-* tokens directly. */
+:root,
+[data-theme] {
+  --bg: var(--c-bg);
+  --surface: var(--c-surface);
+  --surface-hover: var(--c-surface-2);
+  --border: var(--c-border);
+  --text: var(--c-text);
+  --text-muted: var(--c-muted);
+  --accent: var(--c-accent);
+  --accent-hover: var(--c-accent-pressed);
+  --accent-glow: var(--c-accent-soft);
+  --green: var(--c-accent);
+  --green-glow: var(--c-accent-soft);
+  --red: var(--c-danger);
+  --red-glow: var(--c-danger-soft);
+  --yellow: var(--c-warning);
 
-  --radius-sm: 8px;
-  --radius-md: 14px;
-  --radius-lg: 20px;
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.4);
-  --transition: 180ms ease;
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --shadow-sm: var(--e-1);
+  --shadow-md: var(--e-2);
+  --shadow-lg: var(--e-3);
+  --transition: var(--dur) var(--ease);
   --sidebar-width: 220px;
 
-  --accent-gradient: linear-gradient(135deg, #6c8cff 0%, #a78bfa 50%, #6c8cff 100%);
-  --bg-gradient:
-    radial-gradient(ellipse at 20% 50%, rgba(108, 140, 255, 0.06) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 20%, rgba(167, 139, 250, 0.04) 0%, transparent 50%);
-  --surface-glass: rgba(20, 24, 32, 0.7);
-  --surface-glass-border: rgba(255, 255, 255, 0.06);
-  --blur-md: 12px;
-  --blur-lg: 20px;
-  --transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-spring: 500ms cubic-bezier(0.34, 1.56, 0.64, 1);
-  --shadow-glow: 0 0 20px rgba(108, 140, 255, 0.15);
-  --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --accent-gradient: var(--c-accent);
+  --bg-gradient: none;
+  --surface-glass: var(--c-surface);
+  --surface-glass-border: var(--c-border);
+  --blur-md: 0px;
+  --blur-lg: 0px;
+  --transition-slow: var(--dur) var(--ease);
+  --transition-spring: var(--dur) var(--ease);
+  --shadow-glow: none;
+  --shadow-elevated: var(--e-2);
+}
 
-  font-family:
-    "Inter",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+:root {
+  font-family: var(--font-sans);
   font-size: 14px;
-  font-feature-settings: "cv02", "cv03", "cv04";
-  background: var(--bg-gradient), var(--bg);
-  color: var(--text);
+  background: var(--c-bg);
+  color: var(--c-text);
   -webkit-font-smoothing: antialiased;
-}
-
-[data-theme="light"] {
-  --bg: #f5f7fa;
-  --surface: #ffffff;
-  --surface-hover: #f0f2f5;
-  --border: #e2e5ea;
-  --text: #1a1d23;
-  --text-muted: #6b7280;
-  --accent: #4f6df5;
-  --accent-hover: #3d5bd9;
-  --accent-glow: rgba(79, 109, 245, 0.1);
-  --green: #059669;
-  --green-glow: rgba(5, 150, 105, 0.1);
-  --red: #dc2626;
-  --red-glow: rgba(220, 38, 38, 0.1);
-  --yellow: #d97706;
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
-  --surface-glass: rgba(255, 255, 255, 0.7);
-  --surface-glass-border: rgba(0, 0, 0, 0.06);
-  --bg-gradient:
-    radial-gradient(ellipse at 20% 50%, rgba(79, 109, 245, 0.04) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 20%, rgba(167, 139, 250, 0.03) 0%, transparent 50%);
-  --shadow-glow: 0 0 20px rgba(79, 109, 245, 0.1);
-  --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
-}
-
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --bg: #f5f7fa;
-    --surface: #ffffff;
-    --surface-hover: #f0f2f5;
-    --border: #e2e5ea;
-    --text: #1a1d23;
-    --text-muted: #6b7280;
-    --accent: #4f6df5;
-    --accent-hover: #3d5bd9;
-    --accent-glow: rgba(79, 109, 245, 0.1);
-    --green: #059669;
-    --green-glow: rgba(5, 150, 105, 0.1);
-    --red: #dc2626;
-    --red-glow: rgba(220, 38, 38, 0.1);
-    --yellow: #d97706;
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
-    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
-    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
-    --surface-glass: rgba(255, 255, 255, 0.7);
-    --surface-glass-border: rgba(0, 0, 0, 0.06);
-    --bg-gradient:
-      radial-gradient(ellipse at 20% 50%, rgba(79, 109, 245, 0.04) 0%, transparent 50%),
-      radial-gradient(ellipse at 80% 20%, rgba(167, 139, 250, 0.03) 0%, transparent 50%);
-    --shadow-glow: 0 0 20px rgba(79, 109, 245, 0.1);
-    --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
-  }
 }
 
 /* ── Scrollbar ────────────────────────────────────────────────────── */
@@ -433,7 +377,7 @@
 .nav-badge {
   margin-left: auto;
   background: var(--accent);
-  color: #fff;
+  color: var(--c-on-accent);
   font-size: 11px;
   font-weight: 600;
   min-width: 18px;
@@ -533,7 +477,7 @@
   padding: 2px 8px;
   background: var(--accent-glow);
   border-radius: 10px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--accent);
 }
@@ -612,7 +556,7 @@ button:disabled {
 .btn-primary {
   background: var(--accent-gradient);
   background-size: 200% auto;
-  color: #fff;
+  color: var(--c-on-accent);
   position: relative;
   overflow: hidden;
   transition:
@@ -781,7 +725,7 @@ textarea {
   padding: 20px 0;
 }
 .room-code {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   /* A full share link (code + identity fingerprint) is ~53 characters. */
   font-size: 18px;
   font-weight: 700;
@@ -909,7 +853,7 @@ textarea {
   border-radius: 50%;
   background: var(--accent-gradient);
   background-size: 200% auto;
-  color: #fff;
+  color: var(--c-on-avatar);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1053,7 +997,7 @@ textarea {
   font-size: 12px;
   font-weight: 600;
   flex-shrink: 0;
-  color: #fff;
+  color: var(--c-on-avatar);
 }
 .avatar.me {
   background: var(--accent-gradient);
@@ -1081,18 +1025,14 @@ textarea {
   word-break: break-word;
 }
 .message-group.mine .bubble {
-  background: var(--accent-gradient);
-  background-size: 200% auto;
-  color: #fff;
-  border-bottom-right-radius: 4px;
-  box-shadow: 0 2px 8px rgba(108, 140, 255, 0.2);
+  background: var(--c-bubble-out);
+  color: var(--c-text);
+  border-bottom-right-radius: var(--r-bubble-tail);
 }
 .message-group.theirs .bubble {
-  background: var(--surface-glass);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--surface-glass-border);
-  border-bottom-left-radius: 4px;
+  background: var(--c-bubble-in);
+  border: 1px solid var(--c-bubble-in-border);
+  border-bottom-left-radius: var(--r-bubble-tail);
 }
 
 .message-time {
@@ -1555,7 +1495,7 @@ textarea {
 }
 .seed-display code {
   flex: 1;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
   color: var(--accent);
@@ -1678,7 +1618,7 @@ textarea {
   padding: 12px 12px 12px 36px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   user-select: all;
 }
@@ -1777,7 +1717,7 @@ textarea {
   top: -6px;
   right: -10px;
   background: var(--accent);
-  color: #fff;
+  color: var(--c-on-accent);
   font-size: 9px;
   font-weight: 700;
   min-width: 16px;
@@ -2077,10 +2017,10 @@ textarea {
   display: grid;
   place-items: center;
   background: var(--accent);
-  color: #fff;
+  color: var(--c-on-accent);
 }
 .message-group.mine .voice-play {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--c-accent);
 }
 .voice-loading {
   font-size: 10px;
@@ -2284,7 +2224,7 @@ textarea {
   margin: 0 0 16px;
   padding: 0;
   list-style: none;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 18px;
   text-align: center;
 }

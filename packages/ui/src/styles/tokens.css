@@ -1,0 +1,154 @@
+/*
+ * Design tokens: the only place colours are written down. Everything else
+ * refers to these variables (a test enforces it). Graphite surfaces, one
+ * emerald accent, no gradients.
+ */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --c-bg: #0f1113;
+  --c-surface: #171a1d;
+  --c-surface-2: #1e2226;
+  --c-border: #262a2f;
+  --c-text: #ecefed;
+  --c-muted: #8b938f;
+  --c-accent: #2fbf8a;
+  --c-accent-pressed: #27a578;
+  --c-on-accent: #062b1d;
+  --c-accent-soft: #173328;
+  --c-bubble-out: #1d3b30;
+  --c-bubble-in: var(--c-surface);
+  --c-bubble-in-border: transparent;
+  --c-danger: #e5534b;
+  --c-danger-soft: #3a1d1b;
+  --c-warning: #d9a441;
+  --c-warning-soft: #3a2f17;
+  --c-tick: var(--c-muted);
+  --c-tick-read: var(--c-accent);
+  --c-scrim: #000000a0;
+  --c-qr-paper: #ffffff;
+
+  --c-avatar-0: #3b6e5c;
+  --c-avatar-1: #4f6a8a;
+  --c-avatar-2: #7a5c8a;
+  --c-avatar-3: #8a6a4f;
+  --c-avatar-4: #5c7a3b;
+  --c-avatar-5: #8a4f5c;
+  --c-avatar-6: #3b6e7a;
+  --c-avatar-7: #6e6e3b;
+  --c-on-avatar: #f4f6f5;
+
+  --e-1: 0 1px 2px #00000059;
+  --e-2: 0 4px 14px #00000066;
+  --e-3: 0 12px 32px #00000080;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --c-bg: #f6f7f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f0f2f1;
+  --c-border: #e3e6e4;
+  --c-text: #121614;
+  --c-muted: #5e6762;
+  --c-accent: #12936a;
+  --c-accent-pressed: #0f7d5a;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #e3f4ec;
+  --c-bubble-out: #ddf3ea;
+  --c-bubble-in: #ffffff;
+  --c-bubble-in-border: var(--c-border);
+  --c-danger: #d6443c;
+  --c-danger-soft: #fbe9e8;
+  --c-warning: #b9862a;
+  --c-warning-soft: #f8efdc;
+  --c-tick: var(--c-muted);
+  --c-tick-read: var(--c-accent);
+  --c-scrim: #00000066;
+  --c-qr-paper: #ffffff;
+
+  --c-avatar-0: #5fa58a;
+  --c-avatar-1: #6f8fb3;
+  --c-avatar-2: #a07fb3;
+  --c-avatar-3: #b3906f;
+  --c-avatar-4: #7fa05f;
+  --c-avatar-5: #b36f80;
+  --c-avatar-6: #5f98a5;
+  --c-avatar-7: #9a9a5c;
+  --c-on-avatar: #ffffff;
+
+  --e-1: 0 1px 2px #0000001a;
+  --e-2: 0 4px 14px #0000001f;
+  --e-3: 0 12px 32px #00000029;
+}
+
+:root {
+  /* Spacing, 4 px base. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* Radius. */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-bubble: 18px;
+  --r-bubble-tail: 6px;
+  --r-full: 999px;
+
+  /* Typography: size / line height. */
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Roboto Mono", Consolas, monospace;
+  --t-xs: 12px;
+  --t-xs-lh: 16px;
+  --t-sm: 13px;
+  --t-sm-lh: 18px;
+  --t-md: 15px;
+  --t-md-lh: 20px;
+  --t-lg: 17px;
+  --t-lg-lh: 22px;
+  --t-xl: 20px;
+  --t-xl-lh: 26px;
+  --t-2xl: 28px;
+  --t-2xl-lh: 34px;
+
+  /* Layers. */
+  --z-header: 10;
+  --z-fab: 20;
+  --z-sheet: 100;
+  --z-toast: 200;
+
+  /* Motion. */
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layout. */
+  --topbar-h: 56px;
+  --list-w: 360px;
+
+  /*
+   * Safe areas: the browser's insets, unless the Android adapter writes
+   * exact values (edge-to-edge WebViews report none on older versions).
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --kb: 0px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur: 0ms;
+  }
+}

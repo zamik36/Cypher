@@ -1,14 +1,9 @@
+import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 
 export interface AnonymousSettings {
   enabled: boolean;
   bridgeLines: string[];
-}
-
-export interface AnonymityStatus {
-  supported: boolean;
-  label: string;
-  description: string;
 }
 
 const SETTINGS_KEY = "cypher-anonymous-settings";
@@ -32,15 +27,12 @@ function loadSettings(): AnonymousSettings {
 }
 
 const [anonymousSettings, setAnonymousSettingsStore] = createStore<AnonymousSettings>(loadSettings());
-const [anonymityStatus, setAnonymityStatus] = createStore<AnonymityStatus>({
-  supported: true,
-  label: "Not connected",
-  description: "Anonymous inbox routing status will appear after gateway connection.",
-});
+/** Whether inbox traffic goes through the onion relay; `null` until the client reports it. */
+const [onionUp, setOnionUp] = createSignal<boolean | null>(null);
 
 export function setAnonymousSettings(settings: AnonymousSettings) {
   setAnonymousSettingsStore(settings);
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
-export { anonymousSettings, anonymityStatus, setAnonymityStatus };
+export { anonymousSettings, onionUp, setOnionUp };

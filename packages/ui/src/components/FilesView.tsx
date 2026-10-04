@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js";
 import { api } from "../platform";
 import { transfers, upsertTransfer } from "../stores/transfers";
-import { addToast } from "../stores/toasts";
+import { toastError } from "../stores/toasts";
 import { FilesIcon } from "./Icons";
 import { t } from "../i18n";
 
@@ -11,7 +11,7 @@ export default function FilesView() {
       await api.acceptFile(fileId);
       upsertTransfer({ file_id: fileId, status: "active" });
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     }
   }
 
@@ -19,7 +19,7 @@ export default function FilesView() {
     try {
       await api.cancelTransfer(fileId);
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     }
   }
 

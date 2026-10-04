@@ -8,7 +8,7 @@ import { windowActive } from "../stores/presence";
 import VoiceBubble from "./media/VoiceBubble";
 import RoundVideoBubble from "./media/RoundVideoBubble";
 import RecordButton from "./media/RecordButton";
-import { addToast } from "../stores/toasts";
+import { toastError } from "../stores/toasts";
 import { SendIcon, ChatIcon, ShieldIcon, UploadIcon } from "./Icons";
 import SafetyNumber from "./SafetyNumber";
 import type { Page } from "./Sidebar";
@@ -135,7 +135,7 @@ export default function ChatPane(props: ChatPaneProps) {
       addMessage(peer, { msg_id: msgId, from: "me", text, timestamp: Date.now(), status: "pending" });
       setDraft("");
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     }
   }
 
@@ -154,7 +154,7 @@ export default function ChatPane(props: ChatPaneProps) {
         });
       }
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     }
   }
 

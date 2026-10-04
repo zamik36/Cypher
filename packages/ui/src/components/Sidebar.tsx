@@ -1,4 +1,5 @@
 import { Show } from "solid-js";
+import { setThemePref, theme } from "../stores/theme";
 import { HomeIcon, ChatIcon, FilesIcon, SettingsIcon, SunIcon, MoonIcon, LinkIcon } from "./Icons";
 import LinkStatus from "./LinkStatus";
 import { t } from "../i18n";
@@ -8,8 +9,6 @@ export type Page = "home" | "chat" | "files" | "settings";
 interface SidebarProps {
   page: Page;
   setPage: (p: Page) => void;
-  theme: string;
-  toggleTheme: () => void;
   unread: number;
   drawerOpen: boolean;
   setDrawerOpen: (open: boolean) => void;
@@ -70,9 +69,9 @@ export default function Sidebar(props: SidebarProps) {
           <button class={`nav-item ${props.page === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}>
             <SettingsIcon /> {t().nav_settings}
           </button>
-          <button class="nav-item" onClick={() => props.toggleTheme()}>
+          <button class="nav-item" onClick={() => setThemePref(theme() === "dark" ? "light" : "dark")}>
             <Show
-              when={props.theme === "dark"}
+              when={theme() === "dark"}
               fallback={
                 <>
                   <MoonIcon /> {t().sidebar_dark_mode}

@@ -18,6 +18,12 @@ export function reasonText(error: unknown): string {
     UpdateRequired: tr.error_update_required,
     StorageFailed: tr.error_storage_failed,
     Corrupted: tr.error_corrupted,
+    Rejected: tr.error_rejected,
+    Cancelled: tr.error_cancelled,
+    SourceUnavailable: tr.error_source_unavailable,
+    Unauthorized: tr.error_unauthorized,
+    ServerError: tr.error_server,
+    DecryptFailed: tr.error_decrypt_failed,
     // Identity file and recovery phrase, as both platforms word them.
     "wrong passphrase": tr.identity_err_wrong_passphrase,
     "passphrase is too short": tr.identity_err_short,

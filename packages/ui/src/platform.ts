@@ -67,10 +67,9 @@ export interface ConversationEntry {
   last_message_at: number;
 }
 
+/** 1 while inbox traffic goes through the onion relay, 0 otherwise. */
 export interface AnonymityLevelPayload {
   level: number;
-  label: string;
-  description: string;
 }
 export interface FileOffer {
   from: string;

@@ -37,6 +37,7 @@ describe("translations", () => {
       expect(table.toast_clear_failed("disk")).toContain("disk");
       expect(table.toast_anonymous_save_failed("relay")).toContain("relay");
       expect(table.backup_word(17)).toContain("17");
+      expect(table.settings_version("1.2.3")).toContain("1.2.3");
     }
   });
 

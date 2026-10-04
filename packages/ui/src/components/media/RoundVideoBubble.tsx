@@ -1,7 +1,7 @@
 import { createMemo, createSignal, onCleanup, Show } from "solid-js";
 import { api, type UiFile } from "../../platform";
 import { mediaProgress, mediaReady } from "../../stores/media";
-import { addToast } from "../../stores/toasts";
+import { addToast, toastError } from "../../stores/toasts";
 import { t } from "../../i18n";
 import { claimPlayback, formatDuration } from "./player";
 
@@ -45,7 +45,7 @@ export default function RoundVideoBubble(props: { file: UiFile }) {
         video.pause();
       }
     } catch (e) {
-      addToast(String(e), "error");
+      toastError(e);
     }
   }
 

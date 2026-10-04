@@ -37,7 +37,7 @@ export default function HomeView(props: HomeViewProps) {
         /* QR is optional */
       }
     } catch (e) {
-      setError(String(e));
+      setError(reasonText(e));
     } finally {
       setBusy(false);
     }
