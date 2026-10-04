@@ -108,6 +108,14 @@ pub(crate) enum Request {
     Shutdown,
 }
 
+/// Someone the user has a session with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contact {
+    pub peer: PeerId,
+    /// The name the user gave them on this device.
+    pub alias: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Client {
     tx: mpsc::Sender<Request>,
@@ -356,14 +364,67 @@ impl Client {
     }
 
     /// Peers with an established session.
-    pub async fn contacts(&self) -> Result<Vec<PeerId>, ClientError> {
+    /// Everyone with a session, with the name the user gave them. A row that
+    /// cannot be read still lists its contact, unnamed.
+    pub async fn contacts(&self) -> Result<Vec<Contact>, ClientError> {
         Ok(self
             .store
             .scan(Table::Peers.name())
             .await?
             .into_iter()
-            .filter_map(|(k, _)| PeerId::from_bytes(&k))
+            .filter_map(|(key, sealed)| {
+                let peer = PeerId::from_bytes(&key)?;
+                let alias = self.vault.open_contact_alias(&key, &sealed).ok().flatten();
+                Some(Contact { peer, alias })
+            })
             .collect())
+    }
+
+    /// Names a contact on this device; `None` or blank removes the name.
+    pub async fn rename_contact(
+        &self,
+        peer: PeerId,
+        alias: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.command(Command::RenamePeer { peer, alias }).await
+    }
+
+    /// Ends the session with `peer` and deletes the conversation: messages,
+    /// their statuses and stored voice and video notes. Files the user saved
+    /// stay where they are.
+    pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
+        self.command(Command::RemovePeer { peer }).await?;
+        let from = message_key(&peer, 0, &MsgId([0; 16]));
+        let to = message_key(&peer, u64::MAX, &MsgId([0xFF; 16]));
+        let rows = self
+            .store
+            .range_desc(Table::Messages.name(), from, to, usize::MAX)
+            .await?;
+        let mut ops = Vec::with_capacity(rows.len() * 2);
+        let mut media = Vec::new();
+        for (key, sealed) in rows {
+            if let Ok(msg) = self.vault.open_message(&key, &sealed) {
+                ops.push(store::Op::Delete(
+                    Table::MessageStatus.name(),
+                    msg.msg_id.to_vec(),
+                ));
+                if let Content::File { file_id, kind, .. } = msg.content
+                    && kind.is_media()
+                {
+                    ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
+                    media.push(file_id);
+                }
+            }
+            ops.push(store::Op::Delete(Table::Messages.name(), key));
+        }
+        self.store.apply(ops).await?;
+        for file_id in media {
+            match tokio::fs::remove_file(self.config.media_path(&file_id)).await {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Deletes every stored message and media note; sessions and contacts

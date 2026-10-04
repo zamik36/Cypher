@@ -11,7 +11,7 @@ use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind};
-use crate::peer::Peer;
+use crate::peer::{Peer, clean_alias};
 use crate::relay::{self, RelayBody};
 use crate::store::{StoreOp, Table, message_key};
 
@@ -109,6 +109,14 @@ impl<R: CryptoRngCore> Core<R> {
         for &msg_id in ids {
             self.set_status(msg_id, MessageStatus::Read);
         }
+    }
+
+    pub(super) fn rename_peer(&mut self, peer: &PeerId, alias: Option<&str>) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        p.alias = alias.and_then(clean_alias);
+        self.persist_peer(peer);
     }
 
     pub(super) fn remove_peer(&mut self, peer: &PeerId) {
@@ -367,7 +375,11 @@ impl<R: CryptoRngCore> Core<R> {
             });
             return;
         }
-        let inbox = self.peers.get(&peer).and_then(|p| p.inbox);
+        let (inbox, alias) = self
+            .peers
+            .get(&peer)
+            .map(|p| (p.inbox, p.alias.clone()))
+            .unwrap_or_default();
         self.peers.insert(
             peer,
             Peer {
@@ -377,6 +389,7 @@ impl<R: CryptoRngCore> Core<R> {
                 identity_dh,
                 inbox,
                 hello_sent: false,
+                alias,
             },
         );
         self.requeue_for(&peer);
@@ -504,8 +517,8 @@ impl<R: CryptoRngCore> Core<R> {
 
         let previous = self.peers.remove(&from);
         let is_new = previous.is_none();
-        let (inbox, mut seen) = previous
-            .map(|p| (p.inbox, p.accepted_ephemerals))
+        let (inbox, mut seen, alias) = previous
+            .map(|p| (p.inbox, p.accepted_ephemerals, p.alias))
             .unwrap_or_default();
         Peer::remember_ephemeral(&mut seen, init.ephemeral);
         self.peers.insert(
@@ -517,6 +530,7 @@ impl<R: CryptoRngCore> Core<R> {
                 identity_dh: init.identity_dh,
                 inbox,
                 hello_sent: false,
+                alias,
             },
         );
         self.requeue_for(&from);

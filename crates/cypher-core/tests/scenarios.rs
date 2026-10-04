@@ -53,6 +53,40 @@ fn join_link_establishes_session_both_ways_and_either_side_writes_first() {
     assert_eq!(w.status_of(B, from_joiner), Some(MessageStatus::Delivered));
 }
 
+/// A contact's name lives with its session on this device: it survives a
+/// restart and a new session with the same person, and goes with the chat.
+#[test]
+fn contacts_keep_the_name_given_on_this_device() {
+    let mut w = paired();
+    let b = w.peer(B);
+    w.command(
+        A,
+        Command::RenamePeer {
+            peer: b,
+            alias: Some("  Bob\u{7}  ".into()),
+        },
+    );
+    assert_eq!(w.alias(A, b).as_deref(), Some("Bob"));
+
+    w.restart(A);
+    assert_eq!(w.alias(A, b).as_deref(), Some("Bob"));
+    w.pair(A, B);
+    assert_eq!(w.alias(A, b).as_deref(), Some("Bob"));
+    w.send_text(A, B, "still talking");
+    assert!(w.texts(B).contains(&"still talking".to_owned()));
+
+    w.command(
+        A,
+        Command::RenamePeer {
+            peer: b,
+            alias: Some("   ".into()),
+        },
+    );
+    assert_eq!(w.alias(A, b), None);
+    w.command(A, Command::RemovePeer { peer: b });
+    assert!(!w.has_session(A, b));
+}
+
 #[test]
 fn host_can_message_first_right_after_join() {
     let mut w = World::new(2);

@@ -52,6 +52,8 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             identity::get_conversations,
             identity::get_history,
             identity::clear_chat_history,
+            identity::rename_peer,
+            identity::delete_conversation,
             settings::connect_to_gateway,
             settings::apply_anonymous_settings,
             settings::get_nickname,

@@ -74,7 +74,7 @@ export default function App() {
           peerId: conv.peer_id,
           roomCode: "saved",
           role: "guest",
-          displayName: conv.display_name || shortName(conv.peer_id),
+          displayName: conv.alias ?? shortName(conv.peer_id),
           online: false,
         });
       }

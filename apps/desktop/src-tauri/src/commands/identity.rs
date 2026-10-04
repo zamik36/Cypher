@@ -2,7 +2,9 @@ use cypher_client::{IdentityStore, Unlocked};
 use serde::Serialize;
 use tauri::State;
 
+use super::chat::parse_peer;
 use crate::session::{AppState, CmdResult, err};
+use cypher_core::MessageStatus;
 use cypher_core::ui::{self, UiMessage};
 
 /// Argon2id is deliberately slow; keep it off the async runtime.
@@ -74,24 +76,67 @@ pub(crate) async fn export_mnemonic(
 #[derive(Debug, Serialize)]
 pub(crate) struct Conversation {
     peer_id: String,
-    display_name: Option<String>,
+    /// The name the user gave this contact.
+    alias: Option<String>,
     last_message_at: u64,
+    last: Option<UiMessage>,
+    /// Incoming messages not yet read, among the latest [`UNREAD_WINDOW`].
+    unread: usize,
 }
 
+/// How far back unread messages are counted; the list shows "99+" anyway.
+const UNREAD_WINDOW: usize = 100;
+
+/// Every conversation, most recent first, as the chat list shows it.
 #[tauri::command]
 pub(crate) async fn get_conversations(state: State<'_, AppState>) -> CmdResult<Vec<Conversation>> {
     let client = state.client().await?;
     let mut out = Vec::new();
-    for peer in client.contacts().await.map_err(err)? {
-        let last = client.history(peer, None, 1).await.map_err(err)?;
+    for contact in client.contacts().await.map_err(err)? {
+        let recent = client
+            .history(contact.peer, None, UNREAD_WINDOW)
+            .await
+            .map_err(err)?;
+        let unread = recent
+            .iter()
+            .filter(|m| !m.outgoing && m.status != MessageStatus::Read)
+            .count();
         out.push(Conversation {
-            peer_id: peer.to_hex(),
-            display_name: None,
-            last_message_at: last.first().map_or(0, |m| m.sent_at_ms),
+            peer_id: contact.peer.to_hex(),
+            alias: contact.alias,
+            last_message_at: recent.first().map_or(0, |m| m.sent_at_ms),
+            last: recent.first().map(ui::message),
+            unread,
         });
     }
     out.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
     Ok(out)
+}
+
+/// Names a contact on this device; an empty name removes it.
+#[tauri::command]
+pub(crate) async fn rename_peer(
+    state: State<'_, AppState>,
+    peer_id: String,
+    alias: Option<String>,
+) -> CmdResult<()> {
+    let peer = parse_peer(&peer_id)?;
+    state
+        .client()
+        .await?
+        .rename_contact(peer, alias)
+        .await
+        .map_err(err)
+}
+
+/// Ends the session with a contact and deletes the conversation.
+#[tauri::command]
+pub(crate) async fn delete_conversation(
+    state: State<'_, AppState>,
+    peer_id: String,
+) -> CmdResult<()> {
+    let peer = parse_peer(&peer_id)?;
+    state.client().await?.forget_peer(peer).await.map_err(err)
 }
 
 #[tauri::command]

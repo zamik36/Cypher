@@ -191,6 +191,17 @@ impl Vault {
     pub fn open_media(&self, file_id: &FileId, sealed: &[u8]) -> Result<MediaKey, CoreError> {
         self.open(Table::Media, file_id.as_bytes(), sealed)
     }
+
+    /// The name the user gave a contact, from its sealed session row (keyed
+    /// by the peer id). Drivers list contacts without restoring sessions.
+    pub fn open_contact_alias(
+        &self,
+        peer_key: &[u8],
+        sealed: &[u8],
+    ) -> Result<Option<String>, CoreError> {
+        self.open::<crate::peer::PeerRecord>(Table::Peers, peer_key, sealed)
+            .map(|record| record.alias)
+    }
 }
 
 fn aad(table: Table, key: &[u8]) -> Vec<u8> {

@@ -1,4 +1,4 @@
-import type { LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
+import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 import type { Method, Methods, WorkerMessage } from "./protocol";
 import { WebVoiceRecorder } from "./voice";
 
@@ -119,7 +119,11 @@ export const webPlatform: Platform = {
     }
     return url;
   },
-  getConversations: () => call("conversations"),
+  getConversations: () => call("conversations") as Promise<ConversationEntry[]>,
+  renamePeer: async (peerId, alias) => {
+    await call("command", { type: "rename_peer", peer: peerId, alias });
+  },
+  deleteConversation: (peerId) => call("forgetPeer", peerId),
   getHistory: (peerId, limit, before) => call("history", peerId, limit, before) as Promise<UiMessage[]>,
   clearChatHistory: async () => {
     await call("clearHistory");

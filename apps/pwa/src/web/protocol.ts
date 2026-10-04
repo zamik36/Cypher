@@ -26,7 +26,15 @@ export interface Methods {
   safetyNumber(peer: string): string;
   /** Takes the session back after another device took it over. */
   reconnect(): void;
-  conversations(): { peer_id: string; display_name: null; last_message_at: number }[];
+  conversations(): {
+    peer_id: string;
+    alias: string | null;
+    last_message_at: number;
+    last: unknown;
+    unread: number;
+  }[];
+  /** Ends the session with `peer` and deletes the conversation. */
+  forgetPeer(peer: string): void;
   history(peer: string, limit: number, before?: number): unknown[];
   clearHistory(): void;
 }

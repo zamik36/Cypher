@@ -72,6 +72,11 @@ pub enum Command {
     RemovePeer {
         peer: PeerId,
     },
+    /// Names a contact on this device; `None` or blank removes the name.
+    RenamePeer {
+        peer: PeerId,
+        alias: Option<String>,
+    },
     /// With `require_onion`, inbox traffic never falls back to the
     /// identity-bearing gateway session.
     SetAnonymity {

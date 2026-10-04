@@ -97,6 +97,8 @@ export const tauriPlatform: Platform = {
   },
   mediaUrl: (fileId) => Promise.resolve(convertFileSrc(fileId, "cypher-media")),
   getConversations: () => invoke<ConversationEntry[]>("get_conversations"),
+  renamePeer: (peerId, alias) => command("rename_peer", { peerId, alias }),
+  deleteConversation: (peerId) => command("delete_conversation", { peerId }),
   getHistory: (peerId, limit, before) => invoke<UiMessage[]>("get_history", { peerId, limit, before }),
   clearChatHistory: () => command("clear_chat_history"),
   on: (channel, cb) => listen<Parameters<typeof cb>[0]>(`cypher://${channel}`, (e) => cb(e.payload)),

@@ -23,6 +23,7 @@ pub(crate) enum JsCommand {
     FetchInbox,
     SetAnonymity { require_onion: bool },
     RemovePeer { peer: String },
+    RenamePeer { peer: String, alias: Option<String> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +109,10 @@ impl JsCommand {
             Self::FetchInbox => plain(Command::FetchInbox),
             Self::SetAnonymity { require_onion } => plain(Command::SetAnonymity { require_onion }),
             Self::RemovePeer { peer: p } => plain(Command::RemovePeer { peer: peer(&p)? }),
+            Self::RenamePeer { peer: p, alias } => plain(Command::RenamePeer {
+                peer: peer(&p)?,
+                alias,
+            }),
         })
     }
 }
@@ -237,6 +242,25 @@ mod tests {
             });
             assert_eq!(prepare(file).unwrap_err(), CommandError::Size, "{size}");
         }
+    }
+
+    #[test]
+    fn contacts_can_be_named_and_unnamed() {
+        let rename = |alias: serde_json::Value| {
+            prepare(json!({ "type": "rename_peer", "peer": PEER, "alias": alias }))
+                .unwrap()
+                .command
+        };
+        let Command::RenamePeer { alias, .. } = rename(json!("Anna")) else {
+            panic!("not a rename");
+        };
+        assert_eq!(alias.as_deref(), Some("Anna"));
+        let Command::RenamePeer { alias, .. } = rename(json!(null)) else {
+            panic!("not a rename");
+        };
+        assert_eq!(alias, None);
+        let bad = json!({ "type": "rename_peer", "peer": "zz", "alias": "x" });
+        assert_eq!(prepare(bad).unwrap_err(), CommandError::Peer);
     }
 
     #[test]

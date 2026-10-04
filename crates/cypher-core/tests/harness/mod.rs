@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bytes::Bytes;
-use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table};
+use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault};
 use cypher_crypto::IdentitySeed;
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
@@ -145,6 +145,21 @@ impl World {
         self.clients[i].connected = false;
         self.clients[i].inputs.push_back(Input::Disconnected);
         self.run();
+    }
+
+    /// Whether client `i` keeps a session with `peer`.
+    pub(crate) fn has_session(&self, i: usize, peer: PeerId) -> bool {
+        self.clients[i]
+            .kv
+            .contains_key(&(Table::Peers as u8, peer.to_vec()))
+    }
+
+    /// The name client `i` stored for `peer`, whose session must exist.
+    pub(crate) fn alias(&self, i: usize, peer: PeerId) -> Option<String> {
+        let c = &self.clients[i];
+        let vault = Vault::new(IdentitySeed(c.seed).derive_storage_key());
+        let sealed = &c.kv[&(Table::Peers as u8, peer.to_vec())];
+        vault.open_contact_alias(peer.as_bytes(), sealed).unwrap()
     }
 
     pub(crate) fn restart(&mut self, i: usize) {

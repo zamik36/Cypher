@@ -8,6 +8,7 @@ import init, {
   type Effect,
   type ReadChunk,
   type Reply,
+  type Op,
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan } from "./idb";
@@ -329,6 +330,17 @@ async function history(peer: string, limit: number, before?: number) {
   return rows.map(([key, value], i) => c.openMessage(key, value, statuses[i]));
 }
 
+/** How far back unread messages are counted; the list shows "99+" anyway. */
+const UNREAD_WINDOW = 100;
+
+/** The fields of a decrypted message the worker itself reads. */
+interface StoredView {
+  timestamp: number;
+  outgoing: boolean;
+  status: string;
+  file: { file_id: string; kind: string } | null;
+}
+
 type Handlers = { [M in Method]: (...args: Parameters<Methods[M]>) => Promise<ReturnType<Methods[M]>> };
 
 const handlers: Handlers = {
@@ -407,16 +419,43 @@ const handlers: Handlers = {
     return Promise.resolve();
   },
   conversations: async () => {
+    const c = requireClient();
     const peers = await scan(db, "peers");
     const out = await Promise.all(
-      peers.map(async ([key]) => {
+      peers.map(async ([key, value]) => {
         const peer_id = hex(key);
-        const [last] = (await history(peer_id, 1)) as { timestamp: number }[];
-        return { peer_id, display_name: null, last_message_at: last?.timestamp ?? 0 };
+        const recent = (await history(peer_id, UNREAD_WINDOW)) as StoredView[];
+        const last = recent[0] ?? null;
+        return {
+          peer_id,
+          alias: c.contactAlias(key, value) ?? null,
+          last_message_at: last?.timestamp ?? 0,
+          last,
+          unread: recent.filter((m) => !m.outgoing && m.status !== "read").length,
+        };
       }),
     );
     return out.sort((a, b) => b.last_message_at - a.last_message_at);
   },
+  forgetPeer: (peer) =>
+    serial(async () => {
+      await run({ type: "remove_peer", peer });
+      const c = requireClient();
+      const [from, to] = historyRange(peer, undefined);
+      const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true));
+      const media: string[] = [];
+      const ops: Op[] = [];
+      for (const [key, value] of rows) {
+        const msg = c.openMessage(key, value, undefined) as StoredView;
+        if (msg.file && msg.file.kind !== "file") media.push(msg.file.file_id);
+        ops.push({ kind: "delete", table: "messages", key });
+        ops.push({ kind: "delete", table: "message_status", key: key.slice(key.length - 16) });
+      }
+      for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
+      await applyOps(db, ops);
+      const dir = await sinkDir(true);
+      await Promise.all(media.map((id) => dir.removeEntry(id).catch(() => undefined)));
+    }),
   history: (peer, limit, before) => history(peer, Math.min(limit, 500), before),
   sendMedia,
   mediaBlob,

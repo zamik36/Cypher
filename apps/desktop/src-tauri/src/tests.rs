@@ -326,11 +326,36 @@ async fn two_desktops_against_in_process_stack() {
     send_a_voice_note(&a, &b, &a_id, &b_id).await;
     play_a_video_note(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
+    name_then_forget_a_contact(&b, &a_id).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
     a.call("apply_anonymous_settings", anonymity).await.unwrap();
     a.call("clear_chat_history", json!({})).await.unwrap();
     stack.stop().await;
+}
+
+/// A contact's name shows in the chat list; deleting the chat empties its
+/// history and drops it from the list.
+async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
+    let rename = json!({ "peerId": a_id, "alias": " Alice " });
+    b.call("rename_peer", rename).await.unwrap();
+    let list = b.call("get_conversations", json!({})).await.unwrap();
+    assert_eq!(list[0]["alias"], "Alice");
+    assert_eq!(list[0]["peer_id"], a_id);
+    assert!(list[0]["last"].is_object());
+    assert_eq!(list[0]["unread"].as_u64().map(|n| n > 0), Some(true));
+
+    let invalid = b.call("rename_peer", json!({ "peerId": "zz", "alias": "x" }));
+    assert_eq!(invalid.await.unwrap_err(), "invalid peer id");
+
+    b.call("delete_conversation", json!({ "peerId": a_id }))
+        .await
+        .unwrap();
+    let list = b.call("get_conversations", json!({})).await.unwrap();
+    assert_eq!(list.as_array().map(Vec::len), Some(0));
+    let history = json!({ "peerId": a_id, "limit": 10, "before": null });
+    let left = b.call("get_history", history).await.unwrap();
+    assert_eq!(left.as_array().map(Vec::len), Some(0));
 }
 
 async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {

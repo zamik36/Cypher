@@ -61,10 +61,15 @@ export interface TransferInfo {
   status: "offered" | "active" | "complete" | "error";
 }
 
+/** A conversation as the chat list shows it, most recent first. */
 export interface ConversationEntry {
   peer_id: string;
-  display_name: string | null;
+  /** The name the user gave this contact on this device. */
+  alias: string | null;
   last_message_at: number;
+  last: UiMessage | null;
+  /** Incoming messages not read yet (counted over the latest hundred). */
+  unread: number;
 }
 
 /** 1 while inbox traffic goes through the onion relay, 0 otherwise. */
@@ -138,6 +143,10 @@ export interface Platform {
   /** URL an `<audio>`/`<video>` element can play a stored note from. */
   mediaUrl(fileId: string): Promise<string>;
   getConversations(): Promise<ConversationEntry[]>;
+  /** Names a contact on this device; `null` or blank removes the name. */
+  renamePeer(peerId: string, alias: string | null): Promise<void>;
+  /** Ends the session with a contact and deletes the conversation. */
+  deleteConversation(peerId: string): Promise<void>;
   getHistory(peerId: string, limit: number, before?: number): Promise<UiMessage[]>;
   clearChatHistory(): Promise<void>;
   /** Subscribes to a core event channel. */
