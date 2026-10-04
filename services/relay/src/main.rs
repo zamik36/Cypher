@@ -1,9 +1,4 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config: relay::Config = cypher_server_kit::load_config()?;
-    if std::env::args().nth(1).as_deref() == Some("health") {
-        return cypher_server_kit::metrics::probe_ready(config.metrics_addr);
-    }
-    cypher_server_kit::init_tracing();
-    relay::run(config, cypher_server_kit::shutdown_token()).await
+    cypher_server_kit::service_main(|c: &relay::Config| c.metrics_addr, relay::run).await
 }

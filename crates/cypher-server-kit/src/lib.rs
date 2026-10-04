@@ -22,6 +22,25 @@ pub fn peer_subject(peer_hex: &str) -> String {
     format!("peer.{peer_hex}")
 }
 
+/// Everything a service's `main` does: `<service> health` asks a running
+/// instance on `metrics_addr` whether it is ready (the container
+/// healthcheck); otherwise the service runs until a shutdown signal.
+pub async fn service_main<C, F>(
+    metrics_addr: impl FnOnce(&C) -> std::net::SocketAddr,
+    run: impl FnOnce(C, tokio_util::sync::CancellationToken) -> F,
+) -> anyhow::Result<()>
+where
+    C: DeserializeOwned,
+    F: Future<Output = anyhow::Result<()>>,
+{
+    let config: C = load_config()?;
+    if std::env::args().nth(1).as_deref() == Some("health") {
+        return metrics::probe_ready(metrics_addr(&config));
+    }
+    init_tracing();
+    run(config, shutdown_token()).await
+}
+
 /// Loads `T` from an optional `config.toml` and `P2P_*` environment variables.
 pub fn load_config<T: DeserializeOwned>() -> anyhow::Result<T> {
     Ok(config::Config::builder()
