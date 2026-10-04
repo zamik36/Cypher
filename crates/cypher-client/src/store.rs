@@ -71,6 +71,14 @@ impl Store {
         Ok(Self { tx })
     }
 
+    /// A store whose worker is gone, as after the database thread died:
+    /// every call fails with [`ClientError::Closed`].
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let (tx, _) = std_mpsc::channel();
+        Self { tx }
+    }
+
     /// Resolves once the batch is durable.
     pub(crate) async fn apply(&self, ops: Vec<Op>) -> Result<(), ClientError> {
         if ops.is_empty() {

@@ -201,6 +201,8 @@ pub enum FailReason {
     Unauthorized,
     ServerError,
     DecryptFailed,
+    /// The driver could not make state durable and stopped the client.
+    StorageFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

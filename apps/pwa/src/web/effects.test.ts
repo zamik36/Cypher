@@ -50,6 +50,22 @@ describe("applyEffects", () => {
     ]);
   });
 
+  it("sends nothing after a storage batch fails", async () => {
+    const { log, sinks } = recorder();
+    sinks.persist = () => Promise.reject(new DOMException("quota", "QuotaExceededError"));
+    await expect(
+      applyEffects(
+        [
+          { kind: "put", table: "outbox", key: bytes(1), value: bytes(2) },
+          { kind: "transmit", data: bytes(9) },
+          { kind: "anonymous", data: bytes(8) },
+        ],
+        sinks,
+      ),
+    ).rejects.toThrow("quota");
+    expect(log).toEqual([]);
+  });
+
   it("routes every other effect in order without persisting empty batches", async () => {
     const { log, sinks } = recorder();
     await applyEffects(

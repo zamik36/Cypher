@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use cypher_core::{Core, Effect, Event, Input, StoreOp};
+use cypher_core::{Core, Effect, Event, FailReason, Input, StoreOp};
 use cypher_types::FileId;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,8 @@ pub(crate) struct Driver {
     relay_retry: Retry,
     reconnect: bool,
     ops: Vec<Op>,
+    /// Set when state could not be persisted; the driver then stops.
+    failed: bool,
     #[cfg(feature = "tor")]
     tor: Option<Arc<crate::tor::Tor>>,
 }
@@ -110,6 +112,7 @@ impl Driver {
             relay_retry: Retry::new(),
             reconnect: true,
             ops: Vec::new(),
+            failed: false,
             #[cfg(feature = "tor")]
             tor: None,
         };
@@ -136,6 +139,9 @@ impl Driver {
                 Some(ev) = net_rx.recv() => self.on_net(ev).await,
                 Some(done) = io_rx.recv() => self.on_io(done).await,
                 _ = tick.tick() => self.on_tick().await,
+            }
+            if self.failed {
+                break;
             }
         }
         self.flush().await;
@@ -255,25 +261,33 @@ impl Driver {
     }
 
     async fn feed(&mut self, input: Input) {
+        if self.failed {
+            return;
+        }
         let effects = self.core.handle(input, now_ms());
         self.apply(effects).await;
     }
 
     /// Executes effects in order. Pending persistence is committed before any
     /// frame leaves, so a crash can never replay ratchet keys or lose data the
-    /// server already considers delivered.
+    /// server already considers delivered. If it cannot be committed, nothing
+    /// after it runs: the core has moved past what is on disk.
     async fn apply(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
                 Effect::Persist(op) => self.stage(op),
                 Effect::Transmit(frame) => {
-                    self.flush().await;
+                    if !self.flush().await {
+                        return;
+                    }
                     if let Some(gw) = &self.gateway {
                         let _ = gw.send(frame).await;
                     }
                 }
                 Effect::Anonymous(frame) => {
-                    self.flush().await;
+                    if !self.flush().await {
+                        return;
+                    }
                     if let Some(relay) = &self.relay {
                         let _ = relay.send(frame).await;
                     }
@@ -372,11 +386,28 @@ impl Driver {
         self.ops.push(op.into());
     }
 
-    async fn flush(&mut self) {
-        let ops = std::mem::take(&mut self.ops);
-        if let Err(e) = self.store.apply(ops).await {
-            tracing::error!("persisting client state failed: {e}");
+    /// Commits staged operations. On failure the client stops for good:
+    /// sending anything computed from unsaved state could reuse ratchet keys
+    /// after a restart, or acknowledge inbox items that were never stored.
+    async fn flush(&mut self) -> bool {
+        if self.failed {
+            return false;
         }
+        let ops = std::mem::take(&mut self.ops);
+        let Err(e) = self.store.apply(ops).await else {
+            return true;
+        };
+        tracing::error!("persisting client state failed, stopping the client: {e}");
+        self.failed = true;
+        self.reconnect = false;
+        self.relay_addr = None;
+        self.gateway = None;
+        self.relay = None;
+        let _ = self.events.send(Event::Warning {
+            reason: FailReason::StorageFailed,
+        });
+        let _ = self.events.send(Event::Disconnected);
+        false
     }
 
     #[expect(
@@ -416,4 +447,107 @@ pub(crate) fn file_key(file_id: &FileId) -> Vec<u8> {
     let mut k = b"file:".to_vec();
     k.extend_from_slice(file_id.as_bytes());
     k
+}
+
+#[cfg(test)]
+mod tests {
+    use cypher_core::{Snapshot, Table};
+    use cypher_crypto::IdentitySeed;
+
+    use super::*;
+
+    fn driver(store: Store) -> (Driver, mpsc::UnboundedReceiver<Event>) {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let (core, _) = Core::restore(&seed, &Snapshot::default(), now_ms(), OsRng).unwrap();
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let (net_tx, _) = mpsc::unbounded_channel();
+        let (io_tx, _) = mpsc::unbounded_channel();
+        let driver = Driver {
+            core,
+            store,
+            io: FileIo::spawn(io_tx).unwrap(),
+            config: Config {
+                gateway_addr: "localhost:1".into(),
+                tls: cypher_tls::make_client_config(),
+                data_dir: dir.path().to_owned(),
+                require_onion: false,
+                tor: None,
+            },
+            events,
+            files: HashMap::new(),
+            vault: cypher_core::Vault::new(seed.derive_storage_key()),
+            gateway: None,
+            relay: None,
+            relay_addr: Some("localhost:2".into()),
+            net_tx,
+            gateway_retry: Retry::new(),
+            relay_retry: Retry::new(),
+            reconnect: true,
+            ops: Vec::new(),
+            failed: false,
+            #[cfg(feature = "tor")]
+            tor: None,
+        };
+        (driver, events_rx)
+    }
+
+    fn persist() -> Effect {
+        Effect::Persist(StoreOp::Put {
+            table: Table::Meta,
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+        })
+    }
+
+    #[tokio::test]
+    async fn frames_leave_only_after_their_state_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut d, _events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
+        let (gateway, mut sent) = mpsc::channel(4);
+        d.gateway = Some(gateway);
+        d.apply(vec![
+            persist(),
+            Effect::Transmit(Bytes::from_static(b"frame")),
+        ])
+        .await;
+        assert_eq!(sent.try_recv().unwrap(), Bytes::from_static(b"frame"));
+        assert_eq!(
+            d.store.get("meta", b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert!(!d.failed);
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_stops_the_client_before_anything_is_sent() {
+        let (mut d, mut events) = driver(Store::detached());
+        let (gateway, mut sent) = mpsc::channel(4);
+        let (relay, mut anonymous) = mpsc::channel(4);
+        d.gateway = Some(gateway);
+        d.relay = Some(relay);
+        d.apply(vec![
+            persist(),
+            Effect::Transmit(Bytes::from_static(b"frame")),
+            Effect::Anonymous(Bytes::from_static(b"inbox ack")),
+        ])
+        .await;
+
+        assert!(sent.try_recv().is_err(), "nothing reaches the gateway");
+        assert!(anonymous.try_recv().is_err(), "nothing reaches the relay");
+        assert!(d.failed && !d.reconnect && d.relay_addr.is_none());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::Warning {
+                reason: FailReason::StorageFailed
+            }
+        ));
+        assert!(matches!(events.try_recv().unwrap(), Event::Disconnected));
+
+        d.feed(Input::Tick).await;
+        assert!(
+            events.try_recv().is_err(),
+            "a stopped client handles no input"
+        );
+    }
 }
