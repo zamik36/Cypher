@@ -13,7 +13,7 @@ use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg, encode_recv,
     peek_send,
 };
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use rand::RngCore;
 use tokio::sync::Semaphore;
@@ -222,7 +222,6 @@ impl<B: Bus> Session<B> {
                 .try_push(frame(hello.req_id, error(ErrorCode::UnsupportedVersion)));
             return None;
         }
-        let key = VerifyingKey::from_bytes(peer.as_bytes()).ok()?;
         let mut nonce = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
         self.out
@@ -233,10 +232,10 @@ impl<B: Bus> Session<B> {
             return None;
         };
         let signed = [SESSION_AUTH_CONTEXT, nonce.as_slice()].concat();
-        if key
-            .verify(&signed, &Signature::from_bytes(&signature))
-            .is_err()
-        {
+        // Strict: a small-order key would otherwise "sign" any challenge.
+        let verified = VerifyingKey::from_bytes(peer.as_bytes())
+            .and_then(|key| key.verify_strict(&signed, &Signature::from_bytes(&signature)));
+        if verified.is_err() {
             self.gw.metrics.auth_failures.inc();
             self.out
                 .try_push(frame(auth.req_id, error(ErrorCode::Unauthorized)));

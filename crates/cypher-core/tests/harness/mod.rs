@@ -6,10 +6,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use bytes::Bytes;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table};
 use cypher_crypto::IdentitySeed;
+use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
 use cypher_types::{FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -394,10 +394,7 @@ impl World {
                 let (nonce, peer) = self.server.challenges.remove(&from).expect("hello first");
                 let mut signed = SESSION_AUTH_CONTEXT.to_vec();
                 signed.extend_from_slice(&nonce);
-                VerifyingKey::from_bytes(peer.as_bytes())
-                    .unwrap()
-                    .verify(&signed, &Signature::from_bytes(&signature))
-                    .expect("valid auth signature");
+                verify_signature(&peer, &signed, &signature).expect("valid auth signature");
                 self.server.online.insert(peer, from);
                 self.respond(from, &reply(ServerMsg::Ready));
             }

@@ -6,14 +6,13 @@
 //! initiator's Ed25519 identity, binding its X25519 identity key to its peer id.
 
 use cypher_types::PeerId;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand_core::CryptoRngCore;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::double_ratchet::{Ratchet, dh};
 use crate::error::CryptoError;
-use crate::identity::IdentityKeyPair;
+use crate::identity::{IdentityKeyPair, verify_signature};
 use crate::kdf::hkdf;
 use crate::prekey::{OneTimePreKey, PrekeyBundle, SignedPreKey};
 use crate::reader::Reader;
@@ -140,12 +139,11 @@ pub fn respond(
     if spk.id() != header.spk_id || !opk_matches {
         return Err(CryptoError::Malformed);
     }
-    let vk = VerifyingKey::from_bytes(initiator.as_bytes()).map_err(|_| CryptoError::Malformed)?;
-    vk.verify(
+    verify_signature(
+        initiator,
         &header.signed_message(&ours.peer_id()),
-        &Signature::from_bytes(&header.signature),
-    )
-    .map_err(|_| CryptoError::Signature)?;
+        &header.signature,
+    )?;
 
     let mut ikm = Zeroizing::new(Vec::with_capacity(32 * 5));
     ikm.extend_from_slice(&[0xFF; 32]);

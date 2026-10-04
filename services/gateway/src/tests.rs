@@ -112,11 +112,11 @@ async fn frames_before_auth_close_the_connection() {
     assert!(c.closed().await);
 }
 
-#[tokio::test]
-async fn bad_signature_is_rejected() {
+/// Claims `peer`, answers the challenge with `signature` and expects to be
+/// refused.
+async fn assert_auth_refused(peer: PeerId, signature: [u8; 64]) {
     let gw = gateway(&MemBus::default());
     let mut c = Client::connect(&gw);
-    let peer = c.peer();
     c.send(
         0,
         ClientMsg::Hello {
@@ -129,7 +129,7 @@ async fn bad_signature_is_rejected() {
         c.recv().await.unwrap().msg,
         ServerMsg::Challenge { .. }
     ));
-    c.send(0, ClientMsg::Auth { signature: [0; 64] }).await;
+    c.send(0, ClientMsg::Auth { signature }).await;
     assert!(matches!(
         c.recv().await.unwrap().msg,
         ServerMsg::Error {
@@ -137,6 +137,22 @@ async fn bad_signature_is_rejected() {
         }
     ));
     assert!(c.closed().await);
+}
+
+#[tokio::test]
+async fn bad_signature_is_rejected() {
+    assert_auth_refused(IdentityKeyPair::generate().peer_id(), [0; 64]).await;
+}
+
+/// The identity point with `R = identity, s = 0` would pass plain Ed25519
+/// verification for any challenge, letting anyone sign in as that peer.
+#[tokio::test]
+async fn a_small_order_key_cannot_sign_in() {
+    let mut identity_point = [0u8; 32];
+    identity_point[0] = 1;
+    let mut signature = [0u8; 64];
+    signature[0] = 1;
+    assert_auth_refused(PeerId(identity_point), signature).await;
 }
 
 #[tokio::test]

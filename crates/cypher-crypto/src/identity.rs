@@ -98,6 +98,20 @@ impl IdentityKeyPair {
     }
 }
 
+/// Checks that `peer`, an Ed25519 public key, signed `message`.
+///
+/// Strict: rejects small-order keys and non-canonical signatures. Plain
+/// verification accepts them, and a small-order key "signs" any message.
+pub fn verify_signature(
+    peer: &PeerId,
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    let key = VerifyingKey::from_bytes(peer.as_bytes()).map_err(|_| CryptoError::Malformed)?;
+    key.verify_strict(message, &Signature::from_bytes(signature))
+        .map_err(|_| CryptoError::Signature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +124,32 @@ mod tests {
         let vk = VerifyingKey::from_bytes(kp.peer_id().as_bytes()).unwrap();
         vk.verify(b"hello", &sig).unwrap();
         assert!(vk.verify(b"world", &sig).is_err());
+        let peer = kp.peer_id();
+        verify_signature(&peer, b"hello", &sig.to_bytes()).unwrap();
+        assert_eq!(
+            verify_signature(&peer, b"world", &sig.to_bytes()),
+            Err(CryptoError::Signature)
+        );
+    }
+
+    /// The identity point with `R = identity, s = 0` passes plain Ed25519
+    /// verification for every message; it must not pass ours.
+    #[test]
+    fn a_small_order_key_signs_nothing() {
+        let mut identity_point = [0u8; 32];
+        identity_point[0] = 1;
+        let mut signature = [0u8; 64];
+        signature[0] = 1;
+        let lax = VerifyingKey::from_bytes(&identity_point).unwrap();
+        assert!(
+            lax.verify(b"anything", &Signature::from_bytes(&signature))
+                .is_ok(),
+            "plain verification is fooled"
+        );
+        assert_eq!(
+            verify_signature(&PeerId(identity_point), b"anything", &signature),
+            Err(CryptoError::Signature)
+        );
     }
 
     #[test]

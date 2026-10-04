@@ -1,11 +1,10 @@
 use cypher_types::PeerId;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand_core::CryptoRngCore;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::error::CryptoError;
-use crate::identity::IdentityKeyPair;
+use crate::identity::{IdentityKeyPair, verify_signature};
 
 const SPK_SIGNATURE_CONTEXT: &[u8] = b"cypher/v2/spk";
 
@@ -113,11 +112,8 @@ impl PrekeyBundle {
     /// Checks that the signed prekey (and the DH identity it is bound to) was
     /// signed by the Ed25519 identity that *is* the peer id.
     pub fn verify(&self) -> Result<(), CryptoError> {
-        let vk = VerifyingKey::from_bytes(self.identity.as_bytes())
-            .map_err(|_| CryptoError::Malformed)?;
         let msg = spk_signed_message(&self.identity_dh, self.spk_id, &self.spk);
-        vk.verify(&msg, &Signature::from_bytes(&self.spk_signature))
-            .map_err(|_| CryptoError::Signature)
+        verify_signature(&self.identity, &msg, &self.spk_signature)
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
