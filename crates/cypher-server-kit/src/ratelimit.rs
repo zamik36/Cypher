@@ -42,6 +42,9 @@ impl TokenBucket {
     }
 }
 
+/// Seconds of traffic a connection may send in one burst.
+pub const BURST_SECS: u64 = 2;
+
 /// Limits both message rate and bandwidth of one connection.
 #[derive(Debug)]
 pub struct ConnLimiter {
@@ -52,8 +55,8 @@ pub struct ConnLimiter {
 impl ConnLimiter {
     pub fn new(frames_per_sec: u64, bytes_per_sec: u64) -> Self {
         Self {
-            frames: TokenBucket::new(frames_per_sec * 2, frames_per_sec),
-            bytes: TokenBucket::new(bytes_per_sec * 2, bytes_per_sec),
+            frames: TokenBucket::new(frames_per_sec.saturating_mul(BURST_SECS), frames_per_sec),
+            bytes: TokenBucket::new(bytes_per_sec.saturating_mul(BURST_SECS), bytes_per_sec),
         }
     }
 

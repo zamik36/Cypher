@@ -369,3 +369,46 @@ async fn ping_is_answered() {
     a.send(5, ClientMsg::Ping).await;
     assert_eq!(a.recv().await.unwrap(), Frame::new(5, ServerMsg::Pong));
 }
+
+#[test]
+fn settings_that_would_serve_no_one_are_refused() {
+    let valid = || crate::Config {
+        gateway_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: None,
+        nats: cypher_server_kit::NatsConfig {
+            url: "nats://127.0.0.1:4222".into(),
+            user: None,
+            password: None,
+            token: None,
+        },
+        tls_cert_path: None,
+        tls_key_path: None,
+        dev_cert_out: None,
+        metrics_addr: "127.0.0.1:0".parse().unwrap(),
+        max_connections: 10,
+        max_connections_per_ip: 2,
+        frames_per_sec: 100,
+        bytes_per_sec: 1 << 20,
+    };
+    valid().validate().unwrap();
+    for broken in [
+        crate::Config {
+            max_connections: 0,
+            ..valid()
+        },
+        crate::Config {
+            max_connections_per_ip: 0,
+            ..valid()
+        },
+        crate::Config {
+            frames_per_sec: 0,
+            ..valid()
+        },
+        crate::Config {
+            bytes_per_sec: 1000,
+            ..valid()
+        },
+    ] {
+        assert!(broken.validate().is_err());
+    }
+}

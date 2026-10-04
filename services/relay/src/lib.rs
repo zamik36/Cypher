@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::ensure;
 use bytes::{BufMut, Bytes, BytesMut};
 use cypher_server_kit::SIG_ONION_SUBJECT;
 use cypher_server_kit::metrics::Metrics;
@@ -50,6 +51,17 @@ pub struct Config {
     /// Connections one client address (IPv4, or IPv6 /64) may hold.
     #[serde(default = "default_max_connections_per_ip")]
     pub max_connections_per_ip: usize,
+}
+
+impl Config {
+    /// Refuses settings under which the relay would start yet admit no one.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.max_connections > 0 && self.max_connections_per_ip > 0,
+            "max_connections and max_connections_per_ip must be positive"
+        );
+        Ok(())
+    }
 }
 
 fn default_relay_addr() -> SocketAddr {
@@ -172,6 +184,7 @@ impl<U: OnionUpstream> Handler for Relay<U> {
 
 /// Runs the relay until `shutdown` is cancelled.
 pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<()> {
+    config.validate()?;
     let registry = Metrics::new()?;
     registry
         .serve(config.metrics_addr, shutdown.clone())

@@ -13,8 +13,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::ensure;
+use cypher_server_kit::ratelimit::BURST_SECS;
 use cypher_transport::server::{self, Handler, Listener, Upgrade};
 use cypher_transport::{FrameSink, FrameStream};
+use cypher_types::MAX_FRAME_SIZE;
 use serde::Deserialize;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +56,23 @@ fn default_gateway_addr() -> SocketAddr {
 fn default_metrics_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9090))
 }
+impl Config {
+    /// Refuses settings under which the gateway would start yet admit no
+    /// one, or never pass a full-size frame.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.max_connections > 0 && self.max_connections_per_ip > 0,
+            "max_connections and max_connections_per_ip must be positive"
+        );
+        ensure!(self.frames_per_sec > 0, "frames_per_sec must be positive");
+        ensure!(
+            self.bytes_per_sec.saturating_mul(BURST_SECS) >= MAX_FRAME_SIZE as u64,
+            "bytes_per_sec must let a {MAX_FRAME_SIZE}-byte frame through within {BURST_SECS} s"
+        );
+        Ok(())
+    }
+}
+
 fn default_max_connections_per_ip() -> usize {
     128
 }
@@ -82,6 +102,7 @@ impl<B: Bus> Handler for Gateway<B> {
 
 /// Runs the gateway until `shutdown` is cancelled.
 pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<()> {
+    config.validate()?;
     let registry = cypher_server_kit::metrics::Metrics::new()?;
     registry
         .serve(config.metrics_addr, shutdown.clone())
