@@ -17,6 +17,8 @@ const POLL: Duration = Duration::from_millis(50);
 
 pub struct Stack {
     target: Target,
+    /// Metrics (and readiness) endpoints of signaling, gateway and relay.
+    metrics: [SocketAddr; 3],
     shutdown: CancellationToken,
     services: Vec<JoinHandle<anyhow::Result<()>>>,
     _dir: TempDir,
@@ -86,10 +88,15 @@ impl Stack {
         };
         Self {
             target,
+            metrics: probes,
             shutdown,
             services,
             _dir: dir,
         }
+    }
+
+    pub fn metrics_addrs(&self) -> &[SocketAddr] {
+        &self.metrics
     }
 
     pub fn target(&self) -> &Target {

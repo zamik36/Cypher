@@ -3,8 +3,16 @@
 # Runs images CI built from one commit: GHCR_REPO (e.g. ghcr.io/zamik36/cypher)
 # and IMAGE_TAG (the first 8 hex digits of its sha) come from .env, which the
 # deploy writes. Nothing is built on the server: a missing image fails the pull.
+# Docker keeps every container's log in one growing file unless told not to.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
 services:
   caddy:
+    logging: *logging
     image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
     read_only: true
     security_opt:
@@ -35,6 +43,7 @@ services:
   # Copies Caddy's certificate and key for gateway and relay (deploy/sync-certs.sh),
   # so they run unprivileged and never mount Caddy's data with its ACME key.
   certs:
+    logging: *logging
     image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
     entrypoint: ["/bin/sh", "/sync-certs.sh"]
     read_only: true
@@ -62,6 +71,7 @@ services:
   # The Docker API for Alloy, read-only and limited to containers: the raw
   # socket would give it control of the host.
   docker-proxy:
+    logging: *logging
     image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     read_only: true
     security_opt:
@@ -80,6 +90,7 @@ services:
       - docker-api
 
   loki:
+    logging: *logging
     image: grafana/loki@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
     security_opt:
       - no-new-privileges:true
@@ -99,6 +110,7 @@ services:
       - monitoring
 
   alloy:
+    logging: *logging
     image: grafana/alloy@sha256:eadfe35ea52b26cbec4d4d780fbcc31edb31108c1c9e537ca59557a5a102c712
     security_opt:
       - no-new-privileges:true
@@ -126,6 +138,7 @@ services:
       - docker-api
 
   prometheus:
+    logging: *logging
     image: prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
     security_opt:
       - no-new-privileges:true
@@ -133,6 +146,7 @@ services:
       - ALL
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -143,6 +157,7 @@ services:
       - monitoring
 
   grafana:
+    logging: *logging
     image: grafana/grafana@sha256:0dc5a246ab16bb2c38a349fb588174e832b4c6c2db0981d0c3e6cd774ba66a54
     security_opt:
       - no-new-privileges:true
@@ -165,9 +180,96 @@ services:
     networks:
       - monitoring
 
+  # Sends alerts (deploy/alerts.yml) to Telegram; see deploy/alertmanager.yml.
+  alertmanager:
+    logging: *logging
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    secrets:
+      - alert_telegram_token
+      - alert_telegram_chat_id
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # TLS handshakes with gateway and relay: up, and when the certificate expires.
+  blackbox:
+    logging: *logging
+    image: prom/blackbox-exporter:v0.28.0@sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./deploy/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    restart: unless-stopped
+    networks:
+      - edge
+      - monitoring
+
+  # Host disk, memory and CPU.
+  node-exporter:
+    logging: *logging
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["--path.rootfs=/host"]
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  redis-exporter:
+    logging: *logging
+    image: oliver006/redis_exporter:v1.93.0@sha256:6ca518a72f30f7f576ef92963de1b91d3c3f5fd3aeac949f878bfda183587820
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  nats-exporter:
+    logging: *logging
+    image: natsio/prometheus-nats-exporter:0.20.2@sha256:c623b608e148e31e1c1c878673a197f1828e58ce90de4f01d22f1baa84c8fee9
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["-varz", "-connz", "http://nats:8222"]
+    restart: unless-stopped
+    networks:
+      - internal
+
   # IMPORTANT: never publish the plaintext WebSocket ports (gateway 9101,
   # relay 9301); Caddy terminates TLS for them on /ws and /relay.
   gateway:
+    logging: *logging
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-gateway:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
     read_only: true
@@ -204,6 +306,7 @@ services:
       - edge
 
   signaling:
+    logging: *logging
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-signaling:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
     read_only: true
@@ -225,6 +328,7 @@ services:
           cpus: "0.5"
 
   relay:
+    logging: *logging
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-relay:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
     read_only: true
@@ -258,6 +362,7 @@ services:
       - edge
 
   pwa:
+    logging: *logging
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-pwa:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
     ports: !override []
@@ -265,9 +370,11 @@ services:
       - edge
 
   redis:
+    logging: *logging
     ports: !override []
 
   nats:
+    logging: *logging
     ports: !override []
 
 # internal: Redis, NATS and the services. edge: what Caddy proxies to.
@@ -279,7 +386,16 @@ networks:
   docker-api:
     internal: true
 
+# Alert delivery; empty when the variables are unset (alerts then stay in
+# Alertmanager's own list).
+secrets:
+  alert_telegram_token:
+    environment: ALERT_TELEGRAM_TOKEN
+  alert_telegram_chat_id:
+    environment: ALERT_TELEGRAM_CHAT_ID
+
 volumes:
+  alertmanager-data:
   caddy-data:
   caddy-config:
   certs:

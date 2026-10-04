@@ -1,0 +1,166 @@
+# Alerts Prometheus sends to Alertmanager (deploy/alertmanager.yml).
+# critical: users are affected now. warning: they will be unless someone acts.
+groups:
+  - name: services
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"gateway|signaling|relay"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is down"
+          description: "Prometheus has not reached {{ $labels.job }} for a minute."
+
+      - alert: ServiceMemoryHigh
+        # 85% of each container's memory limit (docker-compose.prod.yml).
+        expr: >-
+          process_resident_memory_bytes{job="gateway"} > 0.85 * 768 * 2^20
+          or process_resident_memory_bytes{job="relay"} > 0.85 * 512 * 2^20
+          or process_resident_memory_bytes{job="signaling"} > 0.85 * 256 * 2^20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} is close to its memory limit"
+          description: "{{ $labels.job }} uses {{ $value | humanize1024 }}B; at the limit it is killed and restarted."
+
+      - alert: ConnectionsRefused
+        expr: sum by (job) (rate({__name__=~"(gateway|relay)_rejected_total"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} refuses connections at its limits"
+          description: "More than one connection a second is refused (total or per-address limit) for 10 minutes."
+
+      - alert: SignalingShedding
+        expr: rate(signaling_shed_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Signaling drops requests"
+          description: "Its request pools have been full for 10 minutes; clients retry, but slower."
+
+      - alert: DeliveriesBusy
+        expr: rate(gateway_busy_total[5m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The gateway answers Busy"
+          description: "More than ten sends a second are refused as Busy for 10 minutes."
+
+  - name: tls
+    rules:
+      - alert: TlsEndpointDown
+        expr: probe_success{job="tls"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No TLS handshake with {{ $labels.instance }}"
+          description: "Clients cannot connect to {{ $labels.instance }}."
+
+      - alert: CertificateExpiresSoon
+        expr: probe_ssl_earliest_cert_expiry{job="tls"} - time() < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "Caddy renews 30 days ahead; check `docker compose logs caddy certs`."
+
+      - alert: CertificateExpiresSoon
+        expr: probe_ssl_earliest_cert_expiry{job="tls"} - time() < 3 * 86400
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "Caddy renews 30 days ahead; check `docker compose logs caddy certs`."
+
+  - name: storage
+    rules:
+      - alert: RedisDown
+        expr: redis_up == 0 or absent(redis_up)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Prekeys, links and offline inboxes are unavailable."
+
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.8 and redis_memory_max_bytes > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis uses {{ $value | humanizePercentage }} of maxmemory"
+          description: "At the limit Redis refuses writes (noeviction): new links, prekeys and offline messages fail. Raise REDIS_MAXMEMORY."
+
+      - alert: RedisMemoryFull
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.95 and redis_memory_max_bytes > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is about to refuse writes"
+          description: "It uses {{ $value | humanizePercentage }} of maxmemory."
+
+      - alert: NatsDown
+        expr: absent(gnatsd_varz_connections)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NATS is down"
+          description: "Services cannot reach each other: cross-node delivery and signaling fail."
+
+      - alert: NatsSlowConsumers
+        expr: increase(gnatsd_varz_slow_consumers[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "NATS dropped messages for a slow consumer"
+          description: "A service did not keep up with its subscriptions in the last 10 minutes."
+
+  - name: host
+    rules:
+      - alert: DiskFilling
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk {{ $value | humanizePercentage }} free"
+          description: "Redis, logs and images share this disk."
+
+      - alert: DiskFull
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk {{ $value | humanizePercentage }} free"
+          description: "Redis cannot persist its append-only file once the disk is full."
+
+      - alert: HostMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory {{ $value | humanizePercentage }} available"
+          description: "Containers will be killed when it runs out."
+
+      - alert: ExporterDown
+        expr: up{job=~"redis|nats|node|tls"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} metrics are missing"
+          description: "Alerts that depend on them cannot fire."

@@ -144,6 +144,16 @@ jobs:
         run: >-
           cargo hack clippy --each-feature --all-targets
           -p cypher-media -p cypher-client -p cypher-transport -- -D warnings
+      # Same images as docker-compose.prod.yml.
+      - name: Alert rules, Prometheus and Alertmanager config
+        run: |
+          prometheus=prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
+          alertmanager=prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+          docker run --rm -v "$PWD/deploy:/d:ro" -w /d --entrypoint promtool "$prometheus" test rules alerts.test.yml
+          docker run --rm -v "$PWD/deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/deploy/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            --entrypoint promtool "$prometheus" check config /etc/prometheus/prometheus.yml
+          docker run --rm -v "$PWD/deploy:/d:ro" --entrypoint amtool "$alertmanager" check-config /d/alertmanager.yml
 
   miri:
     name: Miri (UB check)

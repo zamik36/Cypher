@@ -111,6 +111,7 @@ docker compose exec redis redis-cli ping   # PONG; пароль берётся �
 | `DEPLOY_PATH` | Каталог проекта на сервере (по умолчанию `~/cypher`). |
 | `GHCR_TOKEN` | Чтение образов из GHCR на сервере. |
 | `DOMAIN`, `REDIS_PASSWORD`, `GRAFANA_PASSWORD` | Как в `.env`. |
+| `ALERT_TELEGRAM_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | Куда слать алерты: токен бота и id чата. Необязательны. |
 | `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD` | Как в `.env`. Без них деплой откажется стартовать. |
 | `ANDROID_KEYSTORE_BASE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Подпись Android-сборки в релизе. |
 
@@ -138,9 +139,13 @@ Gateway и relay состояния не хранят. Регулярных бэ
 
 ## Мониторинг
 
-В production-слое Prometheus, Grafana, Loki и Alloy поднимаются вместе со стеком:
-- Grafana наружу не публикуется: она слушает `127.0.0.1:3000` на сервере. Откройте туннель `ssh -L 3000:localhost:3000 <сервер>` и зайдите на `http://localhost:3000`. Дашборды подключаются автоматически;
-- логи контейнеров собирает Alloy и складывает в Loki; сервисы пишут JSON (`LOG_FORMAT=json`).
+В production-слое мониторинг поднимается вместе со стеком. Наружу ничего не публикуется: Grafana слушает `127.0.0.1:3000`, Alertmanager — `127.0.0.1:9093`. Откройте туннель `ssh -L 3000:localhost:3000 -L 9093:localhost:9093 <сервер>`.
+
+- **Метрики.** Prometheus собирает метрики сервисов и экспортёров: Redis (`redis-exporter`), NATS (`nats-exporter`), хоста (`node-exporter`) и TLS-рукопожатий с портами 9100/9300 (`blackbox`: отвечают ли и когда истекает сертификат). Хранит 30 дней.
+- **Дашборды.** «Cypher Overview» — состояние, трафик, отказы, процессы и инфраструктура; «Cypher Logs» — логи сервисов. Подключаются автоматически. Тест стека проверяет, что дашборды и алерты ссылаются только на метрики, которые сервисы действительно отдают.
+- **Алерты** — в `deploy/alerts.yml`: падение сервиса, недоступный TLS, сертификат истекает (14 и 3 дня), память Redis (80 % и 95 % от `maxmemory`), NATS, диск, память хоста и контейнеров, отказы на лимитах, сброс запросов signaling. Правила проверяются в CI (`promtool test rules deploy/alerts.test.yml`).
+- **Доставка.** Alertmanager шлёт алерты в Telegram: создайте бота у @BotFather, добавьте его в чат и задайте секреты `ALERT_TELEGRAM_TOKEN` и `ALERT_TELEGRAM_CHAT_ID`. Без них алерты видны только в самом Alertmanager.
+- **Логи.** Alloy собирает логи контейнеров через прокси Docker API и складывает в Loki; сервисы пишут JSON (`LOG_FORMAT=json`). Loki хранит их 7 дней. Docker ротирует логи контейнеров: 3 файла по 10 МБ.
 
 Для мониторинга при локальной разработке:
 
@@ -158,5 +163,5 @@ docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d   # 
 ## Известные ограничения текущего деплоя
 
 Закрываются этапом 2 [roadmap](roadmap.md):
-- **Единые точки отказа.** Один хост, один Redis, один NATS, один gateway. Бэкапов и алертов пока нет.
+- **Единые точки отказа.** Один хост, один Redis, один NATS, один gateway. Регулярных бэкапов пока нет.
 - **Миграции между версиями.** Откат возвращает код и образы, но не данные: если новая версия успела записать в Redis данные нового формата, старая их не прочитает. Пока форматы Redis не менялись.

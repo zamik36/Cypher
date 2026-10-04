@@ -53,6 +53,8 @@ jobs:
           SIGNALING_NATS_PASSWORD: ${{ secrets.SIGNALING_NATS_PASSWORD }}
           RELAY_NATS_PASSWORD: ${{ secrets.RELAY_NATS_PASSWORD }}
           GRAFANA_PASSWORD: ${{ secrets.GRAFANA_PASSWORD }}
+          ALERT_TELEGRAM_TOKEN: ${{ secrets.ALERT_TELEGRAM_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -61,7 +63,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           fingerprint: ${{ secrets.VPS_FINGERPRINT }}
-          envs: DOMAIN,REDIS_PASSWORD,GATEWAY_NATS_PASSWORD,SIGNALING_NATS_PASSWORD,RELAY_NATS_PASSWORD,GRAFANA_PASSWORD,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
+          envs: DOMAIN,REDIS_PASSWORD,GATEWAY_NATS_PASSWORD,SIGNALING_NATS_PASSWORD,RELAY_NATS_PASSWORD,GRAFANA_PASSWORD,ALERT_TELEGRAM_TOKEN,ALERT_TELEGRAM_CHAT_ID,DEPLOY_PATH,DEPLOY_SHA,GHCR_TOKEN,GHCR_USER
           command_timeout: 10m
           script: |
             set -eu
@@ -83,6 +85,11 @@ jobs:
               value="$(printenv "$var" || true)"
               [ -n "$value" ] || { echo "secret $var is not set" >&2; exit 1; }
               printf '%s=%s\n' "$var" "$value" >> .env.next
+            done
+            # Optional: without them alerts are listed in Alertmanager but not
+            # delivered. Written even when empty, as compose requires them set.
+            for var in ALERT_TELEGRAM_TOKEN ALERT_TELEGRAM_CHAT_ID; do
+              printf '%s=%s\n' "$var" "$(printenv "$var" || true)" >> .env.next
             done
             mv .env.next .env
 

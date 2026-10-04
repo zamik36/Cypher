@@ -106,9 +106,9 @@
 
 | Проблема | Где | Серьёзность | Этап |
 |---|---|---|---|
-| Обзорный дашборд мёртв: все запросы ссылаются на несуществующие метрики | `deploy/grafana/dashboards/cypher-overview.json` | блокер | 2 |
-| Нет алертов и Alertmanager: падение сервиса, истечение сертификата, диск, память Redis | `deploy/prometheus.yml` | блокер | 2 |
-| В Loki не включено удаление по retention; нет ротации логов Docker; нет экспортёров Redis и NATS | `deploy/loki.yml`, compose | важно | 2 |
+| Обзорный дашборд мёртв: все запросы ссылаются на несуществующие метрики | `deploy/grafana/dashboards/cypher-overview.json` | блокер | 2 · исправлено |
+| Нет алертов и Alertmanager: падение сервиса, истечение сертификата, диск, память Redis | `deploy/prometheus.yml` | блокер | 2 · исправлено |
+| В Loki не включено удаление по retention; нет ротации логов Docker; нет экспортёров Redis и NATS | `deploy/loki.yml`, compose | важно | 2 · исправлено |
 
 ### Продукт и UX
 

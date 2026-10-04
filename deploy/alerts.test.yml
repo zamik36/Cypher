@@ -1,0 +1,72 @@
+# promtool test rules deploy/alerts.test.yml — run in CI (hygiene job).
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="gateway", instance="gateway:9090"}'
+        values: "1 1 0 0 0"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: gateway, instance: "gateway:9090" }
+            exp_annotations:
+              summary: "gateway is down"
+              description: "Prometheus has not reached gateway for a minute."
+
+  # Counters of both services, each over its own threshold: one alert each.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_rejected_total{job="gateway"}'
+        values: "0+120x20"
+      - series: 'relay_rejected_total{job="relay"}'
+        values: "0+30x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ConnectionsRefused
+        exp_alerts:
+          - exp_labels: { severity: warning, job: gateway }
+            exp_annotations:
+              summary: "gateway refuses connections at its limits"
+              description: "More than one connection a second is refused (total or per-address limit) for 10 minutes."
+
+  # Ten days left: the warning only; two days left: both, until inhibited.
+  - interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="tls", instance="gateway:9100"}'
+        values: "864000x90"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CertificateExpiresSoon
+        exp_alerts:
+          - exp_labels: { severity: warning, job: tls, instance: "gateway:9100" }
+            exp_annotations:
+              summary: "Certificate of gateway:9100 expires in 9d 22h 30m 0s"
+              description: "Caddy renews 30 days ahead; check `docker compose logs caddy certs`."
+
+  - interval: 1m
+    input_series:
+      - series: 'redis_up'
+        values: "1 1 1"
+      - series: 'redis_memory_used_bytes'
+        values: "900 900 900 900 900 900 900 900 900 900 900 900"
+      - series: 'redis_memory_max_bytes'
+        values: "1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: RedisMemoryHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Redis uses 90% of maxmemory"
+              description: "At the limit Redis refuses writes (noeviction): new links, prekeys and offline messages fail. Raise REDIS_MAXMEMORY."
+      - eval_time: 11m
+        alertname: RedisMemoryFull
+        exp_alerts: []
