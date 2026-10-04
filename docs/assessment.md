@@ -88,7 +88,7 @@
 | Gateway и relay работают от root и монтируют весь том Caddy, вместе с ACME-ключом аккаунта | `docker-compose.prod.yml` | блокер | 2 · исправлено |
 | ACL NATS: gateway и relay оба подписаны на `_INBOX.>`, то есть взломанный relay читает ответы signaling для gateway | `deploy/nats.conf` | важно | 1 · исправлено |
 | Лимит памяти gateway 512 МБ при `max_connections` 100 000; нет `nofile` | `docker-compose.prod.yml`, `gateway/src/lib.rs` | важно | 2 · исправлено |
-| Единая точка отказа: один VPS, один Redis (без бэкапов AOF и `signaling-data`), один NATS, один gateway без балансировщика | compose | важно | 2 / позже |
+| Единая точка отказа: один VPS, один Redis (без бэкапов AOF и `signaling-data`), один NATS, один gateway без балансировщика | compose | важно | 2 · бэкапы есть; HA — позже |
 | Grafana открыта наружу по `/grafana`; все сервисы в одной сети; Alloy монтирует `docker.sock` | `deploy/Caddyfile`, compose | важно | 2 · исправлено |
 | Healthcheck Redis без пароля ничего не проверяет; в `start-stack.sh` образы не закреплены | `docker-compose.yml`, `.github/scripts/start-stack.sh` | желательно | 2 · исправлено |
 

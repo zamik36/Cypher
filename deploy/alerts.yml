@@ -110,6 +110,24 @@ groups:
           summary: "Redis is about to refuse writes"
           description: "It uses {{ $value | humanizePercentage }} of maxmemory."
 
+      - alert: BackupStale
+        expr: time() - cypher_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last backup is {{ $value | humanizeDuration }} old"
+          description: "Backups run daily; check `docker compose logs backup`."
+
+      - alert: BackupMissing
+        expr: absent(cypher_backup_last_success_timestamp_seconds)
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No backup has succeeded yet"
+          description: "Check `docker compose logs backup`."
+
       - alert: NatsDown
         expr: absent(gnatsd_varz_connections)
         for: 2m

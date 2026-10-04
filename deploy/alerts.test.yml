@@ -51,6 +51,23 @@ tests:
               summary: "Certificate of gateway:9100 expires in 9d 22h 30m 0s"
               description: "Caddy renews 30 days ahead; check `docker compose logs caddy certs`."
 
+  # A backup a day old is fine; two days old is stale.
+  - interval: 1m
+    input_series:
+      - series: 'cypher_backup_last_success_timestamp_seconds'
+        values: "0x2880"
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 48h
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "The last backup is 2d 0h 0m 0s old"
+              description: "Backups run daily; check `docker compose logs backup`."
+
   - interval: 1m
     input_series:
       - series: 'redis_up'

@@ -221,7 +221,35 @@ services:
       - edge
       - monitoring
 
-  # Host disk, memory and CPU.
+  # Daily snapshots of Redis and the signaling volume (deploy/backup.sh);
+  # restore with deploy/restore.sh. Copy the backups volume off the host.
+  backup:
+    logging: *logging
+    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Read the onion key, which belongs to the services' user.
+      - DAC_READ_SEARCH
+    environment:
+      REDISCLI_AUTH: "${REDIS_PASSWORD}"
+    volumes:
+      - ./deploy/backup.sh:/backup.sh:ro
+      - backups:/backups
+      - backup-metrics:/metrics
+      - signaling-data:/signaling:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # Host disk, memory and CPU; also the backup's last success (textfile).
   node-exporter:
     logging: *logging
     image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
@@ -230,10 +258,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    command: ["--path.rootfs=/host"]
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
     pid: host
     volumes:
       - /:/host:ro,rslave
+      - backup-metrics:/textfile:ro
     restart: unless-stopped
     networks:
       - monitoring
@@ -396,6 +427,8 @@ secrets:
 
 volumes:
   alertmanager-data:
+  backups:
+  backup-metrics:
   caddy-data:
   caddy-config:
   certs:
