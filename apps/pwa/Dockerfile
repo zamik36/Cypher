@@ -8,6 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY services/ services/
 COPY tools/ tools/
+COPY tests/ tests/
 COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
 RUN cargo build -p cypher-wasm --release --target wasm32-unknown-unknown \
     && wasm-bindgen --target web --out-dir /wasm target/wasm32-unknown-unknown/release/cypher_wasm.wasm
@@ -19,6 +20,7 @@ COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/ui/package.json packages/ui/
 COPY apps/desktop/package.json apps/desktop/
 COPY apps/pwa/package.json apps/pwa/
+COPY tests/load/package.json tests/load/
 RUN npm ci --ignore-scripts
 COPY packages/ui/ packages/ui/
 COPY apps/pwa/ apps/pwa/
