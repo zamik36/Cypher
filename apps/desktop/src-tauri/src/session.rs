@@ -226,11 +226,19 @@ pub(crate) async fn await_event<T>(
     .unwrap_or_else(|_| Err("timed out".to_owned()))
 }
 
-/// System trust roots; `CYPHER_DEV_CA` pins development certificates instead.
+/// System trust roots, unless development certificates are pinned: by the
+/// PEM file `CYPHER_DEV_CA` names at startup or, in a debug build, by the PEM
+/// text `CYPHER_DEV_CA_PEM` held at compile time (for devices whose
+/// environment the developer cannot set, such as an Android emulator).
 pub(crate) fn tls_from_env() -> CmdResult<Arc<rustls::ClientConfig>> {
-    tls(std::env::var_os("CYPHER_DEV_CA")
-        .map(PathBuf::from)
-        .as_deref())
+    if let Some(path) = std::env::var_os("CYPHER_DEV_CA") {
+        return tls(Some(&PathBuf::from(path)));
+    }
+    #[cfg(debug_assertions)]
+    if let Some(pem) = option_env!("CYPHER_DEV_CA_PEM") {
+        return cypher_tls::make_client_config_with_pem(pem).map_err(err);
+    }
+    tls(None)
 }
 
 /// Trusts only the certificates in the `dev_ca` PEM file when given, the
