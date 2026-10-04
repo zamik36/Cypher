@@ -125,7 +125,21 @@ fn read(cert_path: &PathBuf, key_path: &PathBuf) -> Result<CertifiedKey> {
             e,
         )
     })?;
-    Ok(CertifiedKey::new(certs, signing_key))
+    let certified = CertifiedKey::new(certs, signing_key);
+    // Files replaced one after the other can be read halfway: a new
+    // certificate with the old key. Refused, it is retried once the key
+    // changes too.
+    certified.keys_match().map_err(|e| {
+        transport(
+            &format!(
+                "{} does not match the key in {}",
+                cert_path.display(),
+                key_path.display()
+            ),
+            e,
+        )
+    })?;
+    Ok(certified)
 }
 
 #[cfg(test)]
@@ -179,11 +193,23 @@ mod tests {
         let second = served(&cert);
         assert_ne!(first, second);
 
+        let (third_cert, third_key) = pair();
+        write(&cert_path, &third_cert, 90);
+        assert!(
+            !cert.reload_if_changed(),
+            "a certificate without its key yet is not installed"
+        );
+        assert_eq!(served(&cert), second);
+        write(&key_path, &third_key, 90);
+        assert!(cert.reload_if_changed(), "installed once its key arrives");
+        let third = served(&cert);
+        assert_ne!(third, second);
+
         write(&cert_path, "not a certificate", 120);
         assert!(
             !cert.reload_if_changed(),
             "a broken renewal is not installed"
         );
-        assert_eq!(served(&cert), second, "the working certificate stays");
+        assert_eq!(served(&cert), third, "the working certificate stays");
     }
 }
