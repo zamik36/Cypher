@@ -231,7 +231,16 @@ mod tests {
         for t in tasks {
             t.await.unwrap();
         }
-        assert_eq!(value("tokio_alive_tasks"), baseline);
+        // A task is released by the runtime only after its JoinHandle has
+        // resolved, so under load the count settles instead of dropping at once.
+        let settled = async {
+            while value("tokio_alive_tasks") != baseline {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), settled)
+            .await
+            .expect("finished tasks are released");
         assert!(text().contains("tokio_worker_busy_seconds_total "));
     }
 
