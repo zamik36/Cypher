@@ -150,6 +150,7 @@ pub async fn shutdown_signal() {
 }
 
 /// Text logs by default, JSON with `LOG_FORMAT=json`; level from `RUST_LOG`.
+/// Installs the subscriber once; later calls do nothing.
 /// With the `console` feature the runtime is also served to tokio-console
 /// on `127.0.0.1:6669` (`TOKIO_CONSOLE_BIND`); `RUST_LOG` filters only logs.
 pub fn init_tracing() {
@@ -167,7 +168,8 @@ pub fn init_tracing() {
     let subscriber = tracing_subscriber::registry().with(logs.with_filter(filter));
     #[cfg(all(feature = "console", tokio_unstable))]
     let subscriber = subscriber.with(console_subscriber::spawn());
-    subscriber.init();
+    // Once per process; a second call (tests) keeps the first subscriber.
+    let _ = subscriber.try_init();
     // console-subscriber panics on a runtime built without the cfg flag, so
     // `--all-features` builds (CI, coverage) run without the console.
     #[cfg(all(feature = "console", not(tokio_unstable)))]
@@ -188,6 +190,30 @@ pub fn redact_url(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Outside `health`, a service's main loads its config and runs it with
+    /// a shutdown token.
+    #[tokio::test]
+    async fn service_main_runs_the_service_with_its_config() {
+        #[derive(serde::Deserialize)]
+        struct Svc {
+            #[serde(default)]
+            limit: u32,
+        }
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        service_main(
+            |_: &Svc| std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            |svc: Svc, shutdown| {
+                assert_eq!(svc.limit, 0);
+                assert!(!shutdown.is_cancelled());
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn redacts_credentials() {
