@@ -28,7 +28,14 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use handler::Handler;
 use store::Store;
 
-const MAX_IN_FLIGHT: usize = 4096;
+/// Requests handled at once, per source. Session requests (keys, links)
+/// are small; an onion request may return an inbox batch of up to 768 KiB,
+/// so its pool bounds that memory (~48 MiB) and anonymous load cannot crowd
+/// out signed-in users. A request beyond its pool is dropped at once rather
+/// than stalling the subscription: the gateway answers it as unavailable
+/// after its timeout and the client retries with backoff.
+const SESSION_PERMITS: usize = 1024;
+const ONION_PERMITS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -58,19 +65,23 @@ struct Service {
     handler: Handler,
     onion_secret: StaticSecret,
     nats: async_nats::Client,
-    permits: Arc<Semaphore>,
     requests: IntCounter,
     onion_requests: IntCounter,
+    shed: IntCounter,
 }
 
 impl Service {
-    async fn serve(self: Arc<Self>, subject: &'static str) -> anyhow::Result<()> {
+    async fn serve(self: Arc<Self>, subject: &'static str, permits: usize) -> anyhow::Result<()> {
+        let permits = Arc::new(Semaphore::new(permits));
         let mut sub = self
             .nats
             .queue_subscribe(subject, SIG_QUEUE_GROUP.to_owned())
             .await?;
         while let Some(msg) = sub.next().await {
-            let permit = Arc::clone(&self.permits).acquire_owned().await?;
+            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                self.shed.inc();
+                continue;
+            };
             let service = Arc::clone(&self);
             tokio::spawn(async move {
                 service.dispatch(subject, msg).await;
@@ -118,26 +129,34 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     );
 
     let onion_secret = StaticSecret::from(secrets::load_or_create_secret(&config.onion_key_path)?);
+    let relay_addr = config.relay_public_addr.filter(|addr| {
+        let valid = cypher_wire::relay_addr_is_valid(addr);
+        if !valid {
+            warn!(%addr, "relay_public_addr is not a valid host:port; anonymous routing is off");
+        }
+        valid
+    });
     let service = Arc::new(Service {
         handler: Handler {
             store: Store::connect(&config.redis_url).await?,
             onion_public: PublicKey::from(&onion_secret).to_bytes(),
-            relay_addr: config
-                .relay_public_addr
-                .filter(|a| cypher_wire::relay_addr_is_valid(a)),
+            relay_addr,
         },
         onion_secret,
         nats: cypher_server_kit::connect_nats(&config.nats).await?,
-        permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         requests: registry.counter("signaling_requests_total", "Session requests handled")?,
         onion_requests: registry
             .counter("signaling_onion_requests_total", "Onion requests handled")?,
+        shed: registry.counter(
+            "signaling_shed_total",
+            "Requests dropped because their pool was full",
+        )?,
     });
 
     info!("signaling ready");
     tokio::select! {
-        r = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT) => r?,
-        r = Arc::clone(&service).serve(SIG_ONION_SUBJECT) => r?,
+        r = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, SESSION_PERMITS) => r?,
+        r = Arc::clone(&service).serve(SIG_ONION_SUBJECT, ONION_PERMITS) => r?,
         () = shutdown.cancelled() => {}
     }
     let _ = service.nats.flush().await;
