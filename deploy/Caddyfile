@@ -21,10 +21,6 @@
 		reverse_proxy relay:9301
 	}
 
-	handle /grafana* {
-		reverse_proxy grafana:3000
-	}
-
 	handle {
 		reverse_proxy pwa:8080
 	}

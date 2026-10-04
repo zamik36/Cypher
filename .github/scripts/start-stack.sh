@@ -8,10 +8,10 @@
 # relay 9300 (WS 9301).
 set -euo pipefail
 
-docker run -d --name redis -p 6379:6379 redis:7-alpine redis-server --requirepass ci
+docker run -d --name redis -p 6379:6379 redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065 redis-server --requirepass ci
 docker run -d --name nats -p 4222:4222 -v "$PWD/deploy/nats.conf:/etc/nats/nats.conf:ro" \
   -e GATEWAY_NATS_PASSWORD=gw -e SIGNALING_NATS_PASSWORD=sig -e RELAY_NATS_PASSWORD=rel \
-  nats:2-alpine -c /etc/nats/nats.conf
+  nats:2-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652 -c /etc/nats/nats.conf
 
 mkdir -p e2e
 export P2P_NATS_URL=nats://127.0.0.1:4222

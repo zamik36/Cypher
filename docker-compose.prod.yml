@@ -28,10 +28,56 @@ services:
     depends_on:
       - gateway
       - pwa
-      - grafana
+    restart: unless-stopped
+    networks: !override
+      - edge
+
+  # Copies Caddy's certificate and key for gateway and relay (deploy/sync-certs.sh),
+  # so they run unprivileged and never mount Caddy's data with its ACME key.
+  certs:
+    image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
+    entrypoint: ["/bin/sh", "/sync-certs.sh"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    network_mode: none
+    volumes:
+      - ./deploy/sync-certs.sh:/sync-certs.sh:ro
+      - caddy-data:/caddy-data:ro
+      - certs:/certs
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
+    healthcheck:
+      test: ["CMD", "test", "-s", "/certs/cert.pem"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5m
+    restart: unless-stopped
+
+  # The Docker API for Alloy, read-only and limited to containers: the raw
+  # socket would give it control of the host.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Listing containers and networks and reading logs; every write is refused.
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
     restart: unless-stopped
     networks:
-      - internal
+      - docker-api
 
   loki:
     image: grafana/loki@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
@@ -50,7 +96,7 @@ services:
           memory: 256M
           cpus: "0.5"
     networks:
-      - internal
+      - monitoring
 
   alloy:
     image: grafana/alloy@sha256:eadfe35ea52b26cbec4d4d780fbcc31edb31108c1c9e537ca59557a5a102c712
@@ -60,13 +106,15 @@ services:
       - ALL
     volumes:
       - ./deploy/alloy.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
     command:
       - run
       - /etc/alloy/config.alloy
       - --storage.path=/var/lib/alloy/data
     depends_on:
       - loki
+      - docker-proxy
     restart: unless-stopped
     deploy:
       resources:
@@ -74,7 +122,8 @@ services:
           memory: 256M
           cpus: "0.5"
     networks:
-      - internal
+      - monitoring
+      - docker-api
 
   prometheus:
     image: prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
@@ -91,6 +140,7 @@ services:
     restart: unless-stopped
     networks:
       - internal
+      - monitoring
 
   grafana:
     image: grafana/grafana@sha256:0dc5a246ab16bb2c38a349fb588174e832b4c6c2db0981d0c3e6cd774ba66a54
@@ -103,25 +153,23 @@ services:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
-      GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD in .env}"
+    # Not published through Caddy: reach it over SSH,
+    # `ssh -L 3000:localhost:3000 <server>`, then http://localhost:3000.
+    ports:
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
       - loki
     restart: unless-stopped
     networks:
-      - internal
+      - monitoring
 
-  # Override: use ghcr.io images, remove external port bindings.
   # IMPORTANT: never publish the plaintext WebSocket ports (gateway 9101,
   # relay 9301); Caddy terminates TLS for them on /ws and /relay.
-  # NOTE: user "0:0" is required to read TLS certs from the shared caddy-data volume;
-  # root is heavily constrained via cap_drop, read_only, and no-new-privileges.
   gateway:
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-gateway:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
-    user: "0:0"
     read_only: true
     security_opt: !override
       - no-new-privileges:true
@@ -129,18 +177,31 @@ services:
       - ALL
     environment:
       LOG_FORMAT: json
-      P2P_TLS_CERT_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
-      P2P_TLS_KEY_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
+      P2P_TLS_CERT_PATH: /certs/cert.pem
+      P2P_TLS_KEY_PATH: /certs/key.pem
+      # ~25 KB per idle connection (docs/performance.md): 20 000 fit the
+      # memory limit with room for traffic. Raise both together.
+      P2P_MAX_CONNECTIONS: "${GATEWAY_MAX_CONNECTIONS:-20000}"
     volumes:
-      - caddy-data:/caddy-data:ro
+      - certs:/certs:ro
+    depends_on:
+      certs:
+        condition: service_healthy
     ports: !override
       - "9100:9100"
       - "127.0.0.1:9090:9090"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 768M
           cpus: "1.0"
+    networks:
+      - internal
+      - edge
 
   signaling:
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-signaling:${IMAGE_TAG:?Set IMAGE_TAG in .env}
@@ -166,31 +227,42 @@ services:
   relay:
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-relay:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
-    user: "0:0"
     read_only: true
     security_opt: !override
       - no-new-privileges:true
     cap_drop: !override
       - ALL
     volumes:
-      - caddy-data:/caddy-data:ro
+      - certs:/certs:ro
     environment:
       LOG_FORMAT: json
-      P2P_TLS_CERT_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt"
-      P2P_TLS_KEY_PATH: "/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
+      P2P_TLS_CERT_PATH: /certs/cert.pem
+      P2P_TLS_KEY_PATH: /certs/key.pem
+    depends_on:
+      certs:
+        condition: service_healthy
     ports: !override
       - "9300:9300"
       - "127.0.0.1:9092:9092"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: "1.0"
+    networks:
+      - internal
+      - edge
 
   pwa:
     image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-pwa:${IMAGE_TAG:?Set IMAGE_TAG in .env}
     build: !reset null
     ports: !override []
+    networks: !override
+      - edge
 
   redis:
     ports: !override []
@@ -198,9 +270,19 @@ services:
   nats:
     ports: !override []
 
+# internal: Redis, NATS and the services. edge: what Caddy proxies to.
+# monitoring: Prometheus, Grafana, Loki, Alloy. docker-api: Alloy and the
+# Docker API proxy only, with no route out.
+networks:
+  edge:
+  monitoring:
+  docker-api:
+    internal: true
+
 volumes:
   caddy-data:
   caddy-config:
+  certs:
   signaling-data:
   prometheus-data:
   grafana-data:

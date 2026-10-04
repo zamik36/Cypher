@@ -16,7 +16,7 @@ RUN cargo build --release --locked \
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && adduser --disabled-password --no-create-home --gecos "" app \
+    && adduser --disabled-password --no-create-home --uid 10001 --gecos "" app \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/* \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info \
     && rm -rf /etc/init.d /etc/rc0.d /etc/rc1.d /etc/rc2.d /etc/rc3.d /etc/rc4.d /etc/rc5.d /etc/rc6.d /etc/rcS.d \

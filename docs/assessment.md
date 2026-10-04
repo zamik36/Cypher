@@ -80,17 +80,17 @@
 
 | Проблема | Где | Серьёзность | Этап |
 |---|---|---|---|
-| Прод всегда работает на `:latest`. Откат делает `git checkout`, но поднимает те же образы, и к тому же не на предыдущий, а на позапрошлый коммит | `docker-compose.prod.yml`, `.github/workflows/deploy.yml` | блокер | 2 |
-| Деплой срабатывает по `workflow_run` и на PR из форка с веткой `main` | `deploy.yml` | блокер | 2 |
-| Каждый деплой — полный простой (`down`); нет `concurrency`. Проверка здоровья смотрит на `/metrics`, который отвечает раньше, чем сервис готов | `deploy.yml`, `services/*/src/lib.rs` | блокер | 2 |
-| `:latest` публикуется до прохождения e2e, покрытия и deny | `.github/workflows/ci.yml` | блокер | 2 |
+| Прод всегда работает на `:latest`. Откат делает `git checkout`, но поднимает те же образы, и к тому же не на предыдущий, а на позапрошлый коммит | `docker-compose.prod.yml`, `.github/workflows/deploy.yml` | блокер | 2 · исправлено |
+| Деплой срабатывает по `workflow_run` и на PR из форка с веткой `main` | `deploy.yml` | блокер | 2 · исправлено |
+| Каждый деплой — полный простой (`down`); нет `concurrency`. Проверка здоровья смотрит на `/metrics`, который отвечает раньше, чем сервис готов | `deploy.yml`, `services/*/src/lib.rs` | блокер | 2 · исправлено |
+| `:latest` публикуется до прохождения e2e, покрытия и deny | `.github/workflows/ci.yml` | блокер | 2 · исправлено |
 | TLS-сертификаты портов 9100/9300 читаются один раз: после обновления Let's Encrypt клиенты получат просроченный сертификат | `crates/cypher-tls/src/config.rs`, `docker-compose.prod.yml` | блокер | 1 · исправлено |
-| Gateway и relay работают от root и монтируют весь том Caddy, вместе с ACME-ключом аккаунта | `docker-compose.prod.yml` | блокер | 2 |
+| Gateway и relay работают от root и монтируют весь том Caddy, вместе с ACME-ключом аккаунта | `docker-compose.prod.yml` | блокер | 2 · исправлено |
 | ACL NATS: gateway и relay оба подписаны на `_INBOX.>`, то есть взломанный relay читает ответы signaling для gateway | `deploy/nats.conf` | важно | 1 · исправлено |
-| Лимит памяти gateway 512 МБ при `max_connections` 100 000; нет `nofile` | `docker-compose.prod.yml`, `gateway/src/lib.rs` | важно | 2 |
+| Лимит памяти gateway 512 МБ при `max_connections` 100 000; нет `nofile` | `docker-compose.prod.yml`, `gateway/src/lib.rs` | важно | 2 · исправлено |
 | Единая точка отказа: один VPS, один Redis (без бэкапов AOF и `signaling-data`), один NATS, один gateway без балансировщика | compose | важно | 2 / позже |
-| Grafana открыта наружу по `/grafana`; все сервисы в одной сети; Alloy монтирует `docker.sock` | `deploy/Caddyfile`, compose | важно | 2 |
-| Healthcheck Redis без пароля ничего не проверяет; в `start-stack.sh` образы не закреплены | `docker-compose.yml`, `.github/scripts/start-stack.sh` | желательно | 2 |
+| Grafana открыта наружу по `/grafana`; все сервисы в одной сети; Alloy монтирует `docker.sock` | `deploy/Caddyfile`, compose | важно | 2 · исправлено |
+| Healthcheck Redis без пароля ничего не проверяет; в `start-stack.sh` образы не закреплены | `docker-compose.yml`, `.github/scripts/start-stack.sh` | желательно | 2 · исправлено |
 
 ### Выпуск и обновления
 
