@@ -120,7 +120,7 @@ jobs:
           npm run build -w tests/load
           k6 run --quiet --summary-export e2e/k6.json \
             -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
-            -e PAIRS=2000 -e RAMP=20s -e HOLD=60s -e SESSION=60 target/k6/gateway-ws.js
+            -e PAIRS=600 -e RAMP=20s -e HOLD=60s -e SESSION=60 target/k6/gateway-ws.js
       - name: Upload report and logs
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

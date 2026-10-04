@@ -274,7 +274,10 @@ jobs:
         with:
           k6-version: "2.3.0"
       # The browser path: WebSocket clients on both nodes, thresholds in the
-      # script (tests/load); then every connection task must be gone.
+      # script (tests/load); then every connection task must be gone. k6 is
+      # CPU-bound on its JavaScript Ed25519 (docs/performance.md): 300 pairs
+      # is what a 4-core runner drives next to both gateways without its own
+      # scheduling showing up as latency.
       - name: WebSocket load (k6)
         run: |
           npm run build -w tests/load
@@ -282,7 +285,7 @@ jobs:
           before=$(tasks)
           k6 run --quiet --summary-export e2e/k6.json \
             -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
-            -e PAIRS=1000 -e RAMP=10s -e HOLD=20s -e SESSION=20 target/k6/gateway-ws.js
+            -e PAIRS=300 -e RAMP=10s -e HOLD=20s -e SESSION=20 target/k6/gateway-ws.js
           sleep 5
           after=$(tasks)
           echo "gateway tasks: $before before, $after after"
