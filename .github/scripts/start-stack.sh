@@ -15,6 +15,8 @@ docker run -d --name nats -p 4222:4222 -v "$PWD/deploy/nats.conf:/etc/nats/nats.
 
 mkdir -p e2e
 export P2P_NATS_URL=nats://127.0.0.1:4222
+# The load tests open thousands of connections from this one address.
+export P2P_MAX_CONNECTIONS_PER_IP=100000
 bin=target/release
 
 P2P_NATS_USER=signaling P2P_NATS_PASSWORD=sig P2P_REDIS_URL=redis://:ci@127.0.0.1:6379 \
@@ -36,6 +38,15 @@ for port in 9090 9091 9100 9101 9110 9111 9300 9301; do
     (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
     sleep 0.1
   done
+done
+
+# Every service ready: listeners bound and NATS connected.
+for port in 9090 9091 9092 9095; do
+  for _ in $(seq 100); do
+    curl -sf "http://127.0.0.1:$port/ready" > /dev/null && break
+    sleep 0.1
+  done
+  curl -sf "http://127.0.0.1:$port/ready" > /dev/null || { echo "service on :$port not ready" >&2; exit 1; }
 done
 
 cat e2e/gw1.pem e2e/relay.pem > e2e/stack.pem
