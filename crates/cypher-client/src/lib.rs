@@ -25,6 +25,7 @@ use rand::rngs::OsRng;
 use tokio::sync::mpsc;
 
 use driver::{Driver, FileEntry, Parts, file_key, now_ms};
+use files::SourceStamp;
 use store::{FILES_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
@@ -99,7 +100,7 @@ pub(crate) enum Request {
     /// Records where a transfer lives, then optionally runs a command.
     Track {
         file_id: FileId,
-        path: PathBuf,
+        entry: FileEntry,
         then: Option<Command>,
     },
     Shutdown,
@@ -202,7 +203,8 @@ impl Client {
         mime: &str,
         kind: MediaKind,
     ) -> Result<(MsgId, FileId), ClientError> {
-        let size = tokio::fs::metadata(path).await?.len();
+        let source = SourceStamp::of(&tokio::fs::metadata(path).await?)?;
+        let size = source.len();
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -225,7 +227,10 @@ impl Client {
         };
         self.send(Request::Track {
             file_id,
-            path: path.to_owned(),
+            entry: FileEntry {
+                path: path.to_owned(),
+                source: Some(source),
+            },
             then: Some(cmd),
         })
         .await?;
@@ -269,9 +274,13 @@ impl Client {
             tokio::fs::create_dir_all(dir).await?;
         }
         tokio::fs::write(&path, data).await?;
+        let source = SourceStamp::of(&tokio::fs::metadata(&path).await?)?;
         self.send(Request::Track {
             file_id,
-            path,
+            entry: FileEntry {
+                path,
+                source: Some(source),
+            },
             then: Some(cmd),
         })
         .await?;
@@ -302,7 +311,10 @@ impl Client {
     pub async fn accept_file(&self, file_id: FileId, dest: PathBuf) -> Result<(), ClientError> {
         self.send(Request::Track {
             file_id,
-            path: dest,
+            entry: FileEntry {
+                path: dest,
+                source: None,
+            },
             then: Some(Command::AcceptFile { file_id }),
         })
         .await

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use crate::files::{FileIo, IoDone, IoJob};
+use crate::files::{ChunkRead, FileIo, IoDone, IoJob, SourceStamp};
 use crate::net::{self, Link, NetEvent};
 use crate::store::{FILES_TABLE, Op, Store};
 use crate::{Config, Request};
@@ -23,10 +23,24 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct FileEntry {
     pub path: PathBuf,
+    /// The file as offered, for files we send; `None` for files we receive.
+    pub source: Option<SourceStamp>,
 }
 
 impl cypher_core::Record for FileEntry {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
+
+    /// Version 1 had no stamp. Receiving still resumes; sending fails, as
+    /// the file can no longer be checked against what was offered.
+    fn upgrade(version: u8, body: &[u8]) -> Result<Self, cypher_core::CoreError> {
+        match version {
+            1 => Ok(Self {
+                path: postcard::from_bytes(body).map_err(|_| cypher_core::CoreError::Storage)?,
+                source: None,
+            }),
+            _ => Err(cypher_core::CoreError::Storage),
+        }
+    }
 }
 
 pub(crate) struct Driver {
@@ -159,10 +173,10 @@ impl Driver {
             Request::Command(cmd) => self.feed(Input::Command(cmd)).await,
             Request::Track {
                 file_id,
-                path,
+                entry,
                 then,
             } => {
-                self.remember_file(file_id, path);
+                self.remember_file(file_id, entry);
                 if let Some(cmd) = then {
                     self.feed(Input::Command(cmd)).await;
                 }
@@ -306,23 +320,7 @@ impl Driver {
                     offset,
                     len,
                     headroom,
-                } => {
-                    if let Some(entry) = self.files.get(&file_id) {
-                        self.io.submit(IoJob::Read {
-                            file_id,
-                            path: entry.path.clone(),
-                            index,
-                            offset,
-                            len,
-                            headroom,
-                        });
-                    } else {
-                        let effects = self
-                            .core
-                            .handle(Input::ChunkUnavailable { file_id }, now_ms());
-                        Box::pin(self.apply(effects)).await;
-                    }
-                }
+                } => self.read_chunk(file_id, index, offset, len, headroom).await,
                 Effect::Disconnect { reconnect } => {
                     self.reconnect = reconnect;
                     self.gateway = None;
@@ -417,8 +415,38 @@ impl Driver {
         false
     }
 
-    fn remember_file(&mut self, file_id: FileId, path: PathBuf) {
-        let entry = FileEntry { path };
+    /// Reads a chunk of a file we send. One whose file is unknown, or cannot
+    /// be checked against what was offered, fails its transfer instead.
+    async fn read_chunk(
+        &mut self,
+        file_id: FileId,
+        index: u32,
+        offset: u64,
+        len: u32,
+        headroom: usize,
+    ) {
+        let Some(FileEntry {
+            path,
+            source: Some(source),
+        }) = self.files.get(&file_id)
+        else {
+            let effects = self
+                .core
+                .handle(Input::ChunkUnavailable { file_id }, now_ms());
+            return Box::pin(self.apply(effects)).await;
+        };
+        self.io.submit(IoJob::Read(ChunkRead {
+            file_id,
+            path: path.clone(),
+            source: *source,
+            index,
+            offset,
+            len,
+            headroom,
+        }));
+    }
+
+    fn remember_file(&mut self, file_id: FileId, entry: FileEntry) {
         let value = self.vault.seal(
             cypher_core::Table::Meta,
             &file_key(&file_id),
@@ -552,5 +580,28 @@ mod tests {
             events.try_recv().is_err(),
             "a stopped client handles no input"
         );
+    }
+
+    /// Entries from before stamps still load: downloads resume, while an
+    /// upload, having no stamp to check its file against, is not read.
+    #[test]
+    fn entries_from_before_stamps_load_without_one() {
+        #[derive(Serialize, Deserialize)]
+        struct V1 {
+            path: PathBuf,
+        }
+        impl cypher_core::Record for V1 {
+            const VERSION: u8 = 1;
+        }
+
+        let vault = cypher_core::Vault::new([7; 32]);
+        let key = file_key(&FileId([5; 16]));
+        let old = V1 {
+            path: PathBuf::from("download.bin"),
+        };
+        let sealed = vault.seal(Table::Meta, &key, &old, &mut OsRng);
+        let entry: FileEntry = vault.open(Table::Meta, &key, &sealed).unwrap();
+        assert_eq!(entry.path, old.path);
+        assert!(entry.source.is_none());
     }
 }
