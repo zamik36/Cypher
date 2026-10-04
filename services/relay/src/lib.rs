@@ -196,10 +196,8 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         config.dev_cert_out.as_deref(),
     )
     .await?;
-    let relay = Arc::new(Relay::new(
-        cypher_server_kit::connect_nats(&config.nats).await?,
-        RelayMetrics::register(&registry)?,
-    ));
+    let nats = cypher_server_kit::connect_nats(&config.nats).await?;
+    let relay = Arc::new(Relay::new(nats.clone(), RelayMetrics::register(&registry)?));
 
     let mut listeners =
         vec![Listener::bind(config.relay_addr, Upgrade::Tls(TlsAcceptor::from(tls))).await?];
@@ -212,6 +210,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         total: config.max_connections,
         per_ip: config.max_connections_per_ip,
     };
+    registry.set_ready(nats);
     server::serve(listeners, relay, limits, shutdown).await;
     Ok(())
 }

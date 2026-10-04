@@ -117,7 +117,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     .await?;
     let nats = cypher_server_kit::connect_nats(&config.nats).await?;
     let gateway = Arc::new(Gateway::new(
-        nats,
+        nats.clone(),
         Limits {
             frames_per_sec: config.frames_per_sec,
             bytes_per_sec: config.bytes_per_sec,
@@ -136,6 +136,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         total: config.max_connections,
         per_ip: config.max_connections_per_ip,
     };
+    registry.set_ready(nats);
     server::serve(listeners, gateway, limits, shutdown).await;
     Ok(())
 }

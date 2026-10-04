@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_nats::Message;
+use async_nats::{Message, Subscriber};
 use cypher_server_kit::metrics::Metrics;
 use cypher_server_kit::{
     PEER_HEADER, SIG_ONION_SUBJECT, SIG_QUEUE_GROUP, SIG_REQUEST_SUBJECT, secrets,
@@ -71,12 +71,17 @@ struct Service {
 }
 
 impl Service {
-    async fn serve(self: Arc<Self>, subject: &'static str, permits: usize) -> anyhow::Result<()> {
-        let permits = Arc::new(Semaphore::new(permits));
-        let mut sub = self
+    async fn subscribe(&self, subject: &'static str) -> anyhow::Result<Subscriber> {
+        Ok(self
             .nats
             .queue_subscribe(subject, SIG_QUEUE_GROUP.to_owned())
-            .await?;
+            .await?)
+    }
+
+    /// Handles `subject` until its subscription ends, at most `permits`
+    /// requests at once.
+    async fn serve(self: Arc<Self>, subject: &'static str, mut sub: Subscriber, permits: usize) {
+        let permits = Arc::new(Semaphore::new(permits));
         while let Some(msg) = sub.next().await {
             let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                 self.shed.inc();
@@ -88,7 +93,6 @@ impl Service {
                 drop(permit);
             });
         }
-        Ok(())
     }
 
     async fn dispatch(&self, subject: &str, msg: Message) {
@@ -153,10 +157,13 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         )?,
     });
 
+    let sessions = service.subscribe(SIG_REQUEST_SUBJECT).await?;
+    let onion = service.subscribe(SIG_ONION_SUBJECT).await?;
+    registry.set_ready(service.nats.clone());
     info!("signaling ready");
     tokio::select! {
-        r = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, SESSION_PERMITS) => r?,
-        r = Arc::clone(&service).serve(SIG_ONION_SUBJECT, ONION_PERMITS) => r?,
+        () = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, sessions, SESSION_PERMITS) => {}
+        () = Arc::clone(&service).serve(SIG_ONION_SUBJECT, onion, ONION_PERMITS) => {}
         () = shutdown.cancelled() => {}
     }
     let _ = service.nats.flush().await;

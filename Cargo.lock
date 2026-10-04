@@ -2387,7 +2387,6 @@ name = "e2e"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "bytes",
  "cypher-client",
  "cypher-core",
  "cypher-crypto",

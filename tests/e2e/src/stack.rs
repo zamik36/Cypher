@@ -5,10 +5,8 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::time::Duration;
 
-use bytes::Bytes;
-use cypher_server_kit::{NatsConfig, SIG_REQUEST_SUBJECT};
+use cypher_server_kit::NatsConfig;
 use tempfile::TempDir;
-use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -37,13 +35,14 @@ impl Stack {
     async fn start(redis_url: String, nats_url: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (gateway_addr, relay_addr) = (free_local_addr(), free_local_addr());
+        let probes = [free_local_addr(), free_local_addr(), free_local_addr()];
         let shutdown = CancellationToken::new();
         let services = vec![
             tokio::spawn(signaling::run(
                 signaling::Config {
                     redis_url,
                     nats: nats(nats_url, "signaling"),
-                    metrics_addr: any_local_port(),
+                    metrics_addr: probes[0],
                     onion_key_path: dir.path().join("onion.bin"),
                     relay_public_addr: Some(format!("localhost:{}", relay_addr.port())),
                 },
@@ -57,7 +56,7 @@ impl Stack {
                     tls_cert_path: None,
                     tls_key_path: None,
                     dev_cert_out: Some(dir.path().join("gateway.pem")),
-                    metrics_addr: any_local_port(),
+                    metrics_addr: probes[1],
                     max_connections: 64,
                     max_connections_per_ip: 64,
                     frames_per_sec: 2_000,
@@ -73,14 +72,14 @@ impl Stack {
                     tls_cert_path: None,
                     tls_key_path: None,
                     dev_cert_out: Some(dir.path().join("relay.pem")),
-                    metrics_addr: any_local_port(),
+                    metrics_addr: probes[2],
                     max_connections: 64,
                     max_connections_per_ip: 64,
                 },
                 shutdown.clone(),
             )),
         ];
-        wait_until_ready(&[gateway_addr, relay_addr], nats_url).await;
+        wait_until_ready(&probes).await;
         let target = Target {
             gateway_addr: format!("localhost:{}", gateway_addr.port()),
             tls: pinned_tls(dir.path()),
@@ -127,24 +126,19 @@ fn free_local_addr() -> SocketAddr {
         .unwrap()
 }
 
-/// Listeners accept connections and signaling answers on NATS. Services
-/// write their certificates before binding, so the PEM files are complete.
-async fn wait_until_ready(listeners: &[SocketAddr], nats_url: &str) {
-    let probe = cypher_server_kit::connect_nats(&nats(nats_url, "gateway"))
-        .await
-        .unwrap();
+/// Every service answers its readiness probe: listeners bound, NATS
+/// subscribed. Services write their certificates before binding, so the PEM
+/// files are complete.
+async fn wait_until_ready(probes: &[SocketAddr]) {
     tokio::time::timeout(STARTUP, async {
-        for addr in listeners {
-            while TcpStream::connect(addr).await.is_err() {
+        for &addr in probes {
+            while tokio::task::spawn_blocking(move || cypher_server_kit::metrics::probe_ready(addr))
+                .await
+                .unwrap()
+                .is_err()
+            {
                 tokio::time::sleep(POLL).await;
             }
-        }
-        while probe
-            .request(SIG_REQUEST_SUBJECT, Bytes::new())
-            .await
-            .is_err()
-        {
-            tokio::time::sleep(POLL).await;
         }
     })
     .await

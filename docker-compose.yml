@@ -12,8 +12,12 @@ services:
     command: >-
       redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
       --maxmemory ${REDIS_MAXMEMORY:-512mb} --maxmemory-policy noeviction
+    # redis-cli authenticates with REDISCLI_AUTH; without it every ping
+    # answers NOAUTH and the check would pass on any running server.
+    environment:
+      REDISCLI_AUTH: "${REDIS_PASSWORD}"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -68,6 +72,13 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+    # `gateway health` asks the service's own /ready endpoint.
+    healthcheck:
+      test: ["CMD", "gateway", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - internal
@@ -97,6 +108,13 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+    # `signaling health` asks the service's own /ready endpoint.
+    healthcheck:
+      test: ["CMD", "signaling", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - internal
@@ -125,6 +143,13 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+    # `relay health` asks the service's own /ready endpoint.
+    healthcheck:
+      test: ["CMD", "relay", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - internal

@@ -1,10 +1,15 @@
 //! Prometheus metrics owned by one service instance and exposed over a
-//! minimal HTTP/1.1 endpoint. Nothing is global, so several instances (e.g.
-//! in integration tests) never collide.
+//! minimal HTTP/1.1 endpoint, which also answers readiness on `/ready`.
+//! Nothing is global, so several instances (e.g. in integration tests) never
+//! collide.
 
-use std::net::SocketAddr;
+use std::io::{Read as _, Write as _};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use async_nats::connection::State;
 
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
@@ -15,10 +20,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct Metrics {
     registry: Registry,
+    /// Set once the service accepts work; it stays ready while this bus
+    /// connection is up.
+    ready: Arc<OnceLock<async_nats::Client>>,
 }
 
 impl Metrics {
@@ -32,7 +41,23 @@ impl Metrics {
         registry.register(Box::new(
             prometheus::process_collector::ProcessCollector::for_self(),
         ))?;
-        Ok(Self { registry })
+        Ok(Self {
+            registry,
+            ready: Arc::default(),
+        })
+    }
+
+    /// Marks the service ready: it has bound its listeners and connected
+    /// its dependencies. From now on `/ready` answers 200 while `nats` stays
+    /// connected, and 503 otherwise.
+    pub fn set_ready(&self, nats: async_nats::Client) {
+        let _ = self.ready.set(nats);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready
+            .get()
+            .is_some_and(|nats| nats.connection_state() == State::Connected)
     }
 
     pub fn counter(&self, name: &str, help: &str) -> anyhow::Result<IntCounter> {
@@ -54,8 +79,9 @@ impl Metrics {
         Ok(body)
     }
 
-    /// Binds `addr` and answers every request with [`Self::render`] until
-    /// `shutdown`. Returns the bound address (useful with port 0).
+    /// Binds `addr` and answers `/ready` with the service's readiness and
+    /// any other request with [`Self::render`], until `shutdown`. Returns the
+    /// bound address (useful with port 0).
     pub async fn serve(
         &self,
         addr: SocketAddr,
@@ -163,18 +189,28 @@ impl Collector for RuntimeCollector {
 
 async fn respond(mut stream: TcpStream, metrics: Metrics) {
     let mut request = [0u8; 1024];
-    if tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut request))
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let Ok(body) = metrics.render() else {
+    let Ok(Ok(read)) = tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut request)).await
+    else {
         return;
     };
+    let (status, content_type, body) = if request.get(..read).is_some_and(asks_ready) {
+        if metrics.is_ready() {
+            ("200 OK", "text/plain", b"ready\n".to_vec())
+        } else {
+            (
+                "503 Service Unavailable",
+                "text/plain",
+                b"not ready\n".to_vec(),
+            )
+        }
+    } else {
+        let Ok(body) = metrics.render() else {
+            return;
+        };
+        ("200 OK", prometheus::TEXT_FORMAT, body)
+    };
     let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        TextEncoder::new().format_type(),
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = tokio::time::timeout(REQUEST_TIMEOUT, async {
@@ -184,9 +220,64 @@ async fn respond(mut stream: TcpStream, metrics: Metrics) {
     .await;
 }
 
+fn asks_ready(request: &[u8]) -> bool {
+    request.starts_with(b"GET /ready ")
+}
+
+/// Asks the service whose metrics listen on `addr` whether it is ready: the
+/// container healthcheck, run as `<service> health` inside the image, which
+/// has no HTTP client of its own.
+pub fn probe_ready(addr: SocketAddr) -> anyhow::Result<()> {
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let mut conn =
+        std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, addr.port()), PROBE_TIMEOUT)?;
+    conn.set_read_timeout(Some(PROBE_TIMEOUT))?;
+    conn.write_all(b"GET /ready HTTP/1.1\r\nConnection: close\r\n\r\n")?;
+    let mut status = [0u8; 12];
+    conn.read_exact(&mut status)?;
+    anyhow::ensure!(&status == b"HTTP/1.1 200", "not ready");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ready only once the service says so, with its bus connected.
+    #[tokio::test]
+    async fn ready_once_the_service_says_so() {
+        let metrics = Metrics::new().unwrap();
+        let shutdown = CancellationToken::new();
+        let addr = metrics
+            .serve("0.0.0.0:0".parse().unwrap(), shutdown.clone())
+            .await
+            .unwrap();
+        let probe = move || tokio::task::spawn_blocking(move || probe_ready(addr));
+        assert!(
+            probe().await.unwrap().is_err(),
+            "not ready before it is set"
+        );
+
+        let Ok(url) = std::env::var("CYPHER_TEST_NATS") else {
+            eprintln!("CYPHER_TEST_NATS unset; skipping the connected half");
+            return;
+        };
+        let nats = async_nats::ConnectOptions::new()
+            .user_and_password(
+                "gateway".into(),
+                std::env::var("GATEWAY_NATS_PASSWORD").unwrap_or_default(),
+            )
+            .connect(url)
+            .await
+            .unwrap();
+        metrics.set_ready(nats);
+        probe().await.unwrap().unwrap();
+        shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn serves_its_own_registry_over_http() {

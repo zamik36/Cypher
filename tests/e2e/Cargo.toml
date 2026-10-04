@@ -19,7 +19,6 @@ relay = { path = "../../services/relay" }
 tokio.workspace = true
 tokio-util.workspace = true
 rustls.workspace = true
-bytes.workspace = true
 anyhow.workspace = true
 tempfile = "3"
 
