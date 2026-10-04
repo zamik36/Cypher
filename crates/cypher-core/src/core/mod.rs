@@ -15,7 +15,7 @@ use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
 use crate::peer::{Peer, PeerRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
-use crate::store::{META_PREKEYS, StoreOp, Table, Vault};
+use crate::store::{META_PREKEYS, Record, StoreOp, Table, Vault};
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
@@ -113,17 +113,23 @@ impl<R: CryptoRngCore> Core<R> {
         let vault = Vault::new(seed.derive_storage_key());
         let inbox_secret = seed.derive_inbox_secret();
 
-        let mut fresh_prekeys = false;
-        let prekeys = if let Some((k, v)) = snapshot.meta.iter().find(|(k, _)| k == META_PREKEYS) {
-            Prekeys::from_record(&vault.open::<PrekeysRecord>(Table::Meta, k, v)?)
-        } else {
-            fresh_prekeys = true;
-            Prekeys::generate(now_ms, &mut rng)
+        let mut skipped = Skipped::default();
+        let stored_prekeys = snapshot
+            .meta
+            .iter()
+            .find(|(k, _)| k == META_PREKEYS)
+            .map(|(k, v)| skipped.open::<PrekeysRecord>(&vault, Table::Meta, k, v))
+            .transpose()?
+            .flatten();
+        let fresh_prekeys = stored_prekeys.is_none();
+        let prekeys = match stored_prekeys {
+            Some(record) => Prekeys::from_record(&record),
+            None => Prekeys::generate(now_ms, &mut rng),
         };
 
-        let peers = load_peers(&vault, &snapshot.peers)?;
-        let outbox = load_outbox(&vault, &snapshot.outbox)?;
-        let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers)?;
+        let peers = load_peers(&vault, &snapshot.peers, &mut skipped)?;
+        let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
+        let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
 
         let mut core = Self {
             rng,
@@ -151,6 +157,11 @@ impl<R: CryptoRngCore> Core<R> {
         };
         if fresh_prekeys {
             core.persist_prekeys();
+        }
+        if skipped.0 > 0 {
+            core.emit(Event::Warning {
+                reason: FailReason::Corrupted,
+            });
         }
         let effects = std::mem::take(&mut core.effects);
         Ok((core, effects))
@@ -623,31 +634,77 @@ impl<R: CryptoRngCore> Core<R> {
     }
 }
 
-fn load_peers(vault: &Vault, rows: &Rows) -> Result<HashMap<PeerId, Peer>, CoreError> {
-    rows.iter()
-        .map(|(k, v)| {
-            let id = PeerId::from_bytes(k).ok_or(CoreError::Storage)?;
-            let peer = Peer::from_record(&vault.open::<PeerRecord>(Table::Peers, k, v)?)?;
-            Ok((id, peer))
-        })
-        .collect()
+/// Records `restore` could not read. One damaged row must not lock the user
+/// out of everything else, so it is left in place, skipped and reported.
+/// Data from a newer release is different: running on it could overwrite
+/// state that release depends on, so it stops the restore instead.
+#[derive(Default)]
+struct Skipped(usize);
+
+impl Skipped {
+    fn open<T: Record>(
+        &mut self,
+        vault: &Vault,
+        table: Table,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Option<T>, CoreError> {
+        match vault.open(table, key, value) {
+            Ok(record) => Ok(Some(record)),
+            Err(CoreError::NewerStorage) => Err(CoreError::NewerStorage),
+            Err(_) => {
+                self.0 = self.0.saturating_add(1);
+                Ok(None)
+            }
+        }
+    }
 }
 
-fn load_outbox(vault: &Vault, rows: &Rows) -> Result<BTreeMap<MsgId, OutboxItem>, CoreError> {
-    rows.iter()
-        .map(|(k, v)| {
-            let item: OutboxItem = vault.open(Table::Outbox, k, v)?;
-            Ok((item.msg_id, item))
-        })
-        .collect()
+fn load_peers(
+    vault: &Vault,
+    rows: &Rows,
+    skipped: &mut Skipped,
+) -> Result<HashMap<PeerId, Peer>, CoreError> {
+    let mut peers = HashMap::with_capacity(rows.len());
+    for (k, v) in rows {
+        let record = skipped.open::<PeerRecord>(vault, Table::Peers, k, v)?;
+        match (PeerId::from_bytes(k), record.map(|r| Peer::from_record(&r))) {
+            (Some(id), Some(Ok(peer))) => {
+                peers.insert(id, peer);
+            }
+            (_, None) => {}
+            _ => skipped.0 = skipped.0.saturating_add(1),
+        }
+    }
+    Ok(peers)
+}
+
+fn load_outbox(
+    vault: &Vault,
+    rows: &Rows,
+    skipped: &mut Skipped,
+) -> Result<BTreeMap<MsgId, OutboxItem>, CoreError> {
+    let mut outbox = BTreeMap::new();
+    for (k, v) in rows {
+        if let Some(item) = skipped.open::<OutboxItem>(vault, Table::Outbox, k, v)? {
+            outbox.insert(item.msg_id, item);
+        }
+    }
+    Ok(outbox)
 }
 
 type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
 
-fn load_transfers(vault: &Vault, rows: &Rows) -> Result<Transfers, CoreError> {
+fn load_transfers(
+    vault: &Vault,
+    rows: &Rows,
+    skipped: &mut Skipped,
+) -> Result<Transfers, CoreError> {
     let (mut outgoing, mut incoming) = (HashMap::new(), HashMap::new());
     for (k, v) in rows {
-        let rec: TransferRecord = vault.open(Table::Transfers, k, v)?;
+        let Some(rec) = skipped.open::<TransferRecord>(vault, Table::Transfers, k, v)? else {
+            continue;
+        };
         let id = rec.desc.file_id;
         if rec.outgoing {
             outgoing.insert(id, Outgoing::from_record(rec));

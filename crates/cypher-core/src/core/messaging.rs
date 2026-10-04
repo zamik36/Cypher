@@ -34,6 +34,10 @@ pub(crate) struct OutboxItem {
     next_try: u64,
 }
 
+impl crate::Record for OutboxItem {
+    const VERSION: u8 = 1;
+}
+
 impl Drop for OutboxItem {
     fn drop(&mut self) {
         self.envelope.zeroize();

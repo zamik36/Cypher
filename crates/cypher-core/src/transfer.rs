@@ -433,6 +433,10 @@ pub(crate) struct TransferRecord {
     pub accepted: bool,
 }
 
+impl crate::Record for TransferRecord {
+    const VERSION: u8 = 1;
+}
+
 pub(crate) fn cipher_for(desc: &FileDesc) -> ChunkCipher {
     ChunkCipher::new(
         &FileKey::from_bytes(desc.key),

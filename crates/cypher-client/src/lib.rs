@@ -386,9 +386,14 @@ async fn load_files(
         let Some(file_id) = FileId::from_bytes(&k) else {
             continue;
         };
-        let plain = vault.open_bytes(Table::Meta, &file_key(&file_id), &v)?;
-        if let Ok(entry) = postcard::from_bytes::<FileEntry>(&plain) {
-            files.insert(file_id, entry);
+        // An unreadable entry only loses the ability to resume that one
+        // transfer; data from a newer release must not be run on at all.
+        match vault.open::<FileEntry>(Table::Meta, &file_key(&file_id), &v) {
+            Ok(entry) => {
+                files.insert(file_id, entry);
+            }
+            Err(CoreError::NewerStorage) => return Err(CoreError::NewerStorage.into()),
+            Err(_) => {}
         }
     }
     Ok(files)

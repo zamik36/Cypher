@@ -216,6 +216,10 @@ pub enum MessageStatus {
     Failed,
 }
 
+impl crate::Record for MessageStatus {
+    const VERSION: u8 = 1;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub msg_id: MsgId,
@@ -224,6 +228,10 @@ pub struct StoredMessage {
     pub sent_at_ms: u64,
     pub status: MessageStatus,
     pub content: Content,
+}
+
+impl crate::Record for StoredMessage {
+    const VERSION: u8 = 1;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

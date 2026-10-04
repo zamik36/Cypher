@@ -26,6 +26,10 @@ pub struct MediaKey {
     key: [u8; 32],
 }
 
+impl crate::Record for MediaKey {
+    const VERSION: u8 = 1;
+}
+
 impl std::fmt::Debug for MediaKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaKey")

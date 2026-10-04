@@ -122,6 +122,10 @@ pub(crate) struct PrekeysRecord {
     next_opk_id: u32,
 }
 
+impl crate::Record for PrekeysRecord {
+    const VERSION: u8 = 1;
+}
+
 impl Drop for PrekeysRecord {
     fn drop(&mut self) {
         self.spk.1.zeroize();

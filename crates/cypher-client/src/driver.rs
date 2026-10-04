@@ -25,6 +25,10 @@ pub(crate) struct FileEntry {
     pub path: PathBuf,
 }
 
+impl cypher_core::Record for FileEntry {
+    const VERSION: u8 = 1;
+}
+
 pub(crate) struct Driver {
     core: Core<OsRng>,
     store: Store,
@@ -410,16 +414,12 @@ impl Driver {
         false
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "postcard serialization of a path into a Vec cannot fail"
-    )]
     fn remember_file(&mut self, file_id: FileId, path: PathBuf) {
         let entry = FileEntry { path };
-        let value = self.vault.seal_bytes(
+        let value = self.vault.seal(
             cypher_core::Table::Meta,
             &file_key(&file_id),
-            &postcard::to_allocvec(&entry).expect("in-memory serialization"),
+            &entry,
             &mut OsRng,
         );
         self.ops.push(Op::Put(FILES_TABLE, file_id.to_vec(), value));

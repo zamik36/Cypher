@@ -23,7 +23,7 @@ pub use api::{
 };
 pub use core::{Core, Rows, Snapshot};
 pub use media::MediaKey;
-pub use store::{StoreOp, Table, Vault, message_key};
+pub use store::{Record, StoreOp, Table, Vault, message_key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CoreError {
@@ -31,6 +31,8 @@ pub enum CoreError {
     Invalid,
     #[error("stored state is corrupt or was written with another key")]
     Storage,
+    #[error("stored state was written by a newer version of the app; update it")]
+    NewerStorage,
     #[error("cryptographic failure")]
     Crypto,
     #[error("concurrent session initiation resolved in favour of ours")]

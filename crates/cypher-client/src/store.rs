@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
-use cypher_core::{StoreOp, Table};
+use cypher_core::{CoreError, StoreOp, Table};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 
@@ -53,12 +53,22 @@ pub(crate) struct Store {
     tx: std_mpsc::Sender<Job>,
 }
 
+/// Layout of the database: its tables and key formats. Bump it when they
+/// change and migrate in [`Store::open`]; a database from a newer release
+/// is refused rather than written in a layout it does not expect.
+const SCHEMA_VERSION: u32 = 1;
+
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self, ClientError> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
+        let found: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if found > SCHEMA_VERSION {
+            return Err(CoreError::NewerStorage.into());
+        }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         for name in Table::ALL.iter().map(|t| t.name()).chain([FILES_TABLE]) {
             conn.execute_batch(&format!(
                 "CREATE TABLE IF NOT EXISTS {name} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;"
@@ -217,5 +227,20 @@ mod tests {
         assert_eq!(range, vec![(vec![1, 2], b"b".to_vec())]);
         assert_eq!(store.get(t, vec![2, 1]).await.unwrap(), Some(b"c".to_vec()));
         assert_eq!(store.get(t, vec![9]).await.unwrap(), None);
+    }
+
+    #[test]
+    fn a_database_from_a_newer_release_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        drop(Store::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(matches!(
+            Store::open(&path),
+            Err(ClientError::Core(CoreError::NewerStorage))
+        ));
     }
 }

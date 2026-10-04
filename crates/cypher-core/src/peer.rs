@@ -79,6 +79,10 @@ pub(crate) struct PeerRecord {
     hello_sent: bool,
 }
 
+impl crate::Record for PeerRecord {
+    const VERSION: u8 = 1;
+}
+
 mod zeroizing_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     use zeroize::Zeroizing;

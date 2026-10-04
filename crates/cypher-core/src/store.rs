@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use cypher_crypto::aead;
 use cypher_types::{FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
@@ -68,6 +70,20 @@ pub enum StoreOp {
 
 pub(crate) const META_PREKEYS: &[u8] = b"prekeys";
 
+/// A type persisted through the [`Vault`]. Its plaintext is
+/// `VERSION ‖ postcard(self)`: bump [`Record::VERSION`] whenever the
+/// serialized shape changes, and teach [`Record::upgrade`] to read the
+/// previous shapes so data written by older releases keeps loading.
+pub trait Record: Serialize + DeserializeOwned {
+    const VERSION: u8;
+
+    /// Decodes a record written as `version`, always older than
+    /// [`Record::VERSION`]. Without a migration the record is unreadable.
+    fn upgrade(_version: u8, _body: &[u8]) -> Result<Self, CoreError> {
+        Err(CoreError::Storage)
+    }
+}
+
 pub fn message_key(peer: &PeerId, sent_at_ms: u64, msg_id: &MsgId) -> Vec<u8> {
     let mut k = Vec::with_capacity(32 + 8 + 16);
     k.extend_from_slice(peer.as_bytes());
@@ -130,28 +146,32 @@ impl Vault {
         clippy::expect_used,
         reason = "postcard serialization into a Vec cannot fail for our record types"
     )]
-    pub fn seal<T: Serialize>(
+    pub fn seal<T: Record>(
         &self,
         table: Table,
         key: &[u8],
         value: &T,
         rng: &mut impl CryptoRngCore,
     ) -> Vec<u8> {
-        let plain = Zeroizing::new(postcard::to_allocvec(value).expect("in-memory serialization"));
+        let plain = Zeroizing::new(
+            postcard::to_extend(value, vec![T::VERSION]).expect("in-memory serialization"),
+        );
         self.seal_bytes(table, key, &plain, rng)
     }
 
-    pub fn open<T: DeserializeOwned>(
-        &self,
-        table: Table,
-        key: &[u8],
-        sealed: &[u8],
-    ) -> Result<T, CoreError> {
+    /// Decrypts and decodes a record, upgrading older versions. A record
+    /// written by a newer release is [`CoreError::NewerStorage`].
+    pub fn open<T: Record>(&self, table: Table, key: &[u8], sealed: &[u8]) -> Result<T, CoreError> {
         let plain = self.open_bytes(table, key, sealed)?;
-        postcard::from_bytes(&plain).map_err(|_| CoreError::Storage)
+        let (&version, body) = plain.split_first().ok_or(CoreError::Storage)?;
+        match version.cmp(&T::VERSION) {
+            Ordering::Equal => postcard::from_bytes(body).map_err(|_| CoreError::Storage),
+            Ordering::Less => T::upgrade(version, body),
+            Ordering::Greater => Err(CoreError::NewerStorage),
+        }
     }
 
-    pub fn put<T: Serialize>(
+    pub fn put<T: Record>(
         &self,
         table: Table,
         key: Vec<u8>,
@@ -184,21 +204,85 @@ fn aad(table: Table, key: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+    use serde::Deserialize;
+
+    /// Version 2 of a test record; version 1 stored the count as a `u8`.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Note {
+        text: String,
+        count: u32,
+    }
+
+    impl Record for Note {
+        const VERSION: u8 = 2;
+
+        fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+            match version {
+                1 => {
+                    let (text, count): (String, u8) =
+                        postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+                    Ok(Self {
+                        text,
+                        count: count.into(),
+                    })
+                }
+                _ => Err(CoreError::Storage),
+            }
+        }
+    }
+
+    fn note() -> Note {
+        Note {
+            text: "hello".into(),
+            count: 42,
+        }
+    }
+
+    /// Seals raw `version ‖ body` the way an older or newer release would.
+    fn sealed_as(v: &Vault, version: u8, body: &[u8]) -> Vec<u8> {
+        let plain = [&[version][..], body].concat();
+        v.seal_bytes(Table::Peers, b"k1", &plain, &mut OsRng)
+    }
 
     #[test]
     fn vault_roundtrip_is_bound_to_table_and_key() {
         let v = Vault::new([7; 32]);
-        let sealed = v.seal(Table::Peers, b"k1", &("hello", 42u32), &mut OsRng);
-        let back: (String, u32) = v.open(Table::Peers, b"k1", &sealed).unwrap();
-        assert_eq!(back, ("hello".to_owned(), 42));
-        v.open::<(String, u32)>(Table::Peers, b"k2", &sealed)
-            .unwrap_err();
-        v.open::<(String, u32)>(Table::Outbox, b"k1", &sealed)
-            .unwrap_err();
+        let sealed = v.seal(Table::Peers, b"k1", &note(), &mut OsRng);
+        assert_eq!(
+            v.open::<Note>(Table::Peers, b"k1", &sealed).unwrap(),
+            note()
+        );
+        v.open::<Note>(Table::Peers, b"k2", &sealed).unwrap_err();
+        v.open::<Note>(Table::Outbox, b"k1", &sealed).unwrap_err();
         Vault::new([8; 32])
-            .open::<(String, u32)>(Table::Peers, b"k1", &sealed)
+            .open::<Note>(Table::Peers, b"k1", &sealed)
             .unwrap_err();
         v.open_bytes(Table::Peers, b"k1", &sealed[..5]).unwrap_err();
+    }
+
+    #[test]
+    fn records_carry_their_version_and_older_ones_are_upgraded() {
+        let v = Vault::new([7; 32]);
+        let old = postcard::to_allocvec(&("hello", 42u8)).unwrap();
+        let upgraded: Note = v
+            .open(Table::Peers, b"k1", &sealed_as(&v, 1, &old))
+            .unwrap();
+        assert_eq!(upgraded, note());
+
+        let unknown_old = sealed_as(&v, 0, &old);
+        assert!(matches!(
+            v.open::<Note>(Table::Peers, b"k1", &unknown_old),
+            Err(CoreError::Storage)
+        ));
+        let newer = sealed_as(&v, 3, &postcard::to_allocvec(&note()).unwrap());
+        assert!(matches!(
+            v.open::<Note>(Table::Peers, b"k1", &newer),
+            Err(CoreError::NewerStorage)
+        ));
+        assert!(matches!(
+            v.open::<Note>(Table::Peers, b"k1", &sealed_as(&v, 2, b"")),
+            Err(CoreError::Storage)
+        ));
     }
 
     #[test]
