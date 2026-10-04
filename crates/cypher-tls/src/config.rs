@@ -230,14 +230,43 @@ mod tests {
         assert!(matches!(only_key, Err(Error::Config(_))));
     }
 
+    /// Runs a TLS handshake in memory; returns the certificate chain the
+    /// client was shown.
+    fn handshake(
+        server: Arc<ServerConfig>,
+        client: Arc<ClientConfig>,
+    ) -> Vec<CertificateDer<'static>> {
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let mut client = rustls::ClientConnection::new(client, name).unwrap();
+        let mut server = rustls::ServerConnection::new(server).unwrap();
+        while client.is_handshaking() || server.is_handshaking() {
+            let mut wire = Vec::new();
+            client.write_tls(&mut wire).unwrap();
+            server.read_tls(&mut wire.as_slice()).unwrap();
+            server.process_new_packets().unwrap();
+            wire.clear();
+            server.write_tls(&mut wire).unwrap();
+            client.read_tls(&mut wire.as_slice()).unwrap();
+            client.process_new_packets().unwrap();
+        }
+        client.peer_certificates().unwrap().to_vec()
+    }
+
     #[tokio::test]
-    async fn ca_issued_pem_files_load() {
+    async fn ca_issued_pem_files_are_served() {
         let files = PemFiles::new();
         let cert = files.write("cert.pem", &files.cert_pem);
         let key = files.write("key.pem", &files.key_pem);
-        load_server_config(Some(&cert), Some(&key), &[], None)
+        let server = load_server_config(Some(&cert), Some(&key), &[], None)
             .await
             .unwrap();
+        let client = make_client_config_with_pem(&files.cert_pem).unwrap();
+        let shown = handshake(server, client);
+        let expected = rustls_pemfile::certs(&mut files.cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.first(), Some(&expected));
     }
 
     #[tokio::test]

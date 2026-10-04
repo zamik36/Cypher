@@ -64,9 +64,13 @@ impl PemCert {
 
     /// Checks for renewals in the background for as long as `cert` is in use.
     pub(crate) fn watch(cert: &Arc<Self>) {
+        Self::watch_every(cert, CHECK_INTERVAL);
+    }
+
+    fn watch_every(cert: &Arc<Self>, interval: Duration) {
         let weak = Arc::downgrade(cert);
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(CHECK_INTERVAL);
+            let mut tick = tokio::time::interval(interval);
             tick.tick().await;
             loop {
                 tick.tick().await;
@@ -211,5 +215,34 @@ mod tests {
             "a broken renewal is not installed"
         );
         assert_eq!(served(&cert), third, "the working certificate stays");
+    }
+
+    #[tokio::test]
+    async fn the_watcher_installs_a_renewal_while_the_certificate_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+        let (first_cert, first_key) = pair();
+        write(&cert_path, &first_cert, 0);
+        write(&key_path, &first_key, 0);
+        let cert = Arc::new(
+            PemCert::load(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).unwrap(),
+        );
+        let first = served(&cert);
+        PemCert::watch_every(&cert, Duration::from_millis(5));
+
+        let (second_cert, second_key) = pair();
+        write(&key_path, &second_key, 60);
+        write(&cert_path, &second_cert, 60);
+        let renewed = async {
+            while served(&cert) == first {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), renewed)
+            .await
+            .expect("the renewal is picked up");
+        // Once nobody holds the certificate, the watcher ends on its next tick.
+        drop(cert);
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

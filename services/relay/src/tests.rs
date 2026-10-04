@@ -160,3 +160,34 @@ fn refused_connections_are_counted() {
     relay.rejected();
     assert_eq!(relay.metrics.rejected.get(), 1);
 }
+
+#[test]
+fn settings_that_would_admit_no_one_are_refused() {
+    let valid = || Config {
+        relay_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: None,
+        nats: cypher_server_kit::NatsConfig {
+            url: "nats://127.0.0.1:4222".into(),
+            user: None,
+            password: None,
+            token: None,
+        },
+        tls_cert_path: None,
+        tls_key_path: None,
+        dev_cert_out: None,
+        metrics_addr: "127.0.0.1:0".parse().unwrap(),
+        max_connections: 10,
+        max_connections_per_ip: 2,
+    };
+    valid().validate().unwrap();
+    let no_connections = Config {
+        max_connections: 0,
+        ..valid()
+    };
+    assert!(no_connections.validate().is_err());
+    let no_connections_per_ip = Config {
+        max_connections_per_ip: 0,
+        ..valid()
+    };
+    assert!(no_connections_per_ip.validate().is_err());
+}

@@ -68,7 +68,11 @@ describe("connection state", () => {
   beforeEach(() => vi.resetModules());
 
   it("is online only once the server accepted us", async () => {
-    const { nextLink } = await load();
+    const { nextLink, linkEvent, isOnline } = await load();
+    linkEvent("start");
+    expect(isOnline()).toBe(false);
+    linkEvent("connected");
+    expect(isOnline()).toBe(true);
     expect(nextLink("idle", "start")).toBe("connecting");
     expect(nextLink("connecting", "disconnected")).toBe("connecting");
     expect(nextLink("connecting", "connected")).toBe("online");
