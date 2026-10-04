@@ -12,6 +12,8 @@ use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector, client};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+mod dial;
+
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -52,7 +54,7 @@ pub fn split_host_port(addr: &str) -> Result<(&str, u16)> {
 
 pub async fn connect_tls(addr: &str, tls: Arc<rustls::ClientConfig>) -> Result<ClientConn> {
     let (host, port) = split_host_port(addr)?;
-    let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
+    let tcp = timeout(CONNECT_TIMEOUT, dial::dial(host, port))
         .await
         .map_err(|_| Error::Timeout)??;
     tcp.set_nodelay(true)?;
