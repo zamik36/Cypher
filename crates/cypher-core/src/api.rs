@@ -72,6 +72,11 @@ pub enum Command {
     RemovePeer {
         peer: PeerId,
     },
+    /// The name this user goes by, sent (encrypted) to every contact;
+    /// `None` or blank sends none.
+    SetProfileName {
+        name: Option<String>,
+    },
     /// Names a contact on this device; `None` or blank removes the name.
     RenamePeer {
         peer: PeerId,
@@ -160,6 +165,11 @@ pub enum Event {
     PeerAdded {
         peer: PeerId,
         initiated_by_us: bool,
+    },
+    /// A contact told us the name they go by, or that they have none.
+    PeerProfile {
+        peer: PeerId,
+        name: Option<String>,
     },
     Message(StoredMessage),
     MessageStatus {

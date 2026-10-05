@@ -68,6 +68,8 @@ export interface ConversationEntry {
   peer_id: string;
   /** The name the user gave this contact on this device. */
   alias: string | null;
+  /** The name the contact goes by, as they last sent it. */
+  name: string | null;
   last_message_at: number;
   last: UiMessage | null;
   /** Incoming messages not read yet (counted over the latest hundred). */
@@ -97,6 +99,8 @@ export interface Events {
   /** The server speaks another protocol version; this client stopped. */
   update_required: null;
   peer_connected: string;
+  /** A contact told us the name they go by (or that they have none). */
+  peer_profile: { peer: string; name: string | null };
   message: UiMessage;
   message_status: { msg_id: string; status: MessageStatus };
   file_offered: FileOffer;
@@ -195,6 +199,7 @@ export const onDisconnected = (cb: () => void) => api.on("disconnected", () => c
 export const onSuperseded = (cb: () => void) => api.on("superseded", () => cb());
 export const onUpdateRequired = (cb: () => void) => api.on("update_required", () => cb());
 export const onPeerConnected = (cb: (peerId: string) => void) => api.on("peer_connected", cb);
+export const onPeerProfile = (cb: (p: Events["peer_profile"]) => void) => api.on("peer_profile", cb);
 export const onMessage = (cb: (msg: UiMessage) => void) => api.on("message", cb);
 export const onMessageStatus = (cb: (p: Events["message_status"]) => void) => api.on("message_status", cb);
 export const onFileOffered = (cb: (info: FileOffer) => void) => api.on("file_offered", cb);

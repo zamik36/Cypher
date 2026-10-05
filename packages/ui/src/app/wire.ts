@@ -11,6 +11,7 @@ import {
   onMessage,
   onMessageStatus,
   onPeerConnected,
+  onPeerProfile,
   onSuperseded,
   onUpdateRequired,
 } from "../platform";
@@ -21,6 +22,7 @@ import {
   loadConversations,
   noteMessage,
   setAllOffline,
+  setContactName,
   setContactOnline,
   setLastStatus,
 } from "../stores/contacts";
@@ -77,6 +79,7 @@ export async function startApp(): Promise<() => void> {
       if (top().name === "new-chat") replace({ name: "chat", peerId });
       else addToast(t().toast_contact_added(displayName(peerId)), "success");
     }),
+    onPeerProfile(({ peer, name }) => setContactName(peer, name)),
     onMessage((ui) => {
       const msg = toChatMessage(ui.from, ui);
       if (msg.file && msg.file.kind !== "file") trackMedia(msg.file.file_id);

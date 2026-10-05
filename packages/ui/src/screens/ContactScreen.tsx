@@ -78,7 +78,7 @@ export default function ContactScreen(props: { peerId: string }) {
                 class="field"
                 type="text"
                 maxLength={MAX_NAME}
-                placeholder={t().contact_name_placeholder}
+                placeholder={contacts[props.peerId]?.name ?? t().contact_name_placeholder}
                 value={name()}
                 onInput={(e) => setName(e.currentTarget.value)}
                 autocomplete="off"

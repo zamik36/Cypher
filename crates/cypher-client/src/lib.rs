@@ -127,6 +127,8 @@ pub struct Contact {
     pub peer: PeerId,
     /// The name the user gave them on this device.
     pub alias: Option<String>,
+    /// The name they go by, as they last sent it.
+    pub name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -463,10 +465,19 @@ impl Client {
             .into_iter()
             .filter_map(|(key, sealed)| {
                 let peer = PeerId::from_bytes(&key)?;
-                let alias = self.vault.open_contact_alias(&key, &sealed).ok().flatten();
-                Some(Contact { peer, alias })
+                let names = self.vault.open_contact(&key, &sealed).unwrap_or_default();
+                Some(Contact {
+                    peer,
+                    alias: names.alias,
+                    name: names.name,
+                })
             })
             .collect())
+    }
+
+    /// Sets the name this user goes by; contacts receive it encrypted.
+    pub async fn set_profile_name(&self, name: Option<String>) -> Result<(), ClientError> {
+        self.command(Command::SetProfileName { name }).await
     }
 
     /// Names a contact on this device; `None` or blank removes the name.

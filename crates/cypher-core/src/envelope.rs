@@ -11,6 +11,8 @@ use crate::api::MediaKind;
 pub const MAX_TEXT_LEN: usize = 16 * 1024;
 pub const MAX_INLINE_LEN: usize = 32 * 1024;
 pub const MAX_NAME_LEN: usize = 255;
+/// A profile name in bytes; the core keeps at most 64 characters of it.
+pub const MAX_PROFILE_NAME_LEN: usize = 256;
 pub const MAX_MIME_LEN: usize = 127;
 pub const MAX_WAVEFORM_LEN: usize = 128;
 pub const MAX_POSTER_LEN: usize = 16 * 1024;
@@ -31,6 +33,10 @@ pub struct Envelope {
 pub enum Body {
     Hello {
         inbox: [u8; 32],
+        /// The name the sender goes by. Appended last: an older peer reads
+        /// `inbox` and takes the rest for padding, and from an older peer
+        /// this decodes from the zero padding as `None`.
+        name: Option<String>,
     },
     Text {
         text: String,
@@ -142,7 +148,10 @@ impl Envelope {
 
     fn validate(&self) -> Result<(), CoreError> {
         let ok = match &self.body {
-            Body::Hello { .. } | Body::FileCtl(FileCtl::Cancel { .. }) => true,
+            Body::Hello { name, .. } => name
+                .as_ref()
+                .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN),
+            Body::FileCtl(FileCtl::Cancel { .. }) => true,
             Body::Text { text, .. } => text.len() <= MAX_TEXT_LEN,
             Body::File { desc, kind } => {
                 desc.validate()?;
@@ -187,6 +196,63 @@ mod tests {
             key: [2; 32],
             inline: None,
         }
+    }
+
+    /// `Hello` before it carried a name, as older clients encode it.
+    #[derive(Serialize, Deserialize)]
+    enum OldBody {
+        Hello { inbox: [u8; 32] },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldEnvelope {
+        msg_id: MsgId,
+        sent_at_ms: u64,
+        body: OldBody,
+    }
+
+    #[test]
+    fn hello_names_travel_both_ways_with_older_peers() {
+        let mut old = postcard::to_allocvec(&OldEnvelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: OldBody::Hello { inbox: [7; 32] },
+        })
+        .unwrap();
+        old.resize(padded_len(old.len()), 0);
+        assert_eq!(
+            Envelope::decode(&old).unwrap().body,
+            Body::Hello {
+                inbox: [7; 32],
+                name: None
+            }
+        );
+
+        let new = Envelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: Body::Hello {
+                inbox: [7; 32],
+                name: Some("Анна".into()),
+            },
+        }
+        .encode();
+        let (read, _) = postcard::take_from_bytes::<OldEnvelope>(&new).unwrap();
+        assert!(matches!(read.body, OldBody::Hello { inbox } if inbox == [7; 32]));
+        assert!(matches!(
+            Envelope::decode(&new).unwrap().body,
+            Body::Hello { name: Some(n), .. } if n == "Анна"
+        ));
+
+        let long = Envelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: Body::Hello {
+                inbox: [7; 32],
+                name: Some("x".repeat(MAX_PROFILE_NAME_LEN + 1)),
+            },
+        };
+        Envelope::decode(&long.encode()).unwrap_err();
     }
 
     #[test]

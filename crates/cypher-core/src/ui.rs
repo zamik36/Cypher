@@ -60,6 +60,10 @@ pub enum UiPayload {
     Anonymity {
         level: u8,
     },
+    Profile {
+        peer: String,
+        name: Option<String>,
+    },
 }
 
 pub fn status(s: MessageStatus) -> &'static str {
@@ -131,6 +135,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         } => ("update_required", UiPayload::None),
         Event::Onion { up } => ("anonymity_level", anonymity(*up)),
         Event::PeerAdded { peer, .. } => ("peer_connected", UiPayload::Text(peer.to_hex())),
+        Event::PeerProfile { peer, name } => ("peer_profile", profile(peer, name.clone())),
         Event::Message(m) if !m.outgoing => ("message", UiPayload::Message(message(m))),
         Event::MessageStatus { msg_id, status: s } => (
             "message_status",
@@ -185,6 +190,13 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
 /// no one sits between them; both sides compute the same digits.
 pub fn safety_number(own: &PeerId, peer: &PeerId) -> String {
     cypher_crypto::fingerprint::safety_number(own.as_bytes(), peer.as_bytes())
+}
+
+fn profile(peer: &PeerId, name: Option<String>) -> UiPayload {
+    UiPayload::Profile {
+        peer: peer.to_hex(),
+        name,
+    }
 }
 
 fn anonymity(up: bool) -> UiPayload {

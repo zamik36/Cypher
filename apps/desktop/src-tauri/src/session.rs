@@ -154,6 +154,11 @@ impl AppState {
         };
         *self.endpoint.lock().await = endpoint;
         let (client, mut rx) = Client::start(&identity.seed, config).await.map_err(err)?;
+        // Before anything else is sent: contacts greeted later hear it too.
+        client
+            .set_profile_name(Some(identity.nickname.clone()))
+            .await
+            .map_err(err)?;
         let (events, _) = broadcast::channel(256);
         let (tx, offers) = (events.clone(), Arc::clone(&self.offers));
         let pump = tokio::spawn(async move {

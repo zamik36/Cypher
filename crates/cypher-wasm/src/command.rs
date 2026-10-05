@@ -24,6 +24,7 @@ pub(crate) enum JsCommand {
     SetAnonymity { require_onion: bool },
     RemovePeer { peer: String },
     RenamePeer { peer: String, alias: Option<String> },
+    SetProfileName { name: Option<String> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +114,7 @@ impl JsCommand {
                 peer: peer(&p)?,
                 alias,
             }),
+            Self::SetProfileName { name } => plain(Command::SetProfileName { name }),
         })
     }
 }
@@ -261,6 +263,8 @@ mod tests {
         assert_eq!(alias, None);
         let bad = json!({ "type": "rename_peer", "peer": "zz", "alias": "x" });
         assert_eq!(prepare(bad).unwrap_err(), CommandError::Peer);
+        let named = prepare(json!({ "type": "set_profile_name", "name": "Anna" })).unwrap();
+        assert!(matches!(named.command, Command::SetProfileName { name: Some(n) } if n == "Anna"));
     }
 
     #[test]

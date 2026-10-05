@@ -87,6 +87,8 @@ pub(crate) struct Conversation {
     peer_id: String,
     /// The name the user gave this contact.
     alias: Option<String>,
+    /// The name they go by, as they last sent it.
+    name: Option<String>,
     last_message_at: u64,
     last: Option<UiMessage>,
     /// Incoming messages not yet read, among the latest [`UNREAD_WINDOW`].
@@ -113,6 +115,7 @@ pub(crate) async fn get_conversations(state: State<'_, AppState>) -> CmdResult<V
         out.push(Conversation {
             peer_id: contact.peer.to_hex(),
             alias: contact.alias,
+            name: contact.name,
             last_message_at: recent.first().map_or(0, |m| m.sent_at_ms),
             last: recent.first().map(ui::message),
             unread,

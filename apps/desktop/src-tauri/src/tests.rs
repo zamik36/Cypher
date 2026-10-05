@@ -351,10 +351,18 @@ async fn two_desktops_against_in_process_stack() {
 /// A contact's name shows in the chat list; deleting the chat empties its
 /// history and drops it from the list.
 async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
+    // The name the contact created their profile with came along.
+    let list = b.call("get_conversations", json!({})).await.unwrap();
+    assert_eq!(list[0]["name"], "alice");
+    assert_eq!(list[0]["alias"], Value::Null);
     let rename = json!({ "peerId": a_id, "alias": " Alice " });
     b.call("rename_peer", rename).await.unwrap();
-    let list = b.call("get_conversations", json!({})).await.unwrap();
-    assert_eq!(list[0]["alias"], "Alice");
+    // The rename is queued to the client; the list reads what is stored.
+    let list = eventually(|| async {
+        let list = b.call("get_conversations", json!({})).await.ok()?;
+        (list[0]["alias"] == "Alice").then_some(list)
+    })
+    .await;
     assert_eq!(list[0]["peer_id"], a_id);
     assert!(list[0]["last"].is_object());
     assert_eq!(list[0]["unread"].as_u64().map(|n| n > 0), Some(true));

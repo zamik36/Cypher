@@ -385,6 +385,7 @@ const handlers: Handlers = {
       relay.stop();
       const c = await startClient();
       await run({ type: "set_anonymity", require_onion: anonymous });
+      await run({ type: "set_profile_name", name: requireIdentity().nickname });
       gateway.start(gatewayUrl);
       relay.start(relayUrl);
       return c.peerId();
@@ -450,6 +451,7 @@ const handlers: Handlers = {
         return {
           peer_id,
           alias: c.contactAlias(key, value) ?? null,
+          name: c.contactName(key, value) ?? null,
           last_message_at: last?.timestamp ?? 0,
           last,
           unread: recent.filter((m) => !m.outgoing && m.status !== "read").length,

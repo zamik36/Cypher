@@ -16,10 +16,11 @@ describe("contacts", () => {
   it("load from the conversation list, newest first", async () => {
     const { loadConversations, sortedContacts, displayName } = await load();
     loadConversations([
-      { peer_id: "aaaaaa11", alias: null, last_message_at: 10, last: null, unread: 0 },
+      { peer_id: "aaaaaa11", alias: null, name: "Ann", last_message_at: 10, last: null, unread: 0 },
       {
         peer_id: "bbbbbb22",
         alias: "Bob",
+        name: "Robert",
         last_message_at: 20,
         last: {
           msg_id: "m",
@@ -36,7 +37,7 @@ describe("contacts", () => {
     expect(sortedContacts().map((c) => c.peerId)).toEqual(["bbbbbb22", "aaaaaa11"]);
     expect(sortedContacts()[0]?.last?.from).toBe("bbbbbb22");
     expect(displayName("bbbbbb22")).toBe("Bob");
-    expect(displayName("aaaaaa11")).toContain("aaaaaa");
+    expect(displayName("aaaaaa11")).toBe("Ann");
     expect(sortedContacts("bo").map((c) => c.peerId)).toEqual(["bbbbbb22"]);
   });
 
@@ -76,6 +77,7 @@ describe("contacts", () => {
       avatarName,
       ensureContact,
       setAlias,
+      setContactName,
       setContactOnline,
       setAllOffline,
       removeContact,
@@ -86,9 +88,13 @@ describe("contacts", () => {
     expect(contacts["p2"]?.online).toBe(true);
     ensureContact("p2", true);
     expect(avatarName("p2")).toBe("p2");
+    setContactName("p2", " Anya ");
+    expect(displayName("p2")).toBe("Anya");
     setAlias("p2", "  Anna ");
     expect(displayName("p2")).toBe("Anna");
     expect(avatarName("p2")).toBe("Anna");
+    setContactName("p2", null);
+    expect(contacts["p2"]?.name).toBeNull();
     setAlias("p2", "   ");
     expect(contacts["p2"]?.alias).toBeNull();
     setContactOnline("p2", false);

@@ -69,6 +69,14 @@ pub enum StoreOp {
 }
 
 pub(crate) const META_PREKEYS: &[u8] = b"prekeys";
+pub(crate) const META_PROFILE: &[u8] = b"profile";
+
+/// How a contact is called: the name the user gave them, the one they go by.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContactNames {
+    pub alias: Option<String>,
+    pub name: Option<String>,
+}
 
 /// A type persisted through the [`Vault`]. Its plaintext is
 /// `VERSION ‖ postcard(self)`: bump [`Record::VERSION`] whenever the
@@ -192,15 +200,14 @@ impl Vault {
         self.open(Table::Media, file_id.as_bytes(), sealed)
     }
 
-    /// The name the user gave a contact, from its sealed session row (keyed
-    /// by the peer id). Drivers list contacts without restoring sessions.
-    pub fn open_contact_alias(
-        &self,
-        peer_key: &[u8],
-        sealed: &[u8],
-    ) -> Result<Option<String>, CoreError> {
+    /// A contact's names from its sealed session row (keyed by the peer id).
+    /// Drivers list contacts without restoring sessions.
+    pub fn open_contact(&self, peer_key: &[u8], sealed: &[u8]) -> Result<ContactNames, CoreError> {
         self.open::<crate::peer::PeerRecord>(Table::Peers, peer_key, sealed)
-            .map(|record| record.alias)
+            .map(|record| ContactNames {
+                alias: record.alias,
+                name: record.name,
+            })
     }
 }
 

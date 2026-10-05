@@ -25,6 +25,9 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
   await createIdentity(alice, "alice");
   await createIdentity(bob, "bob");
   await pair(alice, bob);
+  // Each side goes by the name it chose, sent inside the encrypted session.
+  await expect(alice.getByTestId("chat-header")).toContainText("bob");
+  await expect(bob.getByTestId("chat-header")).toContainText("alice");
 
   await test.step("chat both ways with delivery and read receipts", async () => {
     await say(bob, "hello alice");

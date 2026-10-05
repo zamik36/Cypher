@@ -152,7 +152,7 @@ const ru: TranslationKeys = {
   contact_fallback: (id: string) => `Контакт ${id}`,
   contact_name: "Имя",
   contact_name_placeholder: "Имя на этом устройстве",
-  contact_name_hint: "Это имя видите только вы. Собеседник о нём не узнает.",
+  contact_name_hint: "Это имя видите только вы, оно заменяет выбранное собеседником. Он о нём не узнает.",
   contact_saved: "Имя сохранено",
   contact_security: "Безопасность",
   contact_verify_hint: "Убедитесь, что между вами никого нет",
@@ -179,7 +179,7 @@ const ru: TranslationKeys = {
   settings_about_desc: "Приватный мессенджер со сквозным шифрованием.",
   settings_about_motto: "Без аккаунтов. Без слежки. Без логов.",
   profile_nickname: "Имя",
-  profile_nickname_hint: "Хранится только на этом устройстве. Собеседники видят то имя, которое дадут вам сами.",
+  profile_nickname_hint: "Это имя видят ваши контакты; оно передаётся им в зашифрованном виде.",
   profile_id: "Ваш ID",
   profile_backup: "Фраза восстановления",
   profile_backup_hint:

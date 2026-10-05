@@ -11,9 +11,9 @@ use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind};
-use crate::peer::{Peer, clean_alias};
+use crate::peer::{Peer, ProfileRecord, clean_name};
 use crate::relay::{self, RelayBody};
-use crate::store::{StoreOp, Table, message_key};
+use crate::store::{META_PROFILE, StoreOp, Table, message_key};
 
 /// First wait before retrying a message, by why it did not go out; each
 /// further attempt doubles it, up to [`MAX_RETRY_MS`].
@@ -115,8 +115,44 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(p) = self.peers.get_mut(peer) else {
             return;
         };
-        p.alias = alias.and_then(clean_alias);
+        p.alias = alias.and_then(clean_name);
         self.persist_peer(peer);
+    }
+
+    /// Sets the name this user goes by and tells every contact already
+    /// greeted; the others hear it in their first `Hello`.
+    pub(super) fn set_profile_name(&mut self, name: Option<&str>) {
+        let name = name.and_then(clean_name);
+        if name == self.profile_name {
+            return;
+        }
+        self.profile_name = name;
+        let op = self.vault.put(
+            Table::Meta,
+            META_PROFILE.to_vec(),
+            &ProfileRecord {
+                name: self.profile_name.clone(),
+            },
+            &mut self.rng,
+        );
+        self.persist(op);
+        let mut greeted: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(_, p)| p.hello_sent)
+            .map(|(id, _)| *id)
+            .collect();
+        greeted.sort_unstable_by_key(|id| *id.as_bytes());
+        for peer in greeted {
+            self.send_control(peer, self.hello());
+        }
+    }
+
+    fn hello(&self) -> Body {
+        Body::Hello {
+            inbox: self.inbox_id,
+            name: self.profile_name.clone(),
+        }
     }
 
     pub(super) fn remove_peer(&mut self, peer: &PeerId) {
@@ -375,10 +411,10 @@ impl<R: CryptoRngCore> Core<R> {
             });
             return;
         }
-        let (inbox, alias) = self
+        let (inbox, alias, name) = self
             .peers
             .get(&peer)
-            .map(|p| (p.inbox, p.alias.clone()))
+            .map(|p| (p.inbox, p.alias.clone(), p.name.clone()))
             .unwrap_or_default();
         self.peers.insert(
             peer,
@@ -390,6 +426,7 @@ impl<R: CryptoRngCore> Core<R> {
                 inbox,
                 hello_sent: false,
                 alias,
+                name,
             },
         );
         self.requeue_for(&peer);
@@ -409,8 +446,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         p.hello_sent = true;
         self.persist_peer(&peer);
-        let inbox = self.inbox_id;
-        self.send_control(peer, Body::Hello { inbox });
+        self.send_control(peer, self.hello());
     }
 
     /// Makes in-flight messages for `peer` eligible for re-encryption on a
@@ -517,8 +553,8 @@ impl<R: CryptoRngCore> Core<R> {
 
         let previous = self.peers.remove(&from);
         let is_new = previous.is_none();
-        let (inbox, mut seen, alias) = previous
-            .map(|p| (p.inbox, p.accepted_ephemerals, p.alias))
+        let (inbox, mut seen, alias, name) = previous
+            .map(|p| (p.inbox, p.accepted_ephemerals, p.alias, p.name))
             .unwrap_or_default();
         Peer::remember_ephemeral(&mut seen, init.ephemeral);
         self.peers.insert(
@@ -531,6 +567,7 @@ impl<R: CryptoRngCore> Core<R> {
                 inbox,
                 hello_sent: false,
                 alias,
+                name,
             },
         );
         self.requeue_for(&from);
@@ -551,11 +588,18 @@ impl<R: CryptoRngCore> Core<R> {
             body,
         } = env;
         match body {
-            Body::Hello { inbox } => {
+            Body::Hello { inbox, name } => {
+                let name = name.as_deref().and_then(clean_name);
+                let mut renamed = false;
                 if let Some(p) = self.peers.get_mut(&from) {
                     p.inbox = Some(inbox);
+                    renamed = p.name != name;
+                    p.name.clone_from(&name);
                 }
                 self.persist_peer(&from);
+                if renamed {
+                    self.emit(Event::PeerProfile { peer: from, name });
+                }
                 self.send_hello(from);
             }
             Body::Text { text, reply_to } => {

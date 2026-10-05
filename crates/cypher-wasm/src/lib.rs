@@ -252,7 +252,19 @@ impl Client {
     /// The name the user gave a contact, from its stored session row.
     #[wasm_bindgen(js_name = contactAlias)]
     pub fn contact_alias(&self, key: &[u8], value: &[u8]) -> Option<String> {
-        self.vault.open_contact_alias(key, value).ok().flatten()
+        self.vault
+            .open_contact(key, value)
+            .ok()
+            .and_then(|n| n.alias)
+    }
+
+    /// The name a contact goes by, from its stored session row.
+    #[wasm_bindgen(js_name = contactName)]
+    pub fn contact_name(&self, key: &[u8], value: &[u8]) -> Option<String> {
+        self.vault
+            .open_contact(key, value)
+            .ok()
+            .and_then(|n| n.name)
     }
 
     /// Decrypts a stored message, applying a newer status row if present.

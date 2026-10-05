@@ -13,10 +13,10 @@ use zeroize::Zeroizing;
 
 use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
-use crate::peer::{Peer, PeerRecord};
+use crate::peer::{Peer, PeerRecord, ProfileRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
-use crate::store::{META_PREKEYS, Record, StoreOp, Table, Vault};
+use crate::store::{META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault};
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
@@ -98,6 +98,8 @@ pub struct Core<R> {
     recent: RecentIds,
     progress_at: HashMap<FileId, u64>,
     anon: Anon,
+    /// The name this user goes by, sent to contacts with `Hello`.
+    profile_name: Option<String>,
     effects: Vec<Effect>,
 }
 
@@ -128,6 +130,7 @@ impl<R: CryptoRngCore> Core<R> {
             None => Prekeys::generate(now_ms, &mut rng),
         };
 
+        let profile_name = load_profile(&vault, &snapshot.meta, &mut skipped)?;
         let peers = load_peers(&vault, &snapshot.peers, &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
         let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
@@ -154,6 +157,7 @@ impl<R: CryptoRngCore> Core<R> {
             recent: RecentIds::default(),
             progress_at: HashMap::new(),
             anon: Anon::default(),
+            profile_name,
             effects: Vec::new(),
         };
         if fresh_prekeys {
@@ -450,6 +454,7 @@ impl<R: CryptoRngCore> Core<R> {
             Command::FetchInbox => self.fetch_inbox(),
             Command::RemovePeer { peer } => self.remove_peer(&peer),
             Command::RenamePeer { peer, alias } => self.rename_peer(&peer, alias.as_deref()),
+            Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
         }
     }
@@ -726,6 +731,20 @@ fn load_outbox(
 }
 
 type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
+
+fn load_profile(
+    vault: &Vault,
+    meta: &Rows,
+    skipped: &mut Skipped,
+) -> Result<Option<String>, CoreError> {
+    Ok(meta
+        .iter()
+        .find(|(k, _)| k == META_PROFILE)
+        .map(|(k, v)| skipped.open::<ProfileRecord>(vault, Table::Meta, k, v))
+        .transpose()?
+        .flatten()
+        .and_then(|record| record.name))
+}
 
 fn load_transfers(
     vault: &Vault,

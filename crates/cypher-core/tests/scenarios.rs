@@ -56,6 +56,56 @@ fn join_link_establishes_session_both_ways_and_either_side_writes_first() {
 /// A contact's name lives with its session on this device: it survives a
 /// restart and a new session with the same person, and goes with the chat.
 #[test]
+fn contacts_learn_the_name_each_side_goes_by() {
+    let mut w = World::new(3);
+    w.command(
+        A,
+        Command::SetProfileName {
+            name: Some(
+                " Alice
+"
+                .into(),
+            ),
+        },
+    );
+    w.pair(A, B);
+    let (a, b) = (w.peer(A), w.peer(B));
+    assert_eq!(w.contact_name(B, a).as_deref(), Some("Alice"));
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::PeerProfile { peer, name: Some(n) } if *peer == a && n == "Alice"
+    )));
+    assert_eq!(w.contact_name(A, b), None, "B goes by no name yet");
+
+    // A new name reaches contacts already greeted.
+    w.command(
+        B,
+        Command::SetProfileName {
+            name: Some("Bob".into()),
+        },
+    );
+    assert_eq!(w.contact_name(A, b).as_deref(), Some("Bob"));
+    w.command(
+        A,
+        Command::SetProfileName {
+            name: Some("Alicia".into()),
+        },
+    );
+    assert_eq!(w.contact_name(B, a).as_deref(), Some("Alicia"));
+
+    // Both the name and what contacts said survive restarts.
+    w.restart(A);
+    w.restart(B);
+    assert_eq!(w.contact_name(B, a).as_deref(), Some("Alicia"));
+    w.pair(A, C);
+    assert_eq!(w.contact_name(C, a).as_deref(), Some("Alicia"));
+
+    w.command(A, Command::SetProfileName { name: None });
+    assert_eq!(w.contact_name(B, a), None);
+    assert_eq!(w.contact_name(C, a), None);
+}
+
+#[test]
 fn contacts_keep_the_name_given_on_this_device() {
     let mut w = paired();
     let b = w.peer(B);

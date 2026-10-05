@@ -5,8 +5,8 @@ use zeroize::Zeroizing;
 use crate::CoreError;
 
 const MAX_REMEMBERED_INITS: usize = 16;
-/// Longest name the user may give a contact, in characters.
-pub(crate) const MAX_ALIAS_CHARS: usize = 64;
+/// Longest name kept for anyone (a contact, or this user), in characters.
+pub(crate) const MAX_NAME_CHARS: usize = 64;
 
 pub(crate) struct Peer {
     pub ratchet: Ratchet,
@@ -21,18 +21,20 @@ pub(crate) struct Peer {
     pub hello_sent: bool,
     /// The name the user gave this contact; only ever stored on this device.
     pub alias: Option<String>,
+    /// The name the contact goes by, as they last sent it.
+    pub name: Option<String>,
 }
 
-/// A contact name as the user typed it, made safe to show: control
-/// characters dropped, trimmed, at most [`MAX_ALIAS_CHARS`]; empty means none.
-pub(crate) fn clean_alias(raw: &str) -> Option<String> {
+/// A name as someone typed it, made safe to show: control characters
+/// dropped, trimmed, at most [`MAX_NAME_CHARS`]; empty means none.
+pub(crate) fn clean_name(raw: &str) -> Option<String> {
     let cleaned: String = raw
         .chars()
         .filter(|c| !c.is_control())
         .collect::<String>()
         .trim()
         .chars()
-        .take(MAX_ALIAS_CHARS)
+        .take(MAX_NAME_CHARS)
         .collect();
     let cleaned = cleaned.trim_end();
     (!cleaned.is_empty()).then(|| cleaned.to_owned())
@@ -63,6 +65,7 @@ impl Peer {
             inbox: self.inbox,
             hello_sent: self.hello_sent,
             alias: self.alias.clone(),
+            name: self.name.clone(),
         }
     }
 
@@ -85,6 +88,7 @@ impl Peer {
             inbox: r.inbox,
             hello_sent: r.hello_sent,
             alias: r.alias.clone(),
+            name: r.name.clone(),
         })
     }
 }
@@ -99,27 +103,65 @@ pub(crate) struct PeerRecord {
     inbox: Option<[u8; 32]>,
     hello_sent: bool,
     pub(crate) alias: Option<String>,
+    pub(crate) name: Option<String>,
 }
 
 impl crate::Record for PeerRecord {
-    const VERSION: u8 = 2;
+    const VERSION: u8 = 3;
 
-    /// Version 1 had no contact name.
+    /// Version 1 had no names, version 2 only the user's own for the contact.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
-        if version != 1 {
-            return Err(CoreError::Storage);
-        }
-        let v1: PeerRecordV1 = postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+        let v2: PeerRecordV2 = match version {
+            1 => {
+                let v1: PeerRecordV1 =
+                    postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+                PeerRecordV2 {
+                    ratchet: v1.ratchet,
+                    pending_init: v1.pending_init,
+                    accepted_ephemerals: v1.accepted_ephemerals,
+                    identity_dh: v1.identity_dh,
+                    inbox: v1.inbox,
+                    hello_sent: v1.hello_sent,
+                    alias: None,
+                }
+            }
+            2 => postcard::from_bytes(body).map_err(|_| CoreError::Storage)?,
+            _ => return Err(CoreError::Storage),
+        };
         Ok(Self {
-            ratchet: v1.ratchet,
-            pending_init: v1.pending_init,
-            accepted_ephemerals: v1.accepted_ephemerals,
-            identity_dh: v1.identity_dh,
-            inbox: v1.inbox,
-            hello_sent: v1.hello_sent,
-            alias: None,
+            ratchet: v2.ratchet,
+            pending_init: v2.pending_init,
+            accepted_ephemerals: v2.accepted_ephemerals,
+            identity_dh: v2.identity_dh,
+            inbox: v2.inbox,
+            hello_sent: v2.hello_sent,
+            alias: v2.alias,
+            name: None,
         })
     }
+}
+
+/// [`PeerRecord`] as version 2 stored it.
+#[derive(Deserialize)]
+struct PeerRecordV2 {
+    #[serde(with = "zeroizing_bytes")]
+    ratchet: Zeroizing<Vec<u8>>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    identity_dh: [u8; 32],
+    inbox: Option<[u8; 32]>,
+    hello_sent: bool,
+    alias: Option<String>,
+}
+
+/// The name this user goes by, kept in `meta`.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct ProfileRecord {
+    pub name: Option<String>,
+}
+
+impl crate::Record for ProfileRecord {
+    const VERSION: u8 = 1;
 }
 
 /// [`PeerRecord`] as version 1 stored it.
@@ -162,13 +204,13 @@ mod tests {
 
     #[test]
     fn names_are_cleaned_and_bounded() {
-        assert_eq!(clean_alias("  Anna  "), Some("Anna".into()));
-        assert_eq!(clean_alias("An\u{0}na\n"), Some("Anna".into()));
-        assert_eq!(clean_alias(" \t "), None);
-        let long = "я".repeat(MAX_ALIAS_CHARS + 10);
+        assert_eq!(clean_name("  Anna  "), Some("Anna".into()));
+        assert_eq!(clean_name("An\u{0}na\n"), Some("Anna".into()));
+        assert_eq!(clean_name(" \t "), None);
+        let long = "я".repeat(MAX_NAME_CHARS + 10);
         assert_eq!(
-            clean_alias(&long).map(|a| a.chars().count()),
-            Some(MAX_ALIAS_CHARS)
+            clean_name(&long).map(|a| a.chars().count()),
+            Some(MAX_NAME_CHARS)
         );
     }
 
@@ -202,6 +244,40 @@ mod tests {
         assert_eq!(record.alias, None);
         assert_eq!(record.inbox, Some([4; 32]));
         assert!(record.hello_sent);
-        assert_eq!(vault.open_contact_alias(b"peer", &sealed).unwrap(), None);
+        let names = vault.open_contact(b"peer", &sealed).unwrap();
+        assert_eq!((names.alias, names.name), (None, None));
+    }
+
+    /// Sessions saved before contacts sent their own names keep the alias.
+    #[test]
+    fn version_2_records_keep_the_alias() {
+        #[derive(Serialize, Deserialize)]
+        struct V2 {
+            ratchet: Vec<u8>,
+            pending_init: Vec<u8>,
+            accepted_ephemerals: Vec<[u8; 32]>,
+            identity_dh: [u8; 32],
+            inbox: Option<[u8; 32]>,
+            hello_sent: bool,
+            alias: Option<String>,
+        }
+        impl crate::Record for V2 {
+            const VERSION: u8 = 2;
+        }
+
+        let vault = Vault::new([3; 32]);
+        let old = V2 {
+            ratchet: vec![1, 2, 3],
+            pending_init: Vec::new(),
+            accepted_ephemerals: Vec::new(),
+            identity_dh: [9; 32],
+            inbox: None,
+            hello_sent: false,
+            alias: Some("Bob".into()),
+        };
+        let sealed = vault.seal(Table::Peers, b"peer", &old, &mut OsRng);
+        let names = vault.open_contact(b"peer", &sealed).unwrap();
+        assert_eq!(names.alias.as_deref(), Some("Bob"));
+        assert_eq!(names.name, None);
     }
 }

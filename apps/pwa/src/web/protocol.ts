@@ -33,6 +33,7 @@ export interface Methods {
   conversations(): {
     peer_id: string;
     alias: string | null;
+    name: string | null;
     last_message_at: number;
     last: unknown;
     unread: number;

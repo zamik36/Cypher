@@ -8,6 +8,8 @@ export interface Contact {
   peerId: string;
   /** The name the user gave them on this device. */
   alias: string | null;
+  /** The name they go by, as they last sent it. */
+  name: string | null;
   last: ChatMessage | null;
   /** Time of the last message, for ordering; 0 before any. */
   lastAt: number;
@@ -18,7 +20,7 @@ export interface Contact {
 const [contacts, setContacts] = createStore<Record<string, Contact>>({});
 
 function blank(peerId: string): Contact {
-  return { peerId, alias: null, last: null, lastAt: 0, unread: 0, online: false };
+  return { peerId, alias: null, name: null, last: null, lastAt: 0, unread: 0, online: false };
 }
 
 /** Replaces the list with the conversations the client reported. */
@@ -28,6 +30,7 @@ export function loadConversations(list: readonly ConversationEntry[]): void {
     next[c.peer_id] = {
       peerId: c.peer_id,
       alias: c.alias,
+      name: c.name,
       last: c.last ? toChatMessage(c.peer_id, c.last) : null,
       lastAt: c.last_message_at,
       unread: c.unread,
@@ -92,14 +95,23 @@ export function removeContact(peerId: string): void {
   setContacts(produce((all) => Reflect.deleteProperty(all, peerId)));
 }
 
+/** Records the name a contact goes by. */
+export function setContactName(peerId: string, name: string | null): void {
+  ensureContact(peerId);
+  setContacts(peerId, "name", name?.trim() || null);
+}
+
+/** The name to show: the user's own for the contact, else theirs. */
+const nameOf = (peerId: string) => contacts[peerId]?.alias ?? contacts[peerId]?.name ?? null;
+
 /** What a contact's avatar spells: their name, or their id until they have one. */
 export function avatarName(peerId: string): string {
-  return contacts[peerId]?.alias ?? peerId;
+  return nameOf(peerId) ?? peerId;
 }
 
 /** How a contact is called everywhere in the UI. */
 export function displayName(peerId: string): string {
-  return contacts[peerId]?.alias ?? t().contact_fallback(peerId.slice(0, 6));
+  return nameOf(peerId) ?? t().contact_fallback(peerId.slice(0, 6));
 }
 
 /** Contacts, most recent first, optionally only those matching `query` by name. */
