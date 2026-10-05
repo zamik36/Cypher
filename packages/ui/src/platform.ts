@@ -155,6 +155,12 @@ export interface Platform {
   /** Shows a finished file in its folder; only with `capabilities.revealFile`. */
   revealFile(fileId: string): Promise<void>;
   generateQr(linkId: string): Promise<string>;
+  /**
+   * Reads a QR code with the system scanner, which runs behind the page
+   * (Android). Without it the UI uses the camera itself.
+   */
+  scanQr?: () => Promise<string>;
+  cancelScan?: () => Promise<void>;
   /** The 60 digits both sides of a conversation compare to rule out a man in the middle. */
   safetyNumber(peerId: string): Promise<string>;
   /** Takes the session back after another device took it over. */

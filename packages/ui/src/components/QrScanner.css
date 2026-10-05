@@ -1,0 +1,65 @@
+.qr-scanner {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-sheet);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-camera);
+  color: var(--c-on-avatar);
+  visibility: visible;
+}
+
+/* The system camera runs behind the page: the page shows only the frame. */
+.qr-scanner--native {
+  background: transparent;
+}
+
+.qr-scanner__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.qr-scanner__frame {
+  position: relative;
+  width: min(68vw, 280px);
+  aspect-ratio: 1;
+  border: 3px solid var(--c-on-avatar);
+  border-radius: var(--r-lg);
+  box-shadow: 0 0 0 100vmax var(--c-scrim);
+}
+
+.qr-scanner__bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-6) var(--sp-4) calc(var(--sp-8) + var(--safe-bottom));
+}
+
+.qr-scanner__hint {
+  max-width: 320px;
+  text-align: center;
+  font-size: var(--t-md);
+  line-height: var(--t-md-lh);
+}
+
+/* While the system scanner runs, everything but the frame steps aside. */
+html.native-scan,
+html.native-scan body,
+html.native-scan .shell,
+html.native-scan .screen {
+  background: transparent;
+}
+
+html.native-scan body > * {
+  visibility: hidden;
+}

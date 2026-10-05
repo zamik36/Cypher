@@ -1,6 +1,7 @@
 import { createEffect, createSignal, Match, on, Show, Switch, untrack } from "solid-js";
 import "./NewChat.css";
 import Icon from "../components/Icon";
+import QrScanner from "../components/QrScanner";
 import TopBar from "../components/TopBar";
 import { api } from "../platform";
 import { isOnline } from "../stores/connection";
@@ -119,6 +120,8 @@ function JoinTab() {
   const [input, setInput] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [scanning, setScanning] = createSignal(false);
+  const canScan = Boolean(api.scanQr) || "mediaDevices" in navigator;
 
   async function join() {
     const code = findInvite(input());
@@ -147,6 +150,21 @@ function JoinTab() {
         void join();
       }}
     >
+      <Show when={canScan}>
+        <button class="btn btn--secondary btn--block" type="button" onClick={() => setScanning(true)}>
+          <Icon name="scan" size={18} /> {t().scan_button}
+        </button>
+      </Show>
+      <Show when={scanning()}>
+        <QrScanner
+          onCode={(code) => {
+            setScanning(false);
+            setInput(code);
+            void join();
+          }}
+          onClose={() => setScanning(false)}
+        />
+      </Show>
       <p class="hint">{t().join_hint}</p>
       <input
         class="field mono"

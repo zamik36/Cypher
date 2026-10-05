@@ -28,6 +28,7 @@
   --c-tick: var(--c-muted);
   --c-tick-read: var(--c-accent);
   --c-scrim: #000000a0;
+  --c-camera: #000000;
   --c-qr-paper: #ffffff;
 
   --c-avatar-0: #3b6e5c;
@@ -68,6 +69,7 @@
   --c-tick: var(--c-muted);
   --c-tick-read: var(--c-accent);
   --c-scrim: #00000066;
+  --c-camera: #000000;
   --c-qr-paper: #ffffff;
 
   --c-avatar-0: #5fa58a;

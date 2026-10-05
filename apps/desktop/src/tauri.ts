@@ -63,6 +63,17 @@ export const tauriPlatform: Platform = {
   openFile: (file) => command("open_file", { fileId: file.file_id }),
   revealFile: (fileId) => command("reveal_file", { fileId }),
   generateQr: (linkId) => invoke<string>("generate_qr", { linkId }),
+  ...(isAndroid && {
+    scanQr: async () => {
+      const scanner = await import("@tauri-apps/plugin-barcode-scanner");
+      if ((await scanner.requestPermissions()) !== "granted") {
+        throw new DOMException("camera permission denied", "NotAllowedError");
+      }
+      const { content } = await scanner.scan({ windowed: true, formats: [scanner.Format.QRCode] });
+      return content;
+    },
+    cancelScan: async () => (await import("@tauri-apps/plugin-barcode-scanner")).cancel(),
+  }),
   safetyNumber: (peerId) => invoke<string>("safety_number", { peerId }),
   reconnect: () => command("reconnect"),
   startVoice: async (onLevel) => {

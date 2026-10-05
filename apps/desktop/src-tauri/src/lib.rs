@@ -28,7 +28,10 @@ pub fn run() -> tauri::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    wire(tauri::Builder::default())
+    let builder = wire(tauri::Builder::default());
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_cypher_files::init())
