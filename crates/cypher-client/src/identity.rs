@@ -60,6 +60,35 @@ impl IdentityStore {
         self.save_new(seed, nickname, passphrase)
     }
 
+    /// Deletes everything the app keeps next to the identity: conversations,
+    /// contacts, media, then the identity itself, so a failure part way
+    /// leaves the profile in place to try again. Files the user saved
+    /// elsewhere stay. The client must be stopped first.
+    pub fn erase_device(&self) -> Result<(), ClientError> {
+        let Some(dir) = self.path.parent() else {
+            return Ok(());
+        };
+        let entries = match fs::read_dir(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            entries => entries?,
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path == self.path {
+                continue;
+            }
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+        match fs::remove_file(&self.path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
     pub fn unlock(&self, passphrase: &str) -> Result<Unlocked, ClientError> {
         let (seed, nickname) = identity_file::open(&fs::read(&self.path)?, passphrase)?;
         Ok(Unlocked { seed, nickname })
@@ -120,6 +149,26 @@ mod tests {
             store.create("bob", PASS),
             Err(ClientError::IdentityExists)
         ));
+    }
+
+    #[test]
+    fn erasing_the_device_makes_room_for_a_new_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let store = IdentityStore::new(&data);
+        store.create("alice", PASS).unwrap();
+        fs::write(data.join("state.db"), b"chats").unwrap();
+        fs::create_dir_all(data.join("media")).unwrap();
+        fs::write(data.join("media").join("note.bin"), b"voice").unwrap();
+
+        store.erase_device().unwrap();
+        assert!(!store.exists());
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
+        store.create("bob", PASS).unwrap();
+        assert_eq!(store.unlock(PASS).unwrap().nickname, "bob");
+
+        let missing = IdentityStore::new(&dir.path().join("never-created"));
+        missing.erase_device().unwrap();
     }
 
     #[test]

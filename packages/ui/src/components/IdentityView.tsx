@@ -1,4 +1,4 @@
-import { createSignal, For, Show, createMemo, onMount, type JSX } from "solid-js";
+import { createSignal, For, Show, createMemo, onCleanup, onMount, type JSX } from "solid-js";
 import "./Onboarding.css";
 import Icon from "./Icon";
 import { api } from "../platform";
@@ -13,7 +13,8 @@ interface IdentityViewProps {
   onUnlocked: (peerId: string, nickname: string) => void;
 }
 
-type Mode = "unlock" | "create" | "import" | "backup";
+/** `forgot` explains a lost passphrase and offers to erase the device. */
+type Mode = "unlock" | "create" | "import" | "backup" | "forgot";
 
 /** A new identity, held back until its recovery phrase has been written down. */
 interface Pending {
@@ -39,6 +40,9 @@ export default function IdentityView(props: IdentityViewProps) {
   const [checking, setChecking] = createSignal(false);
   const [positions, setPositions] = createSignal<number[]>([]);
   const [answers, setAnswers] = createSignal<string[]>([]);
+  const [eraseIn, setEraseIn] = createSignal(0);
+  let eraseTimer: ReturnType<typeof setInterval> | undefined;
+  onCleanup(() => clearInterval(eraseTimer));
 
   onMount(() => {
     api
@@ -59,6 +63,28 @@ export default function IdentityView(props: IdentityViewProps) {
     setRepeat("");
     setError("");
     setMode(next);
+    clearInterval(eraseTimer);
+    if (next === "forgot") {
+      // A pause before the button works: this cannot be undone.
+      setEraseIn(3);
+      eraseTimer = setInterval(() => {
+        setEraseIn((n) => Math.max(0, n - 1));
+        if (eraseIn() === 0) clearInterval(eraseTimer);
+      }, 1000);
+    }
+  }
+
+  async function handleErase() {
+    begin();
+    try {
+      await api.eraseDevice();
+      setHasId(false);
+      switchMode("create");
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function begin() {
@@ -150,6 +176,7 @@ export default function IdentityView(props: IdentityViewProps) {
   });
 
   const title = () => {
+    if (mode() === "forgot") return t().identity_forgot_title;
     if (mode() !== "backup") return t().identity_title;
     return checking() ? t().backup_check_title : t().backup_title;
   };
@@ -165,6 +192,8 @@ export default function IdentityView(props: IdentityViewProps) {
         return tr.identity_subtitle_import;
       case "backup":
         return checking() ? tr.backup_check_hint : tr.backup_hint;
+      case "forgot":
+        return tr.identity_forgot_text;
     }
   };
 
@@ -259,11 +288,25 @@ export default function IdentityView(props: IdentityViewProps) {
               </>,
             )}
             <div class="onboard__links">
-              <button class="btn btn--ghost" onClick={() => switchMode("create")}>
-                {t().identity_new}
+              <button class="btn btn--ghost" onClick={() => switchMode("forgot")}>
+                {t().identity_forgot}
               </button>
-              <button class="btn btn--ghost" onClick={() => switchMode("import")}>
-                {t().identity_import_link}
+            </div>
+          </Show>
+
+          <Show when={mode() === "forgot"}>
+            <div class="onboard__form">
+              <button
+                class="btn btn--danger btn--block"
+                disabled={busy() || eraseIn() > 0}
+                onClick={() => void handleErase()}
+              >
+                {t().identity_erase(eraseIn())}
+              </button>
+            </div>
+            <div class="onboard__links">
+              <button class="btn btn--ghost" onClick={() => switchMode("unlock")}>
+                {t().identity_back_unlock}
               </button>
             </div>
           </Show>
@@ -285,11 +328,6 @@ export default function IdentityView(props: IdentityViewProps) {
               </>,
             )}
             <div class="onboard__links">
-              <Show when={hasId()}>
-                <button class="btn btn--ghost" onClick={() => switchMode("unlock")}>
-                  {t().identity_back_unlock}
-                </button>
-              </Show>
               <button class="btn btn--ghost" onClick={() => switchMode("import")}>
                 {t().identity_import_link}
               </button>
@@ -325,7 +363,7 @@ export default function IdentityView(props: IdentityViewProps) {
               </>,
             )}
             <div class="onboard__links">
-              <button class="btn btn--ghost" onClick={() => switchMode(hasId() ? "unlock" : "create")}>
+              <button class="btn btn--ghost" onClick={() => switchMode("create")}>
                 {t().common_back}
               </button>
             </div>

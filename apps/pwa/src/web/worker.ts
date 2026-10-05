@@ -11,7 +11,7 @@ import init, {
   type Op,
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, openDb, put, remove, scan } from "./idb";
+import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
 import { applyEffects, type EffectSinks } from "./effects";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
@@ -353,6 +353,24 @@ const handlers: Handlers = {
     identity = unlocked;
     return [unlocked.peerId(), unlocked.nickname];
   },
+  eraseDevice: () =>
+    serial(async () => {
+      gateway.stop();
+      relay.stop();
+      for (const sink of openSinks.values()) sink.handle.close();
+      openSinks.clear();
+      sources.clear();
+      offerNames.clear();
+      client?.free();
+      client = null;
+      identity?.free();
+      identity = null;
+      await clear(db, STORES);
+      const root = await navigator.storage.getDirectory();
+      await Promise.all(
+        ["media", "downloads"].map((dir) => root.removeEntry(dir, { recursive: true }).catch(() => undefined)),
+      );
+    }),
   exportMnemonic: async (passphrase) => {
     const check = Identity.unlock(await sealedBlob(), passphrase);
     try {

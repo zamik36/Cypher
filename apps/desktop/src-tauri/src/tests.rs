@@ -205,6 +205,19 @@ async fn identity_lifecycle_without_a_server() {
         Ok(json!(peer)),
         "the recovery phrase restores the same identity"
     );
+
+    // A forgotten passphrase: erase, then start over on the same device.
+    desktop.call("erase_device", no_args()).await.unwrap();
+    assert_eq!(
+        desktop.call("has_identity", no_args()).await,
+        Ok(json!(false))
+    );
+    assert_eq!(
+        desktop.call("get_nickname", no_args()).await,
+        Ok(Value::Null)
+    );
+    let args = json!({ "mnemonic": mnemonic, "nickname": "alice", "passphrase": PASS });
+    assert_eq!(desktop.call("import_mnemonic", args).await, Ok(json!(peer)));
 }
 
 #[tokio::test]

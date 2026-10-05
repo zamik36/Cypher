@@ -1,7 +1,17 @@
 /** Minimal promise wrapper over IndexedDB for the worker's key-value tables. */
 import type { Op, Row } from "../wasm/cypher_wasm.js";
 
-const STORES = ["meta", "peers", "outbox", "transfers", "messages", "message_status", "media", "identity", "files"];
+export const STORES = [
+  "meta",
+  "peers",
+  "outbox",
+  "transfers",
+  "messages",
+  "message_status",
+  "media",
+  "identity",
+  "files",
+];
 /** Bumped whenever STORES grows; the upgrade creates any missing store. */
 const VERSION = 2;
 

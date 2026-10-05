@@ -195,6 +195,12 @@ impl AppState {
         Ok((s.client.clone(), s.events.subscribe()))
     }
 
+    /// Stops the client and forgets the unlocked identity.
+    pub(crate) async fn lock(&self) {
+        self.stop().await;
+        *self.identity.lock().await = None;
+    }
+
     pub(crate) async fn stop(&self) {
         let session = self.session.lock().await.take();
         if let Some(s) = session {

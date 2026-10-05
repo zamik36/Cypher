@@ -61,6 +61,15 @@ pub(crate) async fn import_mnemonic(
     Ok(activate(&state, unlocked).await)
 }
 
+/// Deletes the profile and everything kept with it from this device, for a
+/// forgotten passphrase. Asks for none: without it nothing here is readable
+/// anyway, and the recovery phrase brings the identity back.
+#[tauri::command]
+pub(crate) async fn erase_device(state: State<'_, AppState>) -> CmdResult<()> {
+    state.lock().await;
+    with_store(&state, |store| store.erase_device()).await
+}
+
 /// Re-verifies the passphrase before revealing the recovery phrase.
 #[tauri::command]
 pub(crate) async fn export_mnemonic(

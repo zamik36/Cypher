@@ -132,6 +132,8 @@ export interface Platform {
   unlockIdentity(passphrase: string): Promise<[string, string]>;
   importMnemonic(mnemonic: string, nickname: string, passphrase: string): Promise<string>;
   exportMnemonic(passphrase: string): Promise<string>;
+  /** Deletes the profile and everything kept with it from this device. */
+  eraseDevice(): Promise<void>;
   connectToGateway(addr: string, anonymous: boolean, bridges: string[]): Promise<string>;
   applyAnonymousSettings(anonymous: boolean, bridges: string[]): Promise<void>;
   createLink(): Promise<LinkInfo>;

@@ -48,6 +48,7 @@ export const tauriPlatform: Platform = {
   unlockIdentity: (passphrase) => invoke<[string, string]>("unlock_identity", { passphrase }),
   importMnemonic: (mnemonic, nickname, passphrase) =>
     invoke<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
+  eraseDevice: () => command("erase_device"),
   exportMnemonic: (passphrase) => invoke<string>("export_mnemonic", { passphrase }),
   connectToGateway: (addr, anonymous, bridges) => invoke<string>("connect_to_gateway", { addr, anonymous, bridges }),
   applyAnonymousSettings: (anonymous, bridges) => command("apply_anonymous_settings", { anonymous, bridges }),

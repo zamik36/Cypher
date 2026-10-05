@@ -51,6 +51,7 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             identity::create_identity,
             identity::unlock_identity,
             identity::import_mnemonic,
+            identity::erase_device,
             identity::export_mnemonic,
             identity::get_conversations,
             identity::get_history,

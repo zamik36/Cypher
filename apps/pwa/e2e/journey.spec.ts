@@ -144,4 +144,17 @@ test("a recovery phrase restores the identity on a new device", async ({ browser
   await expectConnected(original);
   await expect(banner).toBeHidden();
   await expect(linkStatus(restored)).toHaveAttribute("data-state", "superseded");
+
+  // A forgotten passphrase: erase the device, then restore from the phrase.
+  await original.reload();
+  await original.getByRole("button", { name: "Forgot your passphrase?" }).click();
+  await original.getByRole("button", { name: "Erase this device", exact: true }).click();
+  await expect(original.getByPlaceholder("Nickname")).toBeVisible();
+  await original.getByRole("button", { name: "Restore from phrase" }).click();
+  await original.getByPlaceholder("Recovery phrase (24 words)").fill(phrase);
+  await original.getByPlaceholder("Nickname").fill("carol");
+  await setPassphrase(original, "a passphrase remembered");
+  await original.getByRole("button", { name: "Restore", exact: true }).click();
+  await expectConnected(original);
+  expect(await ownPeerId(original)).toBe(peerId);
 });
