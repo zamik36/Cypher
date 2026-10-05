@@ -340,6 +340,7 @@ async fn two_desktops_against_in_process_stack() {
     play_a_video_note(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
     refuse_to_open_a_program(&a, &b, &b_id).await;
+    send_picked_files(&a, &b_id).await;
     name_then_forget_a_contact(&b, &a_id).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
@@ -588,8 +589,42 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
         Ok(json!(false))
     );
     assert_eq!(
-        b.call("open_file", unknown).await,
+        b.call("open_file", unknown.clone()).await,
         Err("not_saved".to_owned())
+    );
+    assert_eq!(
+        b.call("reveal_file", unknown).await,
+        Err("not_saved".to_owned())
+    );
+}
+
+/// What the file dialog hands back: a path, a `file://` URL, or (Android
+/// only) a `content://` URI.
+async fn send_picked_files(a: &Desktop, b_id: &str) {
+    use crate::commands::transfer::send_pick;
+    use tauri_plugin_dialog::FilePath;
+
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let client = a.state().client().await.unwrap();
+    let handle = a.app.handle();
+    let doc = a.dir.path().join("plan.pdf");
+    std::fs::write(&doc, b"%PDF").unwrap();
+
+    let (_, _, name, size) = send_pick(handle, &client, peer, FilePath::Path(doc.clone()))
+        .await
+        .unwrap();
+    assert_eq!((name.as_str(), size), ("plan.pdf", 4));
+    let url = tauri::Url::from_file_path(&doc).unwrap();
+    let (_, _, name, _) = send_pick(handle, &client, peer, FilePath::Url(url))
+        .await
+        .unwrap();
+    assert_eq!(name, "plan.pdf");
+    let content: tauri::Url = "content://media/external/file/1".parse().unwrap();
+    assert_eq!(
+        send_pick(handle, &client, peer, FilePath::Url(content))
+            .await
+            .unwrap_err(),
+        "unsupported file location"
     );
 }
 

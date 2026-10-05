@@ -55,7 +55,7 @@ pub(crate) async fn browse_and_send<R: Runtime>(
 /// Sends one picked file: a path as it is, a `content://` pick (Android)
 /// through a copy the client deletes when done. Returns the ids, the name
 /// it went by and its size.
-async fn send_pick<R: Runtime>(
+pub(crate) async fn send_pick<R: Runtime>(
     app: &AppHandle<R>,
     client: &Client,
     peer: PeerId,
