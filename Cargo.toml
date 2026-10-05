@@ -18,6 +18,7 @@ members = [
     "tools/xtask",
     "tests/e2e",
     "apps/desktop/src-tauri",
+    "apps/desktop/src-tauri/plugins/cypher-files",
 ]
 default-members = [
     "crates/cypher-types",

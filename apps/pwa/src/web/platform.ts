@@ -24,7 +24,6 @@ worker.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
     listeners.get(data.event)?.forEach((cb) => cb(data.payload));
   } else {
     save(data.download.name, data.download.blob);
-    setTimeout(() => void call("releaseDownload", data.download.fileId), DOWNLOAD_RELEASE_MS);
   }
 };
 
@@ -89,6 +88,9 @@ export const webPlatform: Platform = {
   cancelTransfer: async (fileId) => {
     await call("command", { type: "cancel_transfer", file_id: fileId });
   },
+  fileSaved: (fileId) => call("fileSaved", fileId),
+  openFile: async (file) => save(file.name, await call("savedBlob", file.file_id)),
+  revealFile: () => Promise.reject(new Error("unsupported")),
   generateQr: (linkId) => call("qr", linkId),
   safetyNumber: (peerId) => call("safetyNumber", peerId),
   reconnect: () => call("reconnect"),

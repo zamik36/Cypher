@@ -134,6 +134,13 @@ const en = {
   file_failed: "Transfer failed",
   file_sent: "Sent",
   file_saved: "Saved",
+  file_open: "Open",
+  file_save: "Save",
+  file_reveal: "Show in folder",
+  file_unsafe:
+    "This file can run programs, so it does not open from the chat. Open it from its folder if you trust the sender.",
+  file_no_app: "No app on this device opens this kind of file.",
+  file_missing: "The file is no longer on this device.",
 
   // -- Contact --
   contact_title: "Contact",
@@ -197,8 +204,8 @@ const en = {
   privacy_reconnect: "Reconnect",
   storage_files: "Files",
   storage_files_desktop: "Accepted files are saved to your Downloads folder.",
-  storage_files_android: "Accepted files are kept in Cypher's storage on this phone.",
-  storage_files_web: "Accepted files are downloaded by the browser.",
+  storage_files_android: "Accepted files are saved to Downloads/Cypher.",
+  storage_files_web: "Accepted files are downloaded by the browser and kept in the app until you clear the history.",
   storage_history: "Chat history",
   storage_clear: "Clear all history",
   storage_clear_hint: "Deletes every message on this device. Contacts and encryption stay, so you can keep chatting.",

@@ -326,6 +326,7 @@ async fn two_desktops_against_in_process_stack() {
     send_a_voice_note(&a, &b, &a_id, &b_id).await;
     play_a_video_note(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
+    refuse_to_open_a_program(&a, &b, &b_id).await;
     name_then_forget_a_contact(&b, &a_id).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
@@ -554,6 +555,58 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
         b"older",
         "never overwrites the existing file"
     );
+    eventually(|| async {
+        (b.call("file_saved", file.clone()).await.ok()? == json!(true)).then_some(())
+    })
+    .await;
     b.call("accept_file", file.clone()).await.unwrap_err();
     b.call("cancel_transfer", file).await.unwrap();
+    let unknown = json!({ "fileId": FileId([7; 16]).to_hex() });
+    assert_eq!(
+        b.call("file_saved", unknown.clone()).await,
+        Ok(json!(false))
+    );
+    assert_eq!(
+        b.call("open_file", unknown).await,
+        Err("not_saved".to_owned())
+    );
+}
+
+/// A received program is kept, but never started from the chat.
+async fn refuse_to_open_a_program(a: &Desktop, b: &Desktop, b_id: &str) {
+    let src = a.dir.path().join("setup.exe");
+    std::fs::write(&src, b"MZ").unwrap();
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let (_, file_id) = a
+        .state()
+        .client()
+        .await
+        .unwrap()
+        .send_file(
+            peer,
+            &src,
+            "application/octet-stream",
+            cypher_core::MediaKind::File,
+        )
+        .await
+        .unwrap();
+    eventually(|| async {
+        b.state()
+            .offers
+            .lock()
+            .unwrap()
+            .contains_key(&file_id)
+            .then_some(())
+    })
+    .await;
+    let file = json!({ "fileId": file_id.to_hex() });
+    b.call("accept_file", file.clone()).await.unwrap();
+    eventually(|| async {
+        (b.call("file_saved", file.clone()).await.ok()? == json!(true)).then_some(())
+    })
+    .await;
+    assert_eq!(
+        b.call("open_file", file).await,
+        Err("unsafe_type".to_owned())
+    );
 }

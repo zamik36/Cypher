@@ -409,9 +409,12 @@ const handlers: Handlers = {
       }
       return sent;
     }),
-  releaseDownload: async (fileId) => {
-    await (await sinkDir(false)).removeEntry(fileId).catch(() => undefined);
-  },
+  fileSaved: async (fileId) =>
+    (await sinkDir(false))
+      .getFileHandle(fileId)
+      .then(() => true)
+      .catch(() => false),
+  savedBlob: async (fileId) => (await (await sinkDir(false)).getFileHandle(fileId)).getFile(),
   qr: (text) => Promise.resolve(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg(text))}`),
   safetyNumber: (peer) => Promise.resolve(requireIdentity().safetyNumber(peer)),
   reconnect: () => {
@@ -444,17 +447,22 @@ const handlers: Handlers = {
       const [from, to] = historyRange(peer, undefined);
       const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true));
       const media: string[] = [];
+      const received: string[] = [];
       const ops: Op[] = [];
       for (const [key, value] of rows) {
         const msg = c.openMessage(key, value, undefined) as StoredView;
         if (msg.file && msg.file.kind !== "file") media.push(msg.file.file_id);
+        else if (msg.file) received.push(msg.file.file_id);
         ops.push({ kind: "delete", table: "messages", key });
         ops.push({ kind: "delete", table: "message_status", key: key.slice(key.length - 16) });
       }
       for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
       await applyOps(db, ops);
-      const dir = await sinkDir(true);
-      await Promise.all(media.map((id) => dir.removeEntry(id).catch(() => undefined)));
+      const [sealed, plain] = await Promise.all([sinkDir(true), sinkDir(false)]);
+      await Promise.all([
+        ...media.map((id) => sealed.removeEntry(id).catch(() => undefined)),
+        ...received.map((id) => plain.removeEntry(id).catch(() => undefined)),
+      ]);
     }),
   history: (peer, limit, before) => history(peer, Math.min(limit, 500), before),
   sendMedia,
@@ -462,7 +470,9 @@ const handlers: Handlers = {
   clearHistory: async () => {
     await clear(db, ["messages", "message_status", "media"]);
     const root = await navigator.storage.getDirectory();
-    await root.removeEntry("media", { recursive: true }).catch(() => undefined);
+    await Promise.all(
+      ["media", "downloads"].map((dir) => root.removeEntry(dir, { recursive: true }).catch(() => undefined)),
+    );
   },
 };
 

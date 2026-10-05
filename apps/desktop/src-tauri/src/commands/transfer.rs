@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use cypher_client::Client;
 use cypher_core::{Command, MediaKind};
-use cypher_types::FileId;
+use cypher_types::{FileId, MsgId, PeerId};
 use serde::Serialize;
 use tauri::{AppHandle, Runtime, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use super::chat::parse_peer;
 use crate::session::{AppState, CmdResult, err};
@@ -37,23 +38,189 @@ pub(crate) async fn browse_and_send<R: Runtime>(
     let client = state.client().await?;
     let mut out = Vec::with_capacity(picked.len());
     for file in picked {
-        let path = file.into_path().map_err(err)?;
-        let size = tokio::fs::metadata(&path).await.map_err(err)?.len();
-        let (msg_id, file_id) = client
-            .send_file(peer, &path, "application/octet-stream", MediaKind::File)
-            .await
-            .map_err(err)?;
+        let (msg_id, file_id, file_name, total_size) = send_pick(&app, &client, peer, file).await?;
         out.push(TransferInfo {
             file_id: file_id.to_hex(),
             msg_id: msg_id.to_hex(),
-            file_name: display_name(&path),
-            total_size: size,
+            file_name,
+            total_size,
             progress: 0.0,
             direction: "send",
             status: "active",
         });
     }
     Ok(out)
+}
+
+/// Sends one picked file: a path as it is, a `content://` pick (Android)
+/// through a copy the client deletes when done. Returns the ids, the name
+/// it went by and its size.
+async fn send_pick<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &Client,
+    peer: PeerId,
+    file: FilePath,
+) -> CmdResult<(MsgId, FileId, String, u64)> {
+    let path = match file {
+        FilePath::Path(path) => path,
+        FilePath::Url(url) => match url.to_file_path() {
+            Ok(path) => path,
+            Err(()) => return send_content(app, client, peer, url.as_str()).await,
+        },
+    };
+    let size = tokio::fs::metadata(&path).await.map_err(err)?.len();
+    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+    let (msg_id, file_id) = client
+        .send_file(peer, &path, mime.essence_str(), MediaKind::File)
+        .await
+        .map_err(err)?;
+    Ok((msg_id, file_id, display_name(&path), size))
+}
+
+#[cfg(target_os = "android")]
+async fn send_content<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &Client,
+    peer: PeerId,
+    uri: &str,
+) -> CmdResult<(MsgId, FileId, String, u64)> {
+    use tauri::Manager;
+    let (app, uri) = (app.clone(), uri.to_owned());
+    let staged = tauri::async_runtime::spawn_blocking(move || {
+        app.state::<tauri_plugin_cypher_files::Files<R>>()
+            .stage(&uri)
+    })
+    .await
+    .map_err(err)??;
+    let size = tokio::fs::metadata(&staged.path).await.map_err(err)?.len();
+    let (msg_id, file_id) = client
+        .send_staged_file(peer, Path::new(&staged.path), &staged.name, &staged.mime)
+        .await
+        .map_err(err)?;
+    Ok((msg_id, file_id, staged.name, size))
+}
+
+#[cfg(not(target_os = "android"))]
+#[expect(clippy::unused_async, reason = "the Android version awaits the plugin")]
+async fn send_content<R: Runtime>(
+    _app: &AppHandle<R>,
+    _client: &Client,
+    _peer: PeerId,
+    _uri: &str,
+) -> CmdResult<(MsgId, FileId, String, u64)> {
+    Err("unsupported file location".into())
+}
+
+/// Where a finished file is, if it is still there. A `content://` URI is
+/// taken at its word; a path must still exist.
+async fn saved_location(state: &AppState, file_id: &str) -> CmdResult<Option<String>> {
+    let id = FileId::from_hex(file_id).ok_or("invalid file id")?;
+    let location = state.client().await?.saved_file(id).await.map_err(err)?;
+    Ok(location.filter(|l| l.starts_with("content://") || Path::new(l).exists()))
+}
+
+/// Whether a finished file can be opened from this device.
+#[tauri::command]
+pub(crate) async fn file_saved(state: State<'_, AppState>, file_id: String) -> CmdResult<bool> {
+    Ok(saved_location(&state, &file_id).await?.is_some())
+}
+
+/// Opens a finished file with the app the system picks for it.
+#[tauri::command]
+pub(crate) async fn open_file<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    file_id: String,
+) -> CmdResult<()> {
+    let location = saved_location(&state, &file_id).await?.ok_or("not_saved")?;
+    open_location(app, location).await
+}
+
+#[cfg(target_os = "android")]
+async fn open_location<R: Runtime>(app: AppHandle<R>, location: String) -> CmdResult<()> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<tauri_plugin_cypher_files::Files<R>>()
+            .open(&location)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[cfg(not(target_os = "android"))]
+#[expect(clippy::unused_async, reason = "the Android version awaits the plugin")]
+async fn open_location<R: Runtime>(_app: AppHandle<R>, location: String) -> CmdResult<()> {
+    if runs_code(Path::new(&location)) {
+        // Opening would run it: the user can still do so from the folder.
+        return Err("unsafe_type".into());
+    }
+    tauri_plugin_opener::open_path(&location, None::<&str>).map_err(err)
+}
+
+/// Shows a finished file in the system's file manager (desktop only).
+#[tauri::command]
+pub(crate) async fn reveal_file(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
+    let location = saved_location(&state, &file_id).await?.ok_or("not_saved")?;
+    reveal_location(&location)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn reveal_location(location: &str) -> CmdResult<()> {
+    tauri_plugin_opener::reveal_item_in_dir(location).map_err(err)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn reveal_location(_location: &str) -> CmdResult<()> {
+    Err("unsupported".into())
+}
+
+/// Extensions the system runs rather than shows: never opened from a chat.
+/// (Android hands opening to the app the user picks.)
+#[cfg(not(target_os = "android"))]
+const RUNS_CODE: &[&str] = &[
+    "app",
+    "appimage",
+    "application",
+    "bat",
+    "cmd",
+    "com",
+    "command",
+    "cpl",
+    "deb",
+    "desktop",
+    "dll",
+    "exe",
+    "gadget",
+    "hta",
+    "jar",
+    "js",
+    "jse",
+    "lnk",
+    "msc",
+    "msi",
+    "msix",
+    "pif",
+    "pkg",
+    "ps1",
+    "reg",
+    "rpm",
+    "scf",
+    "scr",
+    "sh",
+    "url",
+    "vb",
+    "vbe",
+    "vbs",
+    "ws",
+    "wsf",
+    "wsh",
+];
+
+#[cfg(not(target_os = "android"))]
+fn runs_code(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| RUNS_CODE.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 /// Saves into the user's downloads folder under the (already sanitized)
@@ -118,7 +285,26 @@ fn unique_path(dir: &Path, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_path;
+    use std::path::Path;
+
+    use super::{runs_code, unique_path};
+
+    #[test]
+    fn programs_are_told_apart_from_documents() {
+        for name in [
+            "setup.exe",
+            "INVOICE.PDF.EXE",
+            "run.bat",
+            "link.lnk",
+            "x.ps1",
+            "a.sh",
+        ] {
+            assert!(runs_code(Path::new(name)), "{name}");
+        }
+        for name in ["photo.jpg", "report.pdf", "notes", "archive.tar.gz", ".exe"] {
+            assert!(!runs_code(Path::new(name)), "{name}");
+        }
+    }
 
     #[test]
     fn never_overwrites() {

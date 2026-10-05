@@ -80,6 +80,13 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
       await expect(messages(alice).getByText(text)).toBeVisible();
     }
     await expect(alice.getByTestId("day-separator")).toHaveCount(1);
+
+    // The received file is still kept: it can be saved again.
+    const card = incoming(alice).getByTestId("file-card");
+    await expect(card).toHaveAttribute("data-state", "complete");
+    const again = alice.waitForEvent("download");
+    await card.getByRole("button", { name: "Save" }).click();
+    expect((await again).suggestedFilename()).toBe("payload.bin");
   });
 
   await test.step("a contact gets a name on this device, and back returns to the chat", async () => {

@@ -7,6 +7,7 @@ describe("reasonText", () => {
     expect(reasonText("KeyMismatch")).toBe(t().join_key_mismatch);
     expect(reasonText(new Error("NotFound"))).toBe(t().join_not_found);
     expect(reasonText("UpdateRequired")).toBe(t().error_update_required);
+    expect(reasonText(new Error("unsafe_type"))).toBe(t().file_unsafe);
   });
 
   it("passes unknown errors through", () => {

@@ -142,6 +142,12 @@ export interface Platform {
   pickAndSend(peerId: string): Promise<TransferInfo[]>;
   acceptFile(fileId: string): Promise<void>;
   cancelTransfer(fileId: string): Promise<void>;
+  /** Whether a finished file can still be opened from this device. */
+  fileSaved(fileId: string): Promise<boolean>;
+  /** Opens a finished file with another app (or, on the web, saves it again). */
+  openFile(file: UiFile): Promise<void>;
+  /** Shows a finished file in its folder; only with `capabilities.revealFile`. */
+  revealFile(fileId: string): Promise<void>;
   generateQr(linkId: string): Promise<string>;
   /** The 60 digits both sides of a conversation compare to rule out a man in the middle. */
   safetyNumber(peerId: string): Promise<string>;

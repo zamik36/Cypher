@@ -24,6 +24,10 @@ export function reasonText(error: unknown): string {
     Unauthorized: tr.error_unauthorized,
     ServerError: tr.error_server,
     DecryptFailed: tr.error_decrypt_failed,
+    // Opening a received file.
+    unsafe_type: tr.file_unsafe,
+    no_app: tr.file_no_app,
+    not_saved: tr.file_missing,
     // Identity file and recovery phrase, as both platforms word them.
     "wrong passphrase": tr.identity_err_wrong_passphrase,
     "passphrase is too short": tr.identity_err_short,

@@ -2,6 +2,8 @@ mod commands;
 mod dto;
 mod media_scheme;
 mod session;
+#[cfg(target_os = "android")]
+mod shared_storage;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +31,7 @@ pub fn run() -> tauri::Result<()> {
     wire(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_cypher_files::init())
         .setup(|app| {
             let paths = session::Paths::resolve(app.handle())?;
             app.manage(session::AppState::new(paths, session::tls_from_env()?));
@@ -66,6 +69,9 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             transfer::browse_and_send,
             transfer::accept_file,
             transfer::cancel_transfer,
+            transfer::file_saved,
+            transfer::open_file,
+            transfer::reveal_file,
             media::voice_start,
             media::voice_stop,
             media::voice_cancel,

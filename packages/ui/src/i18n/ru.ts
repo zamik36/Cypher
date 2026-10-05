@@ -136,6 +136,13 @@ const ru: TranslationKeys = {
   file_failed: "Не удалось передать",
   file_sent: "Отправлен",
   file_saved: "Сохранён",
+  file_open: "Открыть",
+  file_save: "Сохранить",
+  file_reveal: "Показать в папке",
+  file_unsafe:
+    "Этот файл может запускать программы, поэтому из чата он не открывается. Откройте его из папки, если доверяете отправителю.",
+  file_no_app: "На этом устройстве нет приложения для файлов такого типа.",
+  file_missing: "Файла больше нет на этом устройстве.",
 
   contact_title: "Контакт",
   contact_fallback: (id: string) => `Контакт ${id}`,
@@ -198,8 +205,8 @@ const ru: TranslationKeys = {
   privacy_reconnect: "Переподключить",
   storage_files: "Файлы",
   storage_files_desktop: "Принятые файлы сохраняются в папку «Загрузки».",
-  storage_files_android: "Принятые файлы хранятся в памяти Шифра на этом телефоне.",
-  storage_files_web: "Принятые файлы скачивает браузер.",
+  storage_files_android: "Принятые файлы сохраняются в «Загрузки/Cypher».",
+  storage_files_web: "Принятые файлы скачивает браузер; копия хранится в приложении до очистки истории.",
   storage_history: "История чатов",
   storage_clear: "Очистить всю историю",
   storage_clear_hint:

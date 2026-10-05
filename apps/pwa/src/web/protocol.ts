@@ -21,7 +21,9 @@ export interface Methods {
     extra: { frames?: Float32Array; poster?: Uint8Array },
   ): { msg_id: string; file_id: string; duration_ms: number; waveform?: number[] };
   mediaBlob(fileId: string): Blob;
-  releaseDownload(fileId: string): void;
+  /** Whether a received file is still kept (OPFS `downloads`). */
+  fileSaved(fileId: string): boolean;
+  savedBlob(fileId: string): Blob;
   qr(text: string): string;
   safetyNumber(peer: string): string;
   /** Takes the session back after another device took it over. */
