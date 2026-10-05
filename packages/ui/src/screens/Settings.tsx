@@ -1,4 +1,4 @@
-import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
+import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 import "./Settings.css";
 import Avatar from "../components/Avatar";
 import Icon, { type IconName } from "../components/Icon";
@@ -13,6 +13,7 @@ import { back, push, type SettingsSection } from "../stores/nav";
 import { nickname } from "../stores/profile";
 import { setThemePref, themePref, type ThemePref } from "../stores/theme";
 import { addToast, toastError } from "../stores/toasts";
+import { checkBridges } from "../utils/bridges";
 import { copyText } from "../utils/clipboard";
 import {
   notificationPermissionState,
@@ -292,11 +293,15 @@ function Privacy() {
   const [address, setAddress] = createSignal(connection.gatewayAddr);
   const [advanced, setAdvanced] = createSignal(false);
   const [applying, setApplying] = createSignal(false);
-  const bridgeLines = () =>
-    bridges()
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+  const bridgeCheck = createMemo(() => checkBridges(caps.tor ? bridges() : ""));
+  const bridgeLines = () => bridgeCheck().lines;
+  const bridgeProblem = () => {
+    const problem = bridgeCheck().problem;
+    if (!problem) return null;
+    return problem.reason === "transport"
+      ? t().privacy_bridges_transport(problem.line)
+      : t().privacy_bridges_format(problem.line);
+  };
   const changed = () =>
     anonymous() !== anonymousSettings.enabled || bridgeLines().join("\n") !== anonymousSettings.bridgeLines.join("\n");
   const statusTitle = () =>
@@ -356,11 +361,21 @@ function Privacy() {
           onInput={(e) => setBridges(e.currentTarget.value)}
           spellcheck={false}
         />
-        <p class="hint settings__note">{t().privacy_bridges_hint}</p>
+        <Show when={bridgeProblem()} fallback={<p class="hint settings__note">{t().privacy_bridges_hint}</p>}>
+          {(problem) => (
+            <p class="error-text settings__note" role="alert">
+              {problem()}
+            </p>
+          )}
+        </Show>
       </Show>
 
       <Show when={changed()}>
-        <button class="btn btn--primary btn--block settings__apply" disabled={applying()} onClick={() => void apply()}>
+        <button
+          class="btn btn--primary btn--block settings__apply"
+          disabled={applying() || bridgeProblem() !== null}
+          onClick={() => void apply()}
+        >
           {applying() ? t().common_applying : t().common_apply}
         </button>
       </Show>

@@ -207,6 +207,9 @@ const ru: TranslationKeys = {
   privacy_onion_only_web: "Забирать ожидающие сообщения только через onion-узел.",
   privacy_bridges: "Мосты Tor",
   privacy_bridges_placeholder: "По одному мосту в строке: IP:порт отпечаток",
+  privacy_bridges_transport: (line: number) =>
+    `Строка ${line}: мосты с транспортом (obfs4, webtunnel, snowflake) пока не поддерживаются. Нужны обычные: IP:порт отпечаток.`,
+  privacy_bridges_format: (line: number) => `Строка ${line} — не мост. Ожидается: IP:порт отпечаток.`,
   privacy_bridges_hint: "Для сетей, где Tor заблокирован. Если Tor работает и так, оставьте пустым.",
   privacy_advanced: "Дополнительно",
   privacy_server: "Адрес сервера",

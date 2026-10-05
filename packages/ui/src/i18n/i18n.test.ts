@@ -26,6 +26,8 @@ describe("translations", () => {
     for (const table of [en, ru]) {
       expect(table.storage_clear_confirm(3)).toContain("3");
       expect(table.identity_erase(2)).toContain("2");
+      expect(table.privacy_bridges_transport(4)).toContain("4");
+      expect(table.privacy_bridges_format(5)).toContain("5");
       expect(table.identity_erase(0)).not.toMatch(/\d/);
       expect(table.storage_clear_confirm(0)).not.toMatch(/\d/);
       expect(table.contact_fallback("a1b2c3")).toContain("a1b2c3");

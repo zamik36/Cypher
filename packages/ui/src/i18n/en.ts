@@ -206,6 +206,9 @@ const en = {
   privacy_onion_only_web: "Fetch waiting messages only through the onion relay.",
   privacy_bridges: "Tor bridges",
   privacy_bridges_placeholder: "One bridge per line: IP:port fingerprint",
+  privacy_bridges_transport: (line: number) =>
+    `Line ${line}: bridges with a transport (obfs4, webtunnel, snowflake) are not supported yet. Use plain bridges: IP:port fingerprint.`,
+  privacy_bridges_format: (line: number) => `Line ${line} is not a bridge. Expected: IP:port fingerprint.`,
   privacy_bridges_hint: "For networks that block Tor. Leave empty if Tor works without them.",
   privacy_advanced: "Advanced",
   privacy_server: "Server address",
