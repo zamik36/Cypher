@@ -25,8 +25,8 @@ test("voice and round video notes record, deliver and play", async ({ browser, b
 
     const note = incoming(alice).locator(".voice-bubble");
     await expect(note.locator(".voice-bar")).toHaveCount(64);
-    await note.getByRole("button", { name: "play" }).click();
-    await expect(note.getByRole("button", { name: "pause" })).toBeVisible();
+    await note.getByRole("button", { name: "Play" }).click();
+    await expect(note.getByRole("button", { name: "Pause" })).toBeVisible();
     await expect(note.locator(".voice-bar.played").first()).toBeVisible();
   });
 

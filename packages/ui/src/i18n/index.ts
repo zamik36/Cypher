@@ -15,11 +15,14 @@ function detectLocale(): Locale {
   return lang === "ru" ? "ru" : "en";
 }
 
-const [locale, setLocaleSignal] = createSignal<Locale>(detectLocale());
+const initial = detectLocale();
+const [locale, setLocaleSignal] = createSignal<Locale>(initial);
+document.documentElement.lang = initial;
 
 export function setLocale(l: Locale): void {
   setLocaleSignal(l);
   localStorage.setItem(STORAGE_KEY, l);
+  document.documentElement.lang = l;
 }
 
 export function t(): TranslationKeys {

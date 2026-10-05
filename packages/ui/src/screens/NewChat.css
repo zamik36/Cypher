@@ -1,0 +1,69 @@
+.new-chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.new-chat__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+  text-align: center;
+}
+
+.new-chat__panel .hint {
+  max-width: 420px;
+}
+
+.new-chat__panel .field {
+  text-align: center;
+}
+
+.new-chat__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+
+/* A QR code scans only dark-on-light, so it keeps a white card in both themes. */
+.invite-qr {
+  display: grid;
+  place-items: center;
+  width: 220px;
+  height: 220px;
+  padding: var(--sp-3);
+  border-radius: var(--r-lg);
+  background: var(--c-qr-paper);
+  box-shadow: var(--e-1);
+}
+
+.invite-qr img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.invite-code {
+  max-width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--t-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.invite-waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--t-sm);
+}
+
+.invite-waiting .spinner {
+  width: 14px;
+  height: 14px;
+}

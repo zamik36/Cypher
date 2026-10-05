@@ -1,4 +1,5 @@
 import { createSignal, Match, Switch } from "solid-js";
+import "./Overlays.css";
 import { api } from "../platform";
 import { connection, errorMessage, linkEvent } from "../stores/connection";
 import { t } from "../i18n";
@@ -22,19 +23,19 @@ export default function ConnectionBanner() {
   return (
     <Switch>
       <Match when={connection.link === "superseded"}>
-        <div class="connection-banner" role="alert">
-          <div>
+        <div class="banner" role="alert">
+          <div class="banner__text">
             <strong>{t().banner_superseded_title}</strong>
             <p>{t().banner_superseded_text}</p>
           </div>
-          <button class="btn-primary" disabled={busy()} onClick={() => void useHere()}>
+          <button class="btn btn--primary" disabled={busy()} onClick={() => void useHere()}>
             {t().banner_use_here}
           </button>
         </div>
       </Match>
       <Match when={connection.link === "update_required"}>
-        <div class="connection-banner" role="alert">
-          <div>
+        <div class="banner" role="alert">
+          <div class="banner__text">
             <strong>{t().banner_update_title}</strong>
             <p>{t().error_update_required}</p>
           </div>

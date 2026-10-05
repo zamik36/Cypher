@@ -59,6 +59,8 @@ export interface TransferInfo {
   progress: number;
   direction: "send" | "receive";
   status: "offered" | "active" | "complete" | "error";
+  /** Why it failed, in the user's language. */
+  error?: string;
 }
 
 /** A conversation as the chat list shows it, most recent first. */
@@ -112,8 +114,19 @@ export interface Notifications {
   send(title: string, body: string): Promise<void>;
 }
 
+/** What the runtime can do; the UI shows only what works here. */
+export interface Capabilities {
+  /** Inbox traffic can go through Tor (the native client, with vanilla bridges). */
+  tor: boolean;
+  /** The server address is the user's to choose (desktop). */
+  gatewayConfig: boolean;
+  /** A received file can be shown in its folder (desktop). */
+  revealFile: boolean;
+}
+
 export interface Platform {
   readonly kind: "desktop" | "web";
+  readonly capabilities: Capabilities;
   hasIdentity(): Promise<boolean>;
   createIdentity(nickname: string, passphrase: string): Promise<string>;
   unlockIdentity(passphrase: string): Promise<[string, string]>;

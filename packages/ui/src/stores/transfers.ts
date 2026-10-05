@@ -19,6 +19,10 @@ export function upsertTransfer(t: Partial<TransferInfo> & { file_id: string }) {
   });
 }
 
+export function transferOf(fileId: string): TransferInfo | undefined {
+  return transfers.find((x) => x.file_id === fileId);
+}
+
 export function hasTransfer(fileId: string): boolean {
   return transfers.some((x) => x.file_id === fileId);
 }

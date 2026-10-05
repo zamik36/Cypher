@@ -4,9 +4,13 @@ import {
   addMessage,
   clearAllMessages,
   getMessages,
+  hasOlder,
   historyLoaded,
   mergeHistory,
   peerOf,
+  prependHistory,
+  removeChat,
+  setHasOlder,
   setMessageStatus,
   setMessages,
 } from "./chat";
@@ -73,6 +77,36 @@ describe("chat store", () => {
     expect(getMessages("alice").map((m) => m.text)).toEqual(["m1", "m2", "while you were away", "local only"]);
     expect(getMessages("alice")[2]?.status).toBe("read");
     expect(peerOf("m1")).toBe("alice");
+  });
+
+  it("puts older pages in front, skipping what is already shown", () => {
+    addMessage("alice", msg("m3"));
+    expect(prependHistory("alice", [msg("m1"), msg("m2"), msg("m3"), msg(undefined, "unsent")])).toBe(3);
+    expect(getMessages("alice").map((m) => m.text)).toEqual(["m1", "m2", "unsent", "m3"]);
+    expect(prependHistory("alice", [msg("m1")])).toBe(0);
+    expect(getMessages("alice")).toHaveLength(4);
+  });
+
+  it("remembers whether older history exists", () => {
+    expect(hasOlder("alice")).toBe(false);
+    setHasOlder("alice", true);
+    expect(hasOlder("alice")).toBe(true);
+    clearAllMessages();
+    expect(hasOlder("alice")).toBe(false);
+  });
+
+  it("forgets one conversation and keeps the others", () => {
+    addMessage("alice", msg("m1"));
+    addMessage("alice", msg(undefined));
+    addMessage("bob", msg("m2"));
+    mergeHistory("alice", []);
+    setHasOlder("alice", true);
+    removeChat("alice");
+    expect(getMessages("alice")).toEqual([]);
+    expect(historyLoaded("alice")).toBe(false);
+    expect(hasOlder("alice")).toBe(false);
+    expect(peerOf("m1")).toBeUndefined();
+    expect(peerOf("m2")).toBe("bob");
   });
 
   it("clears every conversation", () => {

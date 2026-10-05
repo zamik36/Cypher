@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasTransfer, transfers, upsertTransfer } from "./transfers";
+import { hasTransfer, transferOf, transfers, upsertTransfer } from "./transfers";
 
 describe("transfers store", () => {
   it("fills defaults for a new transfer and merges later updates", () => {
@@ -29,7 +29,9 @@ describe("transfers store", () => {
       direction: "send",
       status: "complete",
     });
-    expect(transfers.find((t) => t.file_id === "f3")).toMatchObject({
+    expect(transferOf("f3")).toBe(transfers.find((t) => t.file_id === "f3"));
+    expect(transferOf("nope")).toBeUndefined();
+    expect(transferOf("f3")).toMatchObject({
       direction: "send",
       status: "complete",
       total_size: 9,

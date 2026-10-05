@@ -1,0 +1,154 @@
+/* ── Toasts ──────────────────────────────────────────────────────── */
+
+.toasts {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sp-6) + max(var(--safe-bottom), var(--kb)));
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(420px, calc(100vw - 2 * var(--sp-4)));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-2) var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--t-sm);
+  line-height: var(--t-sm-lh);
+  box-shadow: var(--e-3);
+  pointer-events: auto;
+  animation: toast-in var(--dur) var(--ease);
+}
+
+.toast > svg {
+  flex: none;
+  color: var(--c-muted);
+}
+
+.toast[data-type="success"] > svg {
+  color: var(--c-accent);
+}
+
+.toast[data-type="error"] > svg {
+  color: var(--c-danger);
+}
+
+.toast__text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast__close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  color: var(--c-muted);
+}
+
+.toast__close:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* ── Connection banner ───────────────────────────────────────────── */
+
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: calc(var(--sp-3) + var(--safe-top)) var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-warning-soft);
+  font-size: var(--t-sm);
+  line-height: var(--t-sm-lh);
+}
+
+.banner__text {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.banner__text p {
+  color: var(--c-muted);
+}
+
+/* ── Modal sheet ─────────────────────────────────────────────────── */
+
+.sheet {
+  width: min(440px, calc(100vw - 2 * var(--sp-4)));
+  max-height: calc(100dvh - 2 * var(--sp-6));
+  margin: auto;
+  padding: var(--sp-6);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  color: var(--c-text);
+  box-shadow: var(--e-3);
+}
+
+.sheet[open] {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-4);
+}
+
+.sheet::backdrop {
+  background: var(--c-scrim);
+}
+
+.sheet__title {
+  font-size: var(--t-xl);
+  line-height: var(--t-xl-lh);
+  font-weight: 600;
+}
+
+.sheet__subtitle {
+  margin-top: calc(-1 * var(--sp-3));
+  color: var(--c-muted);
+}
+
+.sheet .spinner {
+  align-self: center;
+}
+
+.safety-digits {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--t-lg);
+  letter-spacing: 0.04em;
+  text-align: center;
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The banner already clears the status bar. */
+.shell:has(> .banner) .topbar {
+  min-height: var(--topbar-h);
+  padding-top: 0;
+}

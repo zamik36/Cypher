@@ -4,6 +4,7 @@ import { MAX_VIDEO_NOTE_MS, VideoNoteRecorder } from "../../media/videoNote";
 import { addToast, toastError } from "../../stores/toasts";
 import { t } from "../../i18n";
 import { formatDuration } from "./player";
+import Icon from "../Icon";
 
 type Mode = "voice" | "video";
 type Phase = "idle" | "starting" | "recording";
@@ -180,7 +181,8 @@ export default function RecordButton(props: Props) {
         </div>
       </Show>
       <button
-        class={`btn-icon record-btn ${phase() !== "idle" ? "active" : ""}`}
+        class={`icon-btn record-btn ${phase() !== "idle" ? "active" : ""}`}
+        aria-label={mode() === "voice" ? t().media_hold_voice : t().media_hold_video}
         title={mode() === "voice" ? t().media_hold_voice : t().media_hold_video}
         onPointerDown={onDown}
         onPointerMove={onMove}
@@ -188,22 +190,7 @@ export default function RecordButton(props: Props) {
         onPointerCancel={() => phase() === "recording" && void finish(true)}
         onContextMenu={(e) => e.preventDefault()}
       >
-        <Show
-          when={mode() === "voice"}
-          fallback={
-            <svg viewBox="0 0 24 24" width="20" height="20">
-              <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
-              <circle cx="12" cy="12" r="4" fill="currentColor" />
-            </svg>
-          }
-        >
-          <svg viewBox="0 0 24 24" width="20" height="20">
-            <path
-              fill="currentColor"
-              d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1A7 7 0 0 0 19 12z"
-            />
-          </svg>
-        </Show>
+        <Icon name={mode() === "voice" ? "mic" : "video"} />
       </button>
     </>
   );

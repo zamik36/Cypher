@@ -8,6 +8,8 @@ const [chatsByPeer, setChatsByPeer] = createStore<Record<string, ChatMessage[]>>
 const peerOfMessage = new Map<string, string>();
 /** Peers whose stored history is merged in; the others load it when first shown. */
 const historyMerged = new Set<string>();
+/** Peers with older stored messages not loaded yet. */
+const [olderExists, setOlderExists] = createStore<Record<string, boolean>>({});
 
 export function addMessage(peerId: string, msg: ChatMessage) {
   if (msg.msg_id) {
@@ -70,10 +72,39 @@ export function mergeHistory(peerId: string, history: ChatMessage[]) {
   setMessages(peerId, [...merged, ...live.filter((m) => !m.msg_id || !stored.has(m.msg_id))]);
 }
 
+/**
+ * Puts older stored messages (oldest first) in front of the conversation,
+ * skipping any already shown. Returns how many were new.
+ */
+export function prependHistory(peerId: string, older: readonly ChatMessage[]): number {
+  const current = getMessages(peerId);
+  const shown = new Set(current.flatMap((m) => (m.msg_id ? [m.msg_id] : [])));
+  const fresh = older.filter((m) => !m.msg_id || !shown.has(m.msg_id));
+  if (fresh.length > 0) setMessages(peerId, [...fresh, ...current]);
+  return fresh.length;
+}
+
+export function hasOlder(peerId: string): boolean {
+  return olderExists[peerId] ?? false;
+}
+
+export function setHasOlder(peerId: string, value: boolean): void {
+  setOlderExists(peerId, value);
+}
+
+/** Forgets a conversation entirely (after it was deleted). */
+export function removeChat(peerId: string): void {
+  for (const m of getMessages(peerId)) if (m.msg_id) peerOfMessage.delete(m.msg_id);
+  historyMerged.delete(peerId);
+  setChatsByPeer(produce((all) => Reflect.deleteProperty(all, peerId)));
+  setOlderExists(produce((all) => Reflect.deleteProperty(all, peerId)));
+}
+
 export function clearAllMessages() {
   historyMerged.clear();
   peerOfMessage.clear();
   setChatsByPeer(reconcile({}));
+  setOlderExists(reconcile({}));
 }
 
 export { chatsByPeer };

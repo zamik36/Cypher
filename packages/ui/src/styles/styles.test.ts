@@ -6,8 +6,6 @@ const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
 const SCANNED = ["packages/ui/src", "apps/pwa/src", "apps/desktop/src"];
 /** Colours live only in the tokens. */
 const TOKENS = "packages/ui/src/styles/tokens.css";
-/** Stylesheets of screens the redesign has not replaced yet; they go with those screens. */
-const LEGACY = new Set(["packages/ui/src/index.css", "apps/pwa/src/index.css"]);
 const LITERAL_COLOUR = /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(|gradient\(/i;
 
 function stylesheets(dir: string): string[] {
@@ -22,7 +20,7 @@ describe("stylesheets", () => {
   it("take every colour from the design tokens", () => {
     const offending = SCANNED.flatMap((dir) => stylesheets(join(ROOT, dir)))
       .map((path) => relative(ROOT, path).replaceAll("\\", "/"))
-      .filter((path) => path !== TOKENS && !LEGACY.has(path))
+      .filter((path) => path !== TOKENS)
       .flatMap((path) =>
         readFileSync(join(ROOT, path), "utf-8")
           .split("\n")

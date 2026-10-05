@@ -1,0 +1,52 @@
+.contact__hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) 0 var(--sp-6);
+  text-align: center;
+}
+
+.contact__hero h2 {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--t-xl);
+  line-height: var(--t-xl-lh);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact__row {
+  display: flex;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.contact__row .field {
+  flex: 1;
+}
+
+.contact__name .hint {
+  margin-top: var(--sp-2);
+}
+
+.contact__id {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.contact__danger {
+  margin-top: var(--sp-8);
+}
+
+.contact__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+}
+
+.contact__confirm .contact__row {
+  justify-content: flex-end;
+}

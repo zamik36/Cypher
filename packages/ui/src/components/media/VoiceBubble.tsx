@@ -1,4 +1,5 @@
 import { createSignal, For, onCleanup, Show } from "solid-js";
+import Icon from "../Icon";
 import { api, type UiFile } from "../../platform";
 import { mediaProgress, mediaReady } from "../../stores/media";
 import { addToast, toastError } from "../../stores/toasts";
@@ -71,23 +72,12 @@ export default function VoiceBubble(props: { file: UiFile }) {
 
   return (
     <div class="voice-bubble">
-      <button class="voice-play" onClick={toggle} aria-label={playing() ? "pause" : "play"}>
+      <button class="voice-play" onClick={toggle} aria-label={playing() ? t().media_pause : t().media_play}>
         <Show
           when={mediaReady(props.file.file_id)}
           fallback={<span class="voice-loading">{Math.round(mediaProgress(props.file.file_id) * 100)}%</span>}
         >
-          <Show
-            when={playing()}
-            fallback={
-              <svg viewBox="0 0 24 24" width="18" height="18">
-                <path fill="currentColor" d="M8 5v14l11-7z" />
-              </svg>
-            }
-          >
-            <svg viewBox="0 0 24 24" width="18" height="18">
-              <path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z" />
-            </svg>
-          </Show>
+          <Icon name={playing() ? "pause" : "play"} size={18} fill="currentColor" stroke="none" />
         </Show>
       </button>
       <div class="voice-body">

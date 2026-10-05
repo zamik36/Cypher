@@ -1,19 +1,19 @@
 import { For } from "solid-js";
+import "./Overlays.css";
+import Icon from "./Icon";
 import { toasts, removeToast } from "../stores/toasts";
-import { CheckIcon, AlertIcon, XIcon } from "./Icons";
+import { t } from "../i18n";
 
 export default function ToastContainer() {
   return (
-    <div class="toast-container">
+    <div class="toasts" role="status" aria-live="polite">
       <For each={toasts}>
         {(toast) => (
-          <div class={`toast ${toast.type}`}>
-            {toast.type === "success" && <CheckIcon width="16" height="16" />}
-            {toast.type === "error" && <AlertIcon width="16" height="16" />}
-            {toast.type === "info" && <AlertIcon width="16" height="16" />}
-            <span class="toast-msg">{toast.message}</span>
-            <button class="toast-close" onClick={() => removeToast(toast.id)}>
-              <XIcon width="14" height="14" />
+          <div class="toast" data-type={toast.type}>
+            <Icon name={toast.type === "success" ? "check" : toast.type === "error" ? "alert" : "info"} size={18} />
+            <span class="toast__text">{toast.message}</span>
+            <button class="toast__close" aria-label={t().common_close} onClick={() => removeToast(toast.id)}>
+              <Icon name="x" size={16} />
             </button>
           </div>
         )}

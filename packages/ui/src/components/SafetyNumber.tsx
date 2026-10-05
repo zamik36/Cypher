@@ -1,7 +1,9 @@
 import { createResource, For, onMount, Show } from "solid-js";
+import "./Overlays.css";
 import { api } from "../platform";
 import { t } from "../i18n";
 import { digitGroups } from "../utils/safetyNumber";
+import { reasonText } from "../utils/reasons";
 
 interface Props {
   peerId: string;
@@ -19,19 +21,27 @@ export default function SafetyNumber(props: Props) {
   onMount(() => dialog?.showModal());
 
   return (
-    <dialog ref={dialog} class="safety-number" aria-labelledby="safety-number-title" onClose={() => props.onClose()}>
-      <h2 id="safety-number-title">
-        {t().verify_title} · {props.peerName}
+    <dialog ref={dialog} class="sheet" aria-labelledby="safety-number-title" onClose={() => props.onClose()}>
+      <h2 id="safety-number-title" class="sheet__title">
+        {t().verify_title}
       </h2>
-      <Show when={number()} fallback={<p class="safety-error">{String(number.error ?? "")}</p>}>
+      <p class="sheet__subtitle">{props.peerName}</p>
+      <Show
+        when={number()}
+        fallback={
+          <Show when={number.error !== undefined} fallback={<span class="spinner" />}>
+            <p class="error-text">{reasonText(number.error)}</p>
+          </Show>
+        }
+      >
         {(digits) => (
-          <ol class="safety-digits" aria-label={digits()}>
+          <ol class="safety-digits mono" aria-label={digits()}>
             <For each={digitGroups(digits())}>{(group) => <li>{group}</li>}</For>
           </ol>
         )}
       </Show>
-      <p class="safety-hint">{t().verify_hint}</p>
-      <button class="btn-primary" onClick={() => dialog?.close()} autofocus>
+      <p class="hint">{t().verify_hint}</p>
+      <button class="btn btn--primary btn--block" onClick={() => dialog?.close()} autofocus>
         {t().verify_close}
       </button>
     </dialog>

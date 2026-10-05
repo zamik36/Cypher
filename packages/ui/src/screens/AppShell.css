@@ -1,0 +1,31 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  background: var(--c-bg);
+}
+
+.shell__panes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.shell__list,
+.shell__main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.shell--wide .shell__list {
+  flex: none;
+  width: var(--list-w);
+  border-right: 1px solid var(--c-border);
+}
+
+.shell__main > * {
+  height: 100%;
+}

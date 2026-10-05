@@ -1,14 +1,5 @@
 import { createStore } from "solid-js/store";
 
-export interface PeerInfo {
-  peerId: string;
-  roomCode: string;
-  role: "host" | "guest";
-  /** Short display name derived from peerId */
-  displayName: string;
-  online: boolean;
-}
-
 /**
  * The server connection as the user is told about it.
  * - `idle`: not started (identity locked).
@@ -50,10 +41,6 @@ interface ConnectionState {
   linkError: string | null;
   peerId: string | null;
   gatewayAddr: string;
-  /** All connected peers */
-  peers: PeerInfo[];
-  /** Currently active chat peer */
-  activePeerId: string | null;
 }
 
 const DEFAULT_GATEWAY_ADDR = "cyphermessanger.tech:9100";
@@ -88,8 +75,6 @@ const [connection, setConnection] = createStore<ConnectionState>({
   linkError: null,
   peerId: null,
   gatewayAddr: initialGatewayAddr,
-  peers: [],
-  activePeerId: null,
 });
 
 /** The text of a rejected platform call: Tauri rejects with a string, the worker with an `Error`. */
@@ -114,40 +99,11 @@ export async function connectGateway(start: () => Promise<unknown>): Promise<voi
   }
 }
 
-export function addPeer(peer: PeerInfo) {
-  setConnection("peers", (prev) =>
-    prev.some((p) => p.peerId === peer.peerId)
-      ? prev.map((p) => (p.peerId === peer.peerId ? { ...p, online: peer.online, displayName: peer.displayName } : p))
-      : [...prev, peer],
-  );
-  // Auto-select if first peer
-  if (!connection.activePeerId) {
-    setConnection("activePeerId", peer.peerId);
-  }
-}
-
-export function setPeerOnline(peerId: string, online: boolean) {
-  setConnection("peers", (prev) => prev.map((p) => (p.peerId === peerId ? { ...p, online } : p)));
-}
-
-export function markAllPeersOffline() {
-  setConnection("peers", (prev) => prev.map((p) => ({ ...p, online: false })));
-}
-
-export function setActivePeer(peerId: string) {
-  setConnection("activePeerId", peerId);
-}
-
 export function setGatewayAddr(addr: string): string {
   const normalized = normalizeGatewayAddr(addr);
   setConnection("gatewayAddr", normalized);
   localStorage.setItem(GATEWAY_STORAGE_KEY, normalized);
   return normalized;
-}
-
-/** Short name from hex peer id (first 6 chars) */
-export function shortName(peerId: string): string {
-  return peerId.slice(0, 6);
 }
 
 export { connection, setConnection };

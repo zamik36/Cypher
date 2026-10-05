@@ -1,6 +1,7 @@
-import { createSignal, For, Show, createMemo, onMount } from "solid-js";
+import { createSignal, For, Show, createMemo, onMount, type JSX } from "solid-js";
+import "./Onboarding.css";
+import Icon from "./Icon";
 import { api } from "../platform";
-import { ShieldIcon } from "./Icons";
 import { t } from "../i18n";
 import { reasonText } from "../utils/reasons";
 import { answersMatch, phraseWords, pickPositions } from "../utils/recovery";
@@ -148,200 +149,249 @@ export default function IdentityView(props: IdentityViewProps) {
     return 0;
   });
 
-  function onKeyDown(e: KeyboardEvent, handler: () => Promise<void>) {
-    if (e.key === "Enter") void handler();
-  }
+  const title = () => {
+    if (mode() !== "backup") return t().identity_title;
+    return checking() ? t().backup_check_title : t().backup_title;
+  };
+
+  const subtitle = () => {
+    const tr = t();
+    switch (mode()) {
+      case "unlock":
+        return tr.identity_subtitle_unlock;
+      case "create":
+        return tr.identity_subtitle_create;
+      case "import":
+        return tr.identity_subtitle_import;
+      case "backup":
+        return checking() ? tr.backup_check_hint : tr.backup_hint;
+    }
+  };
+
+  /** A form whose Enter key and submit button both run `action`. */
+  const form = (action: () => unknown, children: JSX.Element) => (
+    <form
+      class="onboard__form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!busy()) void action();
+      }}
+    >
+      {children}
+    </form>
+  );
 
   /** A new passphrase, typed twice, with its strength. */
-  const passphrasePair = (onEnter: () => Promise<void>) => (
+  const passphrasePair = () => (
     <>
       <input
+        class="field"
         type="password"
         placeholder={t().identity_passphrase_min}
+        aria-label={t().identity_passphrase_min}
         value={passphrase()}
         onInput={(e) => setPassphrase(e.currentTarget.value)}
         autocomplete="new-password"
       />
       <Show when={passphrase().length > 0}>
-        <div class="strength-bar">
-          <div class={`strength-segment ${strengthLevel() >= 1 ? "weak" : ""}`} />
-          <div class={`strength-segment ${strengthLevel() >= 2 ? "fair" : ""}`} />
-          <div class={`strength-segment ${strengthLevel() >= 3 ? "good" : ""}`} />
-          <div class={`strength-segment ${strengthLevel() >= 4 ? "strong" : ""}`} />
+        <div class="onboard__strength" data-level={strengthLevel()} aria-hidden="true">
+          <span />
+          <span />
+          <span />
+          <span />
         </div>
       </Show>
       <input
+        class="field"
         type="password"
         placeholder={t().identity_passphrase_repeat}
+        aria-label={t().identity_passphrase_repeat}
         value={repeat()}
         onInput={(e) => setRepeat(e.currentTarget.value)}
-        onKeyDown={(e) => onKeyDown(e, onEnter)}
         autocomplete="new-password"
       />
       <Show when={repeat().length > 0 && repeat() !== passphrase()}>
-        <p class="identity-hint">{t().identity_passphrase_mismatch}</p>
+        <p class="error-text">{t().identity_passphrase_mismatch}</p>
       </Show>
     </>
   );
 
+  const nicknameField = (autofocus: boolean) => (
+    <input
+      class="field"
+      type="text"
+      placeholder={t().identity_nickname}
+      aria-label={t().identity_nickname}
+      value={nickname()}
+      onInput={(e) => setNickname(e.currentTarget.value)}
+      autocomplete="nickname"
+      autofocus={autofocus}
+    />
+  );
+
   return (
-    <div class="identity-view">
-      <Show when={hasId() !== null}>
-        <div class="identity-card">
-          <div class="identity-logo-icon">
-            <ShieldIcon width="48" height="48" />
+    <main class="onboard">
+      <Show when={hasId() !== null} fallback={<span class="spinner" />}>
+        <div class="onboard__card">
+          <div class="onboard__logo">
+            <Icon name="shield" size={32} />
           </div>
-          <h2>{t().identity_title}</h2>
-          <p class="identity-subtitle">{t().identity_subtitle}</p>
+          <h1 class="onboard__title">{title()}</h1>
+          <p class="onboard__subtitle">{subtitle()}</p>
 
           <Show when={mode() === "unlock"}>
-            <div class="identity-form">
-              <input
-                type="password"
-                placeholder={t().identity_passphrase}
-                value={passphrase()}
-                onInput={(e) => setPassphrase(e.currentTarget.value)}
-                onKeyDown={(e) => onKeyDown(e, handleUnlock)}
-                autocomplete="current-password"
-                autofocus
-              />
-              <button class="btn-primary" onClick={() => void handleUnlock()} disabled={busy() || !passphrase()}>
-                {busy() ? t().identity_unlocking : t().identity_unlock}
+            {form(
+              handleUnlock,
+              <>
+                <input
+                  class="field"
+                  type="password"
+                  placeholder={t().identity_passphrase}
+                  aria-label={t().identity_passphrase}
+                  value={passphrase()}
+                  onInput={(e) => setPassphrase(e.currentTarget.value)}
+                  autocomplete="current-password"
+                  autofocus
+                />
+                <button class="btn btn--primary btn--block" type="submit" disabled={busy() || !passphrase()}>
+                  {busy() ? t().identity_unlocking : t().identity_unlock}
+                </button>
+              </>,
+            )}
+            <div class="onboard__links">
+              <button class="btn btn--ghost" onClick={() => switchMode("create")}>
+                {t().identity_new}
               </button>
-              <div class="identity-links">
-                <button class="link-btn" onClick={() => switchMode("create")}>
-                  {t().identity_new}
-                </button>
-                <button class="link-btn" onClick={() => switchMode("import")}>
-                  {t().identity_import}
-                </button>
-              </div>
+              <button class="btn btn--ghost" onClick={() => switchMode("import")}>
+                {t().identity_import_link}
+              </button>
             </div>
           </Show>
 
           <Show when={mode() === "create"}>
-            <div class="identity-form">
-              <input
-                type="text"
-                placeholder={t().identity_nickname}
-                value={nickname()}
-                onInput={(e) => setNickname(e.currentTarget.value)}
-                autofocus
-              />
-              {passphrasePair(handleCreate)}
-              <button
-                class="btn-primary"
-                onClick={() => void handleCreate()}
-                disabled={busy() || !nickname() || !passphraseValid()}
-              >
-                {busy() ? t().identity_creating : t().identity_create}
-              </button>
-              <div class="identity-links">
-                <Show when={hasId()}>
-                  <button class="link-btn" onClick={() => switchMode("unlock")}>
-                    {t().identity_back_unlock}
-                  </button>
-                </Show>
-                <button class="link-btn" onClick={() => switchMode("import")}>
-                  {t().identity_import}
+            {form(
+              handleCreate,
+              <>
+                {nicknameField(true)}
+                {passphrasePair()}
+                <p class="hint">{t().identity_passphrase_hint}</p>
+                <button
+                  class="btn btn--primary btn--block"
+                  type="submit"
+                  disabled={busy() || !nickname() || !passphraseValid()}
+                >
+                  {busy() ? t().identity_creating : t().identity_create}
                 </button>
-              </div>
+              </>,
+            )}
+            <div class="onboard__links">
+              <Show when={hasId()}>
+                <button class="btn btn--ghost" onClick={() => switchMode("unlock")}>
+                  {t().identity_back_unlock}
+                </button>
+              </Show>
+              <button class="btn btn--ghost" onClick={() => switchMode("import")}>
+                {t().identity_import_link}
+              </button>
             </div>
           </Show>
 
           <Show when={mode() === "import"}>
-            <div class="identity-form">
-              <textarea
-                placeholder={t().identity_seed_placeholder}
-                value={mnemonic()}
-                onInput={(e) => setMnemonic(e.currentTarget.value)}
-                rows={3}
-                spellcheck={false}
-                autocomplete="off"
-                autocapitalize="off"
-                autocorrect="off"
-                inputmode="text"
-              />
-              <input
-                type="text"
-                placeholder={t().identity_nickname}
-                value={nickname()}
-                onInput={(e) => setNickname(e.currentTarget.value)}
-              />
-              {passphrasePair(handleImport)}
-              <button
-                class="btn-primary"
-                onClick={() => void handleImport()}
-                disabled={busy() || !mnemonic() || !nickname() || !passphraseValid()}
-              >
-                {busy() ? t().identity_importing : t().identity_import}
-              </button>
-              <button class="link-btn" onClick={() => switchMode(hasId() ? "unlock" : "create")}>
-                {t().identity_back}
+            {form(
+              handleImport,
+              <>
+                <textarea
+                  class="field mono"
+                  placeholder={t().identity_seed_placeholder}
+                  aria-label={t().identity_seed_placeholder}
+                  value={mnemonic()}
+                  onInput={(e) => setMnemonic(e.currentTarget.value)}
+                  rows={4}
+                  spellcheck={false}
+                  autocomplete="off"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  autofocus
+                />
+                {nicknameField(false)}
+                {passphrasePair()}
+                <button
+                  class="btn btn--primary btn--block"
+                  type="submit"
+                  disabled={busy() || !mnemonic() || !nickname() || !passphraseValid()}
+                >
+                  {busy() ? t().identity_importing : t().identity_import}
+                </button>
+              </>,
+            )}
+            <div class="onboard__links">
+              <button class="btn btn--ghost" onClick={() => switchMode(hasId() ? "unlock" : "create")}>
+                {t().common_back}
               </button>
             </div>
           </Show>
 
           <Show when={mode() === "backup"}>
-            <div class="identity-form">
-              <h3>{checking() ? t().backup_check_title : t().backup_title}</h3>
-              <Show
-                when={checking()}
-                fallback={
-                  <>
-                    <p class="identity-hint">{t().backup_hint}</p>
-                    <ol class="recovery-words">
-                      <For each={words()}>{(word) => <li>{word}</li>}</For>
-                    </ol>
-                    <button class="btn-primary" onClick={() => setChecking(true)}>
-                      {t().backup_written}
-                    </button>
-                  </>
-                }
-              >
-                <p class="identity-hint">{t().backup_check_hint}</p>
-                <For each={positions()}>
-                  {(position, k) => (
-                    <input
-                      type="text"
-                      aria-label={t().backup_word(position + 1)}
-                      placeholder={t().backup_word(position + 1)}
-                      value={answers()[k()] ?? ""}
-                      onInput={(e) => {
-                        const next = [...answers()];
-                        next[k()] = e.currentTarget.value;
-                        setAnswers(next);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") finishBackup();
-                      }}
-                      spellcheck={false}
-                      autocomplete="off"
-                      autocapitalize="off"
-                    />
-                  )}
-                </For>
-                <button
-                  class="btn-primary"
-                  onClick={finishBackup}
-                  disabled={!answersMatch(words(), positions(), answers())}
-                >
-                  {t().backup_continue}
-                </button>
-                <button class="link-btn" onClick={() => setChecking(false)}>
+            <Show
+              when={checking()}
+              fallback={
+                <div class="onboard__form">
+                  <ol class="recovery-words" data-testid="recovery-words">
+                    <For each={words()}>{(word) => <li>{word}</li>}</For>
+                  </ol>
+                  <button class="btn btn--primary btn--block" onClick={() => setChecking(true)}>
+                    {t().backup_written}
+                  </button>
+                </div>
+              }
+            >
+              {form(
+                finishBackup,
+                <>
+                  <For each={positions()}>
+                    {(position, k) => (
+                      <input
+                        class="field"
+                        type="text"
+                        aria-label={t().backup_word(position + 1)}
+                        placeholder={t().backup_word(position + 1)}
+                        value={answers()[k()] ?? ""}
+                        onInput={(e) => {
+                          const next = [...answers()];
+                          next[k()] = e.currentTarget.value;
+                          setAnswers(next);
+                        }}
+                        spellcheck={false}
+                        autocomplete="off"
+                        autocapitalize="off"
+                      />
+                    )}
+                  </For>
+                  <button
+                    class="btn btn--primary btn--block"
+                    type="submit"
+                    disabled={!answersMatch(words(), positions(), answers())}
+                  >
+                    {t().backup_continue}
+                  </button>
+                </>,
+              )}
+              <div class="onboard__links">
+                <button class="btn btn--ghost" onClick={() => setChecking(false)}>
                   {t().backup_show_again}
                 </button>
-              </Show>
-            </div>
+              </div>
+            </Show>
           </Show>
 
           <Show when={error()}>
-            <div class="identity-error" role="alert">
-              {error()}
-            </div>
+            <p class="onboard__error" role="alert" data-testid="identity-error">
+              <Icon name="alert" size={18} />
+              <span>{error()}</span>
+            </p>
           </Show>
         </div>
       </Show>
-    </div>
+    </main>
   );
 }

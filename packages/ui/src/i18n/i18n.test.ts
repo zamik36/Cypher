@@ -13,27 +13,22 @@ describe("translations", () => {
   });
 
   it.each([
-    [0, "0 peers", "0 пиров", "0 active chats", "0 активных чатов"],
-    [1, "1 peer", "1 пир", "1 active chat", "1 активный чат"],
-    [3, "3 peers", "3 пира", "3 active chats", "3 активных чата"],
-    [11, "11 peers", "11 пиров", "11 active chats", "11 активных чатов"],
-    [21, "21 peers", "21 пир", "21 active chats", "21 активный чат"],
-    [22, "22 peers", "22 пира", "22 active chats", "22 активных чата"],
-    [112, "112 peers", "112 пиров", "112 active chats", "112 активных чатов"],
-  ])("pluralize %d", (n, enPeers, ruPeers, enChats, ruChats) => {
-    expect([en.status_peers(n), ru.status_peers(n), en.status_active_chats(n), ru.status_active_chats(n)]).toEqual([
-      enPeers,
-      ruPeers,
-      enChats,
-      ruChats,
-    ]);
+    [1, "1 unread", "1 непрочитанное"],
+    [3, "3 unread", "3 непрочитанных"],
+    [11, "11 unread", "11 непрочитанных"],
+    [21, "21 unread", "21 непрочитанное"],
+    [112, "112 unread", "112 непрочитанных"],
+  ])("pluralize %d", (n, enUnread, ruUnread) => {
+    expect([en.chats_unread(n), ru.chats_unread(n)]).toEqual([enUnread, ruUnread]);
   });
 
   it("fill in arguments", () => {
     for (const table of [en, ru]) {
-      expect(table.settings_clear_confirm(3)).toContain("3");
-      expect(table.settings_clear_confirm(0)).not.toMatch(/\d/);
-      expect(table.toast_receiving("a.txt")).toContain("a.txt");
+      expect(table.storage_clear_confirm(3)).toContain("3");
+      expect(table.storage_clear_confirm(0)).not.toMatch(/\d/);
+      expect(table.contact_fallback("a1b2c3")).toContain("a1b2c3");
+      expect(table.toast_contact_added("bob")).toContain("bob");
+      expect(table.invite_share_text("abc-def")).toContain("abc-def");
       expect(table.toast_clear_failed("disk")).toContain("disk");
       expect(table.toast_anonymous_save_failed("relay")).toContain("relay");
       expect(table.backup_word(17)).toContain("17");
@@ -60,13 +55,14 @@ describe("locale", () => {
     vi.spyOn(navigator, "language", "get").mockReturnValue("ru-RU");
     let i18n = await import("./index");
     expect(i18n.locale()).toBe("ru");
-    expect(i18n.t().nav_home).toBe(ru.nav_home);
+    expect(i18n.t().chats_title).toBe(ru.chats_title);
 
     i18n.setLocale("en");
-    expect(i18n.t().nav_home).toBe(en.nav_home);
+    expect(i18n.t().chats_title).toBe(en.chats_title);
     vi.resetModules();
     i18n = await import("./index");
     expect(i18n.locale()).toBe("en");
+    expect(document.documentElement.lang).toBe("en");
   });
 
   it("falls back to English", async () => {
