@@ -9,6 +9,7 @@ use std::thread;
 use std::time::SystemTime;
 
 use bytes::Bytes;
+use cypher_core::Event;
 use cypher_types::FileId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -58,6 +59,8 @@ pub(crate) enum IoJob {
         file_id: FileId,
         path: PathBuf,
     },
+    /// Hands `Event` back once every job before it is done.
+    Notify(Event),
 }
 
 /// A chunk to read from a file we send, into a buffer with `headroom`
@@ -84,6 +87,7 @@ pub(crate) enum IoDone {
     WriteFailed {
         file_id: FileId,
     },
+    Notify(Event),
 }
 
 #[derive(Clone)]
@@ -146,6 +150,7 @@ impl Worker {
                     let _ = std::fs::remove_file(path);
                     None
                 }
+                IoJob::Notify(event) => Some(IoDone::Notify(event)),
             };
             if let Some(event) = event {
                 let _ = done.send(event);

@@ -159,6 +159,7 @@ impl<R: CryptoRngCore> Core<R> {
         if fresh_prekeys {
             core.persist_prekeys();
         }
+        core.announce_pending_offers();
         if skipped.0 > 0 {
             core.emit(Event::Warning {
                 reason: FailReason::Corrupted,

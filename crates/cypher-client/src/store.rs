@@ -13,6 +13,8 @@ use crate::ClientError;
 
 /// Driver-owned table: file id → local path of a transfer.
 pub(crate) const FILES_TABLE: &str = "driver_files";
+/// Driver-owned table: file id → where a finished file was saved.
+pub(crate) const SAVED_TABLE: &str = "driver_saved";
 
 use cypher_core::Rows as Pairs;
 
@@ -69,7 +71,11 @@ impl Store {
             return Err(CoreError::NewerStorage.into());
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        for name in Table::ALL.iter().map(|t| t.name()).chain([FILES_TABLE]) {
+        for name in Table::ALL
+            .iter()
+            .map(|t| t.name())
+            .chain([FILES_TABLE, SAVED_TABLE])
+        {
             conn.execute_batch(&format!(
                 "CREATE TABLE IF NOT EXISTS {name} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;"
             ))?;

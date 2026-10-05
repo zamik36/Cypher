@@ -305,6 +305,29 @@ fn transfer_resumes_after_receiver_restart() {
 }
 
 #[test]
+fn unanswered_offer_is_announced_again_after_restart() {
+    let mut w = paired();
+    let data = pattern(300 * 1024);
+    let file_id = offer_file(&mut w, A, B, data.clone(), "later.bin", MediaKind::File);
+    w.clients[B].events.clear();
+    w.restart(B);
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::TransferOffered { file_id: id, name, size, .. }
+            if *id == file_id && name == "later.bin" && *size == data.len() as u64
+    )));
+
+    w.command(B, Command::AcceptFile { file_id });
+    w.advance(10_000);
+    assert_eq!(w.clients[B].sinks[&file_id], data);
+
+    // Accepted or done: nothing to announce any more.
+    w.clients[B].events.clear();
+    w.restart(B);
+    assert!(!w.has_event(B, |e| matches!(e, Event::TransferOffered { .. })));
+}
+
+#[test]
 fn voice_message_is_auto_accepted_and_stored_sealed_identically() {
     let mut w = paired();
     let voice = pattern(200 * 1024);

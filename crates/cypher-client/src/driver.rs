@@ -13,7 +13,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::files::{ChunkRead, FileIo, IoDone, IoJob, SourceStamp};
 use crate::net::{self, Link, NetEvent};
-use crate::store::{FILES_TABLE, Op, Store};
+use crate::store::{FILES_TABLE, Op, SAVED_TABLE, Store};
 use crate::{Config, Request};
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
@@ -41,6 +41,17 @@ impl cypher_core::Record for FileEntry {
             _ => Err(cypher_core::CoreError::Storage),
         }
     }
+}
+
+/// Where a finished file ended up: a path, or a URI once the platform moved
+/// it to shared storage (Android).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SavedFile {
+    pub location: String,
+}
+
+impl cypher_core::Record for SavedFile {
+    const VERSION: u8 = 1;
 }
 
 pub(crate) struct Driver {
@@ -181,6 +192,16 @@ impl Driver {
                     self.feed(Input::Command(cmd)).await;
                 }
             }
+            Request::Saved {
+                file_id,
+                location,
+                done,
+            } => {
+                self.remember_saved(file_id, location);
+                if self.flush().await {
+                    let _ = done.send(());
+                }
+            }
             Request::Reconnect => {
                 self.reconnect = true;
                 self.gateway_retry = Retry::new();
@@ -221,6 +242,10 @@ impl Driver {
 
     async fn on_io(&mut self, done: IoDone) {
         let input = match done {
+            IoDone::Notify(event) => {
+                let _ = self.events.send(event);
+                return;
+            }
             IoDone::ChunkRead {
                 file_id,
                 index,
@@ -384,8 +409,21 @@ impl Driver {
         if let Event::Connected = event {
             self.gateway_retry.backoff = MIN_BACKOFF;
         }
-        if let Event::TransferComplete { file_id } | Event::TransferFailed { file_id, .. } = &event
-        {
+        if let Event::TransferComplete { file_id } = &event {
+            let file_id = *file_id;
+            let received = self
+                .files
+                .get(&file_id)
+                .is_some_and(|entry| entry.source.is_none());
+            self.note_saved(file_id);
+            self.release_file(file_id);
+            if received {
+                // Told only once the file is closed on disk: the IO thread
+                // runs jobs in order, and the sink's close is already queued.
+                self.io.submit(IoJob::Notify(event));
+                return;
+            }
+        } else if let Event::TransferFailed { file_id, .. } = &event {
             self.release_file(*file_id);
         }
         let _ = self.events.send(event);
@@ -461,6 +499,33 @@ impl Driver {
         self.files.insert(file_id, entry);
     }
 
+    /// Remembers where a finished file is, unless it is a temporary or
+    /// sealed copy the app manages itself.
+    fn note_saved(&mut self, file_id: FileId) {
+        let Some(entry) = self.files.get(&file_id) else {
+            return;
+        };
+        if entry.path == self.config.outgoing_path(&file_id)
+            || entry.path == self.config.media_path(&file_id)
+        {
+            return;
+        }
+        if let Some(location) = entry.path.to_str() {
+            let location = location.to_owned();
+            self.remember_saved(file_id, location);
+        }
+    }
+
+    fn remember_saved(&mut self, file_id: FileId, location: String) {
+        let value = self.vault.seal(
+            cypher_core::Table::Meta,
+            &saved_key(&file_id),
+            &SavedFile { location },
+            &mut OsRng,
+        );
+        self.ops.push(Op::Put(SAVED_TABLE, file_id.to_vec(), value));
+    }
+
     /// Drops the bookkeeping of a finished transfer and deletes the staged
     /// plaintext of an outgoing recording.
     fn release_file(&mut self, file_id: FileId) {
@@ -480,6 +545,13 @@ impl Driver {
 /// AAD key for file entries, distinct from every core record key.
 pub(crate) fn file_key(file_id: &FileId) -> Vec<u8> {
     let mut k = b"file:".to_vec();
+    k.extend_from_slice(file_id.as_bytes());
+    k
+}
+
+/// AAD key for saved-file entries.
+pub(crate) fn saved_key(file_id: &FileId) -> Vec<u8> {
+    let mut k = b"saved:".to_vec();
     k.extend_from_slice(file_id.as_bytes());
     k
 }
@@ -583,6 +655,72 @@ mod tests {
         assert!(
             events.try_recv().is_err(),
             "a stopped client handles no input"
+        );
+    }
+
+    /// A received file is announced only once its sink is closed, and is
+    /// remembered where it was saved; a staged recording is neither delayed
+    /// nor remembered.
+    #[tokio::test]
+    async fn a_received_file_is_announced_once_on_disk_and_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut d, mut events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
+        let (io_tx, mut io_rx) = mpsc::unbounded_channel();
+        d.io = FileIo::spawn(io_tx).unwrap();
+        let (received, recorded) = (FileId([1; 16]), FileId([2; 16]));
+        let path = dir.path().join("in.bin");
+        d.files.insert(
+            received,
+            FileEntry {
+                path: path.clone(),
+                source: None,
+            },
+        );
+        let staged = d.config.outgoing_path(&recorded);
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, b"note").unwrap();
+        let stamp = SourceStamp::of(&std::fs::metadata(&staged).unwrap()).unwrap();
+        d.files.insert(
+            recorded,
+            FileEntry {
+                path: staged,
+                source: Some(stamp),
+            },
+        );
+
+        d.emit(Event::TransferComplete { file_id: received });
+        assert!(
+            events.try_recv().is_err(),
+            "not before the IO thread is done"
+        );
+        assert!(d.flush().await);
+        let done = io_rx.recv().await.unwrap();
+        d.on_io(done).await;
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::TransferComplete { file_id } if file_id == received
+        ));
+        let sealed = d
+            .store
+            .get(SAVED_TABLE, received.to_vec())
+            .await
+            .unwrap()
+            .unwrap();
+        let saved: SavedFile = d
+            .vault
+            .open(Table::Meta, &saved_key(&received), &sealed)
+            .unwrap();
+        assert_eq!(saved.location, path.to_str().unwrap());
+
+        d.emit(Event::TransferComplete { file_id: recorded });
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::TransferComplete { file_id } if file_id == recorded
+        ));
+        assert!(d.flush().await);
+        assert_eq!(
+            d.store.get(SAVED_TABLE, recorded.to_vec()).await.unwrap(),
+            None
         );
     }
 

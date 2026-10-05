@@ -52,7 +52,9 @@ pub async fn run(target: &Target) {
 
     pair_through_a_link(&mut a, &mut b).await;
     chat_both_ways(&mut a, &mut b).await;
-    send_a_file(&mut a, &mut b).await;
+    let file_id = send_a_file(&mut a, &mut b).await;
+    send_a_staged_copy(&mut a, &mut b).await;
+    move_a_saved_file(&b, file_id).await;
     play_back_a_voice_note(&a, &mut b).await;
     stream_a_video_note(&mut a, &b).await;
     deliver_offline_through_the_inbox(target, &mut a, b).await;
@@ -176,7 +178,8 @@ async fn chat_both_ways(a: &mut Peer, b: &mut Peer) {
     );
 }
 
-async fn send_a_file(a: &mut Peer, b: &mut Peer) {
+/// Sends a file; both sides remember where it is. Returns its id.
+async fn send_a_file(a: &mut Peer, b: &mut Peer) -> FileId {
     let data = pattern(5 * 1024 * 1024 + 7);
     let src = a.dir.path().join("payload.bin");
     std::fs::write(&src, &data).unwrap();
@@ -201,9 +204,67 @@ async fn send_a_file(a: &mut Peer, b: &mut Peer) {
     let dest = b.dir.path().join("received.bin");
     b.client.accept_file(file_id, dest.clone()).await.unwrap();
     b.transfer_complete(file_id).await;
+    // Complete means closed on disk: the file can be opened at once.
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+    let location = |p: &Path| Some(p.to_str().unwrap().to_owned());
+    assert_eq!(b.client.saved_file(file_id).await.unwrap(), location(&dest));
     a.transfer_complete(file_id).await;
     tokio::time::sleep(SETTLE).await;
-    assert_eq!(std::fs::read(&dest).unwrap(), data);
+    assert_eq!(a.client.saved_file(file_id).await.unwrap(), location(&src));
+    file_id
+}
+
+/// A staged copy (an Android pick) goes under its own name and is gone once
+/// sent.
+async fn send_a_staged_copy(a: &mut Peer, b: &mut Peer) {
+    let staged = a.dir.path().join("pick-1234.tmp");
+    std::fs::write(&staged, b"from a content provider").unwrap();
+    let (_, staged_id) = a
+        .client
+        .send_staged_file(b.client.peer_id(), &staged, "photo.jpg", "image/jpeg")
+        .await
+        .unwrap();
+    assert!(!staged.exists(), "the client took the copy over");
+    let offered = b
+        .wait(|e| match e {
+            Event::TransferOffered {
+                file_id,
+                name,
+                mime,
+                ..
+            } if *file_id == staged_id => Some((name.clone(), mime.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!(offered, ("photo.jpg".to_owned(), "image/jpeg".to_owned()));
+    let photo = b.dir.path().join("photo.jpg");
+    b.client
+        .accept_file(staged_id, photo.clone())
+        .await
+        .unwrap();
+    b.transfer_complete(staged_id).await;
+    assert_eq!(std::fs::read(&photo).unwrap(), b"from a content provider");
+    a.transfer_complete(staged_id).await;
+    tokio::time::sleep(SETTLE).await;
+    let copy = a
+        .dir
+        .path()
+        .join("outgoing")
+        .join(format!("{}.bin", staged_id.to_hex()));
+    assert!(
+        !copy.exists() && a.client.saved_file(staged_id).await.unwrap().is_none(),
+        "a staged copy is neither kept nor remembered"
+    );
+}
+
+/// A platform that moves a received file (Android: into Downloads) says where.
+async fn move_a_saved_file(b: &Peer, file_id: FileId) {
+    let moved = "content://media/external/downloads/42".to_owned();
+    b.client
+        .move_saved_file(file_id, moved.clone())
+        .await
+        .unwrap();
+    assert_eq!(b.client.saved_file(file_id).await.unwrap(), Some(moved));
 }
 
 async fn play_back_a_voice_note(a: &Peer, b: &mut Peer) {

@@ -22,11 +22,11 @@ use cypher_core::{
 use cypher_crypto::IdentitySeed;
 use cypher_types::{FileId, MsgId, PeerId};
 use rand::rngs::OsRng;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use driver::{Driver, FileEntry, Parts, file_key, now_ms};
+use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
-use store::{FILES_TABLE, Store};
+use store::{FILES_TABLE, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
@@ -103,9 +103,22 @@ pub(crate) enum Request {
         entry: FileEntry,
         then: Option<Command>,
     },
+    /// Records that a finished file now lives at `location`.
+    Saved {
+        file_id: FileId,
+        location: String,
+        done: oneshot::Sender<()>,
+    },
     /// Connects again after the session was taken over by another device.
     Reconnect,
     Shutdown,
+}
+
+/// A file about to be offered: its id, where it is, the name it goes by.
+struct Pick {
+    file_id: FileId,
+    path: PathBuf,
+    name: String,
 }
 
 /// Someone the user has a session with.
@@ -213,18 +226,65 @@ impl Client {
         mime: &str,
         kind: MediaKind,
     ) -> Result<(MsgId, FileId), ClientError> {
-        let source = SourceStamp::of(&tokio::fs::metadata(path).await?)?;
-        let size = source.len();
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or(ClientError::InvalidInput)?;
+        let file = Pick {
+            file_id: FileId::random(&mut OsRng),
+            path: path.to_owned(),
+            name,
+        };
+        self.offer(peer, file, mime, kind).await
+    }
+
+    /// Sends a copy the app made only for sending (such as an Android
+    /// `content://` pick) as `name`. The client takes the copy over and
+    /// deletes it when the transfer ends.
+    pub async fn send_staged_file(
+        &self,
+        peer: PeerId,
+        staged: &Path,
+        name: &str,
+        mime: &str,
+    ) -> Result<(MsgId, FileId), ClientError> {
+        let file_id = FileId::random(&mut OsRng);
+        let path = self.config.outgoing_path(&file_id);
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        if tokio::fs::rename(staged, &path).await.is_err() {
+            // Another file system: copy, then drop the original.
+            tokio::fs::copy(staged, &path).await?;
+            tokio::fs::remove_file(staged).await?;
+        }
+        let file = Pick {
+            file_id,
+            path,
+            name: name.to_owned(),
+        };
+        self.offer(peer, file, mime, MediaKind::File).await
+    }
+
+    async fn offer(
+        &self,
+        peer: PeerId,
+        Pick {
+            file_id,
+            path,
+            name,
+        }: Pick,
+        mime: &str,
+        kind: MediaKind,
+    ) -> Result<(MsgId, FileId), ClientError> {
+        let source = SourceStamp::of(&tokio::fs::metadata(&path).await?)?;
+        let size = source.len();
         let inline = if kind.is_media() && size <= MAX_INLINE_LEN as u64 {
-            Some(tokio::fs::read(path).await?)
+            Some(tokio::fs::read(&path).await?)
         } else {
             None
         };
-        let (msg_id, file_id) = (MsgId::random(&mut OsRng), FileId::random(&mut OsRng));
+        let msg_id = MsgId::random(&mut OsRng);
         let cmd = Command::SendFile {
             peer,
             msg_id,
@@ -238,7 +298,7 @@ impl Client {
         self.send(Request::Track {
             file_id,
             entry: FileEntry {
-                path: path.to_owned(),
+                path,
                 source: Some(source),
             },
             then: Some(cmd),
@@ -330,6 +390,35 @@ impl Client {
         .await
     }
 
+    /// Where a finished file is on this device: a path, or a URI the
+    /// platform gave it. `None` for files never received or sent from here.
+    pub async fn saved_file(&self, file_id: FileId) -> Result<Option<String>, ClientError> {
+        let Some(sealed) = self.store.get(SAVED_TABLE, file_id.to_vec()).await? else {
+            return Ok(None);
+        };
+        Ok(self
+            .vault
+            .open::<SavedFile>(Table::Meta, &saved_key(&file_id), &sealed)
+            .ok()
+            .map(|saved| saved.location))
+    }
+
+    /// Records that a finished file moved, e.g. into shared storage.
+    pub async fn move_saved_file(
+        &self,
+        file_id: FileId,
+        location: String,
+    ) -> Result<(), ClientError> {
+        let (done, saved) = oneshot::channel();
+        self.send(Request::Saved {
+            file_id,
+            location,
+            done,
+        })
+        .await?;
+        saved.await.map_err(|_| ClientError::Closed)
+    }
+
     /// Conversation history with `peer`, newest first, sent before `before_ms`.
     pub async fn history(
         &self,
@@ -390,8 +479,8 @@ impl Client {
     }
 
     /// Ends the session with `peer` and deletes the conversation: messages,
-    /// their statuses and stored voice and video notes. Files the user saved
-    /// stay where they are.
+    /// their statuses, stored voice and video notes and where files were
+    /// saved. The saved files themselves stay where they are.
     pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
         self.command(Command::RemovePeer { peer }).await?;
         let from = message_key(&peer, 0, &MsgId([0; 16]));
@@ -408,11 +497,15 @@ impl Client {
                     Table::MessageStatus.name(),
                     msg.msg_id.to_vec(),
                 ));
-                if let Content::File { file_id, kind, .. } = msg.content
-                    && kind.is_media()
-                {
-                    ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
-                    media.push(file_id);
+                match msg.content {
+                    Content::File { file_id, kind, .. } if kind.is_media() => {
+                        ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
+                        media.push(file_id);
+                    }
+                    Content::File { file_id, .. } => {
+                        ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
+                    }
+                    Content::Text { .. } => {}
                 }
             }
             ops.push(store::Op::Delete(Table::Messages.name(), key));
@@ -427,14 +520,15 @@ impl Client {
         Ok(())
     }
 
-    /// Deletes every stored message and media note; sessions and contacts
-    /// are kept.
+    /// Deletes every stored message and media note, and where files were
+    /// saved; sessions, contacts and the saved files themselves are kept.
     pub async fn clear_history(&self) -> Result<(), ClientError> {
         self.store
             .apply(vec![
                 store::Op::Clear(Table::Messages.name()),
                 store::Op::Clear(Table::MessageStatus.name()),
                 store::Op::Clear(Table::Media.name()),
+                store::Op::Clear(SAVED_TABLE),
             ])
             .await?;
         match tokio::fs::remove_dir_all(self.config.data_dir.join("media")).await {
