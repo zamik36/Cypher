@@ -65,7 +65,9 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
     const card = incoming(alice).getByTestId("file-card");
     await expect(card).toContainText("payload.bin");
     const download = alice.waitForEvent("download");
-    await card.getByRole("button", { name: "Accept" }).click();
+    // Tapping the file offers what can be done with it.
+    await card.click();
+    await alice.getByRole("menuitem", { name: "Download" }).click();
     const saved = await (await download).path();
     const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
     expect(digest(await readFile(saved))).toBe(digest(payload));
@@ -88,7 +90,9 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
     const card = incoming(alice).getByTestId("file-card");
     await expect(card).toHaveAttribute("data-state", "complete");
     const again = alice.waitForEvent("download");
-    await card.getByRole("button", { name: "Save" }).click();
+    await card.click();
+    await alice.getByRole("menuitem", { name: "Save" }).click();
+    await expect(alice.getByRole("menu")).toBeHidden();
     expect((await again).suggestedFilename()).toBe("payload.bin");
   });
 

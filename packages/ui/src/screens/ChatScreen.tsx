@@ -73,8 +73,7 @@ function MessageBubble(props: { msg: ChatMessage; first: boolean; last: boolean 
         <Match when={note()}>
           {(file) => (
             <div class="bubble bubble--media">
-              <VoiceBubble file={file()} />
-              {meta()}
+              <VoiceBubble file={file()} meta={meta()} />
             </div>
           )}
         </Match>

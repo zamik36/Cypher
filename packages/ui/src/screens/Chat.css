@@ -148,7 +148,6 @@
   max-width: 100%;
 }
 
-.bubble--media .msg__meta,
 .bubble--file .msg__meta {
   float: none;
   align-self: flex-end;
@@ -225,19 +224,52 @@
 
 .file-card {
   display: flex;
+  align-items: center;
   gap: var(--sp-3);
+  width: 100%;
   min-width: 0;
+  margin: calc(-1 * var(--sp-1));
+  padding: var(--sp-1);
+  border-radius: var(--r-md);
+  color: inherit;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.file-card:not(:disabled):hover,
+.file-card[aria-expanded="true"] {
+  background: var(--c-surface-2);
+}
+
+.msg--out .file-card:not(:disabled):hover,
+.msg--out .file-card[aria-expanded="true"] {
+  background: var(--c-accent-soft);
+}
+
+.file-card:disabled {
+  cursor: default;
 }
 
 .file-card__icon {
   display: grid;
   place-items: center;
   flex: none;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--r-md);
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
   background: var(--c-accent-soft);
   color: var(--c-accent);
+}
+
+/* An offer waiting for an answer: the one thing to do is download it. */
+.file-card__icon[data-state="offered"] {
+  background: var(--c-accent);
+  color: var(--c-on-accent);
+}
+
+.file-card__icon[data-state="error"] {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
 }
 
 .file-card__body {
@@ -256,12 +288,15 @@
 }
 
 .file-card__meta {
+  overflow: hidden;
   color: var(--c-muted);
   font-size: var(--t-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-card__progress {
-  height: 4px;
+  height: 3px;
   margin-top: var(--sp-1);
   overflow: hidden;
   border-radius: var(--r-full);
@@ -275,36 +310,33 @@
   transition: width var(--dur) var(--ease);
 }
 
-.file-card__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin-top: var(--sp-2);
-}
-
-.file-card__actions .btn {
-  min-height: 36px;
-  padding: 0 var(--sp-4);
-  font-size: var(--t-sm);
-}
-
 /* ── Voice note ──────────────────────────────────────────────────── */
+
+.bubble--media {
+  width: 300px;
+}
 
 .voice-bubble {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  padding: 2px 0;
 }
 
 .voice-play {
   display: grid;
   place-items: center;
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   background: var(--c-accent);
   color: var(--c-on-accent);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.voice-play:active {
+  transform: scale(0.94);
 }
 
 .voice-loading {
@@ -315,7 +347,7 @@
 .voice-body {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: 6px;
   flex: 1;
   min-width: 0;
 }
@@ -323,14 +355,17 @@
 .voice-wave {
   display: flex;
   align-items: center;
-  gap: 2px;
-  height: 28px;
+  justify-content: space-between;
+  gap: 1px;
+  height: 26px;
+  overflow: hidden;
   cursor: pointer;
 }
 
+/* 64 bars share whatever width the bubble has. */
 .voice-bar {
-  flex: 1;
-  min-width: 2px;
+  flex: 0 1 3px;
+  min-width: 1px;
   border-radius: 2px;
   background: var(--c-muted);
   opacity: 0.5;
@@ -342,22 +377,35 @@
   opacity: 1;
 }
 
+/* Duration and speed on the left, the message time and ticks on the right. */
 .voice-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--sp-2);
+  min-height: 18px;
   color: var(--c-muted);
   font-size: var(--t-xs);
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
 .voice-speed {
-  padding: 1px 6px;
-  border-radius: var(--r-sm);
+  padding: 2px 6px;
+  border-radius: var(--r-full);
   background: var(--c-surface-2);
   color: var(--c-text);
   font-size: var(--t-xs);
   font-weight: 600;
+  line-height: 1.2;
+}
+
+.msg--out .voice-speed {
+  background: var(--c-accent-soft);
+}
+
+.voice-meta .msg__meta {
+  float: none;
+  margin: 0 0 0 auto;
 }
 
 /* ── Round video note ────────────────────────────────────────────── */

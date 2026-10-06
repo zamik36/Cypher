@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, Show } from "solid-js";
+import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import Icon from "../Icon";
 import { api, type UiFile } from "../../platform";
 import { mediaProgress, mediaReady } from "../../stores/media";
@@ -8,7 +8,8 @@ import { claimPlayback, formatDuration } from "./player";
 
 const SPEEDS = [1, 1.5, 2];
 
-export default function VoiceBubble(props: { file: UiFile }) {
+/** A voice note; `meta` (time and ticks) sits at the end of its bottom row. */
+export default function VoiceBubble(props: { file: UiFile; meta?: JSX.Element }) {
   const [position, setPosition] = createSignal(0);
   const [playing, setPlaying] = createSignal(false);
   const [speed, setSpeed] = createSignal(1);
@@ -92,10 +93,13 @@ export default function VoiceBubble(props: { file: UiFile }) {
           </For>
         </div>
         <div class="voice-meta">
-          <span>{formatDuration(playing() || position() > 0 ? position() * durationMs() : durationMs())}</span>
-          <button class="voice-speed" onClick={cycleSpeed}>
+          <span class="voice-time">
+            {formatDuration(playing() || position() > 0 ? position() * durationMs() : durationMs())}
+          </span>
+          <button class="voice-speed" onClick={cycleSpeed} aria-label={t().media_speed(speed())}>
             {speed()}×
           </button>
+          {props.meta}
         </div>
       </div>
     </div>

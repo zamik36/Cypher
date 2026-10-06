@@ -135,15 +135,19 @@ const en = {
   media_downloading: "Still downloading…",
   media_play: "Play",
   media_pause: "Pause",
+  media_speed: (x: number) => `Speed ${x}×`,
 
   // -- Files --
-  file_accept: "Accept",
+  file_accept: "Download",
+  file_cancel: "Cancel download",
+  file_tap_to_download: "download",
+  file_actions: "File actions",
   file_decline: "Decline",
   file_declined: "Declined",
   file_failed: "Transfer failed",
   file_sent: "Sent",
   file_saved: "Saved",
-  file_open: "Open",
+  file_open: "Open file",
   file_save: "Save",
   file_reveal: "Show in folder",
   file_unsafe:
