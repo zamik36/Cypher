@@ -8,7 +8,7 @@ use cypher_core::{Core, Effect, Event, FailReason, Input, StoreOp};
 use cypher_types::FileId;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::files::{ChunkRead, FileIo, IoDone, IoJob, SourceStamp};
@@ -125,7 +125,7 @@ impl Driver {
         events: mpsc::UnboundedSender<Event>,
         requests: mpsc::Receiver<Request>,
         initial: Vec<Effect>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<watch::Receiver<()>> {
         let (net_tx, net_rx) = mpsc::unbounded_channel();
         let (io_tx, io_rx) = mpsc::unbounded_channel();
         let driver = Self {
@@ -148,8 +148,13 @@ impl Driver {
             #[cfg(feature = "tor")]
             tor: None,
         };
-        tokio::spawn(driver.run(requests, net_rx, io_rx, initial));
-        Ok(())
+        // Dropped when the driver is done: its last state is on disk.
+        let (running, stopped) = watch::channel(());
+        tokio::spawn(async move {
+            driver.run(requests, net_rx, io_rx, initial).await;
+            drop(running);
+        });
+        Ok(stopped)
     }
 
     async fn run(

@@ -22,7 +22,7 @@ use cypher_core::{
 use cypher_crypto::IdentitySeed;
 use cypher_types::{FileId, MsgId, PeerId};
 use rand::rngs::OsRng;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
@@ -165,6 +165,8 @@ pub struct Contact {
 #[derive(Clone)]
 pub struct Client {
     tx: mpsc::Sender<Request>,
+    /// Closes once the driver has stopped.
+    stopped: watch::Receiver<()>,
     store: Store,
     vault: Arc<Vault>,
     peer_id: PeerId,
@@ -197,7 +199,7 @@ impl Client {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (req_tx, req_rx) = mpsc::channel(256);
-        Driver::spawn(
+        let stopped = Driver::spawn(
             Parts {
                 core,
                 store: store.clone(),
@@ -212,6 +214,7 @@ impl Client {
 
         let client = Self {
             tx: req_tx,
+            stopped,
             store,
             vault: Arc::new(vault),
             peer_id,
@@ -626,8 +629,14 @@ impl Client {
         self.send(Request::Reconnect).await
     }
 
+    /// Stops the client and waits until it has: what it persisted is on disk
+    /// and it sends nothing more, so another client may open the same data.
+    /// Two at once would each keep their own prekeys and overwrite the
+    /// other's, leaving the server handing out keys this device lacks.
     pub async fn shutdown(&self) {
         let _ = self.tx.send(Request::Shutdown).await;
+        let mut stopped = self.stopped.clone();
+        while stopped.changed().await.is_ok() {}
     }
 
     async fn send(&self, req: Request) -> Result<(), ClientError> {

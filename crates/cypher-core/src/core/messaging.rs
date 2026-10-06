@@ -620,6 +620,12 @@ impl<R: CryptoRngCore> Core<R> {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
+        let known = self.prekeys.spk(init.spk_id).is_some()
+            && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
+        if !known {
+            self.resync_prekeys();
+            return Err(CoreError::Crypto);
+        }
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),

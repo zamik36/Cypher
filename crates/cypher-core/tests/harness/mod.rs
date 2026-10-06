@@ -226,6 +226,19 @@ impl World {
             .expect("link created")
     }
 
+    /// Makes the server hand out one-time prekeys `i` never had, as when its
+    /// saved state fell behind what it had published.
+    pub(crate) fn foreign_opks(&mut self, i: usize) {
+        let peer = self.peer(i);
+        let entry = self.server.keys.get_mut(&peer).expect("keys published");
+        entry.opks = (9000..9010)
+            .map(|id| {
+                let secret = StaticSecret::from(self.rng.r#gen::<[u8; 32]>());
+                (id, PublicKey::from(&secret).to_bytes())
+            })
+            .collect();
+    }
+
     /// Makes the server answer `share` with `impostor`'s identity.
     pub(crate) fn hijack_link(&mut self, share: &str, impostor: usize) {
         let link = share.split_once('-').map_or(share, |(l, _)| l).to_owned();

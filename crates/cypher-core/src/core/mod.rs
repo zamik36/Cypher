@@ -26,6 +26,8 @@ const REQUEST_TIMEOUT_MS: u64 = 15_000;
 const PING_INTERVAL_MS: u64 = 20_000;
 const DEAD_AFTER_MS: u64 = 50_000;
 const INBOX_POLL_MS: u64 = 5 * 60_000;
+/// Least time between two republished key sets after unknown prekeys.
+const RESYNC_INTERVAL_MS: u64 = 60 * 60_000;
 const RECENT_IDS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +97,8 @@ pub struct Core<R> {
     last_rx: u64,
     last_ping: u64,
     last_inbox_fetch: u64,
+    /// When keys were last republished because the server's were not ours.
+    last_resync: Option<u64>,
     recent: RecentIds,
     progress_at: HashMap<FileId, u64>,
     anon: Anon,
@@ -119,18 +123,13 @@ impl<R: CryptoRngCore> Core<R> {
         let inbox_secret = seed.derive_inbox_secret();
 
         let mut skipped = Skipped::default();
-        let stored_prekeys = snapshot
-            .meta
-            .iter()
-            .find(|(k, _)| k == META_PREKEYS)
-            .map(|(k, v)| skipped.open::<PrekeysRecord>(&vault, Table::Meta, k, v))
-            .transpose()?
-            .flatten();
+        let stored_prekeys =
+            load_meta::<PrekeysRecord>(&vault, &snapshot.meta, META_PREKEYS, &mut skipped)?;
         let fresh_prekeys = stored_prekeys.is_none();
-        let prekeys = match stored_prekeys {
-            Some(record) => Prekeys::from_record(&record),
-            None => Prekeys::generate(now_ms, &mut rng),
-        };
+        let prekeys = stored_prekeys.map_or_else(
+            || Prekeys::generate(now_ms, &mut rng),
+            |r| Prekeys::from_record(&r),
+        );
 
         let profile_name = load_profile(&vault, &snapshot.meta, &mut skipped)?;
         let own_links = load_meta::<OwnLinks>(&vault, &snapshot.meta, META_LINKS, &mut skipped)?
@@ -159,6 +158,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_rx: now_ms,
             last_ping: now_ms,
             last_inbox_fetch: 0,
+            last_resync: None,
             recent: RecentIds::default(),
             progress_at: HashMap::new(),
             anon: Anon::default(),
@@ -508,6 +508,21 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.retransmit_expired();
         self.flush_outbox();
+    }
+
+    /// An initiator used prekeys this device does not have: the server's set
+    /// is not ours (saved state lost after publishing, or two clients on one
+    /// data). Publishing a fresh set lets the next contact through. At most
+    /// once an hour, so strangers cannot churn our keys.
+    pub(super) fn resync_prekeys(&mut self) {
+        let recent = self
+            .last_resync
+            .is_some_and(|at| self.now.saturating_sub(at) < RESYNC_INTERVAL_MS);
+        if recent || self.conn != Conn::Ready {
+            return;
+        }
+        self.last_resync = Some(self.now);
+        self.publish_keys(true);
     }
 
     fn publish_keys(&mut self, batch: bool) {

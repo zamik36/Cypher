@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cypher_client::{Client, Config, Content};
+use cypher_client::{Client, ClientError, Config, Content};
 use cypher_core::{Command, Event, MediaKind, MessageStatus};
 use cypher_crypto::IdentitySeed;
 use cypher_types::FileId;
@@ -368,6 +368,10 @@ async fn stream_a_video_note(a: &mut Peer, b: &Peer) {
 async fn deliver_offline_through_the_inbox(target: &Target, a: &mut Peer, b: Peer) {
     let b_id = b.client.peer_id();
     b.client.shutdown().await;
+    // Stopped for good once `shutdown` returns, so the restart below cannot
+    // overlap it on the same data (two would overwrite each other's keys).
+    let late = b.client.send_text(a.client.peer_id(), "late".into(), None);
+    assert!(matches!(late.await, Err(ClientError::Closed)));
     let (seed, dir) = (b.seed, b.dir);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let queued = a

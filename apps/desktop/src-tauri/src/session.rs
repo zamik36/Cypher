@@ -33,6 +33,14 @@ struct Session {
     pump: JoinHandle<()>,
 }
 
+impl Session {
+    /// Stops the client and waits until it has stopped.
+    async fn close(self) {
+        self.client.shutdown().await;
+        self.pump.abort();
+    }
+}
+
 /// Names of files offered to us, so accepted files can be saved safely.
 pub(crate) type Offers = Arc<StdMutex<HashMap<FileId, String>>>;
 
@@ -142,7 +150,12 @@ impl AppState {
         endpoint: Endpoint,
         emit: impl Fn(&Event) + Send + 'static,
     ) -> CmdResult<String> {
-        self.stop().await;
+        // One client at a time: the old one is gone before the new one opens
+        // the same data, and a second `connect` waits for this one.
+        let mut session = self.session.lock().await;
+        if let Some(old) = session.take() {
+            old.close().await;
+        }
         let identity = self.identity.lock().await;
         let identity = identity.as_ref().ok_or("identity is locked")?;
         let config = Config {
@@ -176,7 +189,7 @@ impl AppState {
             }
         });
         let me = client.peer_id().to_hex();
-        *self.session.lock().await = Some(Session {
+        *session = Some(Session {
             client,
             events,
             pump,
@@ -212,8 +225,7 @@ impl AppState {
     pub(crate) async fn stop(&self) {
         let session = self.session.lock().await.take();
         if let Some(s) = session {
-            s.client.shutdown().await;
-            s.pump.abort();
+            s.close().await;
         }
     }
 }

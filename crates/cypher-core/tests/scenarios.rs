@@ -20,6 +20,9 @@ use harness::World;
 const A: usize = 0;
 const B: usize = 1;
 const C: usize = 2;
+const D: usize = 3;
+const E: usize = 4;
+const F: usize = 5;
 
 fn paired() -> World {
     let mut w = World::new(2);
@@ -144,6 +147,43 @@ fn a_second_joiner_on_a_used_invite_waits_as_a_request() {
     assert_eq!(w.contact_name(C, a).as_deref(), Some("Alice"));
     w.restart(A);
     assert!(!w.contact(A, c).request);
+}
+
+/// The server's one-time prekeys are not the host's (its saved state fell
+/// behind what it published): one joiner fails, the host publishes a fresh
+/// set and the next gets through; strangers cannot make it churn keys.
+#[test]
+fn prekeys_the_server_has_but_we_lack_are_replaced() {
+    let mut w = World::new(6);
+    let joined = |w: &World, i: usize| {
+        let peer = w.peer(i);
+        w.has_event(
+            A,
+            |e| matches!(e, Event::PeerAdded { peer: p, .. } if *p == peer),
+        )
+    };
+    w.foreign_opks(A);
+    w.pair(A, B);
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::Warning {
+            reason: FailReason::DecryptFailed
+        }
+    )));
+    assert!(!joined(&w, B));
+    w.pair(A, C);
+    assert!(joined(&w, C));
+
+    // Within the hour the keys stay as they are, however many try.
+    w.foreign_opks(A);
+    w.pair(A, D);
+    w.pair(A, E);
+    assert!(!joined(&w, D) && !joined(&w, E));
+    w.advance(60 * 60_000);
+    w.foreign_opks(A);
+    w.pair(A, D);
+    w.pair(A, F);
+    assert!(joined(&w, F));
 }
 
 #[test]
