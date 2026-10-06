@@ -13,10 +13,10 @@ use zeroize::Zeroizing;
 
 use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
-use crate::peer::{Peer, PeerRecord, ProfileRecord};
+use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
-use crate::store::{META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault};
+use crate::store::{META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault};
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
@@ -100,6 +100,8 @@ pub struct Core<R> {
     anon: Anon,
     /// The name this user goes by, sent to contacts with `Hello`.
     profile_name: Option<String>,
+    /// Invites this user made and when; each admits one contact.
+    own_links: Vec<(String, u64)>,
     effects: Vec<Effect>,
 }
 
@@ -131,6 +133,9 @@ impl<R: CryptoRngCore> Core<R> {
         };
 
         let profile_name = load_profile(&vault, &snapshot.meta, &mut skipped)?;
+        let own_links = load_meta::<OwnLinks>(&vault, &snapshot.meta, META_LINKS, &mut skipped)?
+            .map(|record| record.links)
+            .unwrap_or_default();
         let peers = load_peers(&vault, &snapshot.peers, &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
         let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
@@ -158,6 +163,7 @@ impl<R: CryptoRngCore> Core<R> {
             progress_at: HashMap::new(),
             anon: Anon::default(),
             profile_name,
+            own_links,
             effects: Vec::new(),
         };
         if fresh_prekeys {
@@ -353,6 +359,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         match (pending, msg) {
             (Pending::CreateLink, ServerMsg::LinkCreated { link }) => {
+                self.remember_link(link.as_str());
                 self.emit(Event::LinkCreated {
                     link: ShareLink::new(link, &self.peer_id).to_string(),
                 });
@@ -455,6 +462,9 @@ impl<R: CryptoRngCore> Core<R> {
             Command::RemovePeer { peer } => self.remove_peer(&peer),
             Command::RenamePeer { peer, alias } => self.rename_peer(&peer, alias.as_deref()),
             Command::DiscardOutgoing { msg_id } => self.discard_outgoing(&msg_id),
+            Command::AcceptContact { peer } => self.accept_contact(&peer),
+            Command::BlockPeer { peer } => self.set_blocked(&peer, true),
+            Command::UnblockPeer { peer } => self.set_blocked(&peer, false),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
         }
@@ -732,6 +742,20 @@ fn load_outbox(
 }
 
 type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
+
+fn load_meta<T: Record>(
+    vault: &Vault,
+    meta: &Rows,
+    key: &[u8],
+    skipped: &mut Skipped,
+) -> Result<Option<T>, CoreError> {
+    Ok(meta
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(k, v)| skipped.open::<T>(vault, Table::Meta, k, v))
+        .transpose()?
+        .flatten())
+}
 
 fn load_profile(
     vault: &Vault,

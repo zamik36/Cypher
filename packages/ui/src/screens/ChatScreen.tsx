@@ -28,6 +28,8 @@ import {
   displayName,
   markConversationRead,
   noteMessage,
+  setContactBlocked,
+  setContactRequest,
   setLastMessage,
 } from "../stores/contacts";
 import { clearDraft, draftOf, setDraftText, setReplyTo } from "../stores/drafts";
@@ -291,6 +293,27 @@ export default function ChatScreen(props: { peerId: string }) {
     } catch (e) {
       setDraft(text);
       setReplyTo(props.peerId, reply);
+      toastError(e);
+    }
+  }
+
+  async function acceptRequest() {
+    const peerId = props.peerId;
+    try {
+      await api.acceptContact(peerId);
+      setContactRequest(peerId, false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function setBlocked(blocked: boolean) {
+    const peerId = props.peerId;
+    try {
+      await api.setBlocked(peerId, blocked);
+      setContactBlocked(peerId, blocked);
+      addToast(blocked ? t().toast_blocked : t().toast_unblocked, "success");
+    } catch (e) {
       toastError(e);
     }
   }
@@ -578,6 +601,20 @@ export default function ChatScreen(props: { peerId: string }) {
         )}
       </Show>
 
+      <Show when={contacts[props.peerId]?.request && !contacts[props.peerId]?.blocked}>
+        <div class="chat__notice" data-testid="request-notice">
+          <p>{t().request_text}</p>
+          <div class="chat__notice-actions">
+            <button class="btn btn--primary" onClick={() => void acceptRequest()}>
+              {t().request_accept}
+            </button>
+            <button class="btn btn--danger" onClick={() => void setBlocked(true)}>
+              {t().contact_block}
+            </button>
+          </div>
+        </div>
+      </Show>
+
       <Show when={replyTo()}>
         {(id) => (
           <div class="reply-bar">
@@ -592,7 +629,18 @@ export default function ChatScreen(props: { peerId: string }) {
         )}
       </Show>
 
-      <footer class="composer">
+      <Show when={contacts[props.peerId]?.blocked}>
+        <div class="chat__notice" data-testid="blocked-notice">
+          <p>{t().blocked_text}</p>
+          <div class="chat__notice-actions">
+            <button class="btn btn--secondary" onClick={() => void setBlocked(false)}>
+              {t().contact_unblock}
+            </button>
+          </div>
+        </div>
+      </Show>
+
+      <footer class="composer" classList={{ "composer--hidden": contacts[props.peerId]?.blocked === true }}>
         <button class="icon-btn" onClick={attach} aria-label={t().composer_attach}>
           <Icon name="paperclip" />
         </button>

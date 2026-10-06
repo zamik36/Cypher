@@ -4,7 +4,7 @@ import Avatar from "../components/Avatar";
 import Icon from "../components/Icon";
 import TopBar from "../components/TopBar";
 import StatusTick from "../components/StatusTick";
-import { avatarName, contacts, displayName, sortedContacts, type Contact } from "../stores/contacts";
+import { avatarName, contacts, displayName, requestContacts, sortedContacts, type Contact } from "../stores/contacts";
 import { connection, type LinkState } from "../stores/connection";
 import { isWide } from "../stores/layout";
 import { push, replace, top } from "../stores/nav";
@@ -88,6 +88,7 @@ function ChatRow(props: { contact: Contact }) {
 export default function ChatList() {
   const [query, setQuery] = createSignal("");
   const all = () => sortedContacts();
+  const requests = () => requestContacts();
   const shown = () => sortedContacts(query());
   const newChat = (tab: "invite" | "join") => push({ name: "new-chat", tab });
 
@@ -121,7 +122,7 @@ export default function ChatList() {
 
       <div class="screen__body">
         <Show
-          when={all().length > 0}
+          when={all().length > 0 || requests().length > 0}
           fallback={
             <div class="empty">
               <span class="empty__icon">
@@ -151,6 +152,13 @@ export default function ChatList() {
               onInput={(e) => setQuery(e.currentTarget.value)}
             />
           </div>
+          <Show when={requests().length > 0}>
+            <h3 class="group-title chat-list__group">{t().chats_requests(requests().length)}</h3>
+            <div class="chat-list__rows" data-testid="requests">
+              <For each={requests()}>{(contact) => <ChatRow contact={contact} />}</For>
+            </div>
+            <h3 class="group-title chat-list__group">{t().chats_title}</h3>
+          </Show>
           <div class="chat-list__rows">
             <For each={shown()} fallback={<p class="chat-list__nothing muted">{t().chats_no_results}</p>}>
               {(contact) => <ChatRow contact={contacts[contact.peerId] ?? contact} />}

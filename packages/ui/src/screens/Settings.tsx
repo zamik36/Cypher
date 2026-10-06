@@ -7,7 +7,7 @@ import { api } from "../platform";
 import { connection, connectGateway, setGatewayAddr } from "../stores/connection";
 import { anonymousSettings, onionUp, setAnonymousSettings } from "../stores/anonymity";
 import { clearAllMessages } from "../stores/chat";
-import { loadConversations } from "../stores/contacts";
+import { blockedContacts, displayName, loadConversations, setContactBlocked } from "../stores/contacts";
 import { isWide } from "../stores/layout";
 import { back, push, type SettingsSection } from "../stores/nav";
 import { nickname } from "../stores/profile";
@@ -323,6 +323,16 @@ function Privacy() {
     }
   }
 
+  async function unblock(peerId: string) {
+    try {
+      await api.setBlocked(peerId, false);
+      setContactBlocked(peerId, false);
+      addToast(t().toast_unblocked, "success");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   async function reconnect() {
     const normalized = setGatewayAddr(address());
     setAddress(normalized);
@@ -379,6 +389,22 @@ function Privacy() {
           {applying() ? t().common_applying : t().common_apply}
         </button>
       </Show>
+
+      <h3 class="group-title">{t().privacy_blocked}</h3>
+      <div class="list">
+        <For each={blockedContacts()} fallback={<p class="hint settings__note">{t().privacy_blocked_none}</p>}>
+          {(contact) => (
+            <div class="list-row">
+              <span class="list-row__text">
+                <span class="list-row__title">{displayName(contact.peerId)}</span>
+              </span>
+              <button class="btn btn--secondary" onClick={() => void unblock(contact.peerId)}>
+                {t().contact_unblock}
+              </button>
+            </div>
+          )}
+        </For>
+      </div>
 
       <Show when={caps.gatewayConfig}>
         <button class="btn btn--ghost settings__advanced" onClick={() => setAdvanced(!advanced())}>

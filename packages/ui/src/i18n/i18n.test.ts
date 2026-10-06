@@ -27,6 +27,7 @@ describe("translations", () => {
       expect(table.storage_clear_confirm(3)).toContain("3");
       expect(table.identity_erase(2)).toContain("2");
       expect(table.media_speed(1.5)).toContain("1.5");
+      expect(table.chats_requests(2)).toContain("2");
       expect(table.privacy_bridges_transport(4)).toContain("4");
       expect(table.privacy_bridges_format(5)).toContain("5");
       expect(table.identity_erase(0)).not.toMatch(/\d/);

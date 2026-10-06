@@ -23,6 +23,13 @@ pub(crate) struct Peer {
     pub alias: Option<String>,
     /// The name the contact goes by, as they last sent it.
     pub name: Option<String>,
+    /// Started a session without one of our invites, not accepted yet: we
+    /// tell them nothing (no `Hello`) until the user accepts.
+    pub request: bool,
+    /// Everything from them is dropped unread.
+    pub blocked: bool,
+    /// The invite we joined them by, told in our `Hello`.
+    pub via: Option<String>,
 }
 
 /// A name as someone typed it, made safe to show: control characters
@@ -41,6 +48,39 @@ pub(crate) fn clean_name(raw: &str) -> Option<String> {
 }
 
 impl Peer {
+    /// A session just made with someone not known before.
+    pub(crate) fn new(
+        ratchet: Ratchet,
+        identity_dh: [u8; 32],
+        pending_init: Option<InitHeader>,
+    ) -> Self {
+        Self {
+            ratchet,
+            pending_init,
+            accepted_ephemerals: Vec::new(),
+            identity_dh,
+            inbox: None,
+            hello_sent: false,
+            alias: None,
+            name: None,
+            request: false,
+            blocked: false,
+            via: None,
+        }
+    }
+
+    /// Keeps what belongs to the contact rather than the old session: their
+    /// inbox, names, request and block state, the invite, inits seen.
+    pub(crate) fn carry_over(&mut self, old: Self) {
+        self.inbox = old.inbox;
+        self.accepted_ephemerals = old.accepted_ephemerals;
+        self.alias = old.alias;
+        self.name = old.name;
+        self.request = old.request;
+        self.blocked = old.blocked;
+        self.via = old.via;
+    }
+
     pub(crate) fn is_unconfirmed_initiator(&self) -> bool {
         self.pending_init.is_some()
     }
@@ -66,6 +106,9 @@ impl Peer {
             hello_sent: self.hello_sent,
             alias: self.alias.clone(),
             name: self.name.clone(),
+            request: self.request,
+            blocked: self.blocked,
+            via: self.via.clone(),
         }
     }
 
@@ -89,6 +132,9 @@ impl Peer {
             hello_sent: r.hello_sent,
             alias: r.alias.clone(),
             name: r.name.clone(),
+            request: r.request,
+            blocked: r.blocked,
+            via: r.via.clone(),
         })
     }
 }
@@ -104,13 +150,34 @@ pub(crate) struct PeerRecord {
     hello_sent: bool,
     pub(crate) alias: Option<String>,
     pub(crate) name: Option<String>,
+    pub(crate) request: bool,
+    pub(crate) blocked: bool,
+    via: Option<String>,
 }
 
 impl crate::Record for PeerRecord {
-    const VERSION: u8 = 3;
+    const VERSION: u8 = 4;
 
-    /// Version 1 had no names, version 2 only the user's own for the contact.
+    /// Version 1 had no names, version 2 only the user's own for the
+    /// contact, version 3 no request or block state: everyone stored before
+    /// is a contact the user already has.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        if version == 3 {
+            let v3: PeerRecordV3 = postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+            return Ok(Self {
+                ratchet: v3.ratchet,
+                pending_init: v3.pending_init,
+                accepted_ephemerals: v3.accepted_ephemerals,
+                identity_dh: v3.identity_dh,
+                inbox: v3.inbox,
+                hello_sent: v3.hello_sent,
+                alias: v3.alias,
+                name: v3.name,
+                request: false,
+                blocked: false,
+                via: None,
+            });
+        }
         let v2: PeerRecordV2 = match version {
             1 => {
                 let v1: PeerRecordV1 =
@@ -137,8 +204,35 @@ impl crate::Record for PeerRecord {
             hello_sent: v2.hello_sent,
             alias: v2.alias,
             name: None,
+            request: false,
+            blocked: false,
+            via: None,
         })
     }
+}
+
+/// [`PeerRecord`] as version 3 stored it.
+#[derive(Deserialize)]
+struct PeerRecordV3 {
+    #[serde(with = "zeroizing_bytes")]
+    ratchet: Zeroizing<Vec<u8>>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    identity_dh: [u8; 32],
+    inbox: Option<[u8; 32]>,
+    hello_sent: bool,
+    alias: Option<String>,
+    name: Option<String>,
+}
+
+/// Invites this user made, with when: whoever joins by one is a contact.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct OwnLinks {
+    pub links: Vec<(String, u64)>,
+}
+
+impl crate::Record for OwnLinks {
+    const VERSION: u8 = 1;
 }
 
 /// [`PeerRecord`] as version 2 stored it.
@@ -279,5 +373,41 @@ mod tests {
         let names = vault.open_contact(b"peer", &sealed).unwrap();
         assert_eq!(names.alias.as_deref(), Some("Bob"));
         assert_eq!(names.name, None);
+    }
+
+    /// Sessions saved before requests and blocking are plain contacts.
+    #[test]
+    fn version_3_records_are_contacts() {
+        #[derive(Serialize, Deserialize)]
+        struct V3 {
+            ratchet: Vec<u8>,
+            pending_init: Vec<u8>,
+            accepted_ephemerals: Vec<[u8; 32]>,
+            identity_dh: [u8; 32],
+            inbox: Option<[u8; 32]>,
+            hello_sent: bool,
+            alias: Option<String>,
+            name: Option<String>,
+        }
+        impl crate::Record for V3 {
+            const VERSION: u8 = 3;
+        }
+
+        let vault = Vault::new([3; 32]);
+        let old = V3 {
+            ratchet: vec![1, 2, 3],
+            pending_init: Vec::new(),
+            accepted_ephemerals: Vec::new(),
+            identity_dh: [9; 32],
+            inbox: None,
+            hello_sent: true,
+            alias: Some("Bob".into()),
+            name: Some("Robert".into()),
+        };
+        let sealed = vault.seal(Table::Peers, b"peer", &old, &mut OsRng);
+        let info = vault.open_contact(b"peer", &sealed).unwrap();
+        assert_eq!(info.alias.as_deref(), Some("Bob"));
+        assert_eq!(info.name.as_deref(), Some("Robert"));
+        assert!(!info.request && !info.blocked);
     }
 }

@@ -162,6 +162,14 @@ impl World {
         vault.open_contact(peer.as_bytes(), sealed).unwrap().alias
     }
 
+    /// What client `i` knows of `peer`: names, request and block state.
+    pub(crate) fn contact(&self, i: usize, peer: PeerId) -> cypher_core::ContactInfo {
+        let c = &self.clients[i];
+        let vault = Vault::new(IdentitySeed(c.seed).derive_storage_key());
+        let sealed = &c.kv[&(Table::Peers as u8, peer.to_vec())];
+        vault.open_contact(peer.as_bytes(), sealed).unwrap()
+    }
+
     /// The name `peer` told client `i` they go by.
     pub(crate) fn contact_name(&self, i: usize, peer: PeerId) -> Option<String> {
         let c = &self.clients[i];

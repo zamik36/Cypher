@@ -139,6 +139,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::Onion { up } => ("anonymity_level", anonymity(*up)),
         Event::PeerAdded { peer, .. } => ("peer_connected", UiPayload::Text(peer.to_hex())),
         Event::PeerProfile { peer, name } => ("peer_profile", profile(peer, name.clone())),
+        Event::ContactRequest { peer } => ("contact_request", UiPayload::Text(peer.to_hex())),
         Event::Message(m) if !m.outgoing => ("message", UiPayload::Message(message(m))),
         Event::MessageStatus { msg_id, status: s } => (
             "message_status",

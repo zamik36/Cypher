@@ -267,6 +267,15 @@ impl Client {
             .and_then(|n| n.name)
     }
 
+    /// Bit 0: the contact wrote without an invite and is not accepted yet;
+    /// bit 1: blocked. From its stored session row.
+    #[wasm_bindgen(js_name = contactFlags)]
+    pub fn contact_flags(&self, key: &[u8], value: &[u8]) -> u8 {
+        self.vault
+            .open_contact(key, value)
+            .map_or(0, |c| u8::from(c.request) | (u8::from(c.blocked) << 1))
+    }
+
     /// Decrypts a stored message, applying a newer status row if present.
     #[wasm_bindgen(js_name = openMessage, unchecked_return_type = "unknown")]
     pub fn open_message(

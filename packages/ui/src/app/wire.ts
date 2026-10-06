@@ -12,6 +12,7 @@ import {
   onMessageStatus,
   onPeerConnected,
   onPeerProfile,
+  onContactRequest,
   onSuperseded,
   onUpdateRequired,
 } from "../platform";
@@ -23,6 +24,8 @@ import {
   noteMessage,
   setAllOffline,
   setContactName,
+  setContactRequest,
+  contacts,
   setContactOnline,
   setLastStatus,
 } from "../stores/contacts";
@@ -80,6 +83,10 @@ export async function startApp(): Promise<() => void> {
       else addToast(t().toast_contact_added(displayName(peerId)), "success");
     }),
     onPeerProfile(({ peer, name }) => setContactName(peer, name)),
+    onContactRequest((peer) => {
+      setContactRequest(peer, true);
+      addToast(t().toast_request, "info");
+    }),
     onMessage((ui) => {
       const msg = toChatMessage(ui.from, ui);
       if (msg.file && msg.file.kind !== "file") trackMedia(msg.file.file_id);
@@ -87,7 +94,8 @@ export async function startApp(): Promise<() => void> {
       const seen = viewing(ui.from);
       noteMessage(ui.from, msg, seen);
       setContactOnline(ui.from, true);
-      if (!seen) void notifyMessage(displayName(ui.from), previewOf(msg).text);
+      // Requests stay quiet until accepted.
+      if (!seen && !contacts[ui.from]?.request) void notifyMessage(displayName(ui.from), previewOf(msg).text);
     }),
     onMessageStatus(({ msg_id, status }) => {
       setMessageStatus(msg_id, status);

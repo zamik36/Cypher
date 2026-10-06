@@ -477,6 +477,8 @@ const handlers: Handlers = {
           peer_id,
           alias: c.contactAlias(key, value) ?? null,
           name: c.contactName(key, value) ?? null,
+          request: (c.contactFlags(key, value) & 1) !== 0,
+          blocked: (c.contactFlags(key, value) & 2) !== 0,
           last_message_at: last?.timestamp ?? 0,
           last,
           unread: recent.filter((m) => !m.outgoing && m.status !== "read").length,

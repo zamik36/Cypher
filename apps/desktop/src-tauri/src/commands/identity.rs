@@ -4,8 +4,8 @@ use tauri::State;
 
 use super::chat::parse_peer;
 use crate::session::{AppState, CmdResult, err};
-use cypher_core::MessageStatus;
 use cypher_core::ui::{self, UiMessage};
+use cypher_core::{Command, MessageStatus};
 
 /// Argon2id is deliberately slow; keep it off the async runtime.
 async fn with_store<T: Send + 'static>(
@@ -89,6 +89,9 @@ pub(crate) struct Conversation {
     alias: Option<String>,
     /// The name they go by, as they last sent it.
     name: Option<String>,
+    /// Wrote without one of our invites; not accepted yet.
+    request: bool,
+    blocked: bool,
     last_message_at: u64,
     last: Option<UiMessage>,
     /// Incoming messages not yet read, among the latest [`UNREAD_WINDOW`].
@@ -116,6 +119,8 @@ pub(crate) async fn get_conversations(state: State<'_, AppState>) -> CmdResult<V
             peer_id: contact.peer.to_hex(),
             alias: contact.alias,
             name: contact.name,
+            request: contact.request,
+            blocked: contact.blocked,
             last_message_at: recent.first().map_or(0, |m| m.sent_at_ms),
             last: recent.first().map(ui::message),
             unread,
@@ -123,6 +128,33 @@ pub(crate) async fn get_conversations(state: State<'_, AppState>) -> CmdResult<V
     }
     out.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
     Ok(out)
+}
+
+/// Takes someone who wrote without an invite as a contact.
+#[tauri::command]
+pub(crate) async fn accept_contact(state: State<'_, AppState>, peer_id: String) -> CmdResult<()> {
+    let peer = parse_peer(&peer_id)?;
+    contact_command(&state, Command::AcceptContact { peer }).await
+}
+
+/// Blocks or unblocks a contact.
+#[tauri::command]
+pub(crate) async fn set_blocked(
+    state: State<'_, AppState>,
+    peer_id: String,
+    blocked: bool,
+) -> CmdResult<()> {
+    let peer = parse_peer(&peer_id)?;
+    let cmd = if blocked {
+        Command::BlockPeer { peer }
+    } else {
+        Command::UnblockPeer { peer }
+    };
+    contact_command(&state, cmd).await
+}
+
+async fn contact_command(state: &AppState, cmd: Command) -> CmdResult<()> {
+    state.client().await?.command(cmd).await.map_err(err)
 }
 
 /// Names a contact on this device; an empty name removes it.

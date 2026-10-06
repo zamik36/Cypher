@@ -69,6 +69,17 @@ pub enum Command {
         ids: Vec<MsgId>,
     },
     FetchInbox,
+    /// Takes someone who wrote without an invite as a contact.
+    AcceptContact {
+        peer: PeerId,
+    },
+    /// Drops everything from `peer` until unblocked; nothing goes to them.
+    BlockPeer {
+        peer: PeerId,
+    },
+    UnblockPeer {
+        peer: PeerId,
+    },
     /// Stops sending a message the user deleted before it went out.
     DiscardOutgoing {
         msg_id: MsgId,
@@ -169,6 +180,11 @@ pub enum Event {
     PeerAdded {
         peer: PeerId,
         initiated_by_us: bool,
+    },
+    /// Someone started a session without one of our invites; they stay a
+    /// request until `AcceptContact`.
+    ContactRequest {
+        peer: PeerId,
     },
     /// A contact told us the name they go by, or that they have none.
     PeerProfile {

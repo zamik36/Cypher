@@ -318,6 +318,31 @@ button.quote {
   box-shadow: var(--e-2);
 }
 
+/* A request to answer, or a blocked contact, above the composer. */
+.chat__notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  flex: none;
+  padding: var(--sp-3) var(--sp-4) calc(var(--sp-3) + var(--safe-bottom));
+  border-top: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-muted);
+  font-size: var(--t-sm);
+  line-height: var(--t-sm-lh);
+  text-align: center;
+}
+
+.chat__notice-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+
+.composer.composer--hidden {
+  display: none;
+}
+
 /* ── Composer ────────────────────────────────────────────────────── */
 
 .composer {

@@ -16,11 +16,22 @@ describe("contacts", () => {
   it("load from the conversation list, newest first", async () => {
     const { loadConversations, sortedContacts, displayName } = await load();
     loadConversations([
-      { peer_id: "aaaaaa11", alias: null, name: "Ann", last_message_at: 10, last: null, unread: 0 },
+      {
+        peer_id: "aaaaaa11",
+        alias: null,
+        name: "Ann",
+        request: false,
+        blocked: false,
+        last_message_at: 10,
+        last: null,
+        unread: 0,
+      },
       {
         peer_id: "bbbbbb22",
         alias: "Bob",
         name: "Robert",
+        request: false,
+        blocked: false,
         last_message_at: 20,
         last: {
           msg_id: "m",
@@ -76,6 +87,29 @@ describe("contacts", () => {
     expect(contacts["p4"]?.last).toBeNull();
     setLastMessage("nobody", null);
     expect(contacts["nobody"]).toBeUndefined();
+  });
+
+  it("keep requests and blocked contacts out of the chats", async () => {
+    const {
+      ensureContact,
+      noteMessage,
+      setContactRequest,
+      setContactBlocked,
+      sortedContacts,
+      requestContacts,
+      blockedContacts,
+      totalUnread,
+    } = await load();
+    ensureContact("friend");
+    noteMessage("stranger", msg("stranger", 9), false);
+    setContactRequest("stranger", true);
+    setContactBlocked("pest", true);
+    expect(sortedContacts().map((c) => c.peerId)).toEqual(["friend"]);
+    expect(requestContacts().map((c) => c.peerId)).toEqual(["stranger"]);
+    expect(blockedContacts().map((c) => c.peerId)).toEqual(["pest"]);
+    expect(totalUnread()).toBe(0);
+    setContactRequest("stranger", false);
+    expect(totalUnread()).toBe(1);
   });
 
   it("hold the profile's own nickname", async () => {

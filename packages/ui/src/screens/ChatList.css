@@ -136,3 +136,7 @@
 .chat-list__fab:active {
   background: var(--c-accent-pressed);
 }
+
+.chat-list__group {
+  padding: 0 var(--sp-4);
+}

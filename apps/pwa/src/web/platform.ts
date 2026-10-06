@@ -142,6 +142,12 @@ export const webPlatform: Platform = {
   renamePeer: async (peerId, alias) => {
     await call("command", { type: "rename_peer", peer: peerId, alias });
   },
+  acceptContact: async (peerId) => {
+    await call("command", { type: "accept_contact", peer: peerId });
+  },
+  setBlocked: async (peerId, blocked) => {
+    await call("command", { type: blocked ? "block_peer" : "unblock_peer", peer: peerId });
+  },
   deleteConversation: (peerId) => call("forgetPeer", peerId),
   getHistory: (peerId, limit, before) => call("history", peerId, limit, before) as Promise<UiMessage[]>,
   clearChatHistory: async () => {

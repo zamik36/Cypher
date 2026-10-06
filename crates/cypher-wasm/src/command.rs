@@ -51,6 +51,15 @@ pub(crate) enum JsCommand {
     SetProfileName {
         name: Option<String>,
     },
+    AcceptContact {
+        peer: String,
+    },
+    BlockPeer {
+        peer: String,
+    },
+    UnblockPeer {
+        peer: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +160,9 @@ impl JsCommand {
                 alias,
             }),
             Self::SetProfileName { name } => plain(Command::SetProfileName { name }),
+            Self::AcceptContact { peer: p } => plain(Command::AcceptContact { peer: peer(&p)? }),
+            Self::BlockPeer { peer: p } => plain(Command::BlockPeer { peer: peer(&p)? }),
+            Self::UnblockPeer { peer: p } => plain(Command::UnblockPeer { peer: peer(&p)? }),
         })
     }
 }

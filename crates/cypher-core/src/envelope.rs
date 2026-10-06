@@ -13,6 +13,8 @@ pub const MAX_INLINE_LEN: usize = 32 * 1024;
 pub const MAX_NAME_LEN: usize = 255;
 /// A profile name in bytes; the core keeps at most 64 characters of it.
 pub const MAX_PROFILE_NAME_LEN: usize = 256;
+/// An invite code in a `Hello`.
+pub const MAX_LINK_LEN: usize = 64;
 pub const MAX_MIME_LEN: usize = 127;
 pub const MAX_WAVEFORM_LEN: usize = 128;
 pub const MAX_POSTER_LEN: usize = 16 * 1024;
@@ -37,6 +39,9 @@ pub enum Body {
         /// `inbox` and takes the rest for padding, and from an older peer
         /// this decodes from the zero padding as `None`.
         name: Option<String>,
+        /// The invite the sender joined by, so the host knows it asked for
+        /// this contact. Appended after `name`, the same way.
+        via: Option<String>,
     },
     Text {
         text: String,
@@ -148,9 +153,11 @@ impl Envelope {
 
     fn validate(&self) -> Result<(), CoreError> {
         let ok = match &self.body {
-            Body::Hello { name, .. } => name
-                .as_ref()
-                .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN),
+            Body::Hello { name, via, .. } => {
+                name.as_ref()
+                    .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN)
+                    && via.as_ref().is_none_or(|v| v.len() <= MAX_LINK_LEN)
+            }
             Body::FileCtl(FileCtl::Cancel { .. }) => true,
             Body::Text { text, .. } => text.len() <= MAX_TEXT_LEN,
             Body::File { desc, kind } => {
@@ -224,7 +231,8 @@ mod tests {
             Envelope::decode(&old).unwrap().body,
             Body::Hello {
                 inbox: [7; 32],
-                name: None
+                name: None,
+                via: None,
             }
         );
 
@@ -234,6 +242,7 @@ mod tests {
             body: Body::Hello {
                 inbox: [7; 32],
                 name: Some("Анна".into()),
+                via: Some("abc".into()),
             },
         }
         .encode();
@@ -250,6 +259,7 @@ mod tests {
             body: Body::Hello {
                 inbox: [7; 32],
                 name: Some("x".repeat(MAX_PROFILE_NAME_LEN + 1)),
+                via: None,
             },
         };
         Envelope::decode(&long.encode()).unwrap_err();

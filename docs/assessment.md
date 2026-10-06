@@ -51,7 +51,7 @@
 |---|---|---|---|
 | Знакомство доверяет серверу: signaling может подставить свой ключ за ссылкой (MITM), сверки отпечатков нет | `crates/cypher-types/src/id.rs`, `core/mod.rs` (ResolveLink → FetchKeys) | блокер | 1 · исправлено |
 | Чужой одноразовый prekey можно «выпить» серией `FetchKeys`. Хуже того, ротация выталкивает уже выданные ключи (запас 300), и сессия того, кто их получил, ломается до повторного знакомства | `services/signaling/src/store.rs`, `crates/cypher-core/src/prekeys.rs` | важно | 1 · исправлено |
-| Любой, кто знает `PeerId`, может начать сессию: новый собеседник добавляется без согласия и без лимита | `core/messaging.rs` (`accept_init`) | важно | 3 |
+| Любой, кто знает `PeerId`, может начать сессию: новый собеседник добавляется без согласия и без лимита | `core/messaging.rs` (`accept_init`) | важно | 3 · исправлено: «запросы» с согласием, лимит, блокировка |
 | Gateway видит граф онлайн-переписки, signaling видит знакомства; онлайн-сообщения не используют sealed sender | архитектура | важно | 4 |
 | Onion-ключ signaling не ротируется; запрос `InboxFetch` несёт долгоживущий секрет inbox | `services/signaling/src/lib.rs`, `crates/cypher-crypto/src/identity.rs` | желательно | 4 |
 | Ed25519 проверяется `verify`, а не `verify_strict` | `gateway/src/session.rs`, `crypto/src/handshake.rs`, `prekey.rs` | желательно | 1 · исправлено |

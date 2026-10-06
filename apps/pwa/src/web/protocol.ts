@@ -34,6 +34,8 @@ export interface Methods {
     peer_id: string;
     alias: string | null;
     name: string | null;
+    request: boolean;
+    blocked: boolean;
     last_message_at: number;
     last: unknown;
     unread: number;

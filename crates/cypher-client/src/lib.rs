@@ -154,6 +154,9 @@ pub struct Contact {
     pub alias: Option<String>,
     /// The name they go by, as they last sent it.
     pub name: Option<String>,
+    /// Wrote without one of our invites; not accepted yet.
+    pub request: bool,
+    pub blocked: bool,
 }
 
 #[derive(Clone)]
@@ -496,11 +499,13 @@ impl Client {
             .into_iter()
             .filter_map(|(key, sealed)| {
                 let peer = PeerId::from_bytes(&key)?;
-                let names = self.vault.open_contact(&key, &sealed).unwrap_or_default();
+                let info = self.vault.open_contact(&key, &sealed).unwrap_or_default();
                 Some(Contact {
                     peer,
-                    alias: names.alias,
-                    name: names.name,
+                    alias: info.alias,
+                    name: info.name,
+                    request: info.request,
+                    blocked: info.blocked,
                 })
             })
             .collect())

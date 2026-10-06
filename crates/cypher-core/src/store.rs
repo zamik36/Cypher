@@ -70,12 +70,16 @@ pub enum StoreOp {
 
 pub(crate) const META_PREKEYS: &[u8] = b"prekeys";
 pub(crate) const META_PROFILE: &[u8] = b"profile";
+pub(crate) const META_LINKS: &[u8] = b"links";
 
-/// How a contact is called: the name the user gave them, the one they go by.
+/// What the UI shows of a contact: the name the user gave them, the one
+/// they go by, and whether they are a request or blocked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ContactNames {
+pub struct ContactInfo {
     pub alias: Option<String>,
     pub name: Option<String>,
+    pub request: bool,
+    pub blocked: bool,
 }
 
 /// A type persisted through the [`Vault`]. Its plaintext is
@@ -202,11 +206,13 @@ impl Vault {
 
     /// A contact's names from its sealed session row (keyed by the peer id).
     /// Drivers list contacts without restoring sessions.
-    pub fn open_contact(&self, peer_key: &[u8], sealed: &[u8]) -> Result<ContactNames, CoreError> {
+    pub fn open_contact(&self, peer_key: &[u8], sealed: &[u8]) -> Result<ContactInfo, CoreError> {
         self.open::<crate::peer::PeerRecord>(Table::Peers, peer_key, sealed)
-            .map(|record| ContactNames {
+            .map(|record| ContactInfo {
                 alias: record.alias,
                 name: record.name,
+                request: record.request,
+                blocked: record.blocked,
             })
     }
 }

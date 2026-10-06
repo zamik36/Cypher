@@ -50,3 +50,7 @@
 .contact__confirm .contact__row {
   justify-content: flex-end;
 }
+
+.contact__block {
+  margin-top: var(--sp-5);
+}

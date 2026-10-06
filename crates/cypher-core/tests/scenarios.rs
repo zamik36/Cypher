@@ -106,6 +106,64 @@ fn contacts_learn_the_name_each_side_goes_by() {
 }
 
 #[test]
+fn a_second_joiner_on_a_used_invite_waits_as_a_request() {
+    let mut w = World::new(3);
+    w.command(
+        A,
+        Command::SetProfileName {
+            name: Some("Alice".into()),
+        },
+    );
+    let link = w.create_link(A);
+    w.command(B, Command::JoinLink { link: link.clone() });
+    let (a, b, c) = (w.peer(A), w.peer(B), w.peer(C));
+    assert!(w.has_event(
+        A,
+        |e| matches!(e, Event::PeerAdded { peer, .. } if *peer == b)
+    ));
+    assert!(!w.contact(A, b).request);
+    assert_eq!(w.contact_name(B, a).as_deref(), Some("Alice"));
+
+    // The same invite again, say intercepted: a request, told nothing.
+    w.command(C, Command::JoinLink { link });
+    assert!(w.has_event(
+        A,
+        |e| matches!(e, Event::ContactRequest { peer } if *peer == c)
+    ));
+    assert!(!w.has_event(
+        A,
+        |e| matches!(e, Event::PeerAdded { peer, .. } if *peer == c)
+    ));
+    assert!(w.contact(A, c).request);
+    assert_eq!(w.contact_name(C, a), None, "no Hello before accepting");
+    w.send_text(C, A, "hi, it's me");
+    assert!(w.texts(A).contains(&"hi, it's me".to_owned()));
+
+    w.command(A, Command::AcceptContact { peer: c });
+    assert!(!w.contact(A, c).request);
+    assert_eq!(w.contact_name(C, a).as_deref(), Some("Alice"));
+    w.restart(A);
+    assert!(!w.contact(A, c).request);
+}
+
+#[test]
+fn a_blocked_contact_is_not_heard_until_unblocked() {
+    let mut w = paired();
+    let b = w.peer(B);
+    w.command(A, Command::BlockPeer { peer: b });
+    assert!(w.contact(A, b).blocked);
+    let unheard = w.send_text(B, A, "are you there?");
+    assert!(!w.texts(A).contains(&"are you there?".to_owned()));
+    assert_ne!(w.status_of(B, unheard), Some(MessageStatus::Delivered));
+
+    w.restart(A);
+    assert!(w.contact(A, b).blocked, "blocking survives a restart");
+    w.command(A, Command::UnblockPeer { peer: b });
+    w.send_text(B, A, "now?");
+    assert!(w.texts(A).contains(&"now?".to_owned()));
+}
+
+#[test]
 fn contacts_keep_the_name_given_on_this_device() {
     let mut w = paired();
     let b = w.peer(B);

@@ -73,6 +73,9 @@ export interface ConversationEntry {
   alias: string | null;
   /** The name the contact goes by, as they last sent it. */
   name: string | null;
+  /** Wrote without one of our invites; not accepted yet. */
+  request: boolean;
+  blocked: boolean;
   last_message_at: number;
   last: UiMessage | null;
   /** Incoming messages not read yet (counted over the latest hundred). */
@@ -106,6 +109,8 @@ export interface Events {
   files_dragging: boolean;
   /** Files were dropped on the window; `sendDropped` offers them. */
   files_dropped: { id: number; names: string[] };
+  /** Someone wrote without one of our invites. */
+  contact_request: string;
   /** A contact told us the name they go by (or that they have none). */
   peer_profile: { peer: string; name: string | null };
   message: UiMessage;
@@ -189,6 +194,9 @@ export interface Platform {
   /** A URL showing a kept picture sent or received as a file. */
   imageUrl(fileId: string): Promise<string>;
   getConversations(): Promise<ConversationEntry[]>;
+  /** Takes someone who wrote without an invite as a contact. */
+  acceptContact(peerId: string): Promise<void>;
+  setBlocked(peerId: string, blocked: boolean): Promise<void>;
   /** Names a contact on this device; `null` or blank removes the name. */
   renamePeer(peerId: string, alias: string | null): Promise<void>;
   /** Ends the session with a contact and deletes the conversation. */
@@ -220,6 +228,7 @@ export const onDisconnected = (cb: () => void) => api.on("disconnected", () => c
 export const onSuperseded = (cb: () => void) => api.on("superseded", () => cb());
 export const onUpdateRequired = (cb: () => void) => api.on("update_required", () => cb());
 export const onPeerConnected = (cb: (peerId: string) => void) => api.on("peer_connected", cb);
+export const onContactRequest = (cb: (peerId: string) => void) => api.on("contact_request", cb);
 export const onPeerProfile = (cb: (p: Events["peer_profile"]) => void) => api.on("peer_profile", cb);
 export const onMessage = (cb: (msg: UiMessage) => void) => api.on("message", cb);
 export const onMessageStatus = (cb: (p: Events["message_status"]) => void) => api.on("message_status", cb);

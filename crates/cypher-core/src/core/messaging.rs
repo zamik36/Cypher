@@ -11,9 +11,10 @@ use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind};
-use crate::peer::{Peer, ProfileRecord, clean_name};
+use crate::peer::{OwnLinks, Peer, ProfileRecord, clean_name};
 use crate::relay::{self, RelayBody};
-use crate::store::{META_PROFILE, StoreOp, Table, message_key};
+use crate::share::ShareLink;
+use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key};
 
 /// First wait before retrying a message, by why it did not go out; each
 /// further attempt doubles it, up to [`MAX_RETRY_MS`].
@@ -23,6 +24,12 @@ const RETRY_FAILED_MS: u64 = 5_000;
 const MAX_RETRY_MS: u64 = 10 * 60_000;
 /// Doublings before the backoff stops growing (2^10 × the base > the cap).
 const MAX_DOUBLINGS: u32 = 10;
+/// How long an invite admits a contact; the server keeps links as long.
+const LINK_TTL_MS: u64 = 24 * 3600 * 1000;
+/// Invites remembered at once; the oldest go first.
+const MAX_OWN_LINKS: usize = 32;
+/// Strangers waiting for an answer at once; more are not let in.
+const MAX_PENDING_REQUESTS: usize = 20;
 
 /// An end-to-end message waiting for server acceptance. Stored as padded
 /// plaintext and encrypted at send time, so a session reset never strands it.
@@ -139,19 +146,98 @@ impl<R: CryptoRngCore> Core<R> {
         let mut greeted: Vec<PeerId> = self
             .peers
             .iter()
-            .filter(|(_, p)| p.hello_sent)
+            .filter(|(_, p)| p.hello_sent && !p.request && !p.blocked)
             .map(|(id, _)| *id)
             .collect();
         greeted.sort_unstable_by_key(|id| *id.as_bytes());
         for peer in greeted {
-            self.send_control(peer, self.hello());
+            let hello = self.hello(&peer);
+            self.send_control(peer, hello);
         }
     }
 
-    fn hello(&self) -> Body {
+    fn hello(&self, peer: &PeerId) -> Body {
         Body::Hello {
             inbox: self.inbox_id,
             name: self.profile_name.clone(),
+            via: self.peers.get(peer).and_then(|p| p.via.clone()),
+        }
+    }
+
+    /// Remembers an invite this user made, so whoever joins by it is taken
+    /// as a contact.
+    pub(super) fn remember_link(&mut self, code: &str) {
+        let now = self.now;
+        self.own_links
+            .retain(|(_, at)| now.saturating_sub(*at) < LINK_TTL_MS);
+        self.own_links.push((code.to_owned(), now));
+        if self.own_links.len() > MAX_OWN_LINKS {
+            self.own_links.remove(0);
+        }
+        self.persist_links();
+    }
+
+    /// Whether `code` is a live invite of ours; it admits one contact only.
+    fn take_own_link(&mut self, code: &str) -> bool {
+        let now = self.now;
+        let Some(i) = self
+            .own_links
+            .iter()
+            .position(|(c, at)| c == code && now.saturating_sub(*at) < LINK_TTL_MS)
+        else {
+            return false;
+        };
+        self.own_links.remove(i);
+        self.persist_links();
+        true
+    }
+
+    fn persist_links(&mut self) {
+        let record = OwnLinks {
+            links: self.own_links.clone(),
+        };
+        let op = self
+            .vault
+            .put(Table::Meta, META_LINKS.to_vec(), &record, &mut self.rng);
+        self.persist(op);
+    }
+
+    fn pending_requests(&self) -> usize {
+        self.peers.values().filter(|p| p.request).count()
+    }
+
+    /// Takes a stranger as a contact: from now on they hear our `Hello`.
+    pub(super) fn accept_contact(&mut self, peer: &PeerId) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        if !p.request {
+            return;
+        }
+        p.request = false;
+        self.persist_peer(peer);
+        self.send_hello(*peer);
+    }
+
+    /// Blocking drops whatever they send, unread, and stops what goes to
+    /// them; unblocking lets them through again.
+    pub(super) fn set_blocked(&mut self, peer: &PeerId, blocked: bool) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        p.blocked = blocked;
+        self.persist_peer(peer);
+        if blocked {
+            let stale: Vec<MsgId> = self
+                .outbox
+                .values()
+                .filter(|i| i.peer == *peer)
+                .map(|i| i.msg_id)
+                .collect();
+            for id in stale {
+                self.drop_outbox(&id);
+            }
+            self.cancel_transfers_with(peer);
         }
     }
 
@@ -415,24 +501,14 @@ impl<R: CryptoRngCore> Core<R> {
             });
             return;
         }
-        let (inbox, alias, name) = self
-            .peers
-            .get(&peer)
-            .map(|p| (p.inbox, p.alias.clone(), p.name.clone()))
-            .unwrap_or_default();
-        self.peers.insert(
-            peer,
-            Peer {
-                ratchet,
-                pending_init: Some(init),
-                accepted_ephemerals: Vec::new(),
-                identity_dh,
-                inbox,
-                hello_sent: false,
-                alias,
-                name,
-            },
-        );
+        let mut fresh = Peer::new(ratchet, identity_dh, Some(init));
+        if let Some(old) = self.peers.remove(&peer) {
+            fresh.carry_over(old);
+        }
+        // We asked for this contact, by this invite.
+        fresh.request = false;
+        fresh.via = ShareLink::parse(&link).map(|share| share.link().as_str().to_owned());
+        self.peers.insert(peer, fresh);
         self.requeue_for(&peer);
         self.emit(Event::PeerAdded {
             peer,
@@ -445,12 +521,13 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(p) = self.peers.get_mut(&peer) else {
             return;
         };
-        if p.hello_sent {
+        if p.hello_sent || p.request || p.blocked {
             return;
         }
         p.hello_sent = true;
         self.persist_peer(&peer);
-        self.send_control(peer, self.hello());
+        let hello = self.hello(&peer);
+        self.send_control(peer, hello);
     }
 
     /// Makes in-flight messages for `peer` eligible for re-encryption on a
@@ -487,6 +564,9 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_message(&mut self, from: PeerId, init: Option<&InitHeader>, header: &Header, ct: &[u8]) {
+        if self.peers.get(&from).is_some_and(|p| p.blocked) {
+            return;
+        }
         let result = match init {
             Some(init) => self.accept_init(from, init, header, ct),
             None => self.decrypt_existing(from, header, ct),
@@ -536,6 +616,10 @@ impl<R: CryptoRngCore> Core<R> {
             return Ok(p.ratchet.decrypt(header, ct, b"", &mut self.rng)?);
         }
 
+        if !self.peers.contains_key(&from) && self.pending_requests() >= MAX_PENDING_REQUESTS {
+            // Quietly: a flood of strangers is not the user's problem.
+            return Err(CoreError::Conflict);
+        }
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
@@ -555,32 +639,16 @@ impl<R: CryptoRngCore> Core<R> {
             self.persist_prekeys();
         }
 
-        let previous = self.peers.remove(&from);
-        let is_new = previous.is_none();
-        let (inbox, mut seen, alias, name) = previous
-            .map(|p| (p.inbox, p.accepted_ephemerals, p.alias, p.name))
-            .unwrap_or_default();
-        Peer::remember_ephemeral(&mut seen, init.ephemeral);
-        self.peers.insert(
-            from,
-            Peer {
-                ratchet,
-                pending_init: None,
-                accepted_ephemerals: seen,
-                identity_dh: init.identity_dh,
-                inbox,
-                hello_sent: false,
-                alias,
-                name,
-            },
-        );
-        self.requeue_for(&from);
-        if is_new {
-            self.emit(Event::PeerAdded {
-                peer: from,
-                initiated_by_us: false,
-            });
+        // Someone new is a request until their `Hello` names one of our
+        // invites; someone known keeps what they were.
+        let mut fresh = Peer::new(ratchet, init.identity_dh, None);
+        fresh.request = true;
+        if let Some(old) = self.peers.remove(&from) {
+            fresh.carry_over(old);
         }
+        Peer::remember_ephemeral(&mut fresh.accepted_ephemerals, init.ephemeral);
+        self.peers.insert(from, fresh);
+        self.requeue_for(&from);
         self.send_hello(from);
         Ok(pt)
     }
@@ -592,7 +660,8 @@ impl<R: CryptoRngCore> Core<R> {
             body,
         } = env;
         match body {
-            Body::Hello { inbox, name } => {
+            Body::Hello { inbox, name, via } => {
+                let invited = via.as_deref().is_some_and(|code| self.take_own_link(code));
                 let name = name.as_deref().and_then(clean_name);
                 let mut renamed = false;
                 if let Some(p) = self.peers.get_mut(&from) {
@@ -600,10 +669,21 @@ impl<R: CryptoRngCore> Core<R> {
                     renamed = p.name != name;
                     p.name.clone_from(&name);
                 }
-                self.persist_peer(&from);
                 if renamed {
                     self.emit(Event::PeerProfile { peer: from, name });
                 }
+                match self.peers.get_mut(&from) {
+                    Some(p) if p.request && invited => {
+                        p.request = false;
+                        self.emit(Event::PeerAdded {
+                            peer: from,
+                            initiated_by_us: false,
+                        });
+                    }
+                    Some(p) if p.request => self.emit(Event::ContactRequest { peer: from }),
+                    _ => {}
+                }
+                self.persist_peer(&from);
                 self.send_hello(from);
             }
             Body::Text { text, reply_to } => {

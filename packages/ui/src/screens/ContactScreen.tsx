@@ -5,7 +5,7 @@ import Icon from "../components/Icon";
 import SafetyNumber from "../components/SafetyNumber";
 import TopBar from "../components/TopBar";
 import { api } from "../platform";
-import { avatarName, contacts, displayName, removeContact, setAlias } from "../stores/contacts";
+import { avatarName, contacts, displayName, removeContact, setAlias, setContactBlocked } from "../stores/contacts";
 import { removeChat } from "../stores/chat";
 import { back, depth } from "../stores/nav";
 import { addToast, toastError } from "../stores/toasts";
@@ -34,6 +34,17 @@ export default function ContactScreen(props: { peerId: string }) {
       toastError(e);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function toggleBlocked() {
+    const [peerId, blocked] = [props.peerId, !contacts[props.peerId]?.blocked];
+    try {
+      await api.setBlocked(peerId, blocked);
+      setContactBlocked(peerId, blocked);
+      addToast(blocked ? t().toast_blocked : t().toast_unblocked, "success");
+    } catch (e) {
+      toastError(e);
     }
   }
 
@@ -109,6 +120,20 @@ export default function ContactScreen(props: { peerId: string }) {
               <span class="list-row__text">
                 <span class="list-row__title">{t().contact_id}</span>
                 <span class="list-row__subtitle mono contact__id">{props.peerId}</span>
+              </span>
+            </button>
+          </div>
+
+          <div class="list contact__block">
+            <button class="list-row" onClick={() => void toggleBlocked()}>
+              <span class="list-row__icon">
+                <Icon name="lock" size={18} />
+              </span>
+              <span class="list-row__text">
+                <span class="list-row__title">
+                  {contacts[props.peerId]?.blocked ? t().contact_unblock : t().contact_block}
+                </span>
+                <span class="list-row__subtitle">{t().contact_block_hint}</span>
               </span>
             </button>
           </div>
