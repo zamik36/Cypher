@@ -6,5 +6,9 @@ rto = "rto"
 # The HTTP load generator (github.com/wg/wrk).
 wrk = "wrk"
 
+[default]
+# Commit hashes in reports and changelogs.
+extend-ignore-re = ["`[0-9a-f]{7,40}`"]
+
 [files]
 extend-exclude = ["*.lock", "apps/pwa/src/wasm/", "**/fuzz/corpus/"]
