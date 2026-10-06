@@ -4,6 +4,7 @@ mod media_scheme;
 mod session;
 #[cfg(target_os = "android")]
 mod shared_storage;
+mod shell;
 #[cfg(test)]
 mod tests;
 
@@ -28,16 +29,34 @@ pub fn run() -> tauri::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let builder = wire(tauri::Builder::default());
+    // First: a second launch hands its invite link to this one and quits.
+    #[cfg(desktop)]
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            shell::show_main(app);
+        }));
     #[cfg(mobile)]
-    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
-    builder
+    let builder = tauri::Builder::default().plugin(tauri_plugin_barcode_scanner::init());
+    #[cfg(desktop)]
+    let builder = builder.on_window_event(shell::on_close);
+    wire(builder)
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_cypher_files::init())
         .setup(|app| {
             let paths = session::Paths::resolve(app.handle())?;
             app.manage(session::AppState::new(paths, session::tls_from_env()?));
+            app.manage(shell::CloseToTray::default());
+            #[cfg(desktop)]
+            shell::install_tray(app)?;
+            // Installers register cypher:// themselves; a dev build points
+            // it at itself so invite links can be tried.
+            #[cfg(all(desktop, debug_assertions))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register_all();
+            }
             Ok(())
         })
         .on_page_load(|webview, _| allow_user_media(webview))
@@ -106,6 +125,8 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             media::voice_cancel,
             media::send_video_note,
             qr::generate_qr,
+            shell::set_tray,
+            shell::set_close_to_tray,
         ])
 }
 

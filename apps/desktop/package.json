@@ -13,6 +13,7 @@
     "@cypher/ui": "*",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-barcode-scanner": "^2.5.1",
+    "@tauri-apps/plugin-deep-link": "^2.6.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "solid-js": "^1.9"
   },

@@ -1,17 +1,19 @@
 import "./stores/theme";
-import { createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import IdentityView from "./components/IdentityView";
 import AppShell from "./screens/AppShell";
 import { startApp } from "./app/wire";
 import { api } from "./platform";
 import { clearAllMessages } from "./stores/chat";
 import { setConnection } from "./stores/connection";
-import { loadConversations } from "./stores/contacts";
+import { loadConversations, totalUnread } from "./stores/contacts";
 import { clearAllDrafts } from "./stores/drafts";
 import { watchForLock } from "./stores/lock";
 import { reset } from "./stores/nav";
 import { setNickname } from "./stores/profile";
 import { toastError } from "./stores/toasts";
+import { closeToTray } from "./stores/window";
+import { t } from "./i18n";
 
 export default function App() {
   const [unlocked, setUnlocked] = createSignal(false);
@@ -45,6 +47,18 @@ export default function App() {
     setConnection({ peerId: null, link: "idle" });
     await api.lock().catch(toastError);
   }
+
+  // The desktop tray speaks the UI's language and counts unread messages.
+  createEffect(() => {
+    const shell = api.shell;
+    if (!shell) return;
+    const unread = unlocked() ? totalUnread() : 0;
+    const tooltip = unread > 0 ? t().tray_unread(unread) : t().identity_title;
+    void shell.setTray(t().tray_open, t().tray_quit, tooltip).catch(() => undefined);
+  });
+  createEffect(() => {
+    void api.shell?.setCloseToTray(closeToTray()).catch(() => undefined);
+  });
 
   return (
     <Show when={unlocked()} fallback={<IdentityView onUnlocked={(id, nick) => void handleUnlocked(id, nick)} />}>

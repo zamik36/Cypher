@@ -29,6 +29,7 @@ describe("translations", () => {
       expect(table.media_speed(1.5)).toContain("1.5");
       expect(table.chats_requests(2)).toContain("2");
       expect(table.lock_minutes(5)).toContain("5");
+      expect(table.tray_unread(3)).toContain("3");
       expect(table.lock_hours(1)).toContain("1");
       expect(table.privacy_bridges_transport(4)).toContain("4");
       expect(table.privacy_bridges_format(5)).toContain("5");

@@ -293,6 +293,12 @@ const en = {
   // -- Install prompt (web) --
   update_text: "A new version of Cypher is ready",
   update_btn: "Update",
+  tray_open: "Open Cypher",
+  tray_quit: "Quit",
+  tray_unread: (n: number) => `Cypher · ${n} unread`,
+  settings_window: "Window",
+  settings_close_to_tray: "Keep in the tray when closed",
+  settings_close_to_tray_hint: "Messages keep arriving; Quit is in the tray menu",
   install_text: "Install Cypher on this device",
   install_btn: "Install",
   install_ios: "Tap Share, then “Add to Home Screen”",

@@ -12,6 +12,7 @@ import { isWide } from "../stores/layout";
 import { back, push, type SettingsSection } from "../stores/nav";
 import { nickname } from "../stores/profile";
 import { setThemePref, themePref, type ThemePref } from "../stores/theme";
+import { closeToTray, setCloseToTray } from "../stores/window";
 import { addToast, toastError } from "../stores/toasts";
 import { checkBridges } from "../utils/bridges";
 import { copyText } from "../utils/clipboard";
@@ -239,6 +240,17 @@ function Appearance() {
           )}
         </For>
       </div>
+      <Show when={api.shell}>
+        <h3 class="group-title">{t().settings_window}</h3>
+        <div class="list">
+          <SwitchRow
+            label={t().settings_close_to_tray}
+            hint={t().settings_close_to_tray_hint}
+            checked={closeToTray()}
+            onChange={() => setCloseToTray(!closeToTray())}
+          />
+        </div>
+      </Show>
     </>
   );
 }

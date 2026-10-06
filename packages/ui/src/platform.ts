@@ -148,6 +148,11 @@ export interface Platform {
   unlockIdentity(passphrase: string): Promise<[string, string]>;
   importMnemonic(mnemonic: string, nickname: string, passphrase: string): Promise<string>;
   exportMnemonic(passphrase: string): Promise<string>;
+  /** The desktop's tray and window behaviour; absent elsewhere. */
+  shell?: {
+    setTray(open: string, quit: string, tooltip: string): Promise<void>;
+    setCloseToTray(enabled: boolean): Promise<void>;
+  };
   /** Stops the client and drops the identity from memory until unlocked. */
   lock(): Promise<void>;
   /** Deletes the profile and everything kept with it from this device. */

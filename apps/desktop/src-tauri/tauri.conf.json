@@ -21,6 +21,15 @@
       }
     ]
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["cypher"] },
+      "mobile": [
+        { "scheme": ["cypher"], "host": "join", "appLink": false },
+        { "host": "cyphermessanger.tech", "pathPrefix": ["/join"] }
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "android": {

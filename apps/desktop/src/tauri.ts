@@ -50,6 +50,12 @@ export const tauriPlatform: Platform = {
     invoke<string>("import_mnemonic", { mnemonic, nickname, passphrase }),
   eraseDevice: () => command("erase_device"),
   lock: () => command("lock"),
+  ...(!isAndroid && {
+    shell: {
+      setTray: (open, quit, tooltip) => command("set_tray", { open, quit, tooltip }),
+      setCloseToTray: (enabled) => command("set_close_to_tray", { enabled }),
+    },
+  }),
   exportMnemonic: (passphrase) => invoke<string>("export_mnemonic", { passphrase }),
   connectToGateway: (addr, anonymous, bridges) => invoke<string>("connect_to_gateway", { addr, anonymous, bridges }),
   applyAnonymousSettings: (anonymous, bridges) => command("apply_anonymous_settings", { anonymous, bridges }),

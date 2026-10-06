@@ -21,8 +21,8 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 
-use crate::media_scheme;
 use crate::session::{self, AppState, Paths};
+use crate::{media_scheme, shell};
 
 const PASS: &str = "correct horse battery";
 const WAIT: Duration = Duration::from_secs(20);
@@ -50,6 +50,7 @@ impl Desktop {
             .build(mock_context(noop_assets()))
             .unwrap();
         app.manage(AppState::new(paths, tls));
+        app.manage(shell::CloseToTray::default());
         let webview = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
             .build()
             .unwrap();
@@ -308,6 +309,28 @@ async fn qr_codes_are_png_data_uris() {
         .call("generate_qr", json!({ "linkId": "cypher-link" }))
         .await;
     assert!(text(&uri.unwrap()).starts_with("data:image/png;base64,"));
+}
+
+#[tokio::test]
+async fn the_ui_words_the_tray_and_chooses_what_closing_does() {
+    use std::sync::atomic::Ordering;
+
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    let closes_to_tray = || {
+        desktop
+            .app
+            .state::<shell::CloseToTray>()
+            .0
+            .load(Ordering::Relaxed)
+    };
+    assert!(closes_to_tray(), "on by default");
+    let args = json!({ "enabled": false });
+    desktop.call("set_close_to_tray", args).await.unwrap();
+    assert!(!closes_to_tray());
+
+    // The mock runtime has no tray; the words wait for one without failing.
+    let args = json!({ "open": "Open", "quit": "Quit", "tooltip": "Cypher · 2 unread" });
+    desktop.call("set_tray", args).await.unwrap();
 }
 
 #[test]

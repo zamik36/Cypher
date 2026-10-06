@@ -291,6 +291,12 @@ const ru: TranslationKeys = {
 
   update_text: "Готова новая версия Шифра",
   update_btn: "Обновить",
+  tray_open: "Открыть Шифр",
+  tray_quit: "Выход",
+  tray_unread: (n: number) => `Шифр · ${plural(n, "непрочитанное", "непрочитанных", "непрочитанных")}`,
+  settings_window: "Окно",
+  settings_close_to_tray: "Сворачивать в трей при закрытии",
+  settings_close_to_tray_hint: "Сообщения продолжат приходить; «Выход» — в меню значка в трее",
   install_text: "Установите Шифр на это устройство",
   install_btn: "Установить",
   install_ios: "Нажмите «Поделиться», затем «На экран Домой»",
