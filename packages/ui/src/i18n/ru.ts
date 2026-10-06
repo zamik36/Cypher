@@ -72,6 +72,8 @@ const ru: TranslationKeys = {
   chats_title: "Чаты",
   chats_search: "Поиск",
   chats_new: "Новый чат",
+  share_pick_files: (n: number) => `Выберите чат: ${plural(n, "файл", "файла", "файлов")}`,
+  share_pick_text: "Выберите чат для текста",
   chats_requests: (n: number) => `Запросы · ${n}`,
   request_text: "Этот человек написал не по вашему приглашению. Пока вы не примете запрос, он ничего о вас не узнает.",
   request_accept: "Принять",

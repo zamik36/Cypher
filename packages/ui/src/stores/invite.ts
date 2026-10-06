@@ -11,12 +11,14 @@ function showJoin(code: string): void {
 /**
  * An invite that reached the app from outside (a link opened, a deep link):
  * shown in New chat once the app is unlocked, at once if it already is.
+ * Returns whether `text` held one.
  */
-export function receiveInvite(text: string): void {
+export function receiveInvite(text: string): boolean {
   const code = findInvite(text);
-  if (!code) return;
+  if (!code) return false;
   if (ready) showJoin(code);
   else pending = code;
+  return true;
 }
 
 /** Whether the app can show screens now (unlocked); a waiting invite shows. */

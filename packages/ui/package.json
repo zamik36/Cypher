@@ -8,6 +8,7 @@
     "./platform": "./src/platform.ts",
     "./i18n": "./src/i18n/index.ts",
     "./invite": "./src/stores/invite.ts",
+    "./share": "./src/stores/share.ts",
     "./index.css": "./src/index.css",
     "./components/*": "./src/components/*.tsx"
   },

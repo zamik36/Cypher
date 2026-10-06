@@ -33,6 +33,7 @@ import { addMessage, peerOf, setMessageStatus } from "../stores/chat";
 import { hasTransfer, upsertTransfer } from "../stores/transfers";
 import { setMediaProgress, trackMedia } from "../stores/media";
 import { setInvitesReady } from "../stores/invite";
+import { setSharesReady } from "../stores/share";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
 import { windowActive } from "../stores/presence";
@@ -64,6 +65,7 @@ export async function refreshConversations(): Promise<void> {
 export async function startApp(): Promise<() => void> {
   const stopNavigation = installNavigation();
   setInvitesReady(true);
+  setSharesReady(true);
   const unsubscribe = await Promise.all([
     onConnected(() => linkEvent("connected")),
     onDisconnected(() => {
@@ -138,6 +140,7 @@ export async function startApp(): Promise<() => void> {
 
   return () => {
     setInvitesReady(false);
+    setSharesReady(false);
     stopNavigation();
     for (const off of unsubscribe) off();
   };

@@ -2,6 +2,26 @@
   position: relative;
 }
 
+.chat-list__share {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-3) var(--sp-4) 0;
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--c-accent-soft);
+  color: var(--c-text);
+  font-weight: 600;
+}
+
+.chat-list__share svg {
+  color: var(--c-accent);
+}
+
+.chat-list__share span {
+  flex: 1;
+}
+
 .chat-list__search {
   position: relative;
   padding: var(--sp-3) var(--sp-4) var(--sp-2);

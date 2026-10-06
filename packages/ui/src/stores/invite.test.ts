@@ -7,7 +7,7 @@ describe("incoming invites", () => {
     const nav = await import("./nav");
     const { receiveInvite, setInvitesReady } = await import("./invite");
     const code = `${"a".repeat(26)}-${"b".repeat(26)}`;
-    receiveInvite("https://cyphermessanger.tech/");
+    expect(receiveInvite("https://cyphermessanger.tech/")).toBe(false);
     receiveInvite(`https://cyphermessanger.tech/join#${code}`);
     expect(nav.top()).toEqual({ name: "chats" });
     setInvitesReady(true);

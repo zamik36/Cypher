@@ -8,6 +8,7 @@ import { avatarName, contacts, displayName, requestContacts, sortedContacts, typ
 import { connection, type LinkState } from "../stores/connection";
 import { isWide } from "../stores/layout";
 import { push, replace, top } from "../stores/nav";
+import { cancelShare, pendingShare, shareWith } from "../stores/share";
 import { formatListTime } from "../utils/format";
 import { isMine, previewOf } from "../utils/messages";
 import { locale, t } from "../i18n";
@@ -49,7 +50,10 @@ function ChatRow(props: { contact: Contact }) {
       classList={{ "chat-row--selected": selected() && isWide() }}
       data-testid="chat-row"
       aria-current={selected() ? "true" : undefined}
-      onClick={() => openChat(props.contact.peerId)}
+      onClick={() => {
+        shareWith(props.contact.peerId);
+        openChat(props.contact.peerId);
+      }}
     >
       <Avatar peerId={props.contact.peerId} name={avatarName(props.contact.peerId)} size={48} />
       <span class="chat-row__body">
@@ -152,7 +156,20 @@ export default function ChatList() {
               onInput={(e) => setQuery(e.currentTarget.value)}
             />
           </div>
-          <Show when={requests().length > 0}>
+          <Show when={pendingShare()}>
+            {(share) => (
+              <div class="chat-list__share" role="status" data-testid="share-pick">
+                <Icon name="share" size={18} />
+                <span>
+                  {share().files.length > 0 ? t().share_pick_files(share().files.length) : t().share_pick_text}
+                </span>
+                <button class="btn btn--ghost" onClick={cancelShare}>
+                  {t().common_cancel}
+                </button>
+              </div>
+            )}
+          </Show>
+          <Show when={requests().length > 0 && !pendingShare()}>
             <h3 class="group-title chat-list__group">{t().chats_requests(requests().length)}</h3>
             <div class="chat-list__rows" data-testid="requests">
               <For each={requests()}>{(contact) => <ChatRow contact={contact} />}</For>

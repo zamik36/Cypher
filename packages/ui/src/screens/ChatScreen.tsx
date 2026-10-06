@@ -35,6 +35,7 @@ import {
 import { clearDraft, draftOf, setDraftText, setReplyTo } from "../stores/drafts";
 import { isWide } from "../stores/layout";
 import { back, push } from "../stores/nav";
+import { takeShare } from "../stores/share";
 import { windowActive } from "../stores/presence";
 import { upsertTransfer } from "../stores/transfers";
 import { trackMedia } from "../stores/media";
@@ -427,6 +428,15 @@ export default function ChatScreen(props: { peerId: string }) {
       toastError(e);
     }
   }
+
+  // What another app shared and the user chose this chat for.
+  onMount(() => {
+    const peerId = props.peerId;
+    const share = takeShare(peerId);
+    if (!share) return;
+    if (share.text) setDraft(draft() ? `${draft()}\n${share.text}` : share.text);
+    if (share.files.length > 0) void offer(() => api.sendFiles(peerId, share.files));
+  });
 
   function attach() {
     const peerId = props.peerId;

@@ -66,6 +66,8 @@ const en = {
   chats_title: "Chats",
   chats_search: "Search",
   chats_new: "New chat",
+  share_pick_files: (n: number) => (n === 1 ? "Choose a chat for the file" : `Choose a chat for ${n} files`),
+  share_pick_text: "Choose a chat for the text",
   chats_requests: (n: number) => `Requests · ${n}`,
   request_text: "This person wrote without one of your invites. They see nothing of you until you accept.",
   request_accept: "Accept",
