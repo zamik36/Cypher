@@ -49,7 +49,7 @@ export default function AppShell() {
                 {(peerId) => <ChatScreen peerId={peerId} />}
               </Match>
               <Match when={param("new-chat")} keyed>
-                {(screen) => <NewChat tab={screen.tab} />}
+                {(screen) => <NewChat tab={screen.tab} code={screen.code} />}
               </Match>
               <Match when={param("contact")?.peerId} keyed>
                 {(peerId) => <ContactScreen peerId={peerId} />}

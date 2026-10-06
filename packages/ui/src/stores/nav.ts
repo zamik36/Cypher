@@ -6,7 +6,7 @@ export type SettingsSection = "profile" | "appearance" | "notifications" | "priv
 export type Screen =
   | { name: "chats" }
   | { name: "chat"; peerId: string }
-  | { name: "new-chat"; tab: "invite" | "join" }
+  | { name: "new-chat"; tab: "invite" | "join"; code?: string }
   | { name: "contact"; peerId: string }
   | { name: "settings" }
   | { name: "settings-section"; section: SettingsSection };

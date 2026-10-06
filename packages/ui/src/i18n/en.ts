@@ -100,7 +100,7 @@ const en = {
   invite_copy: "Copy code",
   invite_copied: "Copied",
   invite_share: "Share",
-  invite_share_text: (code: string) => `Let's talk on Cypher. My invite code: ${code}`,
+  invite_share_text: (link: string) => `Let's talk on Cypher, privately: ${link}`,
   invite_waiting: "Waiting for them to join…",
   invite_new: "New code",
   invite_offline: "Connect to the network to create an invite.",
@@ -291,6 +291,8 @@ const en = {
   verify_close: "Close",
 
   // -- Install prompt (web) --
+  update_text: "A new version of Cypher is ready",
+  update_btn: "Update",
   install_text: "Install Cypher on this device",
   install_btn: "Install",
   install_ios: "Tap Share, then “Add to Home Screen”",

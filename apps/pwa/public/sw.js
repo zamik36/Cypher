@@ -2,9 +2,14 @@
 /// network-first so fixes reach users on the next load.
 const CACHE_NAME = "cypher-pwa-__BUILD_HASH__";
 
+// A new version waits until the page asks for it: taking over mid-session
+// would drop the old cache while the open page still loads chunks from it.
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(["/", "/index.html"])));
-  self.skipWaiting();
+});
+
+self.addEventListener("message", (e) => {
+  if (e.data === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", (e) => {

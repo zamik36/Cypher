@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { avatarColour, initials, AVATAR_COLOURS } from "./avatar";
 import { dayLabel, formatBytes, formatListTime, formatTime, sameDay } from "./format";
-import { findInvite } from "./invite";
+import { findInvite, inviteUrl } from "./invite";
 import { buildTimeline, GROUP_GAP_MS } from "./timeline";
 
 const at = (y: number, m: number, d: number, h = 12, min = 0) => new Date(y, m - 1, d, h, min).getTime();
@@ -58,6 +58,8 @@ describe("invites", () => {
     expect(findInvite(code)).toBe(code);
     expect(findInvite(`  Join me in Cypher: ${code.toUpperCase()} !`)).toBe(code);
     expect(findInvite("not-a-code")).toBeNull();
+    expect(inviteUrl(code)).toMatch(/^https:\/\/.+\/join#/);
+    expect(findInvite(inviteUrl(code))).toBe(code);
     expect(findInvite(`${"a".repeat(26)}-${"b".repeat(25)}`)).toBeNull();
   });
 });

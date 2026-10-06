@@ -8,7 +8,7 @@ import { isOnline } from "../stores/connection";
 import { ensureContact } from "../stores/contacts";
 import { back, replace } from "../stores/nav";
 import { copyText } from "../utils/clipboard";
-import { findInvite } from "../utils/invite";
+import { findInvite, inviteUrl } from "../utils/invite";
 import { reasonText } from "../utils/reasons";
 import { t } from "../i18n";
 
@@ -31,7 +31,8 @@ function InviteTab() {
     try {
       const { link_id } = await api.createLink();
       setCode(link_id);
-      setQr(await api.generateQr(link_id).catch(() => ""));
+      // The QR opens the app (or the web app) straight at New chat.
+      setQr(await api.generateQr(inviteUrl(link_id)).catch(() => ""));
     } catch (e) {
       setError(reasonText(e));
     } finally {
@@ -55,7 +56,7 @@ function InviteTab() {
 
   const share = () => {
     const value = code();
-    if (value) void navigator.share({ text: t().invite_share_text(value) }).catch(() => undefined);
+    if (value) void navigator.share({ text: t().invite_share_text(inviteUrl(value)) }).catch(() => undefined);
   };
 
   return (
@@ -116,8 +117,8 @@ function InviteTab() {
 }
 
 /** Joins someone's chat with the invite code they sent. */
-function JoinTab() {
-  const [input, setInput] = createSignal("");
+function JoinTab(props: { code?: string | undefined }) {
+  const [input, setInput] = createSignal(untrack(() => props.code ?? ""));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [scanning, setScanning] = createSignal(false);
@@ -193,7 +194,7 @@ function JoinTab() {
   );
 }
 
-export default function NewChat(props: { tab: Tab }) {
+export default function NewChat(props: { tab: Tab; code?: string | undefined }) {
   const [tab, setTab] = createSignal<Tab>(untrack(() => props.tab));
   return (
     <section class="screen">
@@ -208,7 +209,7 @@ export default function NewChat(props: { tab: Tab }) {
               {t().new_tab_join}
             </button>
           </div>
-          <Show when={tab() === "invite"} fallback={<JoinTab />}>
+          <Show when={tab() === "invite"} fallback={<JoinTab code={props.code} />}>
             <InviteTab />
           </Show>
         </div>
