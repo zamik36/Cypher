@@ -1,7 +1,7 @@
 //! Presentation shapes shared by every frontend (Tauri and WebAssembly):
 //! hex ids, millisecond timestamps, one channel name per event.
 
-use cypher_types::PeerId;
+use cypher_types::{MsgId, PeerId};
 use serde::Serialize;
 
 use crate::api::{Content, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
@@ -29,6 +29,8 @@ pub struct UiMessage {
     pub timestamp: u64,
     pub status: &'static str,
     pub file: Option<UiFile>,
+    /// The message this one answers.
+    pub reply_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,8 +80,8 @@ pub fn status(s: MessageStatus) -> &'static str {
 }
 
 pub fn message(m: &StoredMessage) -> UiMessage {
-    let (text, file) = match &m.content {
-        Content::Text { text, .. } => (text.clone(), None),
+    let (text, file, reply_to) = match &m.content {
+        Content::Text { text, reply_to } => (text.clone(), None, reply_to.map(MsgId::to_hex)),
         Content::File {
             file_id,
             name,
@@ -108,7 +110,7 @@ pub fn message(m: &StoredMessage) -> UiMessage {
                 waveform,
                 poster,
             };
-            (name.clone(), Some(file))
+            (name.clone(), Some(file), None)
         }
     };
     UiMessage {
@@ -119,6 +121,7 @@ pub fn message(m: &StoredMessage) -> UiMessage {
         timestamp: m.sent_at_ms,
         status: status(m.status),
         file,
+        reply_to,
     }
 }
 
@@ -283,7 +286,7 @@ mod tests {
     fn text_message_shape() {
         let text = Content::Text {
             text: "привет".into(),
-            reply_to: None,
+            reply_to: Some(MsgId([9; 16])),
         };
         let (channel, value) = ui(&Event::Message(stored(false, text)));
         assert_eq!(channel, "message");
@@ -297,6 +300,7 @@ mod tests {
                 "timestamp": 1_700,
                 "status": "delivered",
                 "file": null,
+                "reply_to": MsgId([9; 16]).to_hex(),
             })
         );
     }

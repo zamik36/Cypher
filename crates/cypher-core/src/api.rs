@@ -69,6 +69,10 @@ pub enum Command {
         ids: Vec<MsgId>,
     },
     FetchInbox,
+    /// Stops sending a message the user deleted before it went out.
+    DiscardOutgoing {
+        msg_id: MsgId,
+    },
     RemovePeer {
         peer: PeerId,
     },

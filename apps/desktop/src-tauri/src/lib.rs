@@ -68,6 +68,7 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             link::create_link,
             link::join_link,
             chat::send_message,
+            chat::delete_message,
             chat::mark_read,
             chat::safety_number,
             transfer::browse_and_send,

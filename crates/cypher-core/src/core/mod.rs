@@ -454,6 +454,7 @@ impl<R: CryptoRngCore> Core<R> {
             Command::FetchInbox => self.fetch_inbox(),
             Command::RemovePeer { peer } => self.remove_peer(&peer),
             Command::RenamePeer { peer, alias } => self.rename_peer(&peer, alias.as_deref()),
+            Command::DiscardOutgoing { msg_id } => self.discard_outgoing(&msg_id),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
         }

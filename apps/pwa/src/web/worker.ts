@@ -330,6 +330,31 @@ async function history(peer: string, limit: number, before?: number) {
   return rows.map(([key, value], i) => c.openMessage(key, value, statuses[i]));
 }
 
+/** How far around the UI's time a deleted message is looked for. */
+const DELETE_WINDOW_MS = 60_000;
+
+/** Deletes stored messages with their statuses, media notes and kept files. */
+async function deleteRows(rows: Awaited<ReturnType<typeof scan>>) {
+  const c = requireClient();
+  const media: string[] = [];
+  const received: string[] = [];
+  const ops: Op[] = [];
+  for (const [key, value] of rows) {
+    const msg = c.openMessage(key, value, undefined) as StoredView;
+    if (msg.file && msg.file.kind !== "file") media.push(msg.file.file_id);
+    else if (msg.file) received.push(msg.file.file_id);
+    ops.push({ kind: "delete", table: "messages", key });
+    ops.push({ kind: "delete", table: "message_status", key: key.slice(key.length - 16) });
+  }
+  for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
+  await applyOps(db, ops);
+  const [sealed, plain] = await Promise.all([sinkDir(true), sinkDir(false)]);
+  await Promise.all([
+    ...media.map((id) => sealed.removeEntry(id).catch(() => undefined)),
+    ...received.map((id) => plain.removeEntry(id).catch(() => undefined)),
+  ]);
+}
+
 /** How far back unread messages are counted; the list shows "99+" anyway. */
 const UNREAD_WINDOW = 100;
 
@@ -463,26 +488,21 @@ const handlers: Handlers = {
   forgetPeer: (peer) =>
     serial(async () => {
       await run({ type: "remove_peer", peer });
-      const c = requireClient();
       const [from, to] = historyRange(peer, undefined);
-      const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true));
-      const media: string[] = [];
-      const received: string[] = [];
-      const ops: Op[] = [];
-      for (const [key, value] of rows) {
-        const msg = c.openMessage(key, value, undefined) as StoredView;
-        if (msg.file && msg.file.kind !== "file") media.push(msg.file.file_id);
-        else if (msg.file) received.push(msg.file.file_id);
-        ops.push({ kind: "delete", table: "messages", key });
-        ops.push({ kind: "delete", table: "message_status", key: key.slice(key.length - 16) });
-      }
-      for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
-      await applyOps(db, ops);
-      const [sealed, plain] = await Promise.all([sinkDir(true), sinkDir(false)]);
-      await Promise.all([
-        ...media.map((id) => sealed.removeEntry(id).catch(() => undefined)),
-        ...received.map((id) => plain.removeEntry(id).catch(() => undefined)),
-      ]);
+      await deleteRows(await scan(db, "messages", IDBKeyRange.bound(from, to, false, true)));
+    }),
+  deleteMessage: (peer, msgId, timestamp) =>
+    serial(async () => {
+      const [, from] = historyRange(peer, Math.max(0, timestamp - DELETE_WINDOW_MS));
+      const [, to] = historyRange(peer, timestamp + DELETE_WINDOW_MS);
+      const id = unhex(msgId);
+      const rows = await scan(db, "messages", IDBKeyRange.bound(from, to));
+      const row = rows.find(([key]) => key.subarray(key.length - 16).every((b, i) => b === id[i]));
+      if (!row) throw new Error("NotFound");
+      await run({ type: "discard_outgoing", msg_id: msgId });
+      const msg = requireClient().openMessage(row[0], row[1], undefined) as StoredView;
+      if (msg.file) await run({ type: "cancel_transfer", file_id: msg.file.file_id });
+      await deleteRows([row]);
     }),
   history: (peer, limit, before) => history(peer, Math.min(limit, 500), before),
   sendMedia,

@@ -3,6 +3,7 @@ import type { ChatMessage } from "../platform";
 import {
   addMessage,
   clearAllMessages,
+  findMessage,
   getMessages,
   hasOlder,
   historyLoaded,
@@ -10,6 +11,7 @@ import {
   peerOf,
   prependHistory,
   removeChat,
+  removeMessage,
   setHasOlder,
   setMessageStatus,
   setMessages,
@@ -93,6 +95,16 @@ describe("chat store", () => {
     expect(hasOlder("alice")).toBe(true);
     clearAllMessages();
     expect(hasOlder("alice")).toBe(false);
+  });
+
+  it("drops one deleted message and finds the others", () => {
+    addMessage("alice", msg("m1"));
+    addMessage("alice", msg("m2"));
+    removeMessage("alice", "m1");
+    expect(getMessages("alice").map((m) => m.msg_id)).toEqual(["m2"]);
+    expect(peerOf("m1")).toBeUndefined();
+    expect(findMessage("alice", "m2")?.text).toBe("m2");
+    expect(findMessage("bob", "m2")).toBeUndefined();
   });
 
   it("forgets one conversation and keeps the others", () => {

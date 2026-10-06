@@ -114,6 +114,31 @@ pub(crate) enum Request {
     Shutdown,
 }
 
+/// How far around the UI's time a deleted message is looked for: the UI
+/// stamps outgoing messages itself, a few milliseconds off the core.
+const DELETE_WINDOW_MS: u64 = 60_000;
+
+/// Store operations that go with deleting `msg` besides its own row: its
+/// status, a media note's key, where a file was saved. Returns the media
+/// note whose sealed copy must go too.
+fn deletion_ops(msg: &StoredMessage, ops: &mut Vec<store::Op>) -> Option<FileId> {
+    ops.push(store::Op::Delete(
+        Table::MessageStatus.name(),
+        msg.msg_id.to_vec(),
+    ));
+    match &msg.content {
+        Content::File { file_id, kind, .. } if kind.is_media() => {
+            ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
+            Some(*file_id)
+        }
+        Content::File { file_id, .. } => {
+            ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
+            None
+        }
+        Content::Text { .. } => None,
+    }
+}
+
 /// A file about to be offered: its id, where it is, the name it goes by.
 struct Pick {
     file_id: FileId,
@@ -208,13 +233,19 @@ impl Client {
         self.send(Request::Command(cmd)).await
     }
 
-    pub async fn send_text(&self, peer: PeerId, text: String) -> Result<MsgId, ClientError> {
+    /// Sends a text message, optionally answering `reply_to`.
+    pub async fn send_text(
+        &self,
+        peer: PeerId,
+        text: String,
+        reply_to: Option<MsgId>,
+    ) -> Result<MsgId, ClientError> {
         let msg_id = MsgId::random(&mut OsRng);
         self.command(Command::SendText {
             peer,
             msg_id,
             text,
-            reply_to: None,
+            reply_to,
         })
         .await?;
         Ok(msg_id)
@@ -504,24 +535,57 @@ impl Client {
         let mut media = Vec::new();
         for (key, sealed) in rows {
             if let Ok(msg) = self.vault.open_message(&key, &sealed) {
-                ops.push(store::Op::Delete(
-                    Table::MessageStatus.name(),
-                    msg.msg_id.to_vec(),
-                ));
-                match msg.content {
-                    Content::File { file_id, kind, .. } if kind.is_media() => {
-                        ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
-                        media.push(file_id);
-                    }
-                    Content::File { file_id, .. } => {
-                        ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
-                    }
-                    Content::Text { .. } => {}
-                }
+                media.extend(deletion_ops(&msg, &mut ops));
             }
             ops.push(store::Op::Delete(Table::Messages.name(), key));
         }
         self.store.apply(ops).await?;
+        self.remove_media_files(media).await
+    }
+
+    /// Deletes one message from this device: its row, status, media and
+    /// where its file was saved (the file itself stays). One still going out
+    /// is not sent any more; a file still moving is cancelled. `near_ms` is
+    /// the message's time as the UI knows it, within a minute.
+    pub async fn delete_message(
+        &self,
+        peer: PeerId,
+        msg_id: MsgId,
+        near_ms: u64,
+    ) -> Result<(), ClientError> {
+        let from = message_key(
+            &peer,
+            near_ms.saturating_sub(DELETE_WINDOW_MS),
+            &MsgId([0; 16]),
+        );
+        let to = message_key(
+            &peer,
+            near_ms.saturating_add(DELETE_WINDOW_MS),
+            &MsgId([0xFF; 16]),
+        );
+        let (key, sealed) = self
+            .store
+            .range_desc(Table::Messages.name(), from, to, usize::MAX)
+            .await?
+            .into_iter()
+            .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
+            .ok_or(ClientError::NotFound)?;
+        let msg = self.vault.open_message(&key, &sealed)?;
+        self.command(Command::DiscardOutgoing { msg_id }).await?;
+        if let Content::File { file_id, .. } = &msg.content {
+            self.command(Command::CancelTransfer { file_id: *file_id })
+                .await?;
+        }
+        let mut ops = vec![store::Op::Delete(Table::Messages.name(), key)];
+        let media = deletion_ops(&msg, &mut ops);
+        self.store.apply(ops).await?;
+        self.remove_media_files(media).await
+    }
+
+    async fn remove_media_files(
+        &self,
+        media: impl IntoIterator<Item = FileId>,
+    ) -> Result<(), ClientError> {
         for file_id in media {
             match tokio::fs::remove_file(self.config.media_path(&file_id)).await {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),

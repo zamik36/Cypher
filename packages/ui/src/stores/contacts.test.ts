@@ -30,6 +30,7 @@ describe("contacts", () => {
           timestamp: 20,
           status: "delivered",
           file: null,
+          reply_to: null,
         },
         unread: 2,
       },
@@ -63,6 +64,18 @@ describe("contacts", () => {
     expect(contacts["p3"]?.last?.status).toBe("sent");
     setLastStatus("p3", "me1", "read");
     expect(contacts["p3"]?.last?.status).toBe("read");
+  });
+
+  it("show another last message after a deletion", async () => {
+    const { noteMessage, setLastMessage, contacts } = await load();
+    noteMessage("p4", msg("p4", 5), false);
+    setLastMessage("p4", msg("p4", 2));
+    expect(contacts["p4"]?.last?.timestamp).toBe(2);
+    expect(contacts["p4"]?.lastAt).toBe(2);
+    setLastMessage("p4", null);
+    expect(contacts["p4"]?.last).toBeNull();
+    setLastMessage("nobody", null);
+    expect(contacts["nobody"]).toBeUndefined();
   });
 
   it("hold the profile's own nickname", async () => {

@@ -415,6 +415,35 @@ async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
     assert_eq!(received["msg_id"], msg_id);
     let read = json!({ "peerId": a_id, "msgIds": [msg_id, "zz"] });
     b.call("mark_read", read).await.unwrap();
+
+    // An answer, then deleting it on this device only.
+    let answer = json!({ "peerId": a_id, "text": "и тебе", "replyTo": msg_id });
+    let answer_id = text(&b.call("send_message", answer).await.unwrap());
+    let history = json!({ "peerId": a_id, "limit": 10, "before": null });
+    let mine = eventually(|| async {
+        let list = b.call("get_history", history.clone()).await.ok()?;
+        list.as_array()?
+            .iter()
+            .find(|m| m["msg_id"] == answer_id.as_str())
+            .cloned()
+    })
+    .await;
+    assert_eq!(mine["reply_to"], msg_id);
+    let delete = json!({ "peerId": a_id, "msgId": answer_id, "timestamp": mine["timestamp"] });
+    b.call("delete_message", delete.clone()).await.unwrap();
+    let left = b.call("get_history", history).await.unwrap();
+    assert!(
+        left.as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["msg_id"] != answer_id.as_str())
+    );
+    b.call("delete_message", delete).await.unwrap_err();
+    let bad = json!({ "peerId": a_id, "text": "x", "replyTo": "zz" });
+    assert_eq!(
+        b.call("send_message", bad).await.unwrap_err(),
+        "invalid message id"
+    );
 }
 
 /// Everything after the microphone: stop, encode, send, and the peer's copy.

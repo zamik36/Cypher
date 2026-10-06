@@ -73,6 +73,13 @@ export function setLastStatus(peerId: string, msgId: string, status: MessageStat
   if (contacts[peerId]?.last?.msg_id === msgId) setContacts(peerId, "last", "status", status);
 }
 
+/** Puts `message` (or nothing) as the list's preview, e.g. after a deletion. */
+export function setLastMessage(peerId: string, message: ChatMessage | null): void {
+  if (!contacts[peerId]) return;
+  setContacts(peerId, "last", message);
+  if (message) setContacts(peerId, "lastAt", message.timestamp);
+}
+
 export function markConversationRead(peerId: string): void {
   if (contacts[peerId]?.unread) setContacts(peerId, "unread", 0);
 }

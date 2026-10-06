@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import "./Chat.css";
+import ActionMenu, { type MenuAction } from "../components/ActionMenu";
 import Avatar from "../components/Avatar";
 import Icon from "../components/Icon";
 import SafetyNumber from "../components/SafetyNumber";
@@ -12,22 +13,33 @@ import VoiceBubble from "../components/media/VoiceBubble";
 import { api, type ChatMessage, type MediaSent, type UiFile } from "../platform";
 import {
   addMessage,
+  findMessage,
   getMessages,
   hasOlder,
   historyLoaded,
   mergeHistory,
   prependHistory,
+  removeMessage,
   setHasOlder,
 } from "../stores/chat";
-import { avatarName, contacts, displayName, markConversationRead, noteMessage } from "../stores/contacts";
+import {
+  avatarName,
+  contacts,
+  displayName,
+  markConversationRead,
+  noteMessage,
+  setLastMessage,
+} from "../stores/contacts";
+import { clearDraft, draftOf, setDraftText, setReplyTo } from "../stores/drafts";
 import { isWide } from "../stores/layout";
 import { back, push } from "../stores/nav";
 import { windowActive } from "../stores/presence";
 import { upsertTransfer } from "../stores/transfers";
 import { trackMedia } from "../stores/media";
-import { toastError } from "../stores/toasts";
+import { addToast, toastError } from "../stores/toasts";
+import { copyText } from "../utils/clipboard";
 import { dayLabel, formatTime } from "../utils/format";
-import { isMine, ME, noteOf, toChatMessage } from "../utils/messages";
+import { isMine, ME, noteOf, previewOf, toChatMessage } from "../utils/messages";
 import { buildTimeline } from "../utils/timeline";
 import { locale, t } from "../i18n";
 
@@ -37,10 +49,52 @@ const HISTORY_PAGE = 50;
 const STICK_PX = 120;
 /** The composer grows up to this height, then scrolls. */
 const COMPOSER_MAX_PX = 144;
+/** A touch held this long opens a message's menu. */
+const LONG_PRESS_MS = 450;
+/** Pages of older history searched for a quoted message before giving up. */
+const QUOTE_SEARCH_PAGES = 10;
 
-function MessageBubble(props: { msg: ChatMessage; first: boolean; last: boolean }) {
+/** One line naming a message: who wrote it, and what it says or carries. */
+function Quote(props: { peerId: string; msg: ChatMessage | undefined }) {
+  const author = () => {
+    const msg = props.msg;
+    if (!msg) return "";
+    return isMine(msg) ? t().reply_you : displayName(props.peerId);
+  };
+  return (
+    <>
+      <span class="quote__author">{author()}</span>
+      <span class="quote__text">
+        <Show when={props.msg} fallback={t().reply_unavailable}>
+          {(msg) => {
+            const preview = () => previewOf(msg());
+            return (
+              <>
+                <Show when={preview().icon}>{(icon) => <Icon name={icon()} size={14} />}</Show> {preview().text}
+              </>
+            );
+          }}
+        </Show>
+      </span>
+    </>
+  );
+}
+
+function MessageBubble(props: {
+  peerId: string;
+  msg: ChatMessage;
+  first: boolean;
+  last: boolean;
+  onMenu: (msg: ChatMessage, anchor: HTMLElement) => void;
+  onQuote: (msgId: string) => void;
+}) {
+  let row: HTMLDivElement | undefined;
+  let press: ReturnType<typeof setTimeout> | undefined;
   const mine = () => isMine(props.msg);
   const note = () => noteOf(props.msg);
+  const menu = () => row && props.onMenu(props.msg, row.querySelector<HTMLElement>(".bubble, .msg__round") ?? row);
+  const quoted = () => props.msg.reply_to;
+  onCleanup(() => clearTimeout(press));
   const meta = () => (
     <span class="msg__meta">
       <span>{formatTime(props.msg.timestamp, locale())}</span>
@@ -49,14 +103,38 @@ function MessageBubble(props: { msg: ChatMessage; first: boolean; last: boolean 
   );
   return (
     <div
+      ref={row}
       class="msg"
       classList={{ "msg--out": mine(), "msg--in": !mine(), "msg--first": props.first, "msg--last": props.last }}
       data-testid="message"
       data-dir={mine() ? "out" : "in"}
+      data-msg-id={props.msg.msg_id}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        menu();
+      }}
+      onPointerDown={(e) => {
+        if (e.pointerType !== "touch") return;
+        clearTimeout(press);
+        press = setTimeout(menu, LONG_PRESS_MS);
+      }}
+      onPointerUp={() => clearTimeout(press)}
+      onPointerCancel={() => clearTimeout(press)}
+      onPointerMove={() => clearTimeout(press)}
     >
+      <button class="msg__more" aria-label={t().msg_actions} onClick={menu}>
+        <Icon name="more" size={18} />
+      </button>
       <Switch
         fallback={
           <div class="bubble">
+            <Show when={quoted()}>
+              {(id) => (
+                <button class="quote" onClick={() => props.onQuote(id())}>
+                  <Quote peerId={props.peerId} msg={findMessage(props.peerId, id())} />
+                </button>
+              )}
+            </Show>
             <span class="bubble__text">{props.msg.text}</span>
             {meta()}
           </div>
@@ -91,7 +169,10 @@ function MessageBubble(props: { msg: ChatMessage; first: boolean; last: boolean 
 }
 
 export default function ChatScreen(props: { peerId: string }) {
-  const [draft, setDraft] = createSignal("");
+  const draft = () => draftOf(props.peerId).text;
+  const setDraft = (text: string) => setDraftText(props.peerId, text);
+  const replyTo = () => draftOf(props.peerId).replyTo;
+  const [menuFor, setMenuFor] = createSignal<{ msg: ChatMessage; anchor: HTMLElement } | null>(null);
   const [loading, setLoading] = createSignal(untrack(() => !historyLoaded(props.peerId)));
   const [loadingOlder, setLoadingOlder] = createSignal(false);
   const [verifying, setVerifying] = createSignal(false);
@@ -194,18 +275,104 @@ export default function ChatScreen(props: { peerId: string }) {
     composer.style.height = `${Math.min(composer.scrollHeight, COMPOSER_MAX_PX)}px`;
   }
 
+  async function sendText(text: string, reply: string | null) {
+    const msgId = await api.sendMessage(props.peerId, text, reply ?? undefined);
+    remember({ msg_id: msgId, from: ME, text, timestamp: Date.now(), status: "pending", reply_to: reply });
+  }
+
   async function send() {
     const text = draft().trim();
     if (!text) return;
-    setDraft("");
+    const reply = replyTo();
+    clearDraft(props.peerId);
     queueMicrotask(resizeComposer);
     try {
-      const msgId = await api.sendMessage(props.peerId, text);
-      remember({ msg_id: msgId, from: ME, text, timestamp: Date.now(), status: "pending" });
+      await sendText(text, reply);
     } catch (e) {
       setDraft(text);
+      setReplyTo(props.peerId, reply);
       toastError(e);
     }
+  }
+
+  /** Removes a message here; the list shows the one before it. */
+  async function deleteHere(msg: ChatMessage) {
+    if (!msg.msg_id) return;
+    await api.deleteMessage(props.peerId, msg.msg_id, msg.timestamp);
+    removeMessage(props.peerId, msg.msg_id);
+    if (contacts[props.peerId]?.last?.msg_id === msg.msg_id) setLastMessage(props.peerId, messages().at(-1) ?? null);
+    if (replyTo() === msg.msg_id) setReplyTo(props.peerId, null);
+  }
+
+  async function deleteAndSay(msg: ChatMessage) {
+    await deleteHere(msg);
+    addToast(t().msg_deleted, "success");
+  }
+
+  /** Sends a failed text again as a new message, then drops the failed one. */
+  async function retry(msg: ChatMessage, text: string, reply: string | null) {
+    await sendText(text, reply);
+    await deleteHere(msg);
+  }
+
+  function actionsFor(msg: ChatMessage): MenuAction[] {
+    const tr = t();
+    const id = msg.msg_id;
+    const text = msg.file ? "" : msg.text;
+    const actions: MenuAction[] = [];
+    if (id) {
+      actions.push({
+        label: tr.msg_reply,
+        icon: "reply",
+        run: () => {
+          setReplyTo(props.peerId, id);
+          composer?.focus();
+        },
+      });
+    }
+    if (text) {
+      actions.push({
+        label: tr.msg_copy,
+        icon: "copy",
+        run: () => void copyText(text).then((ok) => ok && addToast(tr.msg_copied, "success")),
+      });
+    }
+    if (id && text && isMine(msg) && msg.status === "failed") {
+      const reply = msg.reply_to ?? null;
+      actions.push({
+        label: tr.msg_retry,
+        icon: "retry",
+        run: () => void retry(msg, text, reply).catch(toastError),
+      });
+    }
+    if (id) {
+      actions.push({
+        label: tr.msg_delete,
+        icon: "trash",
+        danger: true,
+        run: () => void deleteAndSay(msg).catch(toastError),
+      });
+    }
+    return actions;
+  }
+
+  /** Scrolls to a quoted message, loading older pages until it shows up. */
+  async function showQuoted(msgId: string) {
+    for (
+      let page = 0;
+      !findMessage(props.peerId, msgId) && hasOlder(props.peerId) && page < QUOTE_SEARCH_PAGES;
+      page++
+    ) {
+      await loadOlder();
+    }
+    const el = scroller?.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(msgId)}"]`);
+    if (!el) {
+      addToast(t().reply_unavailable, "info");
+      return;
+    }
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("msg--flash");
+    setTimeout(() => el.classList.remove("msg--flash"), 1200);
   }
 
   async function attach() {
@@ -239,6 +406,13 @@ export default function ChatScreen(props: { peerId: string }) {
   }
 
   function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape" && replyTo()) {
+      // Cancels the answer before Escape would leave the chat.
+      e.preventDefault();
+      e.stopPropagation();
+      setReplyTo(props.peerId, null);
+      return;
+    }
     // On a phone Enter is a new line; the send button sends.
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(pointer: fine)").matches) {
       e.preventDefault();
@@ -299,7 +473,14 @@ export default function ChatScreen(props: { peerId: string }) {
                       </span>
                     </div>
                   ) : (
-                    <MessageBubble msg={item.message} first={item.first} last={item.last} />
+                    <MessageBubble
+                      peerId={props.peerId}
+                      msg={item.message}
+                      first={item.first}
+                      last={item.last}
+                      onMenu={(msg, anchor) => setMenuFor({ msg, anchor })}
+                      onQuote={(id) => void showQuoted(id)}
+                    />
                   )
                 }
               </For>
@@ -320,6 +501,32 @@ export default function ChatScreen(props: { peerId: string }) {
         <button class="chat__jump" onClick={toBottom} aria-label={t().chat_to_latest}>
           <Icon name="arrow-left" style={{ transform: "rotate(-90deg)" }} />
         </button>
+      </Show>
+
+      <Show when={menuFor()}>
+        {(open) => (
+          <ActionMenu
+            anchor={open().anchor}
+            align={isMine(open().msg) ? "end" : "start"}
+            actions={actionsFor(open().msg)}
+            label={t().msg_actions}
+            onClose={() => setMenuFor(null)}
+          />
+        )}
+      </Show>
+
+      <Show when={replyTo()}>
+        {(id) => (
+          <div class="reply-bar">
+            <Icon name="reply" size={18} />
+            <span class="reply-bar__quote quote">
+              <Quote peerId={props.peerId} msg={findMessage(props.peerId, id())} />
+            </span>
+            <button class="icon-btn" aria-label={t().reply_cancel} onClick={() => setReplyTo(props.peerId, null)}>
+              <Icon name="x" size={18} />
+            </button>
+          </div>
+        )}
       </Show>
 
       <footer class="composer">

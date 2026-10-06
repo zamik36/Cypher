@@ -14,17 +14,43 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum JsCommand {
     CreateLink,
-    JoinLink { link: String },
-    SendText { peer: String, text: String },
+    JoinLink {
+        link: String,
+    },
+    SendText {
+        peer: String,
+        text: String,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
+    DiscardOutgoing {
+        msg_id: String,
+    },
     SendFile(JsFile),
-    AcceptFile { file_id: String },
-    CancelTransfer { file_id: String },
-    MarkRead { peer: String, ids: Vec<String> },
+    AcceptFile {
+        file_id: String,
+    },
+    CancelTransfer {
+        file_id: String,
+    },
+    MarkRead {
+        peer: String,
+        ids: Vec<String>,
+    },
     FetchInbox,
-    SetAnonymity { require_onion: bool },
-    RemovePeer { peer: String },
-    RenamePeer { peer: String, alias: Option<String> },
-    SetProfileName { name: Option<String> },
+    SetAnonymity {
+        require_onion: bool,
+    },
+    RemovePeer {
+        peer: String,
+    },
+    RenamePeer {
+        peer: String,
+        alias: Option<String>,
+    },
+    SetProfileName {
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,14 +106,21 @@ impl JsCommand {
         Ok(match self {
             Self::CreateLink => plain(Command::CreateLink),
             Self::JoinLink { link } => plain(Command::JoinLink { link }),
-            Self::SendText { peer: p, text } => {
+            Self::SendText {
+                peer: p,
+                text,
+                reply_to,
+            } => {
                 let msg_id = MsgId::random(rng);
+                let reply_to = reply_to
+                    .map(|h| MsgId::from_hex(&h).ok_or(CommandError::Message))
+                    .transpose()?;
                 Prepared {
                     command: Command::SendText {
                         peer: peer(&p)?,
                         msg_id,
                         text,
-                        reply_to: None,
+                        reply_to,
                     },
                     msg_id: Some(msg_id),
                     file_id: None,
@@ -108,6 +141,9 @@ impl JsCommand {
                     .collect::<Result<_, _>>()?,
             }),
             Self::FetchInbox => plain(Command::FetchInbox),
+            Self::DiscardOutgoing { msg_id } => plain(Command::DiscardOutgoing {
+                msg_id: MsgId::from_hex(&msg_id).ok_or(CommandError::Message)?,
+            }),
             Self::SetAnonymity { require_onion } => plain(Command::SetAnonymity { require_onion }),
             Self::RemovePeer { peer: p } => plain(Command::RemovePeer { peer: peer(&p)? }),
             Self::RenamePeer { peer: p, alias } => plain(Command::RenamePeer {

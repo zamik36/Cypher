@@ -70,8 +70,9 @@ export const webPlatform: Platform = {
   applyAnonymousSettings: (anonymous) => call("setAnonymity", anonymous),
   createLink: async (): Promise<LinkInfo> => ({ link_id: await call("createLink") }),
   joinLink: (linkId) => call("joinLink", linkId),
-  sendMessage: async (peerId, text) => {
-    const { msgId } = await call("command", { type: "send_text", peer: peerId, text });
+  deleteMessage: (peerId, msgId, timestamp) => call("deleteMessage", peerId, msgId, timestamp),
+  sendMessage: async (peerId, text, replyTo) => {
+    const { msgId } = await call("command", { type: "send_text", peer: peerId, text, reply_to: replyTo ?? null });
     return msgId ?? "";
   },
   markRead: async (peerId, msgIds) => {

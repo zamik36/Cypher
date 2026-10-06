@@ -342,6 +342,10 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    pub(super) fn discard_outgoing(&mut self, msg_id: &MsgId) {
+        self.drop_outbox(msg_id);
+    }
+
     fn drop_outbox(&mut self, msg_id: &MsgId) {
         if self.outbox.remove(msg_id).is_some() {
             self.persist(StoreOp::Delete {

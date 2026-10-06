@@ -148,7 +148,7 @@ async fn pair_through_a_link(a: &mut Peer, b: &mut Peer) {
 async fn chat_both_ways(a: &mut Peer, b: &mut Peer) {
     let hi = a
         .client
-        .send_text(b.client.peer_id(), "привет".into())
+        .send_text(b.client.peer_id(), "привет".into(), None)
         .await
         .unwrap();
     assert_eq!(b.text_from_peer().await, "привет");
@@ -160,11 +160,21 @@ async fn chat_both_ways(a: &mut Peer, b: &mut Peer) {
         _ => None,
     })
     .await;
+    // An answer carries what it answers.
     b.client
-        .send_text(a.client.peer_id(), "hi back".into())
+        .send_text(a.client.peer_id(), "hi back".into(), Some(hi))
         .await
         .unwrap();
-    assert_eq!(a.text_from_peer().await, "hi back");
+    let answered = a
+        .wait(|e| match e {
+            Event::Message(m) if !m.outgoing => match &m.content {
+                Content::Text { reply_to, .. } => Some(*reply_to),
+                Content::File { .. } => None,
+            },
+            _ => None,
+        })
+        .await;
+    assert_eq!(answered, Some(hi));
 
     let history = b
         .client
@@ -176,6 +186,24 @@ async fn chat_both_ways(a: &mut Peer, b: &mut Peer) {
             .iter()
             .any(|m| matches!(&m.content, Content::Text { text, .. } if text == "привет"))
     );
+
+    // Deleted on this device only, found from a time a little off.
+    let mine = history.iter().find(|m| m.outgoing).unwrap();
+    b.client
+        .delete_message(a.client.peer_id(), mine.msg_id, mine.sent_at_ms + 3)
+        .await
+        .unwrap();
+    let left = b
+        .client
+        .history(a.client.peer_id(), None, 50)
+        .await
+        .unwrap();
+    assert!(left.iter().all(|m| m.msg_id != mine.msg_id));
+    assert_eq!(left.len(), history.len() - 1);
+    b.client
+        .delete_message(a.client.peer_id(), mine.msg_id, mine.sent_at_ms)
+        .await
+        .unwrap_err();
 }
 
 /// Sends a file; both sides remember where it is. Returns its id.
@@ -344,7 +372,7 @@ async fn deliver_offline_through_the_inbox(target: &Target, a: &mut Peer, b: Pee
     tokio::time::sleep(Duration::from_millis(500)).await;
     let queued = a
         .client
-        .send_text(b_id, "пока тебя не было".into())
+        .send_text(b_id, "пока тебя не было".into(), None)
         .await
         .unwrap();
     a.wait(|e| match e {

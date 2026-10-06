@@ -38,6 +38,8 @@ export interface Methods {
     last: unknown;
     unread: number;
   }[];
+  /** Deletes one message from this device; `timestamp` within a minute of its own. */
+  deleteMessage(peer: string, msgId: string, timestamp: number): void;
   /** Ends the session with `peer` and deletes the conversation. */
   forgetPeer(peer: string): void;
   history(peer: string, limit: number, before?: number): unknown[];

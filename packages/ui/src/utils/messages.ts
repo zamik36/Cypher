@@ -14,6 +14,7 @@ export function toChatMessage(peerId: string, m: UiMessage): ChatMessage {
     timestamp: m.timestamp,
     status: m.status,
     file: m.file,
+    reply_to: m.reply_to,
   };
 }
 

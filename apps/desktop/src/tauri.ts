@@ -54,7 +54,9 @@ export const tauriPlatform: Platform = {
   applyAnonymousSettings: (anonymous, bridges) => command("apply_anonymous_settings", { anonymous, bridges }),
   createLink: () => invoke<LinkInfo>("create_link"),
   joinLink: (linkId) => invoke<string>("join_link", { linkId }),
-  sendMessage: (peerId, text) => invoke<string>("send_message", { peerId, text }),
+  sendMessage: (peerId, text, replyTo) => invoke<string>("send_message", { peerId, text, replyTo: replyTo ?? null }),
+  deleteMessage: (peerId, msgId, timestamp) =>
+    command("delete_message", { peerId, msgId, timestamp: Math.round(timestamp) }),
   markRead: (peerId, msgIds) => command("mark_read", { peerId, msgIds }),
   pickAndSend: (peerId) => invoke<TransferInfo[]>("browse_and_send", { peerId }),
   acceptFile: (fileId) => command("accept_file", { fileId }),

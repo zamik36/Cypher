@@ -260,6 +260,19 @@ fn queued_outbox_is_delivered_after_sender_restart() {
     assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
 }
 
+#[test]
+fn a_message_deleted_before_it_went_out_is_never_sent() {
+    let mut w = paired();
+    w.disconnect(A);
+    let kept = w.send_text(A, B, "this one goes");
+    let gone = w.send_text(A, B, "never mind");
+    w.command(A, Command::DiscardOutgoing { msg_id: gone });
+    w.restart(A);
+    assert_eq!(w.texts(B), ["this one goes"]);
+    assert_eq!(w.status_of(A, kept), Some(MessageStatus::Delivered));
+    assert_eq!(w.status_of(A, gone), None);
+}
+
 fn offer_file(
     w: &mut World,
     from: usize,

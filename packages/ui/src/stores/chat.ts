@@ -40,6 +40,17 @@ export function setMessageStatus(msgId: string, status: MessageStatus) {
   setChatsByPeer(peerId, (m) => m.msg_id === msgId, "status", status);
 }
 
+/** Drops one message from its conversation (after it was deleted). */
+export function removeMessage(peerId: string, msgId: string): void {
+  peerOfMessage.delete(msgId);
+  setChatsByPeer(peerId, (list) => list.filter((m) => m.msg_id !== msgId));
+}
+
+/** A loaded message of `peerId` by id. */
+export function findMessage(peerId: string, msgId: string): ChatMessage | undefined {
+  return chatsByPeer[peerId]?.find((m) => m.msg_id === msgId);
+}
+
 export function peerOf(msgId: string): string | undefined {
   return peerOfMessage.get(msgId);
 }

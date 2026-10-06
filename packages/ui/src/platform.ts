@@ -39,6 +39,8 @@ export interface ChatMessage {
   timestamp: number;
   status?: MessageStatus;
   file?: UiFile | null;
+  /** The message this one answers. */
+  reply_to?: string | null;
 }
 
 export interface UiMessage {
@@ -49,6 +51,7 @@ export interface UiMessage {
   timestamp: number;
   status: MessageStatus;
   file: UiFile | null;
+  reply_to: string | null;
 }
 
 export interface TransferInfo {
@@ -142,7 +145,9 @@ export interface Platform {
   applyAnonymousSettings(anonymous: boolean, bridges: string[]): Promise<void>;
   createLink(): Promise<LinkInfo>;
   joinLink(linkId: string): Promise<string>;
-  sendMessage(peerId: string, text: string): Promise<string>;
+  sendMessage(peerId: string, text: string, replyTo?: string): Promise<string>;
+  /** Deletes a message from this device only; `timestamp` as the UI shows it. */
+  deleteMessage(peerId: string, msgId: string, timestamp: number): Promise<void>;
   markRead(peerId: string, msgIds: string[]): Promise<void>;
   /** Lets the user pick files and offers them to `peerId`. */
   pickAndSend(peerId: string): Promise<TransferInfo[]>;

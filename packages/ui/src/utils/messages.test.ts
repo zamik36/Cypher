@@ -21,6 +21,7 @@ describe("messages", () => {
       timestamp: 5,
       status: "read",
       file: null,
+      reply_to: "m0",
     };
     expect(toChatMessage("peer", stored)).toEqual({
       msg_id: "m",
@@ -29,6 +30,7 @@ describe("messages", () => {
       timestamp: 5,
       status: "read",
       file: null,
+      reply_to: "m0",
     });
     expect(isMine(toChatMessage("peer", stored))).toBe(true);
     expect(isMine(toChatMessage("peer", { ...stored, outgoing: false }))).toBe(false);

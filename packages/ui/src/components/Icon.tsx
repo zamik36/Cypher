@@ -89,6 +89,13 @@ const PATHS = {
     "m2 2 20 20",
   ],
   "message-circle": ["M7.9 20A9 9 0 1 0 4 16.1L2 22Z"],
+  reply: ["m9 17-5-5 5-5", "M20 18v-2a4 4 0 0 0-4-4H4"],
+  more: [
+    "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+    "M19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+    "M5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+  ],
+  retry: ["M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8", "M3 3v5h5"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type IconName = keyof typeof PATHS;

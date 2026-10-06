@@ -88,6 +88,120 @@
   margin-top: var(--sp-2);
 }
 
+/* Actions: right click or a long press anywhere, or this button on hover. */
+.msg {
+  position: relative;
+}
+
+.msg__more {
+  position: absolute;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--c-muted);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.msg--out .msg__more {
+  right: calc(100% + var(--sp-1));
+}
+
+.msg--in .msg__more {
+  left: calc(100% + var(--sp-1));
+}
+
+.msg__more:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+@media (hover: hover) {
+  .msg:hover .msg__more,
+  .msg__more:focus-visible {
+    opacity: 1;
+  }
+}
+
+@media (hover: none) {
+  .msg__more {
+    display: none;
+  }
+}
+
+/* A quoted message jumped to from a reply. */
+.msg--flash .bubble,
+.msg--flash .msg__round {
+  animation: msg-flash 1.2s var(--ease);
+}
+
+@keyframes msg-flash {
+  20% {
+    box-shadow: 0 0 0 3px var(--c-accent);
+  }
+}
+
+/* A reply's quote of what it answers, in the bubble and above the composer. */
+.quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  max-width: 100%;
+  margin-bottom: var(--sp-1);
+  padding: 2px var(--sp-2);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--r-sm);
+  background: var(--c-accent-soft);
+  color: inherit;
+  font-size: var(--t-sm);
+  line-height: var(--t-sm-lh);
+  text-align: left;
+}
+
+button.quote {
+  width: 100%;
+}
+
+.quote__author {
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.quote__text {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  overflow: hidden;
+  color: var(--c-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-2) var(--sp-2) 0 var(--sp-4);
+  border-top: 1px solid var(--c-border);
+  background: var(--c-bg);
+  color: var(--c-accent);
+}
+
+.reply-bar__quote {
+  flex: 1;
+  margin: 0;
+}
+
+.reply-bar + .composer {
+  border-top: none;
+}
+
 .msg--out {
   align-self: flex-end;
   align-items: flex-end;

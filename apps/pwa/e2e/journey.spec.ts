@@ -34,8 +34,13 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
     await expect(incoming(alice).getByText("hello alice")).toBeVisible();
     // Alice has the chat open, so the message is marked read.
     await expect(outgoing(bob).locator('[data-testid="message-status"][data-status="read"]')).toBeVisible();
+    // Alice answers that message: the reply carries a quote of it.
+    await incoming(alice).filter({ hasText: "hello alice" }).click({ button: "right" });
+    await alice.getByRole("menuitem", { name: "Reply" }).click();
     await say(alice, "hi bob");
-    await expect(incoming(bob).getByText("hi bob")).toBeVisible();
+    const reply = incoming(bob).filter({ hasText: "hi bob" });
+    await expect(reply).toBeVisible();
+    await expect(reply.locator(".quote")).toContainText("hello alice");
     // The chat list shows the conversation with its last message.
     await expect(bob.getByTestId("chat-row").first()).toContainText("hi bob");
   });
@@ -82,7 +87,7 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
     await unlock(alice);
     await openFirstChat(alice);
     for (const text of ["hello alice", "hi bob", "while you were away"]) {
-      await expect(messages(alice).getByText(text)).toBeVisible();
+      await expect(messages(alice).locator(".bubble__text", { hasText: text })).toBeVisible();
     }
     await expect(alice.getByTestId("day-separator")).toHaveCount(1);
 
@@ -104,6 +109,20 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
     await alice.goBack();
     await expect(alice.getByTestId("chat-header")).toContainText("Bob");
     await expect(alice.getByTestId("chat-row").first()).toContainText("Bob");
+  });
+
+  await test.step("a message deleted here stays deleted", async () => {
+    await say(alice, "oops, wrong chat");
+    const oops = outgoing(alice).filter({ hasText: "oops, wrong chat" });
+    await expect(oops).toBeVisible();
+    await oops.click({ button: "right" });
+    await alice.getByRole("menuitem", { name: "Delete for me" }).click();
+    await expect(oops).toHaveCount(0);
+    await alice.reload();
+    await unlock(alice);
+    await openFirstChat(alice);
+    await expect(messages(alice).getByText("hi bob")).toBeVisible();
+    await expect(messages(alice).getByText("oops, wrong chat")).toHaveCount(0);
   });
 
   await test.step("clearing history removes it from the screen and the device", async () => {
