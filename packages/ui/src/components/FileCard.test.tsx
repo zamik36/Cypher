@@ -15,7 +15,7 @@ const calls = {
 function platform(kind: "desktop" | "web", saved: readonly string[]) {
   registerPlatform({
     kind,
-    capabilities: { tor: false, gatewayConfig: false, revealFile: kind === "desktop" },
+    capabilities: { tor: false, gatewayConfig: false, revealFile: kind === "desktop", streamMedia: false },
     fileSaved: (id: string) => Promise.resolve(saved.includes(id)),
     imageUrl: (id: string) => Promise.resolve(`blob:picture-${id}`),
     ...calls,

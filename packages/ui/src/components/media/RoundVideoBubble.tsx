@@ -1,6 +1,6 @@
 import { createMemo, createSignal, onCleanup, Show } from "solid-js";
 import { api, type UiFile } from "../../platform";
-import { mediaProgress, mediaReady } from "../../stores/media";
+import { mediaPlayable, mediaProgress, mediaReady } from "../../stores/media";
 import { addToast, toastError } from "../../stores/toasts";
 import { t } from "../../i18n";
 import { claimPlayback, formatDuration } from "./player";
@@ -28,10 +28,11 @@ export default function RoundVideoBubble(props: { file: UiFile }) {
   });
 
   const durationMs = () => props.file.duration_ms ?? 0;
-  const ring = () => (mediaReady(props.file.file_id) ? position() : mediaProgress(props.file.file_id));
+  // The download's progress until the note is in or playing, then its own.
+  const ring = () => (mediaReady(props.file.file_id) || playing() ? position() : mediaProgress(props.file.file_id));
 
   async function toggle() {
-    if (!mediaReady(props.file.file_id)) {
+    if (!mediaPlayable(props.file.file_id, api.capabilities.streamMedia)) {
       addToast(t().media_downloading, "info");
       return;
     }

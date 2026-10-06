@@ -1,7 +1,7 @@
 import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import Icon from "../Icon";
 import { api, type UiFile } from "../../platform";
-import { mediaProgress, mediaReady } from "../../stores/media";
+import { mediaPlayable, mediaProgress } from "../../stores/media";
 import { addToast, toastError } from "../../stores/toasts";
 import { t } from "../../i18n";
 import { claimPlayback, formatDuration } from "./player";
@@ -21,6 +21,8 @@ export default function VoiceBubble(props: { file: UiFile; meta?: JSX.Element })
     return w.length > 0 ? w : new Array<number>(64).fill(0);
   };
 
+  const playable = () => mediaPlayable(props.file.file_id, api.capabilities.streamMedia);
+
   async function element(): Promise<HTMLAudioElement> {
     if (audio) return audio;
     const el = new Audio(await api.mediaUrl(props.file.file_id));
@@ -38,7 +40,7 @@ export default function VoiceBubble(props: { file: UiFile; meta?: JSX.Element })
   }
 
   async function toggle() {
-    if (!mediaReady(props.file.file_id)) {
+    if (!playable()) {
       addToast(t().media_downloading, "info");
       return;
     }
@@ -75,7 +77,7 @@ export default function VoiceBubble(props: { file: UiFile; meta?: JSX.Element })
     <div class="voice-bubble">
       <button class="voice-play" onClick={toggle} aria-label={playing() ? t().media_pause : t().media_play}>
         <Show
-          when={mediaReady(props.file.file_id)}
+          when={playable()}
           fallback={<span class="voice-loading">{Math.round(mediaProgress(props.file.file_id) * 100)}%</span>}
         >
           <Icon name={playing() ? "pause" : "play"} size={18} fill="currentColor" stroke="none" />

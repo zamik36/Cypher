@@ -56,6 +56,9 @@ pub enum ClientError {
     InvalidInput,
     #[error("not found")]
     NotFound,
+    /// The bytes asked for are still on their way (a note being received).
+    #[error("not downloaded yet")]
+    NotReady,
 }
 
 #[derive(Clone)]

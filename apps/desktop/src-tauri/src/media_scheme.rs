@@ -1,9 +1,13 @@
 //! `cypher-media://<file_id>`: ranged playback of sealed voice and video
 //! notes. Each request decrypts only the chunks covering the asked range,
-//! so playback starts immediately and memory stays bounded.
+//! so playback starts immediately and memory stays bounded. A note still
+//! being received plays as far as it came; a request for bytes on their way
+//! waits for them.
 //!
 //! `cypher-media://preview-<file_id>`: a picture received or sent as a file,
 //! for its preview in the chat. Only images, only files this device keeps.
+
+use std::time::Duration;
 
 use cypher_client::{Client, ClientError, MediaSlice};
 use cypher_types::FileId;
@@ -108,8 +112,7 @@ pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Respon
         .map(parse_range);
     let result = match range {
         None => read_all(client, file_id).await.map(|s| (s, false)),
-        Some(Some(Range::From(start, end))) => client
-            .media_range(file_id, start, end)
+        Some(Some(Range::From(start, end))) => arrived(client, file_id, start, end)
             .await
             .map(|s| (s, true)),
         Some(Some(Range::Suffix(len))) => suffix(client, file_id, len).await.map(|s| (s, true)),
@@ -118,14 +121,37 @@ pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Respon
     match result {
         Ok((slice, partial)) => respond(slice, partial),
         Err(ClientError::InvalidInput) => status(StatusCode::RANGE_NOT_SATISFIABLE),
+        Err(ClientError::NotReady) => status(StatusCode::SERVICE_UNAVAILABLE),
         Err(_) => status(StatusCode::NOT_FOUND),
     }
 }
 
+/// How long a request waits for bytes of a note still being received.
+const ARRIVAL_WAIT: Duration = Duration::from_secs(30);
+const ARRIVAL_POLL: Duration = Duration::from_millis(150);
+
+/// `media_range`, waiting a while for a start that has not arrived yet.
+async fn arrived(
+    client: &Client,
+    file_id: FileId,
+    start: u64,
+    end: Option<u64>,
+) -> Result<MediaSlice, ClientError> {
+    let deadline = tokio::time::Instant::now() + ARRIVAL_WAIT;
+    loop {
+        match client.media_range(file_id, start, end).await {
+            Err(ClientError::NotReady) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(ARRIVAL_POLL).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 async fn read_all(client: &Client, file_id: FileId) -> Result<MediaSlice, ClientError> {
-    let mut slice = client.media_range(file_id, 0, None).await?;
+    let mut slice = arrived(client, file_id, 0, None).await?;
     while slice.end + 1 < slice.total {
-        let next = client.media_range(file_id, slice.end + 1, None).await?;
+        let next = arrived(client, file_id, slice.end + 1, None).await?;
         slice.bytes.extend_from_slice(&next.bytes);
         slice.end = next.end;
     }
@@ -133,10 +159,8 @@ async fn read_all(client: &Client, file_id: FileId) -> Result<MediaSlice, Client
 }
 
 async fn suffix(client: &Client, file_id: FileId, len: u64) -> Result<MediaSlice, ClientError> {
-    let total = client.media_range(file_id, 0, Some(0)).await?.total;
-    client
-        .media_range(file_id, total.saturating_sub(len), None)
-        .await
+    let total = arrived(client, file_id, 0, Some(0)).await?.total;
+    arrived(client, file_id, total.saturating_sub(len), None).await
 }
 
 fn respond(slice: MediaSlice, partial: bool) -> Response<Vec<u8>> {

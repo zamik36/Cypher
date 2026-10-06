@@ -138,6 +138,8 @@ export interface Capabilities {
   gatewayConfig: boolean;
   /** A received file can be shown in its folder (desktop). */
   revealFile: boolean;
+  /** A note plays while it is still downloading (ranged reads of what came). */
+  streamMedia: boolean;
 }
 
 export interface Platform {

@@ -42,7 +42,7 @@ async function command(cmd: string, args?: InvokeArgs): Promise<void> {
 
 export const tauriPlatform: Platform = {
   kind: "desktop",
-  capabilities: { tor: true, gatewayConfig: !isAndroid, revealFile: !isAndroid },
+  capabilities: { tor: true, gatewayConfig: !isAndroid, revealFile: !isAndroid, streamMedia: true },
   hasIdentity: () => invoke<boolean>("has_identity"),
   createIdentity: (nickname, passphrase) => invoke<string>("create_identity", { nickname, passphrase }),
   unlockIdentity: (passphrase) => invoke<[string, string]>("unlock_identity", { passphrase }),

@@ -64,7 +64,7 @@ function endpoints(): [string, string] {
 
 export const webPlatform: Platform = {
   kind: "web",
-  capabilities: { tor: false, gatewayConfig: false, revealFile: false },
+  capabilities: { tor: false, gatewayConfig: false, revealFile: false, streamMedia: false },
   hasIdentity: () => call("hasIdentity"),
   createIdentity: (nickname, passphrase) => call("createIdentity", nickname, passphrase),
   unlockIdentity: (passphrase) => call("unlockIdentity", passphrase),
