@@ -273,6 +273,10 @@ button.quote {
   user-select: none;
 }
 
+.msg--out .bubble .msg__meta {
+  color: var(--c-meta-out);
+}
+
 .bubble--media,
 .bubble--file {
   display: flex;

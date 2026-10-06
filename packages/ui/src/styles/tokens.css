@@ -19,6 +19,8 @@
   --c-on-accent: #062b1d;
   --c-accent-soft: #173328;
   --c-bubble-out: #1d3b30;
+  /* Time and ticks on an outgoing bubble, readable on its tint. */
+  --c-meta-out: #a3ada8;
   --c-bubble-in: var(--c-surface);
   --c-bubble-in-border: transparent;
   --c-danger: #e5534b;
@@ -55,14 +57,15 @@
   --c-border: #e3e6e4;
   --c-text: #121614;
   --c-muted: #5e6762;
-  --c-accent: #12936a;
-  --c-accent-pressed: #0f7d5a;
+  --c-accent: #0e7a57;
+  --c-accent-pressed: #0b6548;
   --c-on-accent: #ffffff;
   --c-accent-soft: #e3f4ec;
   --c-bubble-out: #ddf3ea;
+  --c-meta-out: var(--c-muted);
   --c-bubble-in: #ffffff;
   --c-bubble-in-border: var(--c-border);
-  --c-danger: #d6443c;
+  --c-danger: #b9362f;
   --c-danger-soft: #fbe9e8;
   --c-warning: #b9862a;
   --c-warning-soft: #f8efdc;
