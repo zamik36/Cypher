@@ -109,6 +109,8 @@ pub struct Core<R> {
     /// When a fresh session was last started with a contact, per contact.
     last_repair: HashMap<PeerId, u64>,
     recent: RecentIds,
+    /// Our messages the contact has read, so a late receipt cannot undo it.
+    read: RecentIds,
     progress_at: HashMap<FileId, u64>,
     anon: Anon,
     /// The name this user goes by, sent to contacts with `Hello`.
@@ -170,6 +172,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_resync: None,
             last_repair: HashMap::new(),
             recent: RecentIds::default(),
+            read: RecentIds::default(),
             progress_at: HashMap::new(),
             anon: Anon::default(),
             profile_name,
@@ -850,6 +853,10 @@ struct RecentIds {
 }
 
 impl RecentIds {
+    fn contains(&self, id: &MsgId) -> bool {
+        self.set.contains(id)
+    }
+
     /// Returns false when `id` was already seen.
     fn insert(&mut self, id: MsgId) -> bool {
         if !self.set.insert(id) {

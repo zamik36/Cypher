@@ -11,15 +11,16 @@ const historyMerged = new Set<string>();
 /** Peers with older stored messages not loaded yet. */
 const [olderExists, setOlderExists] = createStore<Record<string, boolean>>({});
 
-export function addMessage(peerId: string, msg: ChatMessage) {
+/** Adds a message to its conversation; false for one already there (sent again). */
+export function addMessage(peerId: string, msg: ChatMessage): boolean {
   if (msg.msg_id) {
-    if (peerOfMessage.has(msg.msg_id)) return;
+    if (peerOfMessage.has(msg.msg_id)) return false;
     peerOfMessage.set(msg.msg_id, peerId);
   }
   const list = chatsByPeer[peerId];
   if (!list) {
     setChatsByPeer(peerId, [msg]);
-    return;
+    return true;
   }
   setChatsByPeer(peerId, list.length, msg);
   if (list.length > MAX_IN_MEMORY) {
@@ -32,6 +33,7 @@ export function addMessage(peerId: string, msg: ChatMessage) {
       }),
     );
   }
+  return true;
 }
 
 export function setMessageStatus(msgId: string, status: MessageStatus) {

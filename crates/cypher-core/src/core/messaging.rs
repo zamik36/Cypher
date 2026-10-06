@@ -31,8 +31,10 @@ const MAX_OWN_LINKS: usize = 32;
 /// Strangers waiting for an answer at once; more are not let in.
 const MAX_PENDING_REQUESTS: usize = 20;
 
-/// An end-to-end message waiting for server acceptance. Stored as padded
-/// plaintext and encrypted at send time, so a session reset never strands it.
+/// An end-to-end message on its way. Stored as padded plaintext and
+/// encrypted at send time, so a session reset never strands it. A message
+/// the user sees stays after the server took it, until the contact's
+/// receipt: if their side could not read it, a fresh session sends it again.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct OutboxItem {
     pub msg_id: MsgId,
@@ -40,6 +42,8 @@ pub(crate) struct OutboxItem {
     envelope: Vec<u8>,
     /// User-visible message whose status the UI tracks.
     tracked: bool,
+    /// Taken by the server; waiting for the contact's receipt.
+    awaiting: bool,
     #[serde(skip)]
     in_flight: bool,
     #[serde(skip)]
@@ -51,8 +55,36 @@ pub(crate) struct OutboxItem {
 }
 
 impl crate::Record for OutboxItem {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
+
+    fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        /// Version 1: dropped once the server took it.
+        #[derive(Deserialize)]
+        struct V1 {
+            msg_id: MsgId,
+            peer: PeerId,
+            envelope: Vec<u8>,
+            tracked: bool,
+        }
+        if version != 1 {
+            return Err(CoreError::Storage);
+        }
+        let mut old: V1 = postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+        Ok(Self {
+            msg_id: old.msg_id,
+            peer: old.peer,
+            envelope: std::mem::take(&mut old.envelope),
+            tracked: old.tracked,
+            awaiting: false,
+            in_flight: false,
+            next_try: 0,
+            attempts: 0,
+        })
+    }
 }
+
+/// Messages to one contact kept for a receipt; older ones are let go.
+const MAX_AWAITING_PER_PEER: usize = 500;
 
 impl Drop for OutboxItem {
     fn drop(&mut self) {
@@ -280,6 +312,7 @@ impl<R: CryptoRngCore> Core<R> {
             peer,
             envelope,
             tracked,
+            awaiting: false,
             in_flight: false,
             next_try: 0,
             attempts: 0,
@@ -299,7 +332,7 @@ impl<R: CryptoRngCore> Core<R> {
         let due: Vec<MsgId> = self
             .outbox
             .values()
-            .filter(|i| !i.in_flight && i.next_try <= self.now)
+            .filter(|i| !i.in_flight && !i.awaiting && i.next_try <= self.now)
             .map(|i| i.msg_id)
             .collect();
         for id in due {
@@ -320,7 +353,7 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(peer) = self.peers.get_mut(&item.peer) else {
             return;
         };
-        if item.in_flight || !peer.ratchet.can_send() {
+        if item.in_flight || item.awaiting || !peer.ratchet.can_send() {
             return;
         }
         let Ok((header, ct)) = peer.ratchet.encrypt(&item.envelope, b"") else {
@@ -420,11 +453,52 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    /// The server took the message. Control traffic is done; a message the
+    /// user sees waits for the contact's receipt.
     fn complete_outbox(&mut self, msg_id: MsgId, status: MessageStatus) {
-        let tracked = self.outbox.get(&msg_id).is_some_and(|i| i.tracked);
-        self.drop_outbox(&msg_id);
-        if tracked {
-            self.set_status(msg_id, status);
+        let Some(item) = self.outbox.get_mut(&msg_id) else {
+            return;
+        };
+        if !item.tracked {
+            self.drop_outbox(&msg_id);
+            return;
+        }
+        item.awaiting = true;
+        item.in_flight = false;
+        let peer = item.peer;
+        self.persist_outbox(&msg_id);
+        self.set_status(msg_id, status);
+        self.trim_awaiting(&peer);
+    }
+
+    /// Keeps at most [`MAX_AWAITING_PER_PEER`] messages waiting for one
+    /// contact's receipts, letting the oldest go.
+    fn trim_awaiting(&mut self, peer: &PeerId) {
+        let mut waiting: Vec<(u64, MsgId)> = self
+            .outbox
+            .values()
+            .filter(|i| i.awaiting && i.peer == *peer)
+            .map(|i| {
+                let sent = Envelope::decode(&i.envelope).map_or(0, |e| e.sent_at_ms);
+                (sent, i.msg_id)
+            })
+            .collect();
+        if waiting.len() <= MAX_AWAITING_PER_PEER {
+            return;
+        }
+        waiting.sort_unstable();
+        let excess = waiting.len() - MAX_AWAITING_PER_PEER;
+        for (_, id) in waiting.into_iter().take(excess) {
+            self.drop_outbox(&id);
+        }
+    }
+
+    fn persist_outbox(&mut self, msg_id: &MsgId) {
+        if let Some(item) = self.outbox.get(msg_id) {
+            let op = self
+                .vault
+                .put(Table::Outbox, msg_id.to_vec(), item, &mut self.rng);
+            self.persist(op);
         }
     }
 
@@ -557,13 +631,24 @@ impl<R: CryptoRngCore> Core<R> {
         self.send_control(peer, hello);
     }
 
-    /// Makes in-flight messages for `peer` eligible for re-encryption on a
-    /// freshly established session.
+    /// Sends `peer`'s waiting messages again on a freshly established
+    /// session: those in flight, and those the server took but the contact
+    /// never confirmed (they may have been lost with the old session).
     fn requeue_for(&mut self, peer: &PeerId) {
+        let mut confirmed_none = Vec::new();
         for item in self.outbox.values_mut().filter(|i| i.peer == *peer) {
             item.in_flight = false;
             item.next_try = 0;
+            if item.awaiting {
+                item.awaiting = false;
+                confirmed_none.push(item.msg_id);
+            }
         }
+        for id in confirmed_none {
+            self.persist_outbox(&id);
+        }
+        // At once, so they arrive before anything written from now on.
+        self.flush_outbox();
     }
 
     pub(super) fn on_relay(&mut self, from: PeerId, body: &Bytes, via_inbox: bool) {
@@ -616,6 +701,10 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         };
         if !self.recent.insert(env.msg_id) {
+            // Sent again because our receipt was lost: confirm it again.
+            if matches!(env.body, Body::Text { .. } | Body::File { .. }) {
+                self.send_receipt(from, env.msg_id);
+            }
             return;
         }
         self.dispatch(from, env);
@@ -738,15 +827,27 @@ impl<R: CryptoRngCore> Core<R> {
                 self.send_receipt(from, msg_id);
             }
             Body::FileCtl(ctl) => self.on_file_ctl(from, ctl),
-            Body::Receipt { kind, ids } => {
-                let status = match kind {
-                    ReceiptKind::Delivered => MessageStatus::Delivered,
-                    ReceiptKind::Read => MessageStatus::Read,
-                };
-                for id in ids {
-                    self.set_status(id, status);
-                }
+            Body::Receipt { kind, ids } => self.on_receipt(from, kind, ids),
+        }
+    }
+
+    /// The contact got (or read) our messages: they stop waiting, and their
+    /// status moves on, never back from "read".
+    fn on_receipt(&mut self, from: PeerId, kind: ReceiptKind, ids: Vec<MsgId>) {
+        let status = match kind {
+            ReceiptKind::Delivered => MessageStatus::Delivered,
+            ReceiptKind::Read => MessageStatus::Read,
+        };
+        for id in ids {
+            if self.outbox.get(&id).is_some_and(|i| i.peer == from) {
+                self.drop_outbox(&id);
             }
+            if status == MessageStatus::Read {
+                self.read.insert(id);
+            } else if self.read.contains(&id) {
+                continue;
+            }
+            self.set_status(id, status);
         }
     }
 
@@ -789,5 +890,39 @@ mod tests {
             let d = retry_delay(RETRY_BUSY_MS, 3, roll);
             assert!((8_000..=16_000).contains(&d), "{d}");
         }
+    }
+
+    #[test]
+    fn outbox_items_from_before_receipts_load_as_not_yet_taken() {
+        #[derive(Serialize)]
+        struct V1<'a> {
+            msg_id: MsgId,
+            peer: PeerId,
+            envelope: &'a [u8],
+            tracked: bool,
+        }
+        let vault = crate::Vault::new([4; 32]);
+        let mut plain = vec![1u8];
+        let old = V1 {
+            msg_id: MsgId([1; 16]),
+            peer: PeerId([2; 32]),
+            envelope: b"padded envelope",
+            tracked: true,
+        };
+        plain.extend(postcard::to_allocvec(&old).unwrap());
+        let sealed = vault.seal_bytes(Table::Outbox, b"k", &plain, &mut rand::rngs::OsRng);
+        let item: OutboxItem = vault.open(Table::Outbox, b"k", &sealed).unwrap();
+        assert_eq!((item.msg_id, item.peer), (MsgId([1; 16]), PeerId([2; 32])));
+        assert_eq!(item.envelope, b"padded envelope");
+        assert!(item.tracked && !item.awaiting);
+
+        let mut other = vec![7u8];
+        other.extend(postcard::to_allocvec(&old).unwrap());
+        let sealed = vault.seal_bytes(Table::Outbox, b"k", &other, &mut rand::rngs::OsRng);
+        assert!(
+            vault
+                .open::<OutboxItem>(Table::Outbox, b"k", &sealed)
+                .is_err()
+        );
     }
 }

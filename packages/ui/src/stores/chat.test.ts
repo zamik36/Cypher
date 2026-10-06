@@ -31,7 +31,7 @@ describe("chat store", () => {
   it("appends messages per peer and ignores a repeated id", () => {
     addMessage("alice", msg("m1"));
     addMessage("alice", msg("m2"));
-    addMessage("alice", msg("m1", "duplicate"));
+    expect(addMessage("alice", msg("m1", "duplicate"))).toBe(false);
     addMessage("bob", msg("m3"));
     expect(getMessages("alice").map((m) => m.text)).toEqual(["m1", "m2"]);
     expect(getMessages("bob")).toHaveLength(1);

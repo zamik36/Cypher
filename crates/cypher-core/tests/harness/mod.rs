@@ -33,6 +33,9 @@ pub(crate) struct Server {
     /// Every `Recv` delivered, for replay/tamper attacks.
     pub delivered: Vec<(usize, Bytes)>,
     pub drop_chunks_every: Option<usize>,
+    /// Messages (not chunks) still to lose per sender: the server takes and
+    /// acknowledges them, the recipient never sees them.
+    pub lose_from: HashMap<PeerId, usize>,
     chunk_counter: usize,
     rng: Option<Rng>,
     pub session_inbox_ops: usize,
@@ -224,6 +227,21 @@ impl World {
                 _ => None,
             })
             .expect("link created")
+    }
+
+    /// The server takes `i`'s next `n` messages and loses them.
+    pub(crate) fn lose_messages_from(&mut self, i: usize, n: usize) {
+        let peer = self.peer(i);
+        self.server.lose_from.insert(peer, n);
+    }
+
+    /// Stored messages of `i` with this id (a resent one is stored once).
+    pub(crate) fn stored_copies(&self, i: usize, id: MsgId) -> usize {
+        self.clients[i]
+            .kv
+            .keys()
+            .filter(|(table, key)| *table == Table::Messages as u8 && key.ends_with(&id.0))
+            .count()
     }
 
     /// Makes the server hand out one-time prekeys `i` never had, as when its
@@ -459,11 +477,18 @@ impl World {
             ClientMsg::Send { to, want_ack, body } => {
                 let sender = authed.unwrap();
                 let is_chunk = body.first() == Some(&1);
-                let dropped = is_chunk
-                    && self.server.drop_chunks_every.is_some_and(|n| {
-                        self.server.chunk_counter += 1;
-                        self.server.chunk_counter.is_multiple_of(n)
+                let lost = !is_chunk
+                    && self.server.lose_from.get_mut(&sender).is_some_and(|left| {
+                        let lose = *left > 0;
+                        *left = left.saturating_sub(1);
+                        lose
                     });
+                let dropped = lost
+                    || is_chunk
+                        && self.server.drop_chunks_every.is_some_and(|n| {
+                            self.server.chunk_counter += 1;
+                            self.server.chunk_counter.is_multiple_of(n)
+                        });
                 let status = match self.server.online.get(&to).copied() {
                     Some(idx) if self.clients[idx].connected => {
                         if !dropped {

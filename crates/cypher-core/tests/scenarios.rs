@@ -201,7 +201,7 @@ fn a_session_that_drifted_apart_is_started_afresh() {
     w.clients[B].kv = older;
     w.restart(B);
 
-    w.send_text(B, A, "lost in the old session");
+    let lost = w.send_text(B, A, "lost in the old session");
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::Warning {
@@ -214,6 +214,61 @@ fn a_session_that_drifted_apart_is_started_afresh() {
     assert_eq!(w.texts(A).last().unwrap(), "after the repair");
     assert_eq!(w.texts(B).last().unwrap(), "heard you");
     assert!(!w.contact(A, b).request, "still a contact, not a stranger");
+    // What the old session could not carry came again on the new one.
+    assert!(w.texts(A).contains(&"lost in the old session".to_owned()));
+    assert_eq!(w.status_of(B, lost), Some(MessageStatus::Delivered));
+}
+
+/// Rolls `i` back to `older` and restarts it, then has it write to `to`:
+/// that message cannot be read, and `to` starts a fresh session.
+fn drift(
+    w: &mut World,
+    i: usize,
+    older: std::collections::BTreeMap<(u8, Vec<u8>), Vec<u8>>,
+    to: usize,
+) {
+    w.clients[i].kv = older;
+    w.restart(i);
+    w.send_text(i, to, "from the past");
+}
+
+/// The server took a message the contact never got: it waits for their
+/// receipt and goes again once the two have a fresh session.
+#[test]
+fn a_message_the_contact_never_got_is_sent_again() {
+    let mut w = paired();
+    w.lose_messages_from(A, 1);
+    let lost = w.send_text(A, B, "into the void");
+    assert!(!w.texts(B).contains(&"into the void".to_owned()));
+    assert_eq!(w.status_of(A, lost), Some(MessageStatus::Sent));
+
+    let older = w.clients[B].kv.clone();
+    w.send_text(B, A, "moving on");
+    drift(&mut w, B, older, A);
+    assert!(w.texts(B).contains(&"into the void".to_owned()));
+    assert_eq!(w.status_of(A, lost), Some(MessageStatus::Delivered));
+}
+
+/// The contact got it but their receipt was lost: the copy sent again is
+/// not shown twice, and it is confirmed this time.
+#[test]
+fn a_message_sent_again_is_confirmed_not_repeated() {
+    let mut w = paired();
+    w.lose_messages_from(B, 1);
+    let id = w.send_text(A, B, "did you get this?");
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Sent));
+
+    let older = w.clients[A].kv.clone();
+    w.send_text(A, B, "hello?");
+    drift(&mut w, A, older, B);
+    let seen = w
+        .texts(B)
+        .iter()
+        .filter(|t| *t == "did you get this?")
+        .count();
+    assert_eq!(seen, 1);
+    assert_eq!(w.stored_copies(B, id), 1);
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
 }
 
 #[test]

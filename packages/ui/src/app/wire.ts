@@ -94,7 +94,8 @@ export async function startApp(): Promise<() => void> {
     onMessage((ui) => {
       const msg = toChatMessage(ui.from, ui);
       if (msg.file && msg.file.kind !== "file") trackMedia(msg.file.file_id);
-      addMessage(ui.from, msg);
+      // A copy sent again (its receipt was lost) is neither new nor unread.
+      if (!addMessage(ui.from, msg)) return;
       const seen = viewing(ui.from);
       noteMessage(ui.from, msg, seen);
       setContactOnline(ui.from, true);
