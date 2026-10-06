@@ -313,20 +313,18 @@ async fn qr_codes_are_png_data_uris() {
 
 #[tokio::test]
 async fn the_ui_words_the_tray_and_chooses_what_closing_does() {
-    use std::sync::atomic::Ordering;
-
     let desktop = Desktop::new(cypher_tls::make_client_config());
-    let closes_to_tray = || {
-        desktop
-            .app
-            .state::<shell::CloseToTray>()
-            .0
-            .load(Ordering::Relaxed)
-    };
-    assert!(closes_to_tray(), "on by default");
+    let app = desktop.app.handle();
+    assert!(shell::closes_to_tray(app), "on by default");
     let args = json!({ "enabled": false });
     desktop.call("set_close_to_tray", args).await.unwrap();
-    assert!(!closes_to_tray());
+    assert!(!shell::closes_to_tray(app));
+
+    // Open in the tray menu brings the hidden window back; strays do nothing.
+    desktop.webview.hide().unwrap();
+    shell::on_menu(app, "open");
+    shell::on_menu(app, "elsewhere");
+    assert!(desktop.webview.is_visible().unwrap());
 
     // The mock runtime has no tray; the words wait for one without failing.
     let args = json!({ "open": "Open", "quit": "Quit", "tooltip": "Cypher · 2 unread" });
@@ -415,6 +413,7 @@ async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
 
     let invalid = b.call("rename_peer", json!({ "peerId": "zz", "alias": "x" }));
     assert_eq!(invalid.await.unwrap_err(), "invalid peer id");
+    block_then_unblock(b, a_id).await;
 
     b.call("delete_conversation", json!({ "peerId": a_id }))
         .await
@@ -428,6 +427,24 @@ async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
     let history = json!({ "peerId": a_id, "limit": 10, "before": null });
     let left = b.call("get_history", history).await.unwrap();
     assert_eq!(left.as_array().map(Vec::len), Some(0));
+}
+
+/// A blocked contact stays listed, marked; accepting a known one changes nothing.
+async fn block_then_unblock(b: &Desktop, a_id: &str) {
+    let blocked = |on: bool| async move {
+        let list = b.call("get_conversations", json!({})).await.ok()?;
+        (list[0]["blocked"] == on).then_some(())
+    };
+    let block = json!({ "peerId": a_id, "blocked": true });
+    b.call("set_blocked", block).await.unwrap();
+    eventually(|| blocked(true)).await;
+    let unblock = json!({ "peerId": a_id, "blocked": false });
+    b.call("set_blocked", unblock).await.unwrap();
+    eventually(|| blocked(false)).await;
+    let accept = json!({ "peerId": a_id });
+    b.call("accept_contact", accept).await.unwrap();
+    let invalid = b.call("accept_contact", json!({ "peerId": "zz" }));
+    assert_eq!(invalid.await.unwrap_err(), "invalid peer id");
 }
 
 async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {

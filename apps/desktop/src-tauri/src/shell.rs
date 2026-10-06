@@ -49,11 +49,7 @@ pub(crate) fn install_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
         .tooltip("Шифр")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => show_main(app),
-            "quit" => app.exit(0),
-            _ => {}
-        })
+        .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -72,15 +68,29 @@ pub(crate) fn install_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
     Ok(())
 }
 
+/// The tray menu's entries: Open brings the window back, Quit ends the app.
+#[cfg(desktop)]
+pub(crate) fn on_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    match id {
+        "open" => show_main(app),
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+/// Whether closing the window should leave the app running in the tray.
+#[cfg(desktop)]
+pub(crate) fn closes_to_tray<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<CloseToTray>()
+        .is_some_and(|close| close.0.load(Ordering::Relaxed))
+}
+
 /// Hides the window instead of closing it when the user wants the app to
 /// stay in the tray.
 #[cfg(desktop)]
 pub(crate) fn on_close<R: Runtime>(window: &tauri::Window<R>, event: &tauri::WindowEvent) {
     if let tauri::WindowEvent::CloseRequested { api, .. } = event
-        && window
-            .app_handle()
-            .try_state::<CloseToTray>()
-            .is_some_and(|close| close.0.load(Ordering::Relaxed))
+        && closes_to_tray(window.app_handle())
     {
         api.prevent_close();
         let _ = window.hide();
