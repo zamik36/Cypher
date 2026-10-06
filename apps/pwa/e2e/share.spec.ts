@@ -4,7 +4,7 @@ import { createIdentity, incoming, newUser, outgoing, pair, unlock } from "./use
 /** Posts to the share target as Android's share sheet would, through the service worker. */
 async function shareFromAnotherApp(page: Page, fileName: string, text: string): Promise<void> {
   await page.evaluate(
-    async ([name, caption]) => {
+    async ({ name, caption }) => {
       await navigator.serviceWorker.ready;
       while (!navigator.serviceWorker.controller) await new Promise((done) => setTimeout(done, 50));
       const form = new FormData();
@@ -12,7 +12,7 @@ async function shareFromAnotherApp(page: Page, fileName: string, text: string): 
       form.append("files", new File(["shared from elsewhere"], name, { type: "text/plain" }));
       await fetch("/share", { method: "POST", body: form });
     },
-    [fileName, text],
+    { name: fileName, caption: text },
   );
   await page.goto("/?share");
 }
