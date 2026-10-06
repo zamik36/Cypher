@@ -155,8 +155,11 @@ const ru: TranslationKeys = {
   status_read: "Прочитано",
   status_failed: "Не отправлено",
 
-  media_hold_voice: "Удерживайте для записи голосового, нажмите — для видео",
-  media_hold_video: "Удерживайте для записи видео, нажмите — для голосового",
+  media_hold_voice: "Удерживайте (или Enter) для записи голосового, нажмите — для видео",
+  media_hold_video: "Удерживайте (или Enter) для записи видео, нажмите — для голосового",
+  media_mode_voice: "Голосовое сообщение",
+  media_mode_video: "Видеосообщение",
+  media_keys_hint: "Enter — отправить · Esc — отмена",
   media_slide_cancel: "‹ Влево — отмена",
   media_release_cancel: "Отпустите для отмены",
   media_too_short: "Удерживайте кнопку для записи",

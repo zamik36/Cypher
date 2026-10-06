@@ -13,6 +13,8 @@ type Phase = "idle" | "starting" | "recording";
 const HOLD_MS = 200;
 /** Dragging this far left while recording cancels it. */
 const CANCEL_PX = 90;
+/** How long the note about a switched mode stays up. */
+const MODE_HINT_MS = 1800;
 
 interface Props {
   peer: string;
@@ -21,7 +23,8 @@ interface Props {
 
 /**
  * Hold to record a voice or round video note, release to send, slide left
- * to cancel; a quick tap toggles between voice and video.
+ * to cancel; a quick tap toggles between voice and video. From the keyboard:
+ * Enter or Space starts and sends, Escape cancels, Shift+Enter switches.
  */
 export default function RecordButton(props: Props) {
   const [mode, setMode] = createSignal<Mode>("voice");
@@ -29,6 +32,9 @@ export default function RecordButton(props: Props) {
   const [elapsed, setElapsed] = createSignal(0);
   const [level, setLevel] = createSignal(0);
   const [dx, setDx] = createSignal(0);
+  const [viaKeys, setViaKeys] = createSignal(false);
+  const [modeHint, setModeHint] = createSignal("");
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
   let holdTimer: ReturnType<typeof setTimeout> | undefined;
   let clock: ReturnType<typeof setInterval> | undefined;
   let startX = 0;
@@ -38,6 +44,19 @@ export default function RecordButton(props: Props) {
   let finishing = false;
 
   const cancelling = () => dx() < -CANCEL_PX;
+  const hint = () => {
+    if (viaKeys()) return t().media_keys_hint;
+    return cancelling() ? t().media_release_cancel : t().media_slide_cancel;
+  };
+
+  /** Switches voice ↔ video and says so, on screen and to screen readers. */
+  function switchMode() {
+    const next = mode() === "voice" ? "video" : "voice";
+    setMode(next);
+    setModeHint(next === "voice" ? t().media_mode_voice : t().media_mode_video);
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => setModeHint(""), MODE_HINT_MS);
+  }
 
   async function begin() {
     setPhase("starting");
@@ -77,6 +96,7 @@ export default function RecordButton(props: Props) {
     setElapsed(0);
     setDx(0);
     setLevel(0);
+    setViaKeys(false);
     try {
       if (cancel) {
         await discard();
@@ -134,7 +154,7 @@ export default function RecordButton(props: Props) {
     if (holdTimer) {
       clearTimeout(holdTimer);
       holdTimer = undefined;
-      setMode((m) => (m === "voice" ? "video" : "voice"));
+      switchMode();
       return;
     }
     if (phase() === "starting") setPhase("idle");
@@ -144,9 +164,26 @@ export default function RecordButton(props: Props) {
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape" && phase() === "recording") void finish(true);
   }
+
+  function onButtonKey(e: KeyboardEvent) {
+    if ((e.key !== "Enter" && e.key !== " ") || e.repeat) return;
+    e.preventDefault();
+    if (e.shiftKey) {
+      if (phase() === "idle") switchMode();
+    } else if (phase() === "idle") {
+      setViaKeys(true);
+      void begin();
+    } else if (phase() === "starting") {
+      setPhase("idle");
+      setViaKeys(false);
+    } else {
+      void finish(false);
+    }
+  }
   window.addEventListener("keydown", onKey);
   onCleanup(() => {
     window.removeEventListener("keydown", onKey);
+    clearTimeout(hintTimer);
     if (phase() !== "idle") void finish(true);
   });
 
@@ -159,7 +196,7 @@ export default function RecordButton(props: Props) {
         >
           <span class="rec-dot" style={{ transform: `scale(${1 + level() * 0.8})` }} />
           <span class="rec-time">{formatDuration(elapsed())}</span>
-          <span class="rec-hint">{cancelling() ? t().media_release_cancel : t().media_slide_cancel}</span>
+          <span class="rec-hint">{hint()}</span>
         </div>
       </Show>
       <Show when={phase() !== "idle" && mode() === "video"}>
@@ -177,9 +214,12 @@ export default function RecordButton(props: Props) {
             </svg>
           </div>
           <span class="rec-time">{formatDuration(elapsed())}</span>
-          <span class="rec-hint">{cancelling() ? t().media_release_cancel : t().media_slide_cancel}</span>
+          <span class="rec-hint">{hint()}</span>
         </div>
       </Show>
+      <span class="record-mode-hint" classList={{ "record-mode-hint--shown": modeHint() !== "" }} role="status">
+        {modeHint()}
+      </span>
       <button
         class={`icon-btn record-btn ${phase() !== "idle" ? "active" : ""}`}
         aria-label={mode() === "voice" ? t().media_hold_voice : t().media_hold_video}
@@ -188,6 +228,9 @@ export default function RecordButton(props: Props) {
         onPointerMove={onMove}
         onPointerUp={onUp}
         onPointerCancel={() => phase() === "recording" && void finish(true)}
+        onKeyDown={onButtonKey}
+        aria-keyshortcuts="Enter Shift+Enter"
+        aria-pressed={phase() !== "idle"}
         onContextMenu={(e) => e.preventDefault()}
       >
         <Icon name={mode() === "voice" ? "mic" : "video"} />

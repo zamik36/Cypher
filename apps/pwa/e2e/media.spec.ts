@@ -40,4 +40,17 @@ test("voice and round video notes record, deliver and play", async ({ browser, b
     const size = () => note.locator("video").evaluate((v: HTMLVideoElement) => [v.videoWidth, v.videoHeight]);
     await expect.poll(size).toEqual([384, 384]);
   });
+
+  await test.step("record from the keyboard: Shift+Enter switches, Enter starts and sends", async () => {
+    const button = bob.getByTitle(/Hold to record a video message/);
+    await button.focus();
+    await bob.keyboard.press("Shift+Enter");
+    await expect(bob.getByRole("status").filter({ hasText: "Voice message" })).toBeVisible();
+    await bob.keyboard.press("Enter");
+    await expect(bob.locator(".recording-bar")).toContainText("Enter sends");
+    await bob.waitForTimeout(1200);
+    await bob.keyboard.press("Enter");
+    await expect(bob.locator(".recording-bar")).toBeHidden();
+    await expect(outgoing(bob).locator(".voice-bubble")).toHaveCount(2);
+  });
 });

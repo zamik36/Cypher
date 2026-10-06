@@ -152,8 +152,11 @@ const en = {
   status_failed: "Not sent",
 
   // -- Media --
-  media_hold_voice: "Hold to record a voice message, tap to switch to video",
-  media_hold_video: "Hold to record a video message, tap to switch to voice",
+  media_hold_voice: "Hold to record a voice message (or press Enter), tap to switch to video",
+  media_hold_video: "Hold to record a video message (or press Enter), tap to switch to voice",
+  media_mode_voice: "Voice message",
+  media_mode_video: "Video message",
+  media_keys_hint: "Enter sends · Esc cancels",
   media_slide_cancel: "‹ Slide to cancel",
   media_release_cancel: "Release to cancel",
   media_too_short: "Hold the button to record",

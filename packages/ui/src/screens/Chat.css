@@ -651,6 +651,35 @@ button.quote {
   -webkit-user-select: none;
 }
 
+/* Says which note a tap switched to, just above the button. */
+.record-mode-hint {
+  position: absolute;
+  right: var(--sp-2);
+  bottom: calc(100% + var(--sp-1));
+  z-index: 3;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-full);
+  background: var(--c-text);
+  color: var(--c-bg);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.record-mode-hint--shown {
+  opacity: 1;
+  transform: none;
+}
+
+.record-mode-hint:empty {
+  padding: 0;
+}
+
 .record-btn.active {
   background: var(--c-danger-soft);
   color: var(--c-danger);
