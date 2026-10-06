@@ -61,4 +61,26 @@ describe("app lock", () => {
     lockNow();
     expect(locked).toHaveBeenCalledTimes(2);
   });
+
+  it("does not lock while a system picker hides the app", async () => {
+    const { awayFor, setLockOnHide, watchForLock } = await load();
+    setLockOnHide(true);
+    const locked = vi.fn();
+    const stop = watchForLock(locked);
+    const hide = () => {
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    await expect(
+      awayFor(() => {
+        hide();
+        return Promise.resolve("picked");
+      }),
+    ).resolves.toBe("picked");
+    expect(locked).not.toHaveBeenCalled();
+    await expect(awayFor(() => Promise.reject(new Error("cancelled")))).rejects.toThrow("cancelled");
+    hide();
+    expect(locked).toHaveBeenCalledOnce();
+    stop();
+  });
 });

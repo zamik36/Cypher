@@ -35,6 +35,7 @@ import {
 import { clearDraft, draftOf, setDraftText, setReplyTo } from "../stores/drafts";
 import { isWide } from "../stores/layout";
 import { back, push } from "../stores/nav";
+import { awayFor } from "../stores/lock";
 import { takeShare } from "../stores/share";
 import { windowActive } from "../stores/presence";
 import { upsertTransfer } from "../stores/transfers";
@@ -440,7 +441,7 @@ export default function ChatScreen(props: { peerId: string }) {
 
   function attach() {
     const peerId = props.peerId;
-    void offer(() => api.pickAndSend(peerId));
+    void offer(() => awayFor(() => api.pickAndSend(peerId)));
   }
 
   // Files dropped on the chat (a browser hands them over; the desktop app

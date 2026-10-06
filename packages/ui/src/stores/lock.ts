@@ -26,6 +26,21 @@ export function setLockOnHide(on: boolean): void {
 }
 
 let handler: (() => void) | undefined;
+/** System pickers and scanners open now; the app hides behind them. */
+let away = 0;
+
+/**
+ * Runs `task`, a system file picker or scanner the app hides behind on a
+ * phone, without that counting as leaving the app.
+ */
+export async function awayFor<T>(task: () => Promise<T>): Promise<T> {
+  away++;
+  try {
+    return await task();
+  } finally {
+    away--;
+  }
+}
 
 /** Locks the app now (the app registers how, see `watchForLock`). */
 export function lockNow(): void {
@@ -44,7 +59,7 @@ export function watchForLock(lock: () => void): () => void {
     if (minutes > 0) timer = setTimeout(lock, minutes * 60_000);
   };
   const onVisibility = () => {
-    if (document.visibilityState === "hidden" && lockOnHide()) lock();
+    if (document.visibilityState === "hidden" && lockOnHide() && away === 0) lock();
     else arm();
   };
   handler = lock;

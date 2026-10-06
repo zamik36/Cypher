@@ -2,6 +2,7 @@ import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import "./QrScanner.css";
 import Icon from "./Icon";
 import { api } from "../platform";
+import { awayFor } from "../stores/lock";
 import { findInvite } from "../utils/invite";
 import { reasonText } from "../utils/reasons";
 import { t } from "../i18n";
@@ -74,7 +75,7 @@ export default function QrScanner(props: { onCode: (code: string) => void; onClo
   async function scanNatively(scan: () => Promise<string>) {
     document.documentElement.classList.add("native-scan");
     try {
-      while (!run.stopped && !read(await scan()));
+      while (!run.stopped && !read(await awayFor(scan)));
     } catch (e) {
       if (!run.stopped) setError(cameraError(e));
     } finally {
