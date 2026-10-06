@@ -466,25 +466,7 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        let mut raw = Vec::with_capacity(PrekeyBundle::MAX_LEN);
-        raw.extend_from_slice(base);
-        match opk {
-            Some((id, key)) => {
-                raw.push(1);
-                raw.extend_from_slice(&id.to_le_bytes());
-                raw.extend_from_slice(&key);
-            }
-            None => raw.push(0),
-        }
-        let initiated = PrekeyBundle::decode(&raw)
-            .ok()
-            .filter(|b| b.identity == peer)
-            .and_then(|b| {
-                handshake::initiate(&self.identity, &b, &mut self.rng)
-                    .ok()
-                    .map(|(r, init)| (r, init, b.identity_dh))
-            });
-        let Some((ratchet, init, identity_dh)) = initiated else {
+        let Some(mut fresh) = self.initiate(peer, base, opk) else {
             self.emit(Event::JoinFailed {
                 link,
                 reason: FailReason::InvalidKeys,
@@ -501,7 +483,6 @@ impl<R: CryptoRngCore> Core<R> {
             });
             return;
         }
-        let mut fresh = Peer::new(ratchet, identity_dh, Some(init));
         if let Some(old) = self.peers.remove(&peer) {
             fresh.carry_over(old);
         }
@@ -515,6 +496,52 @@ impl<R: CryptoRngCore> Core<R> {
             initiated_by_us: true,
         });
         self.send_hello(peer);
+    }
+
+    /// A fresh session with a contact whose messages stopped decrypting.
+    /// Messages still waiting go out on it; theirs follow once they accept.
+    pub(super) fn on_repair_keys(
+        &mut self,
+        peer: PeerId,
+        base: &[u8],
+        opk: Option<(u32, [u8; 32])>,
+    ) {
+        if !self.peers.contains_key(&peer) {
+            return;
+        }
+        let Some(mut fresh) = self.initiate(peer, base, opk) else {
+            return;
+        };
+        if let Some(old) = self.peers.remove(&peer) {
+            fresh.carry_over(old);
+        }
+        self.peers.insert(peer, fresh);
+        self.requeue_for(&peer);
+        self.send_hello(peer);
+    }
+
+    /// Our side of a new session with `peer` from its published bundle.
+    fn initiate(
+        &mut self,
+        peer: PeerId,
+        base: &[u8],
+        opk: Option<(u32, [u8; 32])>,
+    ) -> Option<Peer> {
+        let mut raw = Vec::with_capacity(PrekeyBundle::MAX_LEN);
+        raw.extend_from_slice(base);
+        match opk {
+            Some((id, key)) => {
+                raw.push(1);
+                raw.extend_from_slice(&id.to_le_bytes());
+                raw.extend_from_slice(&key);
+            }
+            None => raw.push(0),
+        }
+        let bundle = PrekeyBundle::decode(&raw)
+            .ok()
+            .filter(|b| b.identity == peer)?;
+        let (ratchet, init) = handshake::initiate(&self.identity, &bundle, &mut self.rng).ok()?;
+        Some(Peer::new(ratchet, bundle.identity_dh, Some(init)))
     }
 
     fn send_hello(&mut self, peer: PeerId) {
@@ -578,6 +605,9 @@ impl<R: CryptoRngCore> Core<R> {
                 self.emit(Event::Warning {
                     reason: FailReason::DecryptFailed,
                 });
+                if init.is_none() {
+                    self.repair_session(from);
+                }
                 return;
             }
         };

@@ -282,7 +282,8 @@ const en = {
   error_source_unavailable: "The file is no longer available on the sender's device.",
   error_unauthorized: "The server did not accept this device. Restart the app.",
   error_server: "The server could not handle the request. Try again later.",
-  error_decrypt_failed: "A message could not be decrypted and was skipped.",
+  error_decrypt_failed:
+    "A message could not be decrypted. The secure session is being set up again; ask your contact to resend what you missed.",
   error_update_required: "This version of Cypher can no longer talk to the server. Please update the app.",
   error_storage_failed:
     "Cypher could not save its data and stopped to avoid losing messages. Free up disk space and restart the app.",

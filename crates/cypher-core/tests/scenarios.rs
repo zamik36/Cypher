@@ -186,6 +186,36 @@ fn prekeys_the_server_has_but_we_lack_are_replaced() {
     assert!(joined(&w, F));
 }
 
+/// One side's session went back in time (its saved state was overwritten
+/// by an older copy): the other cannot decrypt it, starts a fresh session
+/// from published keys, and the two talk again, as the same contacts.
+#[test]
+fn a_session_that_drifted_apart_is_started_afresh() {
+    let mut w = paired();
+    w.send_text(A, B, "one");
+    w.send_text(B, A, "two");
+    let older = w.clients[B].kv.clone();
+    w.send_text(A, B, "three");
+    w.send_text(B, A, "four");
+    w.send_text(A, B, "five");
+    w.clients[B].kv = older;
+    w.restart(B);
+
+    w.send_text(B, A, "lost in the old session");
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::Warning {
+            reason: FailReason::DecryptFailed
+        }
+    )));
+    let b = w.peer(B);
+    w.send_text(B, A, "after the repair");
+    w.send_text(A, B, "heard you");
+    assert_eq!(w.texts(A).last().unwrap(), "after the repair");
+    assert_eq!(w.texts(B).last().unwrap(), "heard you");
+    assert!(!w.contact(A, b).request, "still a contact, not a stranger");
+}
+
 #[test]
 fn a_blocked_contact_is_not_heard_until_unblocked() {
     let mut w = paired();

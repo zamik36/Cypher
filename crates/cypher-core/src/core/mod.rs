@@ -28,6 +28,8 @@ const DEAD_AFTER_MS: u64 = 50_000;
 const INBOX_POLL_MS: u64 = 5 * 60_000;
 /// Least time between two republished key sets after unknown prekeys.
 const RESYNC_INTERVAL_MS: u64 = 60 * 60_000;
+/// Least time between two fresh sessions started with one contact.
+const REPAIR_INTERVAL_MS: u64 = 10 * 60_000;
 const RECENT_IDS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,11 @@ enum Pending {
     },
     FetchKeys {
         link: String,
+        peer: PeerId,
+    },
+    /// Keys for a fresh session with a contact whose messages stopped
+    /// decrypting.
+    Repair {
         peer: PeerId,
     },
     Publish {
@@ -99,6 +106,8 @@ pub struct Core<R> {
     last_inbox_fetch: u64,
     /// When keys were last republished because the server's were not ours.
     last_resync: Option<u64>,
+    /// When a fresh session was last started with a contact, per contact.
+    last_repair: HashMap<PeerId, u64>,
     recent: RecentIds,
     progress_at: HashMap<FileId, u64>,
     anon: Anon,
@@ -159,6 +168,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_ping: now_ms,
             last_inbox_fetch: 0,
             last_resync: None,
+            last_repair: HashMap::new(),
             recent: RecentIds::default(),
             progress_at: HashMap::new(),
             anon: Anon::default(),
@@ -370,6 +380,9 @@ impl<R: CryptoRngCore> Core<R> {
             (Pending::FetchKeys { link, peer }, ServerMsg::Keys { base, opk }) => {
                 self.on_keys(link, peer, &base, opk);
             }
+            (Pending::Repair { peer }, ServerMsg::Keys { base, opk }) => {
+                self.on_repair_keys(peer, &base, opk);
+            }
             (Pending::Publish { batch }, ServerMsg::KeysAck { opks_left }) => {
                 if !batch && opks_left < OPK_LOW_WATER {
                     self.publish_keys(true);
@@ -420,7 +433,7 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::Send { msg_id, .. } | Pending::InboxPut { msg_id } => {
                 self.on_send_failed(msg_id);
             }
-            Pending::Publish { .. } | Pending::InboxAck => {}
+            Pending::Publish { .. } | Pending::InboxAck | Pending::Repair { .. } => {}
         }
     }
 
@@ -508,6 +521,30 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.retransmit_expired();
         self.flush_outbox();
+    }
+
+    /// A known contact's message did not decrypt: the two sessions drifted
+    /// apart (state lost on one side), and every later message would fail
+    /// too. Starts a fresh one from their published keys, keeping the
+    /// contact; at most every ten minutes per contact.
+    pub(super) fn repair_session(&mut self, peer: PeerId) {
+        let settled = self
+            .peers
+            .get(&peer)
+            .is_some_and(|p| !p.request && !p.blocked && !p.is_unconfirmed_initiator());
+        let recent = self
+            .last_repair
+            .get(&peer)
+            .is_some_and(|at| self.now.saturating_sub(*at) < REPAIR_INTERVAL_MS);
+        if !settled || recent || self.conn != Conn::Ready {
+            return;
+        }
+        self.last_repair.insert(peer, self.now);
+        self.request(
+            ClientMsg::FetchKeys { peer },
+            Pending::Repair { peer },
+            false,
+        );
     }
 
     /// An initiator used prekeys this device does not have: the server's set
