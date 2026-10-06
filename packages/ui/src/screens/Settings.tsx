@@ -25,14 +25,7 @@ import {
   setPreviewEnabled,
 } from "../utils/notifications";
 import { reasonText } from "../utils/reasons";
-import {
-  AUTO_LOCK_CHOICES,
-  autoLock,
-  lockNow,
-  lockOnHide,
-  setAutoLock,
-  setLockOnHide,
-} from "../stores/lock";
+import { AUTO_LOCK_CHOICES, autoLock, lockNow, lockOnHide, setAutoLock, setLockOnHide } from "../stores/lock";
 import { APP_VERSION } from "../version";
 import { locale, setLocale, t, type Locale } from "../i18n";
 
