@@ -140,7 +140,8 @@ cosign verify ghcr.io/zamik36/cypher/cypher-gateway:<sha8> \
 ## Что хранится и бэкапы
 
 - **Onion-ключ signaling** — `/data/signaling/onion_key.bin` в томе `signaling-data`, создаётся при первом запуске. Им клиенты запечатывают анонимные запросы к inbox. Это секрет: кто его знает, тот может раскрыть, к каким inbox обращаются через relay.
-- **Redis** — том `redis-data`, append-only. В нём prekeys (30 дней), ссылки (24 ч) и офлайн-inbox (14 дней); всё либо публично, либо зашифровано end-to-end.
+- **VAPID-ключ signaling** — `/data/signaling/vapid_key.bin` в том же томе, создаётся при первом запуске; без `P2P_VAPID_KEY_PATH` push выключен. Им подписаны сигналы Web Push; клиенты подписываются на его публичную половину. Если он сменится, устройства переподпишутся при следующем запуске, а до того сигналы до них не дойдут. Signaling ходит наружу только по HTTPS на порт 443 к известным push-сервисам (FCM, Mozilla, Windows, Apple, ntfy.sh); свой дистрибьютор UnifiedPush добавляется в `P2P_PUSH_EXTRA_HOSTS`.
+- **Redis** — том `redis-data`, append-only. В нём prekeys (30 дней), ссылки (24 ч), офлайн-inbox (14 дней) и push-подписки по inbox (14 дней, без `PeerId`); всё либо публично, либо зашифровано end-to-end.
 - **Мониторинг** — тома Prometheus, Grafana, Loki и Alertmanager; их не бэкапим.
 
 Gateway и relay состояния не хранят.

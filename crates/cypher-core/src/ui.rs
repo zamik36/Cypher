@@ -186,7 +186,29 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::JoinFailed { reason, .. } | Event::Warning { reason } => {
             ("error", UiPayload::Text(format!("{reason:?}")))
         }
+        Event::PushKey { .. } | Event::PushRegistered | Event::PushUnavailable => push(e),
         Event::Message(_) | Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
+    })
+}
+
+/// Push setup: the server's key (hex) to subscribe with, then its answer.
+fn push(e: &Event) -> (&'static str, UiPayload) {
+    if let Event::PushKey { key } = e {
+        return ("push_key", UiPayload::Text(hex(key)));
+    }
+    let state = if matches!(e, Event::PushRegistered) {
+        "registered"
+    } else {
+        "unavailable"
+    };
+    ("push_state", UiPayload::Text(state.to_owned()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
     })
 }
 

@@ -9,6 +9,7 @@ use cypher_client::{Client, ClientError, Config, Content};
 use cypher_core::{Command, Event, MediaKind, MessageStatus};
 use cypher_crypto::IdentitySeed;
 use cypher_types::FileId;
+use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -57,6 +58,7 @@ pub async fn run(target: &Target) {
     move_a_saved_file(&b, file_id).await;
     play_back_a_voice_note(&a, &mut b).await;
     stream_a_video_note(&mut a, &b).await;
+    register_for_push(&mut b).await;
     deliver_offline_through_the_inbox(target, &mut a, b).await;
     a.client.shutdown().await;
 }
@@ -363,6 +365,32 @@ async fn stream_a_video_note(a: &mut Peer, b: &Peer) {
         .join("outgoing")
         .join(format!("{}.bin", note_id.to_hex()));
     assert!(!staged.exists(), "staged plaintext is deleted once sent");
+}
+
+/// The server hands out its push key and takes a subscription, through the
+/// onion relay (these clients require it).
+async fn register_for_push(b: &mut Peer) {
+    b.client.command(Command::EnablePush).await.unwrap();
+    let key = b
+        .wait(|e| match e {
+            Event::PushKey { key } => Some(key.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(key.len(), 65);
+    let register = Command::RegisterPush {
+        endpoint: "https://push.invalid/up-b".into(),
+        p256dh: *p256::SecretKey::random(&mut rand::rngs::OsRng)
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .first_chunk::<65>()
+            .unwrap(),
+        auth: [1; 16],
+    };
+    b.client.command(register).await.unwrap();
+    b.wait(|e| matches!(e, Event::PushRegistered).then_some(()))
+        .await;
 }
 
 async fn deliver_offline_through_the_inbox(target: &Target, a: &mut Peer, b: Peer) {

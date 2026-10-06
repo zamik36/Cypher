@@ -26,7 +26,12 @@ pub(crate) async fn handle(handler: &Handler, secret: &StaticSecret, blob: &[u8]
     let frame = Bytes::from(opened.frame);
     let allowed = matches!(
         Frame::<ClientMsg>::decode(frame.clone()).ok()?.msg,
-        ClientMsg::InboxPut { .. } | ClientMsg::InboxFetch { .. } | ClientMsg::InboxAck { .. }
+        ClientMsg::InboxPut { .. }
+            | ClientMsg::InboxFetch { .. }
+            | ClientMsg::InboxAck { .. }
+            | ClientMsg::PushKey
+            | ClientMsg::PushRegister { .. }
+            | ClientMsg::PushUnregister { .. }
     );
     if !allowed {
         return None;

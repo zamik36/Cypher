@@ -40,6 +40,11 @@ pub(crate) struct Server {
     rng: Option<Rng>,
     pub session_inbox_ops: usize,
     pub onion_inbox_ops: usize,
+    /// Push requests that came over the session instead of the relay.
+    pub session_push_ops: usize,
+    /// Push endpoint per inbox, and the inboxes signalled so far.
+    pub pushes: HashMap<[u8; 32], String>,
+    pub signals: Vec<[u8; 32]>,
 }
 
 pub(crate) struct Client {
@@ -472,6 +477,28 @@ impl World {
                 }
                 self.serve_inbox(from, req_id, msg);
             }
+            ClientMsg::PushKey
+            | ClientMsg::PushRegister { .. }
+            | ClientMsg::PushUnregister { .. } => {
+                if self.onion_ctx.is_none() {
+                    self.server.session_push_ops += 1;
+                }
+                let answer = match msg {
+                    ClientMsg::PushRegister {
+                        secret, endpoint, ..
+                    } => {
+                        let inbox = cypher_wire::inbox_id(&secret);
+                        self.server.pushes.insert(inbox, endpoint);
+                        ServerMsg::Done
+                    }
+                    ClientMsg::PushUnregister { secret } => {
+                        self.server.pushes.remove(&cypher_wire::inbox_id(&secret));
+                        ServerMsg::Done
+                    }
+                    _ => ServerMsg::PushKey { key: [4; 65] },
+                };
+                self.respond(from, &reply(answer));
+            }
             _ if authed.is_none() || self.onion_ctx.is_some() => panic!("unauthenticated request"),
             ClientMsg::Ping => self.respond(from, &reply(ServerMsg::Pong)),
             ClientMsg::Send { to, want_ack, body } => {
@@ -573,6 +600,9 @@ impl World {
         match msg {
             ClientMsg::InboxPut { inbox, item } => {
                 self.server.inboxes.entry(inbox).or_default().push(item);
+                if self.server.pushes.contains_key(&inbox) {
+                    self.server.signals.push(inbox);
+                }
                 self.respond(from, &reply(ServerMsg::Done));
             }
             ClientMsg::InboxFetch { secret } => {

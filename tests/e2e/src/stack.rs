@@ -12,6 +12,26 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Target;
 
+fn signaling_config(
+    dir: &Path,
+    redis_url: String,
+    nats_url: &str,
+    metrics_addr: SocketAddr,
+    relay_addr: SocketAddr,
+) -> signaling::Config {
+    signaling::Config {
+        redis_url,
+        nats: nats(nats_url, "signaling"),
+        metrics_addr,
+        onion_key_path: dir.join("onion.bin"),
+        relay_public_addr: Some(format!("localhost:{}", relay_addr.port())),
+        vapid_key_path: Some(dir.join("vapid.bin")),
+        push_contact: "mailto:e2e@example.org".into(),
+        // Accepted, never reachable: no test calls out.
+        push_extra_hosts: "push.invalid".into(),
+    }
+}
+
 const STARTUP: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(50);
 
@@ -41,13 +61,7 @@ impl Stack {
         let shutdown = CancellationToken::new();
         let services = vec![
             tokio::spawn(signaling::run(
-                signaling::Config {
-                    redis_url,
-                    nats: nats(nats_url, "signaling"),
-                    metrics_addr: probes[0],
-                    onion_key_path: dir.path().join("onion.bin"),
-                    relay_public_addr: Some(format!("localhost:{}", relay_addr.port())),
-                },
+                signaling_config(dir.path(), redis_url, nats_url, probes[0], relay_addr),
                 shutdown.clone(),
             )),
             tokio::spawn(gateway::run(

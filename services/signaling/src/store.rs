@@ -235,6 +235,33 @@ impl Store {
         Ok(admitted == 1)
     }
 
+    /// Keeps the push subscription of `inbox` as long as the inbox lives.
+    pub(crate) async fn push_register(
+        &self,
+        inbox: &[u8; 32],
+        sub: &[u8],
+    ) -> redis::RedisResult<()> {
+        let mut redis = self.redis.clone();
+        redis::cmd("SET")
+            .arg(key(b"p:", inbox))
+            .arg(sub)
+            .arg("EX")
+            .arg(INBOX_TTL_SECS)
+            .query_async::<()>(&mut redis)
+            .await
+    }
+
+    pub(crate) async fn push_subscription(
+        &self,
+        inbox: &[u8; 32],
+    ) -> redis::RedisResult<Option<Vec<u8>>> {
+        self.redis.clone().get(key(b"p:", inbox)).await
+    }
+
+    pub(crate) async fn push_unregister(&self, inbox: &[u8; 32]) -> redis::RedisResult<()> {
+        self.redis.clone().del(key(b"p:", inbox)).await
+    }
+
     pub(crate) async fn inbox_put(
         &self,
         inbox: &[u8; 32],

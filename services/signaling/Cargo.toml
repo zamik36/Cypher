@@ -27,6 +27,14 @@ serde.workspace = true
 prometheus.workspace = true
 hex.workspace = true
 x25519-dalek.workspace = true
+cypher-tls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+p256.workspace = true
+base64.workspace = true
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

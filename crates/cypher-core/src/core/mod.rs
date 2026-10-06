@@ -1,6 +1,7 @@
 mod anon;
 mod files;
 mod messaging;
+mod push;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -21,6 +22,7 @@ use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
 use messaging::OutboxItem;
+use push::{PushState, Subscription};
 
 const REQUEST_TIMEOUT_MS: u64 = 15_000;
 const PING_INTERVAL_MS: u64 = 20_000;
@@ -68,6 +70,22 @@ enum Pending {
     InboxFetch,
     InboxAck,
     Bootstrap,
+    PushKey,
+    PushRegister,
+    PushUnregister,
+}
+
+/// What a server error means for the request it answers.
+fn failure(code: ErrorCode) -> FailReason {
+    match code {
+        ErrorCode::NotFound => FailReason::NotFound,
+        ErrorCode::Unauthorized => FailReason::Unauthorized,
+        ErrorCode::RateLimited | ErrorCode::Unavailable => FailReason::Offline,
+        ErrorCode::BadRequest | ErrorCode::TooLarge | ErrorCode::Internal => {
+            FailReason::ServerError
+        }
+        ErrorCode::UnsupportedVersion => FailReason::UpdateRequired,
+    }
 }
 
 /// Encrypted state restored by the driver at startup: raw `(key, value)`
@@ -113,6 +131,7 @@ pub struct Core<R> {
     read: RecentIds,
     progress_at: HashMap<FileId, u64>,
     anon: Anon,
+    push: PushState,
     /// The name this user goes by, sent to contacts with `Hello`.
     profile_name: Option<String>,
     /// Invites this user made and when; each admits one contact.
@@ -175,6 +194,7 @@ impl<R: CryptoRngCore> Core<R> {
             read: RecentIds::default(),
             progress_at: HashMap::new(),
             anon: Anon::default(),
+            push: PushState::default(),
             profile_name,
             own_links,
             effects: Vec::new(),
@@ -224,6 +244,7 @@ impl<R: CryptoRngCore> Core<R> {
                 self.emit(Event::Onion { up });
                 if up {
                     self.fetch_inbox();
+                    self.renew_push();
                 }
             }
             Input::Command(cmd) => self.on_command(cmd),
@@ -286,7 +307,10 @@ impl<R: CryptoRngCore> Core<R> {
         if !session
             && !matches!(
                 msg,
-                ServerMsg::InboxBatch { .. } | ServerMsg::Done | ServerMsg::Error { .. }
+                ServerMsg::InboxBatch { .. }
+                    | ServerMsg::Done
+                    | ServerMsg::PushKey { .. }
+                    | ServerMsg::Error { .. }
             )
         {
             return;
@@ -312,6 +336,7 @@ impl<R: CryptoRngCore> Core<R> {
             | ServerMsg::InboxBatch { .. }
             | ServerMsg::Done
             | ServerMsg::BootstrapInfo { .. }
+            | ServerMsg::PushKey { .. }
             | ServerMsg::Error { .. }) => match self.pending.remove(&req_id) {
                 Some((pending, _)) => self.on_response(pending, msg),
                 None => {
@@ -358,18 +383,18 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn on_response(&mut self, pending: Pending, msg: ServerMsg) {
         if let ServerMsg::Error { code } = msg {
-            let reason = match code {
-                ErrorCode::NotFound => FailReason::NotFound,
-                ErrorCode::Unauthorized => FailReason::Unauthorized,
-                ErrorCode::RateLimited | ErrorCode::Unavailable => FailReason::Offline,
-                ErrorCode::BadRequest | ErrorCode::TooLarge | ErrorCode::Internal => {
-                    FailReason::ServerError
-                }
-                ErrorCode::UnsupportedVersion => FailReason::UpdateRequired,
-            };
-            self.fail_request(pending, reason);
-            return;
+            self.fail_request(pending, failure(code));
+        } else if matches!(
+            pending,
+            Pending::PushKey | Pending::PushRegister | Pending::PushUnregister
+        ) {
+            self.on_push_response(&pending, &msg);
+        } else {
+            self.on_success(pending, msg);
         }
+    }
+
+    fn on_success(&mut self, pending: Pending, msg: ServerMsg) {
         match (pending, msg) {
             (Pending::CreateLink, ServerMsg::LinkCreated { link }) => {
                 self.remember_link(link.as_str());
@@ -410,6 +435,7 @@ impl<R: CryptoRngCore> Core<R> {
                 let relay = (!relay_addr.is_empty()).then_some(onion_key);
                 self.anon.on_bootstrap(relay, self.now);
                 self.fetch_inbox();
+                self.push_step();
                 self.emit(Event::Bootstrap {
                     relay_addr,
                     onion_key,
@@ -437,6 +463,9 @@ impl<R: CryptoRngCore> Core<R> {
                 self.on_send_failed(msg_id);
             }
             Pending::Publish { .. } | Pending::InboxAck | Pending::Repair { .. } => {}
+            Pending::PushKey | Pending::PushRegister | Pending::PushUnregister => {
+                self.on_push_failed(&pending, reason);
+            }
         }
     }
 
@@ -483,6 +512,17 @@ impl<R: CryptoRngCore> Core<R> {
             Command::UnblockPeer { peer } => self.set_blocked(&peer, false),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
+            Command::EnablePush => self.enable_push(),
+            Command::RegisterPush {
+                endpoint,
+                p256dh,
+                auth,
+            } => self.register_push(Subscription {
+                endpoint,
+                p256dh,
+                auth,
+            }),
+            Command::DisablePush => self.disable_push(),
         }
     }
 

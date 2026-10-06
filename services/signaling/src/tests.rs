@@ -10,7 +10,8 @@ use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg, inbox_id};
 use rand::RngCore as _;
 use rand::rngs::OsRng;
 
-use crate::handler::{CAPABILITY_ONION, Handler};
+use crate::handler::{CAPABILITY_ONION, CAPABILITY_PUSH, Handler, Pusher};
+use crate::push::{Outcome, Subscription};
 use crate::store::Store;
 
 async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
@@ -19,6 +20,7 @@ async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
         store: Store::connect(&url).await.unwrap(),
         onion_public: [7; 32],
         relay_addr: relay_addr.map(str::to_owned),
+        push: None,
     })
 }
 
@@ -342,4 +344,129 @@ async fn one_time_prekeys_cannot_be_drained_or_hoarded() {
         handed_out += usize::from(opk.is_some());
     }
     assert_eq!(handed_out, 20, "the bundle still comes, without a prekey");
+}
+
+type Sent = std::sync::Arc<std::sync::Mutex<Vec<Subscription>>>;
+
+/// A handler whose push service answers `outcome` and records what it got.
+async fn push_handler(outcome: Outcome) -> Option<(Handler, Sent)> {
+    let mut h = handler(None).await?;
+    let sent = Sent::default();
+    h.push = Some(Pusher::Record(
+        std::sync::Arc::clone(&sent),
+        [4; 65],
+        outcome,
+    ));
+    Some((h, sent))
+}
+
+/// A device's push subscription for `secret`'s inbox.
+fn subscribe(secret: [u8; 32], endpoint: &str) -> ClientMsg {
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+    let point = p256::SecretKey::random(&mut OsRng)
+        .public_key()
+        .to_encoded_point(false);
+    ClientMsg::PushRegister {
+        secret,
+        endpoint: endpoint.into(),
+        p256dh: point.as_bytes().try_into().unwrap(),
+        auth: [1; 16],
+    }
+}
+
+fn put(inbox: [u8; 32]) -> ClientMsg {
+    ClientMsg::InboxPut {
+        inbox,
+        item: Bytes::from_static(b"sealed"),
+    }
+}
+
+#[tokio::test]
+async fn push_is_registered_anonymously_and_signals_once_per_burst() {
+    let Some((h, sent)) = push_handler(Outcome::Sent).await else {
+        return;
+    };
+    assert_eq!(
+        ask(&h, None, ClientMsg::PushKey).await,
+        ServerMsg::PushKey { key: [4; 65] }
+    );
+    let ServerMsg::BootstrapInfo { capabilities, .. } =
+        ask(&h, Some(PeerId(random32())), ClientMsg::Bootstrap).await
+    else {
+        panic!("no bootstrap");
+    };
+    assert_eq!(capabilities & CAPABILITY_PUSH, CAPABILITY_PUSH);
+
+    let secret = random32();
+    let inbox = inbox_id(&secret);
+    open_inbox(&h, secret).await;
+    let register = subscribe(secret, "https://ntfy.sh/up1");
+    // Over the session it would tie the push address to an identity.
+    let signed_in = ask(&h, Some(PeerId(random32())), register.clone()).await;
+    assert!(is_error(&signed_in, ErrorCode::BadRequest));
+    for bad in [
+        subscribe(secret, "http://ntfy.sh/up1"),
+        ClientMsg::PushRegister {
+            secret,
+            endpoint: "https://ntfy.sh/up1".into(),
+            p256dh: [0; 65],
+            auth: [1; 16],
+        },
+    ] {
+        assert!(is_error(&ask(&h, None, bad).await, ErrorCode::BadRequest));
+    }
+    assert_eq!(ask(&h, None, register).await, ServerMsg::Done);
+
+    // Two items in a row wake the device once.
+    assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
+    assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
+    let got = sent.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].endpoint, "https://ntfy.sh/up1");
+
+    // The store keeps the subscription by inbox, nothing else.
+    let kept = h.store.push_subscription(&inbox).await.unwrap().unwrap();
+    assert_eq!(kept, got[0].to_bytes());
+    assert_eq!(
+        ask(&h, None, ClientMsg::PushUnregister { secret }).await,
+        ServerMsg::Done
+    );
+    assert_eq!(h.store.push_subscription(&inbox).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_subscription_the_push_service_dropped_is_forgotten() {
+    let Some((h, sent)) = push_handler(Outcome::Gone).await else {
+        return;
+    };
+    let secret = random32();
+    let inbox = inbox_id(&secret);
+    open_inbox(&h, secret).await;
+    assert_eq!(
+        ask(&h, None, subscribe(secret, "https://ntfy.sh/up2")).await,
+        ServerMsg::Done
+    );
+    assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    assert_eq!(h.store.push_subscription(&inbox).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn without_a_vapid_key_push_is_unavailable() {
+    let Some(h) = handler(None).await else { return };
+    assert!(is_error(
+        &ask(&h, None, ClientMsg::PushKey).await,
+        ErrorCode::Unavailable
+    ));
+    let register = subscribe(random32(), "https://ntfy.sh/up3");
+    assert!(is_error(
+        &ask(&h, None, register).await,
+        ErrorCode::Unavailable
+    ));
+    let ServerMsg::BootstrapInfo { capabilities, .. } =
+        ask(&h, Some(PeerId(random32())), ClientMsg::Bootstrap).await
+    else {
+        panic!("no bootstrap");
+    };
+    assert_eq!(capabilities & CAPABILITY_PUSH, 0);
 }

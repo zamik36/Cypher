@@ -350,6 +350,7 @@ services:
     environment:
       LOG_FORMAT: json
       P2P_RELAY_PUBLIC_ADDR: "${DOMAIN}:9300"
+      P2P_PUSH_CONTACT: "https://${DOMAIN}"
     ports: !override
       - "127.0.0.1:9091:9091"
     deploy:

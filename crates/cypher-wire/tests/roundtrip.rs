@@ -67,6 +67,14 @@ fn client_samples() -> Vec<ClientMsg> {
             claim: [11; 16],
         },
         ClientMsg::Bootstrap,
+        ClientMsg::PushKey,
+        ClientMsg::PushRegister {
+            secret: [12; 32],
+            endpoint: "https://ntfy.sh/upAbC?up=1".into(),
+            p256dh: [4; 65],
+            auth: [13; 16],
+        },
+        ClientMsg::PushUnregister { secret: [14; 32] },
     ]
 }
 
@@ -109,6 +117,7 @@ fn server_samples() -> Vec<ServerMsg> {
             onion_key: [7; 32],
             capabilities: 3,
         },
+        ServerMsg::PushKey { key: [4; 65] },
         ServerMsg::Error {
             code: ErrorCode::NotFound,
         },
@@ -251,4 +260,23 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn push_endpoints_are_bounded() {
+    let frame = |endpoint: String| {
+        Frame::new(
+            1,
+            ClientMsg::PushRegister {
+                secret: [1; 32],
+                endpoint,
+                p256dh: [4; 65],
+                auth: [2; 16],
+            },
+        )
+        .encode()
+    };
+    let longest = "a".repeat(cypher_wire::MAX_PUSH_ENDPOINT_LEN);
+    Frame::<ClientMsg>::decode(frame(longest.clone())).unwrap();
+    Frame::<ClientMsg>::decode(frame(format!("{longest}a"))).unwrap_err();
 }

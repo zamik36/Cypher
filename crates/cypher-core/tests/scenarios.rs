@@ -883,3 +883,67 @@ fn reading_marks_messages_read_on_both_sides() {
         "the sender's copy"
     );
 }
+
+fn push_events(w: &World, i: usize) -> (bool, bool) {
+    let key = w.has_event(
+        i,
+        |e| matches!(e, Event::PushKey { key } if key.as_slice() == [4; 65]),
+    );
+    (key, w.has_event(i, |e| matches!(e, Event::PushRegistered)))
+}
+
+/// A device asks to be woken: the key and the registration go through the
+/// relay only, and a message for its inbox then signals it.
+#[test]
+fn push_is_set_up_through_the_relay_and_signals_an_absent_device() {
+    let mut w = paired();
+    w.command(B, Command::EnablePush);
+    assert_eq!(push_events(&w, B), (true, false));
+    w.command(
+        B,
+        Command::RegisterPush {
+            endpoint: "https://ntfy.sh/up-b".into(),
+            p256dh: [4; 65],
+            auth: [1; 16],
+        },
+    );
+    assert_eq!(push_events(&w, B), (true, true));
+    let inbox = w.clients[B].core.as_ref().unwrap().inbox_id();
+    assert_eq!(
+        w.server.pushes.get(&inbox).map(String::as_str),
+        Some("https://ntfy.sh/up-b")
+    );
+    assert_eq!(w.server.session_push_ops, 0, "never over the session");
+
+    w.disconnect(B);
+    w.send_text(A, B, "while you were away");
+    assert_eq!(w.server.signals, [inbox]);
+
+    w.connect(B);
+    w.run();
+    w.command(B, Command::DisablePush);
+    assert!(!w.server.pushes.contains_key(&inbox));
+    assert_eq!(w.server.session_push_ops, 0);
+}
+
+/// Without the relay nothing about push is said, not even over the session
+/// it would otherwise fall back to; it goes once the relay is up.
+#[test]
+fn push_waits_for_the_relay() {
+    let mut w = World::new(2);
+    w.relay_up = false;
+    w.disconnect(A);
+    w.connect(A);
+    w.run();
+    w.command(A, Command::EnablePush);
+    w.advance(15_000);
+    assert_eq!(push_events(&w, A), (false, false));
+    assert_eq!(w.server.session_push_ops, 0);
+
+    w.relay_up = true;
+    w.disconnect(A);
+    w.connect(A);
+    w.run();
+    assert!(push_events(&w, A).0);
+    assert_eq!(w.server.session_push_ops, 0);
+}

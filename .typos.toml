@@ -7,8 +7,8 @@ rto = "rto"
 wrk = "wrk"
 
 [default]
-# Commit hashes in reports and changelogs.
-extend-ignore-re = ["`[0-9a-f]{7,40}`"]
+# Commit hashes in reports; base64 keys in test vectors.
+extend-ignore-re = ["`[0-9a-f]{7,40}`", "\"[A-Za-z0-9_-]{40,}\""]
 
 [files]
 extend-exclude = ["*.lock", "apps/pwa/src/wasm/", "**/fuzz/corpus/"]

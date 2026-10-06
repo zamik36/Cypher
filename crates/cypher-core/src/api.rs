@@ -102,6 +102,17 @@ pub enum Command {
     SetAnonymity {
         require_onion: bool,
     },
+    /// Wants a wake-up when the inbox gets something while away: asks the
+    /// server for its key ([`Event::PushKey`]) to subscribe with.
+    EnablePush,
+    /// The device's Web Push subscription, registered through the relay.
+    RegisterPush {
+        endpoint: String,
+        p256dh: [u8; 65],
+        auth: [u8; 16],
+    },
+    /// The server forgets the subscription.
+    DisablePush,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +229,14 @@ pub enum Event {
     Warning {
         reason: FailReason,
     },
+    /// The server's VAPID public key, for subscribing to Web Push.
+    PushKey {
+        key: Vec<u8>,
+    },
+    /// The server will wake this device when its inbox gets something.
+    PushRegistered,
+    /// The server does not offer push, or refused the subscription.
+    PushUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

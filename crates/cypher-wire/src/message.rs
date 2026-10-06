@@ -4,7 +4,7 @@ use cypher_types::{LinkId, PeerId};
 use crate::codec::{Reader, WriteExt, field_len};
 use crate::{
     BUNDLE_BASE_LEN, FRAME_HEADER_LEN, MAX_BODY_LEN, MAX_INBOX_BATCH, MAX_INBOX_ITEM_LEN,
-    MAX_OPKS_PER_PUBLISH, MAX_RELAY_ADDR_LEN, WireError,
+    MAX_OPKS_PER_PUBLISH, MAX_PUSH_ENDPOINT_LEN, MAX_RELAY_ADDR_LEN, WireError,
 };
 
 /// A message plus the request id that correlates it with its reply.
@@ -66,6 +66,19 @@ pub enum ClientMsg {
         claim: [u8; 16],
     },
     Bootstrap,
+    /// The server's VAPID public key, for subscribing to Web Push.
+    PushKey,
+    /// Signal `endpoint` whenever the inbox `H(secret)` receives an item.
+    /// Anonymous only: tying it to the session would link push and identity.
+    PushRegister {
+        secret: [u8; 32],
+        endpoint: String,
+        p256dh: [u8; 65],
+        auth: [u8; 16],
+    },
+    PushUnregister {
+        secret: [u8; 32],
+    },
 }
 
 /// Server → client messages.
@@ -107,6 +120,10 @@ pub enum ServerMsg {
         relay_addr: String,
         onion_key: [u8; 32],
         capabilities: u32,
+    },
+    /// Uncompressed P-256 VAPID public key.
+    PushKey {
+        key: [u8; 65],
     },
     Error {
         code: ErrorCode,
@@ -163,6 +180,9 @@ mod kind {
     pub(super) const DONE: u8 = 0x44;
     pub(super) const BOOTSTRAP: u8 = 0x50;
     pub(super) const BOOTSTRAP_INFO: u8 = 0x51;
+    pub(super) const PUSH_KEY: u8 = 0x60;
+    pub(super) const PUSH_REGISTER: u8 = 0x61;
+    pub(super) const PUSH_UNREGISTER: u8 = 0x62;
     pub(super) const ERROR: u8 = 0x7F;
 }
 
@@ -280,6 +300,25 @@ impl Frame<ClientMsg> {
                 b
             }
             M::Bootstrap => header(kind::BOOTSTRAP, id, 0),
+            M::PushKey => header(kind::PUSH_KEY, id, 0),
+            M::PushRegister {
+                secret,
+                endpoint,
+                p256dh,
+                auth,
+            } => {
+                let mut b = header(kind::PUSH_REGISTER, id, endpoint.len().saturating_add(117));
+                b.put_slice(secret);
+                b.put_slice(p256dh);
+                b.put_slice(auth);
+                b.put_bytes_prefixed(endpoint.as_bytes());
+                b
+            }
+            M::PushUnregister { secret } => {
+                let mut b = header(kind::PUSH_UNREGISTER, id, 32);
+                b.put_slice(secret);
+                b
+            }
         };
         b.freeze()
     }
@@ -347,6 +386,15 @@ impl Frame<ClientMsg> {
                 claim: r.array()?,
             },
             kind::BOOTSTRAP => M::Bootstrap,
+            kind::PUSH_KEY => M::PushKey,
+            kind::PUSH_REGISTER => M::PushRegister {
+                secret: r.array()?,
+                p256dh: r.array()?,
+                auth: r.array()?,
+                endpoint: String::from_utf8(r.bytes(MAX_PUSH_ENDPOINT_LEN)?.to_vec())
+                    .map_err(|_| WireError::Malformed)?,
+            },
+            kind::PUSH_UNREGISTER => M::PushUnregister { secret: r.array()? },
             other => return Err(WireError::UnknownKind(other)),
         };
         r.finish()?;
@@ -429,6 +477,11 @@ impl Frame<ServerMsg> {
                 b.put_u32_le(*capabilities);
                 b
             }
+            M::PushKey { key } => {
+                let mut b = header(kind::PUSH_KEY, id, 65);
+                b.put_slice(key);
+                b
+            }
             M::Error { code } => {
                 let mut b = header(kind::ERROR, id, 2);
                 b.put_u16_le(*code as u16);
@@ -495,6 +548,7 @@ impl Frame<ServerMsg> {
                 onion_key: r.array()?,
                 capabilities: r.u32()?,
             },
+            kind::PUSH_KEY => M::PushKey { key: r.array()? },
             kind::ERROR => M::Error {
                 code: match r.u16()? {
                     1 => ErrorCode::NotFound,

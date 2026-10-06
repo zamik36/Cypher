@@ -20,6 +20,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 rustls.workspace = true
 anyhow.workspace = true
+p256.workspace = true
+rand.workspace = true
 tempfile = "3"
 
 [dev-dependencies]

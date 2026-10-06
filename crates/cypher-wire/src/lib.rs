@@ -34,6 +34,8 @@ pub const MAX_INBOX_ITEM_LEN: usize = 72 * 1024;
 pub const MAX_INBOX_BATCH: usize = 64;
 pub const MAX_OPKS_PER_PUBLISH: usize = 200;
 pub const MAX_RELAY_ADDR_LEN: usize = 255;
+/// Longest Web Push endpoint URL a client may register.
+pub const MAX_PUSH_ENDPOINT_LEN: usize = 1024;
 
 /// Public inbox address derived from the owner's secret. Writers need only
 /// the id; fetching or acknowledging requires the preimage.

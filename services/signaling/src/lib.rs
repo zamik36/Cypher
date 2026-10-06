@@ -3,6 +3,7 @@
 
 mod handler;
 mod onion;
+mod push;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -49,6 +50,15 @@ pub struct Config {
     pub onion_key_path: PathBuf,
     /// Public `host:port` of the onion relay advertised to clients.
     pub relay_public_addr: Option<String>,
+    /// Where the VAPID key for Web Push lives; push is off without it.
+    pub vapid_key_path: Option<PathBuf>,
+    /// The VAPID `sub` claim: how push services can reach the operator.
+    #[serde(default = "default_push_contact")]
+    pub push_contact: String,
+    /// More push services endpoints may point at, comma-separated (e.g. a
+    /// self-hosted `UnifiedPush` distributor).
+    #[serde(default)]
+    pub push_extra_hosts: String,
 }
 
 fn default_redis_url() -> String {
@@ -59,6 +69,28 @@ fn default_metrics_addr() -> SocketAddr {
 }
 fn default_onion_key_path() -> PathBuf {
     PathBuf::from("data/onion_key.bin")
+}
+fn default_push_contact() -> String {
+    "https://cyphermessanger.tech".into()
+}
+
+/// Web Push from the configured VAPID key, or off.
+fn web_push(config: &Config) -> anyhow::Result<Option<handler::Pusher>> {
+    let Some(path) = &config.vapid_key_path else {
+        info!("no VAPID key path; push notifications are off");
+        return Ok(None);
+    };
+    let extra: Vec<String> = config
+        .push_extra_hosts
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    let web = push::WebPush::new(
+        secrets::load_or_create_secret(path)?,
+        config.push_contact.clone(),
+        push::Policy::new(&extra),
+    )?;
+    Ok(Some(handler::Pusher::Web(Arc::new(web))))
 }
 
 struct Service {
@@ -133,6 +165,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     );
 
     let onion_secret = StaticSecret::from(secrets::load_or_create_secret(&config.onion_key_path)?);
+    let push = web_push(&config)?;
     let relay_addr = config.relay_public_addr.filter(|addr| {
         let valid = cypher_wire::relay_addr_is_valid(addr);
         if !valid {
@@ -145,6 +178,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
             store: Store::connect(&config.redis_url).await?,
             onion_public: PublicKey::from(&onion_secret).to_bytes(),
             relay_addr,
+            push,
         },
         onion_secret,
         nats: cypher_server_kit::connect_nats(&config.nats).await?,
