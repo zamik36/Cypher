@@ -242,6 +242,16 @@ button.quote {
   overflow-wrap: anywhere;
 }
 
+/* On a touchscreen a long press opens the message menu (Copy is there),
+   so it must not also start selecting text. */
+@media (pointer: coarse) {
+  .bubble {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
 .msg--out .bubble {
   background: var(--c-bubble-out);
   box-shadow: none;
