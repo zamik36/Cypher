@@ -23,7 +23,16 @@ export default function ImageViewer(props: { src: string; alt: string; onClose: 
     <Portal>
       <div class="image-viewer" role="dialog" aria-label={props.alt} onClick={() => props.onClose()}>
         <img class="image-viewer__img" src={props.src} alt={props.alt} />
-        <button ref={close} class="image-viewer__close" aria-label={t().common_close} onClick={() => props.onClose()}>
+        <button
+          ref={close}
+          class="image-viewer__close"
+          aria-label={t().common_close}
+          onClick={(e) => {
+            // The backdrop closes on a tap too; once is enough.
+            e.stopPropagation();
+            props.onClose();
+          }}
+        >
           <Icon name="x" size={22} />
         </button>
       </div>

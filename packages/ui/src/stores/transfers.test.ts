@@ -36,5 +36,8 @@ describe("transfers store", () => {
       status: "complete",
       total_size: 9,
     });
+    // An error for a transfer seen first through it keeps its reason.
+    upsertTransfer({ file_id: "f4", status: "error", error: "Peer went away", msg_id: "m4" });
+    expect(transferOf("f4")).toMatchObject({ status: "error", error: "Peer went away", msg_id: "m4" });
   });
 });

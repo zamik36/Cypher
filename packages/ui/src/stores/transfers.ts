@@ -9,8 +9,9 @@ export function upsertTransfer(t: Partial<TransferInfo> & { file_id: string }) {
     setTransfers(idx, t);
     return;
   }
+  // A first sighting keeps everything it carries (an error, a message id).
   setTransfers(transfers.length, {
-    file_id: t.file_id,
+    ...t,
     file_name: t.file_name ?? t.file_id,
     total_size: t.total_size ?? 0,
     progress: t.progress ?? 0,
