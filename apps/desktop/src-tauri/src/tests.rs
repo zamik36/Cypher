@@ -341,6 +341,7 @@ async fn two_desktops_against_in_process_stack() {
     accept_an_offered_file(&a, &b, &b_id).await;
     refuse_to_open_a_program(&a, &b, &b_id).await;
     send_picked_files(&a, &b_id).await;
+    send_and_preview_pictures(&a, &b, &b_id).await;
     name_then_forget_a_contact(&b, &a_id).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
@@ -374,8 +375,12 @@ async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
     b.call("delete_conversation", json!({ "peerId": a_id }))
         .await
         .unwrap();
-    let list = b.call("get_conversations", json!({})).await.unwrap();
-    assert_eq!(list.as_array().map(Vec::len), Some(0));
+    // The session row goes when the client gets to the command.
+    eventually(|| async {
+        let list = b.call("get_conversations", json!({})).await.ok()?;
+        (list.as_array()?.is_empty()).then_some(())
+    })
+    .await;
     let history = json!({ "peerId": a_id, "limit": 10, "before": null });
     let left = b.call("get_history", history).await.unwrap();
     assert_eq!(left.as_array().map(Vec::len), Some(0));
@@ -611,6 +616,9 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
     })
     .await;
     b.call("accept_file", file.clone()).await.unwrap_err();
+    let not_a_picture = media_request(&format!("preview-{}", file_id.to_hex()), None);
+    let response = media_scheme::answer(b.app.handle(), &not_a_picture).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     b.call("cancel_transfer", file).await.unwrap();
     let unknown = json!({ "fileId": FileId([7; 16]).to_hex() });
     assert_eq!(
@@ -655,6 +663,77 @@ async fn send_picked_files(a: &Desktop, b_id: &str) {
             .unwrap_err(),
         "unsupported file location"
     );
+}
+
+/// A pasted picture goes from memory, a dropped one by the path the drop
+/// gave; once kept, both show through the preview route, a text file not.
+async fn send_and_preview_pictures(a: &Desktop, b: &Desktop, b_id: &str) {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::GrayImage::from_pixel(8, 8, image::Luma([200]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let png = png.into_inner();
+    let headers: HeaderMap = [
+        ("x-peer", b_id.to_owned()),
+        ("x-name", "%D1%84%D0%BE%D1%82%D0%BE.png".to_owned()),
+        ("x-mime", "image%2Fpng".to_owned()),
+    ]
+    .iter()
+    .map(|(k, v)| (k.parse().unwrap(), HeaderValue::from_str(v).unwrap()))
+    .collect();
+    let pasted = a
+        .invoke("send_bytes", InvokeBody::Raw(png.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(pasted["file_name"], "фото.png");
+    let too_big = InvokeBody::Raw(vec![0; (50 << 20) + 1]);
+    a.invoke("send_bytes", too_big, headers).await.unwrap_err();
+
+    let dropped = a.dir.path().join("drop.png");
+    std::fs::write(&dropped, &png).unwrap();
+    crate::commands::transfer::files_dropped(
+        a.app.handle(),
+        vec![dropped, a.dir.path().to_owned()],
+    );
+    let id = a.state().dropped.lock().unwrap().id_for_tests();
+    let send = json!({ "peerId": b_id, "id": id });
+    let sent = a.call("send_dropped", send.clone()).await.unwrap();
+    assert_eq!(
+        sent.as_array().map(Vec::len),
+        Some(1),
+        "a folder is skipped"
+    );
+    a.call("send_dropped", send).await.unwrap_err();
+
+    for info in [pasted, sent[0].clone()] {
+        accept_and_preview(b, &info, &png).await;
+    }
+}
+
+/// Accepts the picture `info` names; its preview is exactly `png`.
+async fn accept_and_preview(b: &Desktop, info: &Value, png: &[u8]) {
+    let file_id = text(&info["file_id"]);
+    let id = FileId::from_hex(&file_id).unwrap();
+    eventually(|| async {
+        b.state()
+            .offers
+            .lock()
+            .unwrap()
+            .contains_key(&id)
+            .then_some(())
+    })
+    .await;
+    let file = json!({ "fileId": file_id });
+    b.call("accept_file", file.clone()).await.unwrap();
+    eventually(|| async {
+        (b.call("file_saved", file.clone()).await.ok()? == json!(true)).then_some(())
+    })
+    .await;
+    let request = media_request(&format!("preview-{file_id}"), None);
+    let preview = media_scheme::answer(b.app.handle(), &request).await;
+    assert_eq!(preview.status(), StatusCode::OK);
+    assert_eq!(preview.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(preview.body(), png);
 }
 
 /// A received program is kept, but never started from the chat.

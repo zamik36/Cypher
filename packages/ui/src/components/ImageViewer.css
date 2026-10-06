@@ -1,0 +1,42 @@
+.image-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-sheet);
+  display: grid;
+  place-items: center;
+  padding: calc(var(--sp-6) + var(--safe-top)) var(--sp-4) calc(var(--sp-6) + var(--safe-bottom));
+  background: var(--c-camera);
+  animation: image-viewer-in var(--dur) var(--ease) both;
+}
+
+.image-viewer__img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-sm);
+}
+
+.image-viewer__close {
+  position: absolute;
+  top: calc(var(--sp-3) + var(--safe-top));
+  right: calc(var(--sp-3) + var(--safe-right));
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--c-scrim);
+  color: var(--c-on-avatar);
+}
+
+@keyframes image-viewer-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-viewer {
+    animation: none;
+  }
+}

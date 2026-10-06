@@ -6,7 +6,6 @@
 
 use std::borrow::Cow;
 
-use base64::Engine as _;
 use cypher_core::MediaKind;
 use cypher_core::envelope::{MAX_MIME_LEN, MAX_POSTER_LEN};
 use cypher_media::Recorder;
@@ -23,8 +22,6 @@ use crate::session::{AppState, CmdResult, err};
 const MIN_VOICE_MS: u32 = 500;
 /// A 60 s round video at the recorder's bitrate is well under this.
 const MAX_VIDEO_NOTE_BYTES: usize = 32 << 20;
-/// The same limit as base64 text, checked before anything is decoded.
-const MAX_VIDEO_NOTE_BASE64: usize = MAX_VIDEO_NOTE_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct MediaSent {
@@ -163,25 +160,9 @@ impl<'a> VideoNote<'a> {
     }
 }
 
-/// The note's bytes: the raw body from desktop webviews, or `{"data":
-/// "<base64>"}` from Android, where the IPC bridge only carries JSON.
+/// The note's bytes: raw from desktop webviews, base64 from Android.
 fn note_body(body: &InvokeBody) -> CmdResult<Cow<'_, [u8]>> {
-    match body {
-        InvokeBody::Raw(bytes) => Ok(Cow::Borrowed(bytes)),
-        InvokeBody::Json(value) => {
-            let data = value
-                .get("data")
-                .and_then(|data| data.as_str())
-                .ok_or("expected the video note as raw bytes or base64 data")?;
-            if data.len() > MAX_VIDEO_NOTE_BASE64 {
-                return Err("video note is too large".into());
-            }
-            base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map(Cow::Owned)
-                .map_err(|_| "the video note data is not valid base64".into())
-        }
-    }
+    super::ipc::bytes(body, MAX_VIDEO_NOTE_BYTES + MAX_POSTER_LEN, "video note")
 }
 
 #[tauri::command]

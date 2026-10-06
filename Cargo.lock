@@ -1800,6 +1800,7 @@ dependencies = [
  "e2e",
  "image",
  "mime_guess",
+ "percent-encoding",
  "qrcode",
  "rustls",
  "serde",
@@ -7531,6 +7532,7 @@ dependencies = [
 name = "tauri-plugin-cypher-files"
 version = "0.3.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "tauri",
  "tauri-plugin",

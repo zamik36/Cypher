@@ -59,6 +59,23 @@ export const tauriPlatform: Platform = {
     command("delete_message", { peerId, msgId, timestamp: Math.round(timestamp) }),
   markRead: (peerId, msgIds) => command("mark_read", { peerId, msgIds }),
   pickAndSend: (peerId) => invoke<TransferInfo[]>("browse_and_send", { peerId }),
+  sendDropped: (peerId, dropId) => invoke<TransferInfo[]>("send_dropped", { peerId, id: dropId }),
+  sendFiles: async (peerId, files) => {
+    const sent: TransferInfo[] = [];
+    for (const file of files) {
+      const payload = isAndroid ? { data: await base64Of(file) } : new Uint8Array(await file.arrayBuffer());
+      sent.push(
+        await invoke<TransferInfo>("send_bytes", payload, {
+          headers: {
+            "x-peer": peerId,
+            "x-name": encodeURIComponent(file.name || "file"),
+            "x-mime": encodeURIComponent(file.type || "application/octet-stream"),
+          },
+        }),
+      );
+    }
+    return sent;
+  },
   acceptFile: (fileId) => command("accept_file", { fileId }),
   cancelTransfer: (fileId) => command("cancel_transfer", { fileId }),
   fileSaved: (fileId) => invoke<boolean>("file_saved", { fileId }),
@@ -114,6 +131,7 @@ export const tauriPlatform: Platform = {
     });
   },
   mediaUrl: (fileId) => Promise.resolve(convertFileSrc(fileId, "cypher-media")),
+  imageUrl: (fileId) => Promise.resolve(convertFileSrc(`preview-${fileId}`, "cypher-media")),
   getConversations: () => invoke<ConversationEntry[]>("get_conversations"),
   renamePeer: (peerId, alias) => command("rename_peer", { peerId, alias }),
   deleteConversation: (peerId) => command("delete_conversation", { peerId }),

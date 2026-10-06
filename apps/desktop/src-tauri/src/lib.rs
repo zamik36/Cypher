@@ -8,7 +8,7 @@ mod shared_storage;
 mod tests;
 
 use commands::{chat, identity, link, media, qr, settings, transfer};
-use tauri::{Manager, Runtime};
+use tauri::{Emitter, Manager, Runtime};
 
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
@@ -41,6 +41,25 @@ pub fn run() -> tauri::Result<()> {
             Ok(())
         })
         .on_page_load(|webview, _| allow_user_media(webview))
+        .on_webview_event(|webview, event| {
+            let tauri::WebviewEvent::DragDrop(drag) = event else {
+                return;
+            };
+            let app = webview.app_handle();
+            match drag {
+                tauri::DragDropEvent::Enter { .. } => {
+                    let _ = app.emit("cypher://files_dragging", true);
+                }
+                tauri::DragDropEvent::Drop { paths, .. } => {
+                    let _ = app.emit("cypher://files_dragging", false);
+                    transfer::files_dropped(app, paths.clone());
+                }
+                tauri::DragDropEvent::Leave => {
+                    let _ = app.emit("cypher://files_dragging", false);
+                }
+                _ => {}
+            }
+        })
         .run(tauri::generate_context!())
 }
 
@@ -77,6 +96,8 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             transfer::file_saved,
             transfer::open_file,
             transfer::reveal_file,
+            transfer::send_dropped,
+            transfer::send_bytes,
             media::voice_start,
             media::voice_stop,
             media::voice_cancel,

@@ -1,6 +1,9 @@
 //! `cypher-media://<file_id>`: ranged playback of sealed voice and video
 //! notes. Each request decrypts only the chunks covering the asked range,
 //! so playback starts immediately and memory stays bounded.
+//!
+//! `cypher-media://preview-<file_id>`: a picture received or sent as a file,
+//! for its preview in the chat. Only images, only files this device keeps.
 
 use cypher_client::{Client, ClientError, MediaSlice};
 use cypher_types::FileId;
@@ -32,11 +35,67 @@ pub(crate) async fn answer<R: Runtime>(
     let Some(state) = app.try_state::<AppState>() else {
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
-    match state.client().await {
-        Ok(client) => serve(&client, request).await,
-        Err(_) => status(StatusCode::SERVICE_UNAVAILABLE),
+    let Ok(client) = state.client().await else {
+        return status(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    match request.uri().path().trim_matches('/').strip_prefix(PREVIEW) {
+        Some(id) => preview(app, &client, id).await,
+        None => serve(&client, request).await,
     }
 }
+
+const PREVIEW: &str = "preview-";
+/// Larger pictures are not read whole for a preview (desktop).
+const MAX_PREVIEW_BYTES: u64 = 20 << 20;
+
+/// A kept picture, or 404 for anything else: an unknown id, a file that is
+/// not an image, one too large or gone.
+async fn preview<R: Runtime>(app: &AppHandle<R>, client: &Client, id: &str) -> Response<Vec<u8>> {
+    let Some(file_id) = FileId::from_hex(id) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let Ok(Some(location)) = client.saved_file(file_id).await else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    match picture(app, location).await {
+        Some((mime, bytes)) => Response::builder()
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(bytes)
+            .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR)),
+        None => status(StatusCode::NOT_FOUND),
+    }
+}
+
+/// The picture at `location` with its type, if it is one.
+async fn picture<R: Runtime>(_app: &AppHandle<R>, location: String) -> Option<(String, Vec<u8>)> {
+    #[cfg(target_os = "android")]
+    if location.starts_with("content://") {
+        use tauri_plugin_cypher_files::Files;
+        let app = _app.clone();
+        let jpeg = tauri::async_runtime::spawn_blocking(move || {
+            app.state::<Files<R>>().thumbnail(&location, THUMBNAIL_PX)
+        })
+        .await
+        .ok()?
+        .ok()?;
+        return Some(("image/jpeg".to_owned(), jpeg));
+    }
+    let mime = mime_guess::from_path(&location).first()?;
+    if mime.type_() != mime_guess::mime::IMAGE {
+        return None;
+    }
+    let meta = tokio::fs::metadata(&location).await.ok()?;
+    if meta.len() > MAX_PREVIEW_BYTES {
+        return None;
+    }
+    let bytes = tokio::fs::read(&location).await.ok()?;
+    Some((mime.essence_str().to_owned(), bytes))
+}
+
+/// Longest side of an Android thumbnail.
+#[cfg(target_os = "android")]
+const THUMBNAIL_PX: u32 = 720;
 
 pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     let Some(file_id) = FileId::from_hex(request.uri().path().trim_matches('/')) else {

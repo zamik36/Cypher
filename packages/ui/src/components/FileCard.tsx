@@ -1,6 +1,7 @@
 import { createResource, createSignal, Match, Show, Switch } from "solid-js";
 import ActionMenu, { type MenuAction } from "./ActionMenu";
 import Icon, { type IconName } from "./Icon";
+import ImageViewer from "./ImageViewer";
 import { api, type TransferInfo, type UiFile } from "../platform";
 import { transferOf, upsertTransfer } from "../stores/transfers";
 import { toastError } from "../stores/toasts";
@@ -18,6 +19,8 @@ type State = "offered" | "active" | "error" | "done" | "idle";
  */
 export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
   const [menu, setMenu] = createSignal(false);
+  const [viewing, setViewing] = createSignal(false);
+  const [broken, setBroken] = createSignal(false);
   let card: HTMLButtonElement | undefined;
   const id = () => props.file.file_id;
   const transfer = () => transferOf(id());
@@ -37,6 +40,14 @@ export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
     if (status === "complete" || (!transfer() && stored() === true)) return "done";
     return "idle";
   };
+
+  const image = () => props.file.mime.startsWith("image/") || IMAGE.test(props.file.name);
+  // A kept picture shows itself instead of an icon.
+  const [preview] = createResource(
+    () => image() && state() === "done" && stored() !== false && id(),
+    (fileId) => api.imageUrl(fileId).catch(() => undefined),
+  );
+  const shown = () => (broken() ? undefined : preview());
 
   async function act(action: () => Promise<void>, after?: Partial<TransferInfo>) {
     try {
@@ -81,12 +92,13 @@ export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
         return [{ label: tr.file_cancel, icon: "x", danger: true, run: cancel }];
       case "done": {
         if (stored() === false) return [];
+        const view: MenuAction[] = shown() ? [{ label: tr.file_view, icon: "image", run: () => setViewing(true) }] : [];
         const first: MenuAction =
           api.kind === "web"
             ? { label: tr.file_save, icon: "download", run: open }
             : { label: tr.file_open, icon: "external-link", run: open };
         const folder: MenuAction = { label: tr.file_reveal, icon: "folder-open", run: reveal };
-        return api.capabilities.revealFile ? [first, folder] : [first];
+        return [...view, first, ...(api.capabilities.revealFile ? [folder] : [])];
       }
       default:
         return [];
@@ -96,7 +108,7 @@ export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
   const icon = (): IconName => {
     if (state() === "offered") return "download";
     if (state() === "error") return "alert";
-    return props.file.mime.startsWith("image/") || IMAGE.test(props.file.name) ? "image" : "file";
+    return image() ? "image" : "file";
   };
 
   const size = () => formatBytes(props.file.size, locale());
@@ -113,10 +125,18 @@ export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
         aria-expanded={menu()}
         aria-label={props.file.name}
         onClick={() => setMenu(!menu())}
+        classList={{ "file-card--image": Boolean(shown()) }}
       >
-        <span class="file-card__icon" data-state={state()}>
-          <Icon name={icon()} />
-        </span>
+        <Show
+          when={shown()}
+          fallback={
+            <span class="file-card__icon" data-state={state()}>
+              <Icon name={icon()} />
+            </span>
+          }
+        >
+          {(src) => <img class="file-card__image" src={src()} alt="" onError={() => setBroken(true)} />}
+        </Show>
         <span class="file-card__body">
           <span class="file-card__name" title={props.file.name}>
             {props.file.name}
@@ -144,6 +164,9 @@ export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
           </Show>
         </span>
       </button>
+      <Show when={viewing() && shown()}>
+        {(src) => <ImageViewer src={src()} alt={props.file.name} onClose={() => setViewing(false)} />}
+      </Show>
       <Show when={menu() && card && actions().length > 0}>
         <ActionMenu
           anchor={card as HTMLElement}

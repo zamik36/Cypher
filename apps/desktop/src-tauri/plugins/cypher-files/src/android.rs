@@ -30,6 +30,18 @@ struct Published {
     uri: String,
 }
 
+#[derive(Serialize)]
+struct ThumbnailArgs<'a> {
+    uri: &'a str,
+    size: u32,
+}
+
+#[derive(Deserialize)]
+struct Thumbnail {
+    /// JPEG, base64.
+    jpeg: String,
+}
+
 impl<R: Runtime> Files<R> {
     /// Moves a received file into Downloads/Cypher; returns its `content://`
     /// URI. The file at `path` is gone afterwards.
@@ -50,6 +62,21 @@ impl<R: Runtime> Files<R> {
     pub fn open(&self, uri: &str) -> Result<(), String> {
         self.0
             .run_mobile_plugin::<()>("open", UriArgs { uri })
+            .map_err(|e| e.to_string())
+    }
+
+    /// A JPEG of the picture at `uri`, its longest side at most `size`.
+    ///
+    /// # Errors
+    /// The Kotlin side's message when it is not a picture or cannot be read.
+    pub fn thumbnail(&self, uri: &str, size: u32) -> Result<Vec<u8>, String> {
+        use base64::Engine as _;
+        let thumb: Thumbnail = self
+            .0
+            .run_mobile_plugin("thumbnail", ThumbnailArgs { uri, size })
+            .map_err(|e| e.to_string())?;
+        base64::engine::general_purpose::STANDARD
+            .decode(thumb.jpeg)
             .map_err(|e| e.to_string())
     }
 

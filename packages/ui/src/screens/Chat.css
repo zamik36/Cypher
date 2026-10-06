@@ -2,6 +2,26 @@
   position: relative;
 }
 
+/* Files dragged over the chat. */
+.chat__drop {
+  position: absolute;
+  inset: var(--sp-3);
+  z-index: var(--z-sheet);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  border: 2px dashed var(--c-accent);
+  border-radius: var(--r-lg);
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  font-size: var(--t-lg);
+  font-weight: 600;
+  pointer-events: none;
+  animation: action-menu-in var(--dur) var(--ease) both;
+}
+
 /* ── Header ──────────────────────────────────────────────────────── */
 
 .chat__who {
@@ -362,6 +382,21 @@ button.quote {
 
 .file-card:disabled {
   cursor: default;
+}
+
+/* A picture: the image on top, its name and size below. */
+.file-card--image {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.file-card__image {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
 }
 
 .file-card__icon {

@@ -4,7 +4,11 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
+import android.util.Size
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -34,6 +38,12 @@ class PublishArgs {
 @InvokeArg
 class UriArgs {
     lateinit var uri: String
+}
+
+@InvokeArg
+class ThumbnailArgs {
+    lateinit var uri: String
+    var size: Int = 720
 }
 
 /** Serves files kept in app storage on devices without MediaStore downloads. */
@@ -77,6 +87,33 @@ class FilesPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             invoke.reject(e.message ?: "cannot open the file")
         }
+    }
+
+    /** A JPEG (base64) of a picture, its longest side at most `size`. */
+    @Command
+    fun thumbnail(invoke: Invoke) {
+        val args = invoke.parseArgs(ThumbnailArgs::class.java)
+        background(invoke) {
+            val uri = Uri.parse(args.uri)
+            val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                resolver.loadThumbnail(uri, Size(args.size, args.size), null)
+            } else {
+                decodeScaled(uri, args.size)
+            }
+            val jpeg = java.io.ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, jpeg)
+            JSObject().put("jpeg", Base64.encodeToString(jpeg.toByteArray(), Base64.NO_WRAP))
+        }
+    }
+
+    private fun decodeScaled(uri: Uri, size: Int): Bitmap {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= size && bounds.outHeight / (sample * 2) >= size) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+            ?: throw IOException("not a picture")
     }
 
     /** Copies a picked `content://` file into the app so it can be sent. */

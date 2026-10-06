@@ -84,6 +84,8 @@ pub(crate) struct AppState {
     pub offers: Offers,
     /// The voice note being recorded, if any.
     pub voice: StdMutex<Option<Recorder>>,
+    /// The last files dropped on the window.
+    pub dropped: StdMutex<crate::commands::transfer::Dropped>,
 }
 
 impl AppState {
@@ -96,6 +98,7 @@ impl AppState {
             endpoint: Mutex::default(),
             offers: Offers::default(),
             voice: StdMutex::default(),
+            dropped: StdMutex::default(),
         }
     }
 

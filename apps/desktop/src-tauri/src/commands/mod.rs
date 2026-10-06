@@ -4,6 +4,7 @@
 
 pub(crate) mod chat;
 pub(crate) mod identity;
+pub(crate) mod ipc;
 pub(crate) mod link;
 pub(crate) mod media;
 pub(crate) mod qr;

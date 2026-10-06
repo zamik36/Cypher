@@ -9,6 +9,7 @@ publish.workspace = true
 links = "tauri-plugin-cypher-files"
 
 [dependencies]
+base64 = "0.22"
 serde.workspace = true
 tauri = { version = "2", features = [] }
 

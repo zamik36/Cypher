@@ -42,6 +42,11 @@ function save(name: string, blob: Blob) {
   setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_RELEASE_MS);
 }
 
+async function sendFiles(peerId: string, files: File[]): Promise<TransferInfo[]> {
+  const sent = await call("sendFiles", peerId, files);
+  return sent.map((f) => ({ ...f, progress: 0, direction: "send", status: "active" }));
+}
+
 function pickFiles(): Promise<File[]> {
   return new Promise((resolve) => {
     const input = Object.assign(document.createElement("input"), { type: "file", multiple: true });
@@ -80,10 +85,9 @@ export const webPlatform: Platform = {
   },
   pickAndSend: async (peerId): Promise<TransferInfo[]> => {
     const files = await pickFiles();
-    if (files.length === 0) return [];
-    const sent = await call("sendFiles", peerId, files);
-    return sent.map((f) => ({ ...f, progress: 0, direction: "send", status: "active" }));
+    return files.length === 0 ? [] : sendFiles(peerId, files);
   },
+  sendFiles: (peerId, files) => sendFiles(peerId, files),
   acceptFile: async (fileId) => {
     await call("command", { type: "accept_file", file_id: fileId });
   },
@@ -121,6 +125,16 @@ export const webPlatform: Platform = {
       url = call("mediaBlob", fileId).then((blob) => URL.createObjectURL(blob));
       url.catch(() => mediaUrls.delete(fileId));
       mediaUrls.set(fileId, url);
+    }
+    return url;
+  },
+  imageUrl: (fileId) => {
+    const key = `image:${fileId}`;
+    let url = mediaUrls.get(key);
+    if (!url) {
+      url = call("savedBlob", fileId).then((blob) => URL.createObjectURL(blob));
+      url.catch(() => mediaUrls.delete(key));
+      mediaUrls.set(key, url);
     }
     return url;
   },

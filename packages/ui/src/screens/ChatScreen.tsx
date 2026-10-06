@@ -10,7 +10,7 @@ import FileCard from "../components/FileCard";
 import RecordButton from "../components/media/RecordButton";
 import RoundVideoBubble from "../components/media/RoundVideoBubble";
 import VoiceBubble from "../components/media/VoiceBubble";
-import { api, type ChatMessage, type MediaSent, type UiFile } from "../platform";
+import { api, type ChatMessage, type MediaSent, type TransferInfo, type UiFile } from "../platform";
 import {
   addMessage,
   findMessage,
@@ -375,29 +375,80 @@ export default function ChatScreen(props: { peerId: string }) {
     setTimeout(() => el.classList.remove("msg--flash"), 1200);
   }
 
-  async function attach() {
+  /** Shows files just offered as messages with their transfers. */
+  function rememberSent(sent: readonly TransferInfo[]) {
+    for (const info of sent) {
+      upsertTransfer({ ...info, direction: "send", status: "active" });
+      remember({
+        ...(info.msg_id && { msg_id: info.msg_id }),
+        from: ME,
+        text: info.file_name,
+        timestamp: Date.now(),
+        status: "pending",
+        file: {
+          file_id: info.file_id,
+          name: info.file_name,
+          size: info.total_size,
+          mime: "",
+          kind: "file",
+          duration_ms: null,
+        },
+      });
+    }
+  }
+
+  async function offer(send: () => Promise<TransferInfo[]>) {
     try {
-      for (const sent of await api.pickAndSend(props.peerId)) {
-        upsertTransfer({ ...sent, direction: "send", status: "active" });
-        remember({
-          ...(sent.msg_id && { msg_id: sent.msg_id }),
-          from: ME,
-          text: sent.file_name,
-          timestamp: Date.now(),
-          status: "pending",
-          file: {
-            file_id: sent.file_id,
-            name: sent.file_name,
-            size: sent.total_size,
-            mime: "",
-            kind: "file",
-            duration_ms: null,
-          },
-        });
-      }
+      rememberSent(await send());
     } catch (e) {
       toastError(e);
     }
+  }
+
+  function attach() {
+    const peerId = props.peerId;
+    void offer(() => api.pickAndSend(peerId));
+  }
+
+  // Files dropped on the chat (a browser hands them over; the desktop app
+  // catches the drop natively and sends the paths it got).
+  const [dragging, setDragging] = createSignal(false);
+  let dragDepth = 0;
+  const holdsFiles = (e: DragEvent) => e.dataTransfer?.types.includes("Files") === true;
+  function onDragEnter(e: DragEvent) {
+    if (!holdsFiles(e)) return;
+    e.preventDefault();
+    dragDepth++;
+    setDragging(true);
+  }
+  function onDragLeave() {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setDragging(false);
+  }
+  function onDrop(e: DragEvent) {
+    if (!holdsFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    setDragging(false);
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    const peerId = props.peerId;
+    if (files.length > 0) void offer(() => api.sendFiles(peerId, files));
+  }
+  function onDropped(drop: { id: number }) {
+    const [send, peerId] = [api.sendDropped, props.peerId];
+    if (send) void offer(() => send(peerId, drop.id));
+  }
+  onMount(() => {
+    const unlisten = [api.on("files_dragging", setDragging), api.on("files_dropped", onDropped)];
+    onCleanup(() => void Promise.all(unlisten).then((offs) => offs.forEach((off) => off())));
+  });
+
+  function onPaste(e: ClipboardEvent) {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    const peerId = props.peerId;
+    void offer(() => api.sendFiles(peerId, files));
   }
 
   function mediaSent(sent: MediaSent, file: UiFile) {
@@ -421,7 +472,19 @@ export default function ChatScreen(props: { peerId: string }) {
   }
 
   return (
-    <section class="screen chat">
+    <section
+      class="screen chat"
+      onDragEnter={onDragEnter}
+      onDragOver={(e) => holdsFiles(e) && e.preventDefault()}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <Show when={dragging()}>
+        <div class="chat__drop" aria-hidden="true">
+          <Icon name="paperclip" size={28} />
+          <span>{t().chat_drop}</span>
+        </div>
+      </Show>
       <TopBar
         onBack={isWide() ? undefined : back}
         testId="chat-header"
@@ -530,7 +593,7 @@ export default function ChatScreen(props: { peerId: string }) {
       </Show>
 
       <footer class="composer">
-        <button class="icon-btn" onClick={() => void attach()} aria-label={t().composer_attach}>
+        <button class="icon-btn" onClick={attach} aria-label={t().composer_attach}>
           <Icon name="paperclip" />
         </button>
         <textarea
@@ -545,6 +608,7 @@ export default function ChatScreen(props: { peerId: string }) {
             resizeComposer();
           }}
           onKeyDown={onKey}
+          onPaste={onPaste}
         />
         <Show when={draft().trim()} fallback={<RecordButton peer={props.peerId} onSent={mediaSent} />}>
           <button class="icon-btn icon-btn--accent" onClick={() => void send()} aria-label={t().composer_send}>

@@ -115,6 +115,7 @@ const en = {
   chat_contact_info: "Contact info",
   chat_say_hello: "No messages yet. Say hello!",
   chat_encrypted: "Messages are end-to-end encrypted. Only you and your contact can read them.",
+  chat_drop: "Drop to send",
   chat_to_latest: "Jump to the latest message",
   composer_placeholder: "Message",
   msg_actions: "Message actions",
@@ -158,6 +159,7 @@ const en = {
   file_sent: "Sent",
   file_saved: "Saved",
   file_open: "Open file",
+  file_view: "View",
   file_save: "Save",
   file_reveal: "Show in folder",
   file_unsafe:

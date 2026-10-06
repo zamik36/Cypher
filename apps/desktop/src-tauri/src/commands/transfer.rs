@@ -4,10 +4,12 @@ use cypher_client::Client;
 use cypher_core::{Command, MediaKind};
 use cypher_types::{FileId, MsgId, PeerId};
 use serde::Serialize;
-use tauri::{AppHandle, Runtime, State};
+use tauri::ipc::Request;
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use super::chat::parse_peer;
+use super::ipc;
 use crate::session::{AppState, CmdResult, err};
 
 #[derive(Debug, Serialize)]
@@ -50,6 +52,127 @@ pub(crate) async fn browse_and_send<R: Runtime>(
         });
     }
     Ok(out)
+}
+
+/// Files dropped on the window, held for the UI to send to the open chat:
+/// the paths come from the drop itself, never from the webview.
+#[derive(Default)]
+pub(crate) struct Dropped {
+    id: u64,
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+impl Dropped {
+    pub(crate) fn id_for_tests(&self) -> u64 {
+        self.id
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct DropInfo {
+    id: u64,
+    names: Vec<String>,
+}
+
+/// Remembers a drop and tells the UI, which answers with `send_dropped`.
+pub(crate) fn files_dropped<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
+    let state = app.state::<AppState>();
+    let Ok(mut dropped) = state.dropped.lock() else {
+        return;
+    };
+    dropped.id += 1;
+    let info = DropInfo {
+        id: dropped.id,
+        names: paths.iter().map(|p| display_name(p)).collect(),
+    };
+    dropped.paths = paths;
+    drop(dropped);
+    let _ = app.emit("cypher://files_dropped", info);
+}
+
+/// Sends the files of drop `id` to `peer_id`; each drop is sent once.
+#[tauri::command]
+pub(crate) async fn send_dropped<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    peer_id: String,
+    id: u64,
+) -> CmdResult<Vec<TransferInfo>> {
+    let peer = parse_peer(&peer_id)?;
+    let paths = {
+        let mut dropped = state.dropped.lock().map_err(err)?;
+        if dropped.id != id || dropped.paths.is_empty() {
+            return Err("this drop is gone".into());
+        }
+        std::mem::take(&mut dropped.paths)
+    };
+    let client = state.client().await?;
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        // Folders and the like are skipped, not fatal.
+        if !tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        let (msg_id, file_id, file_name, total_size) =
+            send_pick(&app, &client, peer, FilePath::Path(path)).await?;
+        out.push(TransferInfo {
+            file_id: file_id.to_hex(),
+            msg_id: msg_id.to_hex(),
+            file_name,
+            total_size,
+            progress: 0.0,
+            direction: "send",
+            status: "active",
+        });
+    }
+    Ok(out)
+}
+
+/// A fresh name for a staged copy.
+fn staging_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{nanos}-{n}.tmp")
+}
+
+/// Largest file sent from memory (a pasted picture); bigger ones go by path.
+const MAX_SENT_BYTES: usize = 50 << 20;
+
+/// Sends bytes the webview holds, such as a pasted picture, as a file:
+/// staged in the app's folder, then deleted by the client once sent.
+#[tauri::command]
+pub(crate) async fn send_bytes(
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> CmdResult<TransferInfo> {
+    let headers = request.headers();
+    let peer = parse_peer(&ipc::header(headers, "x-peer")?)?;
+    let name = ipc::header(headers, "x-name")?;
+    let mime = ipc::header(headers, "x-mime")?;
+    let data = ipc::bytes(request.body(), MAX_SENT_BYTES, "file")?;
+    let dir = state.paths().data.join("staging");
+    tokio::fs::create_dir_all(&dir).await.map_err(err)?;
+    let staged = dir.join(staging_name());
+    tokio::fs::write(&staged, &data).await.map_err(err)?;
+    let (msg_id, file_id) = state
+        .client()
+        .await?
+        .send_staged_file(peer, &staged, &name, &mime)
+        .await
+        .map_err(err)?;
+    Ok(TransferInfo {
+        file_id: file_id.to_hex(),
+        msg_id: msg_id.to_hex(),
+        file_name: name,
+        total_size: data.len() as u64,
+        progress: 0.0,
+        direction: "send",
+        status: "active",
+    })
 }
 
 /// Sends one picked file: a path as it is, a `content://` pick (Android)

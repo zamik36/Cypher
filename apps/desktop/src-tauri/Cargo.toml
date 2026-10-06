@@ -26,6 +26,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-cypher-files = { path = "plugins/cypher-files" }
 mime_guess = "2"
+percent-encoding = "2"
 rustls.workspace = true
 serde.workspace = true
 tokio.workspace = true

@@ -119,6 +119,7 @@ const ru: TranslationKeys = {
   chat_contact_info: "О контакте",
   chat_say_hello: "Сообщений пока нет. Напишите первым!",
   chat_encrypted: "Сообщения защищены сквозным шифрованием. Прочитать их можете только вы и собеседник.",
+  chat_drop: "Отпустите, чтобы отправить",
   chat_to_latest: "К последнему сообщению",
   composer_placeholder: "Сообщение",
   msg_actions: "Действия с сообщением",
@@ -160,6 +161,7 @@ const ru: TranslationKeys = {
   file_sent: "Отправлен",
   file_saved: "Сохранён",
   file_open: "Открыть файл",
+  file_view: "Просмотреть",
   file_save: "Сохранить",
   file_reveal: "Показать в папке",
   file_unsafe:

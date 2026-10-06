@@ -102,6 +102,10 @@ export interface Events {
   /** The server speaks another protocol version; this client stopped. */
   update_required: null;
   peer_connected: string;
+  /** Files are being dragged over the window (native drops only). */
+  files_dragging: boolean;
+  /** Files were dropped on the window; `sendDropped` offers them. */
+  files_dropped: { id: number; names: string[] };
   /** A contact told us the name they go by (or that they have none). */
   peer_profile: { peer: string; name: string | null };
   message: UiMessage;
@@ -149,6 +153,10 @@ export interface Platform {
   /** Deletes a message from this device only; `timestamp` as the UI shows it. */
   deleteMessage(peerId: string, msgId: string, timestamp: number): Promise<void>;
   markRead(peerId: string, msgIds: string[]): Promise<void>;
+  /** Offers files the UI holds (dropped in a browser, pasted) to `peerId`. */
+  sendFiles(peerId: string, files: File[]): Promise<TransferInfo[]>;
+  /** Offers the files of a native drop (`files_dropped`) to `peerId`. */
+  sendDropped?: (peerId: string, dropId: number) => Promise<TransferInfo[]>;
   /** Lets the user pick files and offers them to `peerId`. */
   pickAndSend(peerId: string): Promise<TransferInfo[]>;
   acceptFile(fileId: string): Promise<void>;
@@ -178,6 +186,8 @@ export interface Platform {
   sendVideoNote(peerId: string, note: VideoNote): Promise<MediaSent>;
   /** URL an `<audio>`/`<video>` element can play a stored note from. */
   mediaUrl(fileId: string): Promise<string>;
+  /** A URL showing a kept picture sent or received as a file. */
+  imageUrl(fileId: string): Promise<string>;
   getConversations(): Promise<ConversationEntry[]>;
   /** Names a contact on this device; `null` or blank removes the name. */
   renamePeer(peerId: string, alias: string | null): Promise<void>;
