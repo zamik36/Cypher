@@ -70,6 +70,7 @@ export const webPlatform: Platform = {
   unlockIdentity: (passphrase) => call("unlockIdentity", passphrase),
   importMnemonic: (mnemonic, nickname, passphrase) => call("importMnemonic", mnemonic, nickname, passphrase),
   eraseDevice: () => call("eraseDevice"),
+  lock: () => call("lock"),
   exportMnemonic: (passphrase) => call("exportMnemonic", passphrase),
   connectToGateway: (_addr, anonymous) => call("connect", ...endpoints(), anonymous),
   applyAnonymousSettings: (anonymous) => call("setAnonymity", anonymous),

@@ -1,4 +1,4 @@
-import { createStore } from "solid-js/store";
+import { createStore, reconcile } from "solid-js/store";
 
 /** What the user was writing in a chat, and to which message. */
 export interface Draft {
@@ -28,4 +28,9 @@ export function setReplyTo(peerId: string, replyTo: string | null): void {
 
 export function clearDraft(peerId: string): void {
   setDrafts(peerId, { ...EMPTY });
+}
+
+/** Forgets every draft (on lock). */
+export function clearAllDrafts(): void {
+  setDrafts(reconcile({}));
 }

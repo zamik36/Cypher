@@ -206,6 +206,27 @@ async fn identity_lifecycle_without_a_server() {
         "the recovery phrase restores the same identity"
     );
 
+    lock_then_erase(&desktop, &peer, &text(&mnemonic)).await;
+}
+
+/// Locking forgets the identity until the passphrase; erasing, for a
+/// forgotten one, makes room to start over.
+async fn lock_then_erase(desktop: &Desktop, peer: &str, mnemonic: &str) {
+    let no_args = || json!({});
+    let with_pass = |passphrase: &str| json!({ "passphrase": passphrase });
+    // Locking forgets the identity until the passphrase is typed again.
+    desktop.call("lock", no_args()).await.unwrap();
+    assert_eq!(
+        desktop.call("get_nickname", no_args()).await,
+        Ok(Value::Null)
+    );
+    assert_eq!(
+        desktop.call("export_mnemonic", with_pass(PASS)).await,
+        Ok(json!(mnemonic))
+    );
+    let unlocked = desktop.call("unlock_identity", with_pass(PASS)).await;
+    assert_eq!(unlocked, Ok(json!([peer, "alice"])));
+
     // A forgotten passphrase: erase, then start over on the same device.
     desktop.call("erase_device", no_args()).await.unwrap();
     assert_eq!(

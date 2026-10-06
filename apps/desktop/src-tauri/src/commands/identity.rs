@@ -61,6 +61,14 @@ pub(crate) async fn import_mnemonic(
     Ok(activate(&state, unlocked).await)
 }
 
+/// Locks the app: the client stops and the identity leaves memory until the
+/// passphrase is typed again.
+#[tauri::command]
+pub(crate) async fn lock(state: State<'_, AppState>) -> CmdResult<()> {
+    state.lock().await;
+    Ok(())
+}
+
 /// Deletes the profile and everything kept with it from this device, for a
 /// forgotten passphrase. Asks for none: without it nothing here is readable
 /// anyway, and the recovery phrase brings the identity back.

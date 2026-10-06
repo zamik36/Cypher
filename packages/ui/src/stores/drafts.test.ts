@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clearDraft, draftOf, setDraftText, setReplyTo } from "./drafts";
+import { clearAllDrafts, clearDraft, draftOf, setDraftText, setReplyTo } from "./drafts";
 
 describe("drafts", () => {
   it("keep text and the message answered per chat", () => {
@@ -11,5 +11,7 @@ describe("drafts", () => {
     expect(draftOf("b")).toEqual({ text: "other", replyTo: null });
     clearDraft("a");
     expect(draftOf("a")).toEqual({ text: "", replyTo: null });
+    clearAllDrafts();
+    expect(draftOf("b")).toEqual({ text: "", replyTo: null });
   });
 });

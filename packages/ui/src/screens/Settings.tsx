@@ -25,6 +25,14 @@ import {
   setPreviewEnabled,
 } from "../utils/notifications";
 import { reasonText } from "../utils/reasons";
+import {
+  AUTO_LOCK_CHOICES,
+  autoLock,
+  lockNow,
+  lockOnHide,
+  setAutoLock,
+  setLockOnHide,
+} from "../stores/lock";
 import { APP_VERSION } from "../version";
 import { locale, setLocale, t, type Locale } from "../i18n";
 
@@ -286,6 +294,12 @@ function Notifications() {
   );
 }
 
+/** "Never", "1 min", "1 h"... */
+function lockLabel(minutes: number): string {
+  if (minutes === 0) return t().lock_never;
+  return minutes < 60 ? t().lock_minutes(minutes) : t().lock_hours(minutes / 60);
+}
+
 function Privacy() {
   const caps = api.capabilities;
   const [anonymous, setAnonymous] = createSignal(anonymousSettings.enabled);
@@ -343,6 +357,35 @@ function Privacy() {
 
   return (
     <>
+      <h3 class="group-title">{t().lock_title}</h3>
+      <div class="segmented" role="radiogroup" aria-label={t().lock_auto}>
+        <For each={AUTO_LOCK_CHOICES}>
+          {(minutes) => (
+            <button aria-pressed={autoLock() === minutes} onClick={() => setAutoLock(minutes)}>
+              {lockLabel(minutes)}
+            </button>
+          )}
+        </For>
+      </div>
+      <div class="list settings__list">
+        <SwitchRow
+          label={t().lock_on_hide}
+          hint={t().lock_on_hide_hint}
+          checked={lockOnHide()}
+          onChange={() => setLockOnHide(!lockOnHide())}
+        />
+        <button class="list-row" onClick={lockNow}>
+          <span class="list-row__icon">
+            <Icon name="lock" size={18} />
+          </span>
+          <span class="list-row__text">
+            <span class="list-row__title">{t().lock_now}</span>
+            <span class="list-row__subtitle">{t().lock_hint}</span>
+          </span>
+        </button>
+      </div>
+
+      <h3 class="group-title">{t().privacy_route}</h3>
       <div class="card settings__card settings__status">
         <span class="settings__dot" data-on={onionUp() === true} />
         <span class="list-row__text">

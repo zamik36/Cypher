@@ -6,6 +6,8 @@ export interface Methods {
   unlockIdentity(passphrase: string): [string, string];
   importMnemonic(mnemonic: string, nickname: string, passphrase: string): string;
   exportMnemonic(passphrase: string): string;
+  /** Stops the client and drops the identity from memory. */
+  lock(): void;
   /** Deletes the identity and everything kept with it. */
   eraseDevice(): void;
   connect(gatewayUrl: string, relayUrl: string, anonymous: boolean): string;

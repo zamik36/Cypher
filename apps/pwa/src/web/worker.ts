@@ -330,6 +330,20 @@ async function history(peer: string, limit: number, before?: number) {
   return rows.map(([key, value], i) => c.openMessage(key, value, statuses[i]));
 }
 
+/** Stops talking to the network and drops every key from memory. */
+function forget() {
+  gateway.stop();
+  relay.stop();
+  for (const sink of openSinks.values()) sink.handle.close();
+  openSinks.clear();
+  sources.clear();
+  offerNames.clear();
+  client?.free();
+  client = null;
+  identity?.free();
+  identity = null;
+}
+
 /** How far around the UI's time a deleted message is looked for. */
 const DELETE_WINDOW_MS = 60_000;
 
@@ -378,18 +392,10 @@ const handlers: Handlers = {
     identity = unlocked;
     return [unlocked.peerId(), unlocked.nickname];
   },
+  lock: () => serial(() => forget()),
   eraseDevice: () =>
     serial(async () => {
-      gateway.stop();
-      relay.stop();
-      for (const sink of openSinks.values()) sink.handle.close();
-      openSinks.clear();
-      sources.clear();
-      offerNames.clear();
-      client?.free();
-      client = null;
-      identity?.free();
-      identity = null;
+      forget();
       await clear(db, STORES);
       const root = await navigator.storage.getDirectory();
       await Promise.all(

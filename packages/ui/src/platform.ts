@@ -148,6 +148,8 @@ export interface Platform {
   unlockIdentity(passphrase: string): Promise<[string, string]>;
   importMnemonic(mnemonic: string, nickname: string, passphrase: string): Promise<string>;
   exportMnemonic(passphrase: string): Promise<string>;
+  /** Stops the client and drops the identity from memory until unlocked. */
+  lock(): Promise<void>;
   /** Deletes the profile and everything kept with it from this device. */
   eraseDevice(): Promise<void>;
   connectToGateway(addr: string, anonymous: boolean, bridges: string[]): Promise<string>;
