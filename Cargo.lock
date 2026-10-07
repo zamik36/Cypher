@@ -1842,6 +1842,7 @@ dependencies = [
  "async-nats",
  "config",
  "console-subscriber",
+ "cypher-types",
  "prometheus",
  "rand 0.8.5",
  "serde",

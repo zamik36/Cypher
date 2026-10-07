@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{IdentityKeyPair, PrekeyBundle};
-use cypher_types::{LinkId, PeerId};
+use cypher_types::{DeviceId, LinkId, PeerId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg, inbox_id};
 use rand::RngCore as _;
 use rand::rngs::OsRng;
@@ -37,8 +37,14 @@ fn is_error(msg: &ServerMsg, expected: ErrorCode) -> bool {
 
 /// The bundle a client publishes: everything but the trailing OPK flag.
 fn base_bundle(id: &IdentityKeyPair) -> Bytes {
+    device_bundle(id, DeviceId::FIRST)
+}
+
+/// The bundle one device of `id` publishes.
+fn device_bundle(id: &IdentityKeyPair, device: DeviceId) -> Bytes {
     let mut out = Vec::new();
-    PrekeyBundle::new(id, &SignedPreKey::generate(1, &mut OsRng), None).encode(&mut out);
+    let spk = SignedPreKey::generate(1, &mut OsRng);
+    PrekeyBundle::new(id, device, &spk, None).encode(&mut out);
     out.pop();
     Bytes::from(out)
 }
@@ -78,6 +84,7 @@ async fn keys_are_published_fetched_and_forgeries_rejected() {
         Some(mallory.peer_id()),
         ClientMsg::FetchKeys {
             peer: alice.peer_id(),
+            device: DeviceId::FIRST,
         },
     )
     .await;
@@ -101,9 +108,53 @@ async fn keys_are_published_fetched_and_forgeries_rejected() {
 
     let unknown = ClientMsg::FetchKeys {
         peer: IdentityKeyPair::generate().peer_id(),
+        device: DeviceId::FIRST,
     };
     assert!(is_error(
         &ask(&h, Some(alice.peer_id()), unknown).await,
+        ErrorCode::NotFound
+    ));
+}
+
+/// Each device of an identity keeps its own bundle and prekeys: publishing
+/// from one leaves the other's alone, and a fetch names the device.
+#[tokio::test]
+async fn every_device_has_its_own_keys() {
+    let Some(h) = handler(None).await else { return };
+    let (alice, bob) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+    let me = Some(alice.peer_id());
+    for device in [DeviceId(1), DeviceId(2)] {
+        let publish = ClientMsg::PublishKeys {
+            base: device_bundle(&alice, device),
+            opks: vec![(device.0, random32())],
+            replace_opks: true,
+        };
+        let acked = ask(&h, me, publish).await;
+        assert!(
+            matches!(acked, ServerMsg::KeysAck { opks_left: 1 }),
+            "{acked:?}"
+        );
+    }
+    for device in [DeviceId(1), DeviceId(2)] {
+        let fetch = ClientMsg::FetchKeys {
+            peer: alice.peer_id(),
+            device,
+        };
+        let ServerMsg::Keys { base, opk } = ask(&h, Some(bob.peer_id()), fetch).await else {
+            panic!("no keys for {device}");
+        };
+        let bundle = PrekeyBundle::decode(&[&base[..], &[0]].concat()).unwrap();
+        assert_eq!(
+            (bundle.device, opk.map(|(id, _)| id)),
+            (device, Some(device.0))
+        );
+    }
+    let missing = ClientMsg::FetchKeys {
+        peer: alice.peer_id(),
+        device: DeviceId(3),
+    };
+    assert!(is_error(
+        &ask(&h, Some(bob.peer_id()), missing).await,
         ErrorCode::NotFound
     ));
 }
@@ -169,6 +220,7 @@ async fn identity_requests_need_an_authenticated_peer() {
         ClientMsg::Bootstrap,
         ClientMsg::FetchKeys {
             peer: PeerId([2; 32]),
+            device: DeviceId::FIRST,
         },
         ClientMsg::ResolveLink {
             link: LinkId::random(&mut OsRng),
@@ -337,6 +389,7 @@ async fn one_time_prekeys_cannot_be_drained_or_hoarded() {
         let thief = Some(IdentityKeyPair::generate().peer_id());
         let fetch = ClientMsg::FetchKeys {
             peer: victim.peer_id(),
+            device: DeviceId::FIRST,
         };
         let ServerMsg::Keys { opk, .. } = ask(&h, thief, fetch).await else {
             panic!("no keys");

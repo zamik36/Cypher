@@ -8,10 +8,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use cypher_server_kit::ratelimit::ConnLimiter;
 use cypher_server_kit::{SIG_REQUEST_SUBJECT, peer_subject};
-use cypher_types::{PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, SESSION_AUTH_CONTEXT};
 use cypher_wire::{
-    ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg, encode_recv,
-    peek_send,
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, SendView, ServerMsg,
+    encode_recv, peek_send,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -84,9 +84,8 @@ impl<B: Bus> Gateway<B> {
             sig_permits: Arc::new(Semaphore::new(MAX_SIG_IN_FLIGHT)),
             ack_permits: Arc::new(Semaphore::new(MAX_ACKS_IN_FLIGHT)),
         };
-        let peer = session.run(stream).await;
-        if let Some(peer) = peer {
-            self.registry.remove(&peer, session.conn_id);
+        if let Some(me) = session.run(stream).await {
+            self.registry.remove(&me, session.conn_id);
         }
         cancel.cancel();
         let _ = writer.await;
@@ -114,28 +113,29 @@ enum Next {
 }
 
 impl<B: Bus> Session<B> {
-    /// Returns the authenticated peer (for registry cleanup), if any.
-    async fn run<S>(&mut self, mut stream: S) -> Option<PeerId>
+    /// Returns the authenticated device (for registry cleanup), if any.
+    async fn run<S>(&mut self, mut stream: S) -> Option<Addr>
     where
         S: Stream<Item = io::Result<Bytes>> + Unpin + Send,
     {
-        let peer = timeout(AUTH_TIMEOUT, self.authenticate(&mut stream))
+        let me = timeout(AUTH_TIMEOUT, self.authenticate(&mut stream))
             .await
             .ok()
             .flatten()?;
-        if let Some((relayed, kick)) = self.attach(&peer).await {
+        if let Some((relayed, kick)) = self.attach(me).await {
             self.out.try_push(frame(0, ServerMsg::Ready));
-            self.pump(&peer, stream, relayed, &kick).await;
+            self.pump(me, stream, relayed, &kick).await;
         }
-        Some(peer)
+        Some(me)
     }
 
-    /// Registers the session, evicting older ones of the same identity here
-    /// and on other nodes, and subscribes to frames relayed to it.
-    async fn attach(&self, peer: &PeerId) -> Option<(B::Sub, CancellationToken)> {
+    /// Registers the session, evicting older ones of the same device here
+    /// and on other nodes, and subscribes to frames relayed to it. Other
+    /// devices of the identity stay connected.
+    async fn attach(&self, me: Addr) -> Option<(B::Sub, CancellationToken)> {
         let kick = CancellationToken::new();
         if let Some(old) = self.gw.registry.insert(
-            *peer,
+            me,
             ConnHandle {
                 conn_id: self.conn_id,
                 outbox: self.out.clone(),
@@ -147,7 +147,7 @@ impl<B: Bus> Session<B> {
         }
         // An empty message evicts an older session on another node; it goes
         // out before this session subscribes, so it never reaches itself.
-        let subject = peer_subject(&peer.to_hex());
+        let subject = peer_subject(&me.peer.to_hex(), me.device);
         self.gw.bus.publish(subject.clone(), Bytes::new()).await;
         let relayed = self.gw.bus.subscribe(subject).await.ok()?;
         Some((relayed, kick))
@@ -157,7 +157,7 @@ impl<B: Bus> Session<B> {
     /// the gateway shuts down.
     async fn pump<S>(
         &mut self,
-        peer: &PeerId,
+        me: Addr,
         mut stream: S,
         mut relayed: B::Sub,
         kick: &CancellationToken,
@@ -191,7 +191,7 @@ impl<B: Bus> Session<B> {
             match next {
                 Next::Frame(bytes) => {
                     last_frame = Instant::now();
-                    if !self.on_frame(peer, bytes).await {
+                    if !self.on_frame(me, bytes).await {
                         break;
                     }
                 }
@@ -208,13 +208,19 @@ impl<B: Bus> Session<B> {
         }
     }
 
-    /// `Hello` → `Challenge` → `Auth` proof-of-possession of the identity key.
-    async fn authenticate<S>(&self, stream: &mut S) -> Option<PeerId>
+    /// `Hello` → `Challenge` → `Auth` proof-of-possession of the identity
+    /// key, for the device the client names.
+    async fn authenticate<S>(&self, stream: &mut S) -> Option<Addr>
     where
         S: Stream<Item = io::Result<Bytes>> + Unpin + Send,
     {
         let hello = Frame::<ClientMsg>::decode(stream.next().await?.ok()?).ok()?;
-        let ClientMsg::Hello { version, peer } = hello.msg else {
+        let ClientMsg::Hello {
+            version,
+            peer,
+            device,
+        } = hello.msg
+        else {
             return None;
         };
         if version != PROTOCOL_VERSION {
@@ -231,7 +237,12 @@ impl<B: Bus> Session<B> {
         let ClientMsg::Auth { signature } = auth.msg else {
             return None;
         };
-        let signed = [SESSION_AUTH_CONTEXT, nonce.as_slice()].concat();
+        let signed = [
+            SESSION_AUTH_CONTEXT,
+            nonce.as_slice(),
+            &device.0.to_le_bytes(),
+        ]
+        .concat();
         // Strict: a small-order key would otherwise "sign" any challenge.
         let verified = VerifyingKey::from_bytes(peer.as_bytes())
             .and_then(|key| key.verify_strict(&signed, &Signature::from_bytes(&signature)));
@@ -241,19 +252,19 @@ impl<B: Bus> Session<B> {
                 .try_push(frame(auth.req_id, error(ErrorCode::Unauthorized)));
             return None;
         }
-        Some(peer)
+        Some(Addr::new(peer, device))
     }
 
     /// Returns false when the connection must be closed.
-    async fn on_frame(&mut self, me: &PeerId, bytes: Bytes) -> bool {
+    async fn on_frame(&mut self, me: Addr, bytes: Bytes) -> bool {
         self.gw.metrics.frames_in.inc();
         self.gw.metrics.bytes_in.inc_by(bytes.len() as u64);
         if !self.limiter.admit(bytes.len()) {
             self.gw.metrics.rate_limited.inc();
             return true;
         }
-        if let Some((req_id, to, want_ack, body)) = peek_send(&bytes) {
-            self.route(me, req_id, to, want_ack, &body).await;
+        if let Some(send) = peek_send(&bytes) {
+            self.route(me, send).await;
             return true;
         }
         let Ok(Frame { req_id, msg }) = Frame::<ClientMsg>::decode(bytes.clone()) else {
@@ -266,17 +277,27 @@ impl<B: Bus> Session<B> {
             }
             ClientMsg::Hello { .. } | ClientMsg::Auth { .. } | ClientMsg::Send { .. } => false,
             _ => {
-                self.forward_to_signaling(*me, req_id, bytes);
+                self.forward_to_signaling(me, req_id, bytes);
                 true
             }
         }
     }
 
-    async fn route(&self, me: &PeerId, req_id: u32, to: PeerId, want_ack: bool, body: &[u8]) {
-        if to == *me {
+    /// Relays a `Send` to the device it names; a device may write to its
+    /// siblings, never to itself.
+    async fn route(&self, me: Addr, send: SendView) {
+        let SendView {
+            req_id,
+            to,
+            device,
+            want_ack,
+            body,
+        } = send;
+        let to = Addr::new(to, device);
+        if to == me {
             return;
         }
-        let relayed = encode_recv(me, body);
+        let relayed = encode_recv(&me.peer, me.device, &body);
         if let Some(target) = self.gw.registry.get(&to) {
             self.gw.metrics.delivered_local.inc();
             let ok = target.outbox.try_push(relayed);
@@ -290,7 +311,7 @@ impl<B: Bus> Session<B> {
             }
             return;
         }
-        let subject = peer_subject(&to.to_hex());
+        let subject = peer_subject(&to.peer.to_hex(), to.device);
         if !want_ack {
             self.gw.bus.publish(subject, relayed).await;
             return;
@@ -340,7 +361,7 @@ impl<B: Bus> Session<B> {
         }
     }
 
-    fn forward_to_signaling(&self, peer: PeerId, req_id: u32, request: Bytes) {
+    fn forward_to_signaling(&self, me: Addr, req_id: u32, request: Bytes) {
         let Ok(permit) = Arc::clone(&self.sig_permits).try_acquire_owned() else {
             self.out
                 .try_push(frame(req_id, error(ErrorCode::RateLimited)));
@@ -353,7 +374,7 @@ impl<B: Bus> Session<B> {
                 .bus
                 .request(
                     SIG_REQUEST_SUBJECT.to_owned(),
-                    Some(peer),
+                    Some(me.peer),
                     request,
                     SIG_REQUEST_TIMEOUT,
                 )

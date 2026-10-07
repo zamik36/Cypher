@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use cypher_crypto::IdentityKeyPair;
 use cypher_transport::ClientConn;
-use cypher_types::SESSION_AUTH_CONTEXT;
+use cypher_types::{DeviceId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, Frame, PROTOCOL_VERSION, ServerMsg};
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpSocket, TcpStream, lookup_host};
@@ -103,6 +103,7 @@ async fn relay(
         let started = Instant::now();
         let send = ClientMsg::Send {
             to,
+            device: DeviceId::FIRST,
             want_ack: true,
             body: plan.payload.clone(),
         };
@@ -146,13 +147,15 @@ async fn connect(
     let hello = ClientMsg::Hello {
         version: PROTOCOL_VERSION,
         peer: id.peer_id(),
+        device: DeviceId::FIRST,
     };
     conn.send(Frame::new(0, hello).encode()).await?;
     let nonce = match next(&mut conn).await? {
         ServerMsg::Challenge { nonce } => nonce,
         other => bail!("expected challenge, got {other:?}"),
     };
-    let signed = [SESSION_AUTH_CONTEXT, nonce.as_slice()].concat();
+    let device = DeviceId::FIRST.0.to_le_bytes();
+    let signed = [SESSION_AUTH_CONTEXT, nonce.as_slice(), &device].concat();
     let signature = id.sign(&signed).to_bytes();
     conn.send(Frame::new(0, ClientMsg::Auth { signature }).encode())
         .await?;

@@ -3,9 +3,10 @@
 //! The initiator is always the party that joined via a share link. It sends
 //! [`InitHeader`] alongside its first ratchet message so the responder can
 //! derive the same session without a round trip. The header is signed by the
-//! initiator's Ed25519 identity, binding its X25519 identity key to its peer id.
+//! initiator's Ed25519 identity, binding its X25519 identity key to its peer id
+//! and the session to the two devices it joins.
 
-use cypher_types::PeerId;
+use cypher_types::{DeviceId, PeerId};
 use rand_core::CryptoRngCore;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
@@ -17,7 +18,7 @@ use crate::kdf::hkdf;
 use crate::prekey::{OneTimePreKey, PrekeyBundle, SignedPreKey};
 use crate::reader::Reader;
 
-const INIT_SIGNATURE_CONTEXT: &[u8] = b"cypher/v2/init";
+const INIT_SIGNATURE_CONTEXT: &[u8] = b"cypher/v3/init";
 
 /// Key-agreement parameters the initiator attaches to its first message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +69,14 @@ impl InitHeader {
         Ok((header, r.rest()))
     }
 
-    /// `context ‖ identity_dh ‖ ephemeral ‖ responder ‖ spk_id ‖ has_opk ‖ opk_id`.
-    fn signed_message(&self, responder: &PeerId) -> Vec<u8> {
+    /// `context ‖ identity_dh ‖ ephemeral ‖ initiator_device ‖ responder ‖
+    /// responder_device ‖ spk_id ‖ has_opk ‖ opk_id`.
+    fn signed_message(
+        &self,
+        initiator_device: DeviceId,
+        responder: &PeerId,
+        responder_device: DeviceId,
+    ) -> Vec<u8> {
         let (has_opk, opk_id) = match self.opk_id {
             Some(id) => (1u8, id.to_le_bytes()),
             None => (0, [0; 4]),
@@ -78,7 +85,9 @@ impl InitHeader {
             INIT_SIGNATURE_CONTEXT,
             &self.identity_dh,
             &self.ephemeral,
+            &initiator_device.0.to_le_bytes(),
             responder.as_bytes(),
+            &responder_device.0.to_le_bytes(),
             &self.spk_id.to_le_bytes(),
             &[has_opk],
             &opk_id,
@@ -87,9 +96,11 @@ impl InitHeader {
     }
 }
 
-/// Starts a session with the owner of `bundle`.
+/// Starts a session from our `device` with the device that published
+/// `bundle`.
 pub fn initiate(
     ours: &IdentityKeyPair,
+    device: DeviceId,
     bundle: &PrekeyBundle,
     rng: &mut impl CryptoRngCore,
 ) -> Result<(Ratchet, InitHeader), CryptoError> {
@@ -116,21 +127,24 @@ pub fn initiate(
         signature: [0; 64],
     };
     header.signature = ours
-        .sign(&header.signed_message(&bundle.identity))
+        .sign(&header.signed_message(device, &bundle.identity, bundle.device))
         .to_bytes();
     Ok((ratchet, header))
 }
 
-/// Accepts a session started by `initiator`. The caller resolves `spk` and
-/// `opk` from `header.spk_id` / `header.opk_id` and must delete the one-time
-/// prekey afterwards.
+/// Accepts on our `device` a session started by `initiator`'s
+/// `initiator_device`. The caller resolves `spk` and `opk` from
+/// `header.spk_id` / `header.opk_id` and must delete the one-time prekey
+/// afterwards.
 pub fn respond(
     ours: &IdentityKeyPair,
+    device: DeviceId,
     spk: &SignedPreKey,
     opk: Option<&OneTimePreKey>,
-    initiator: &PeerId,
+    initiator: (&PeerId, DeviceId),
     header: &InitHeader,
 ) -> Result<Ratchet, CryptoError> {
+    let (initiator, initiator_device) = initiator;
     let opk_matches = match (header.opk_id, opk) {
         (None, None) => true,
         (Some(id), Some(k)) => id == k.id(),
@@ -141,7 +155,7 @@ pub fn respond(
     }
     verify_signature(
         initiator,
-        &header.signed_message(&ours.peer_id()),
+        &header.signed_message(initiator_device, &ours.peer_id(), device),
         &header.signature,
     )?;
 
@@ -164,5 +178,5 @@ pub fn respond(
 }
 
 fn shared_key(ikm: &[u8]) -> Zeroizing<[u8; 32]> {
-    hkdf::<32>(Some(&[0u8; 32]), ikm, b"cypher/v2/x3dh")
+    hkdf::<32>(Some(&[0u8; 32]), ikm, b"cypher/v3/x3dh")
 }

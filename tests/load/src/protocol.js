@@ -7,7 +7,7 @@ import { sha512 } from "@noble/hashes/sha2.js";
 
 ed.hashes.sha512 = sha512;
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export const Kind = Object.freeze({
   Hello: 0x01,
@@ -27,8 +27,12 @@ export const Delivery = Object.freeze({ Delivered: 0, Offline: 1, Busy: 2 });
 
 const HEADER = 5;
 const PEER = 32;
-/// `b"cypher-session-auth-v2"`, signed together with the server's nonce.
-const AUTH_CONTEXT = ascii("cypher-session-auth-v2");
+const DEVICE = 4;
+/// Load clients are each an identity's first and only device.
+export const FIRST_DEVICE = 1;
+/// `b"cypher-session-auth-v3"`, signed together with the server's nonce and
+/// the device.
+const AUTH_CONTEXT = ascii("cypher-session-auth-v3");
 
 /// k6's JS engine cannot build typed arrays from strings (no string
 /// iterators in `TypedArray.from`), so bytes are copied explicitly.
@@ -54,27 +58,32 @@ function frame(kind, reqId, size) {
 }
 
 export function hello(reqId, peer) {
-  const bytes = frame(Kind.Hello, reqId, 2 + PEER);
-  new DataView(bytes.buffer).setUint16(HEADER, PROTOCOL_VERSION, true);
+  const bytes = frame(Kind.Hello, reqId, 2 + PEER + DEVICE);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(HEADER, PROTOCOL_VERSION, true);
   bytes.set(peer, HEADER + 2);
+  view.setUint32(HEADER + 2 + PEER, FIRST_DEVICE, true);
   return bytes.buffer;
 }
 
 /// Proof of possession of `secret` for the server's challenge `nonce`.
 export function auth(secret, nonce) {
-  const signed = new Uint8Array(AUTH_CONTEXT.length + nonce.length);
+  const signed = new Uint8Array(AUTH_CONTEXT.length + nonce.length + DEVICE);
   signed.set(AUTH_CONTEXT);
   signed.set(nonce, AUTH_CONTEXT.length);
+  new DataView(signed.buffer).setUint32(AUTH_CONTEXT.length + nonce.length, FIRST_DEVICE, true);
   const bytes = frame(Kind.Auth, 0, 64);
   bytes.set(ed.sign(signed, secret), HEADER);
   return bytes.buffer;
 }
 
+/// A `Send` to the first device of `to`.
 export function send(reqId, to, body, wantAck) {
-  const bytes = frame(Kind.Send, reqId, PEER + 1 + body.length);
+  const bytes = frame(Kind.Send, reqId, PEER + DEVICE + 1 + body.length);
   bytes.set(to, HEADER);
-  bytes[HEADER + PEER] = wantAck ? 1 : 0;
-  bytes.set(body, HEADER + PEER + 1);
+  new DataView(bytes.buffer).setUint32(HEADER + PEER, FIRST_DEVICE, true);
+  bytes[HEADER + PEER + DEVICE] = wantAck ? 1 : 0;
+  bytes.set(body, HEADER + PEER + DEVICE + 1);
   return bytes.buffer;
 }
 
@@ -95,9 +104,9 @@ export function decode(buffer) {
   };
 }
 
-/// Body of a `Recv` (after the sender's peer id).
+/// Body of a `Recv` (after the sender's peer id and device).
 export function recvBody(fields) {
-  return fields.subarray(PEER);
+  return fields.subarray(PEER + DEVICE);
 }
 
 /// A payload of `size` bytes whose first 8 carry `stamp` (ms, f64 LE).

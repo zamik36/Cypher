@@ -1,4 +1,4 @@
-use cypher_types::PeerId;
+use cypher_types::{DeviceId, PeerId};
 use rand_core::CryptoRngCore;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::CryptoError;
 use crate::identity::{IdentityKeyPair, verify_signature};
 
-const SPK_SIGNATURE_CONTEXT: &[u8] = b"cypher/v2/spk";
+const SPK_SIGNATURE_CONTEXT: &[u8] = b"cypher/v3/spk";
 
 /// Medium-term X25519 prekey, signed by the identity key and rotated periodically.
 pub struct SignedPreKey {
@@ -60,8 +60,11 @@ prekey_common!(SignedPreKey);
 prekey_common!(OneTimePreKey);
 
 impl SignedPreKey {
-    pub fn sign(&self, identity: &IdentityKeyPair) -> [u8; 64] {
+    /// Signs this prekey as `device`'s: the server cannot serve one device's
+    /// prekey under another's name.
+    pub fn sign(&self, identity: &IdentityKeyPair, device: DeviceId) -> [u8; 64] {
         let msg = spk_signed_message(
+            device,
             &identity.dh_public_key().to_bytes(),
             self.id,
             &self.public(),
@@ -70,19 +73,27 @@ impl SignedPreKey {
     }
 }
 
-fn spk_signed_message(identity_dh: &[u8; 32], spk_id: u32, spk: &[u8; 32]) -> [u8; 81] {
-    let mut msg = [0u8; 81];
+fn spk_signed_message(
+    device: DeviceId,
+    identity_dh: &[u8; 32],
+    spk_id: u32,
+    spk: &[u8; 32],
+) -> [u8; 85] {
+    let mut msg = [0u8; 85];
     msg[..13].copy_from_slice(SPK_SIGNATURE_CONTEXT);
-    msg[13..45].copy_from_slice(identity_dh);
-    msg[45..49].copy_from_slice(&spk_id.to_le_bytes());
-    msg[49..81].copy_from_slice(spk);
+    msg[13..17].copy_from_slice(&device.0.to_le_bytes());
+    msg[17..49].copy_from_slice(identity_dh);
+    msg[49..53].copy_from_slice(&spk_id.to_le_bytes());
+    msg[53..85].copy_from_slice(spk);
     msg
 }
 
-/// Public material a peer publishes so others can start a session with it.
+/// Public material one device of a peer publishes so others can start a
+/// session with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrekeyBundle {
     pub identity: PeerId,
+    pub device: DeviceId,
     pub identity_dh: [u8; 32],
     pub spk_id: u32,
     pub spk: [u8; 32],
@@ -91,34 +102,37 @@ pub struct PrekeyBundle {
 }
 
 impl PrekeyBundle {
-    const BASE_LEN: usize = 32 + 32 + 4 + 32 + 64 + 1;
+    const BASE_LEN: usize = 32 + 4 + 32 + 4 + 32 + 64 + 1;
     pub const MAX_LEN: usize = Self::BASE_LEN + 4 + 32;
 
     pub fn new(
         identity: &IdentityKeyPair,
+        device: DeviceId,
         spk: &SignedPreKey,
         opk: Option<&OneTimePreKey>,
     ) -> Self {
         Self {
             identity: identity.peer_id(),
+            device,
             identity_dh: identity.dh_public_key().to_bytes(),
             spk_id: spk.id,
             spk: spk.public(),
-            spk_signature: spk.sign(identity),
+            spk_signature: spk.sign(identity, device),
             opk: opk.map(|k| (k.id(), k.public())),
         }
     }
 
-    /// Checks that the signed prekey (and the DH identity it is bound to) was
-    /// signed by the Ed25519 identity that *is* the peer id.
+    /// Checks that the signed prekey (and the device and DH identity it is
+    /// bound to) was signed by the Ed25519 identity that *is* the peer id.
     pub fn verify(&self) -> Result<(), CryptoError> {
-        let msg = spk_signed_message(&self.identity_dh, self.spk_id, &self.spk);
+        let msg = spk_signed_message(self.device, &self.identity_dh, self.spk_id, &self.spk);
         verify_signature(&self.identity, &msg, &self.spk_signature)
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.reserve(Self::MAX_LEN);
         out.extend_from_slice(self.identity.as_bytes());
+        out.extend_from_slice(&self.device.0.to_le_bytes());
         out.extend_from_slice(&self.identity_dh);
         out.extend_from_slice(&self.spk_id.to_le_bytes());
         out.extend_from_slice(&self.spk);
@@ -137,6 +151,10 @@ impl PrekeyBundle {
     pub fn decode(b: &[u8]) -> Result<Self, CryptoError> {
         let mut r = crate::reader::Reader::new(b);
         let identity = PeerId(r.array()?);
+        let device = DeviceId(r.u32()?);
+        if !device.is_valid() {
+            return Err(CryptoError::Malformed);
+        }
         let identity_dh = r.array()?;
         let spk_id = r.u32()?;
         let spk = r.array()?;
@@ -149,6 +167,7 @@ impl PrekeyBundle {
         r.finish()?;
         Ok(Self {
             identity,
+            device,
             identity_dh,
             spk_id,
             spk,
@@ -167,7 +186,7 @@ mod tests {
         let ik = IdentityKeyPair::generate();
         let spk = SignedPreKey::generate(7, &mut OsRng);
         let opk = OneTimePreKey::generate(9, &mut OsRng);
-        PrekeyBundle::new(&ik, &spk, with_opk.then_some(&opk))
+        PrekeyBundle::new(&ik, DeviceId(3), &spk, with_opk.then_some(&opk))
     }
 
     #[test]
@@ -195,6 +214,18 @@ mod tests {
         let mut b = bundle(false);
         b.spk_id += 1;
         assert_eq!(b.verify(), Err(CryptoError::Signature));
+
+        let mut b = bundle(false);
+        b.device = DeviceId(4);
+        assert_eq!(b.verify(), Err(CryptoError::Signature));
+    }
+
+    #[test]
+    fn device_zero_is_not_a_bundle() {
+        let mut buf = Vec::new();
+        bundle(false).encode(&mut buf);
+        buf[32..36].copy_from_slice(&[0; 4]);
+        assert_eq!(PrekeyBundle::decode(&buf), Err(CryptoError::Malformed));
     }
 
     #[test]

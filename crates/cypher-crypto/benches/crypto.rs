@@ -9,6 +9,7 @@ use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
     ChunkCipher, FileKey, IdentityKeyPair, OneTimePreKey, PrekeyBundle, Ratchet, onion, sealed,
 };
+use cypher_types::DeviceId;
 use cypher_types::FileId;
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -22,9 +23,17 @@ fn session() -> (Ratchet, Ratchet) {
     let alice = IdentityKeyPair::generate();
     let bob = IdentityKeyPair::generate();
     let spk = SignedPreKey::generate(1, &mut OsRng);
-    let bundle = PrekeyBundle::new(&bob, &spk, None);
-    let (mut a, header) = handshake::initiate(&alice, &bundle, &mut OsRng).unwrap();
-    let mut b = handshake::respond(&bob, &spk, None, &alice.peer_id(), &header).unwrap();
+    let bundle = PrekeyBundle::new(&bob, DeviceId(2), &spk, None);
+    let (mut a, header) = handshake::initiate(&alice, DeviceId(1), &bundle, &mut OsRng).unwrap();
+    let mut b = handshake::respond(
+        &bob,
+        DeviceId(2),
+        &spk,
+        None,
+        (&alice.peer_id(), DeviceId(1)),
+        &header,
+    )
+    .unwrap();
     let (h, ct) = a.encrypt(b"hi", b"").unwrap();
     b.decrypt(&h, &ct, b"", &mut OsRng).unwrap();
     (a, b)
@@ -91,11 +100,20 @@ fn x3dh(c: &mut Criterion) {
     let bob = IdentityKeyPair::generate();
     let spk = SignedPreKey::generate(1, &mut OsRng);
     let opk = OneTimePreKey::generate(9, &mut OsRng);
-    let bundle = PrekeyBundle::new(&bob, &spk, Some(&opk));
+    let bundle = PrekeyBundle::new(&bob, DeviceId(2), &spk, Some(&opk));
     c.bench_function("x3dh/initiate_and_respond", |bench| {
         bench.iter(|| {
-            let (_, header) = handshake::initiate(&alice, &bundle, &mut OsRng).unwrap();
-            handshake::respond(&bob, &spk, Some(&opk), &alice.peer_id(), &header).unwrap()
+            let (_, header) =
+                handshake::initiate(&alice, DeviceId(1), &bundle, &mut OsRng).unwrap();
+            handshake::respond(
+                &bob,
+                DeviceId(2),
+                &spk,
+                Some(&opk),
+                (&alice.peer_id(), DeviceId(1)),
+                &header,
+            )
+            .unwrap()
         });
     });
 }

@@ -4,10 +4,10 @@
 )]
 
 use bytes::Bytes;
-use cypher_types::{LinkId, PeerId};
+use cypher_types::{DeviceId, LinkId, PeerId};
 use cypher_wire::{
-    BUNDLE_BASE_LEN, ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_INBOX_ITEM_LEN, ServerMsg,
-    WireError, encode_recv, peek_send,
+    BUNDLE_BASE_LEN, ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_INBOX_ITEM_LEN,
+    SEND_HEADER_LEN, SendView, ServerMsg, WireError, encode_recv, peek_send,
 };
 use proptest::prelude::*;
 
@@ -32,18 +32,21 @@ fn link() -> LinkId {
 fn client_samples() -> Vec<ClientMsg> {
     vec![
         ClientMsg::Hello {
-            version: 2,
+            version: 3,
             peer: PeerId([1; 32]),
+            device: DeviceId(7),
         },
         ClientMsg::Auth { signature: [2; 64] },
         ClientMsg::Ping,
         ClientMsg::Send {
             to: PeerId([3; 32]),
+            device: DeviceId::FIRST,
             want_ack: true,
             body: Bytes::from_static(b"opaque"),
         },
         ClientMsg::Send {
             to: PeerId([3; 32]),
+            device: DeviceId(u32::MAX),
             want_ack: false,
             body: Bytes::new(),
         },
@@ -54,6 +57,7 @@ fn client_samples() -> Vec<ClientMsg> {
         },
         ClientMsg::FetchKeys {
             peer: PeerId([7; 32]),
+            device: DeviceId(2),
         },
         ClientMsg::CreateLink,
         ClientMsg::ResolveLink { link: link() },
@@ -85,6 +89,7 @@ fn server_samples() -> Vec<ServerMsg> {
         ServerMsg::Pong,
         ServerMsg::Recv {
             from: PeerId([2; 32]),
+            device: DeviceId(3),
             body: Bytes::from_static(b"payload"),
         },
         ServerMsg::SendAck {
@@ -175,17 +180,53 @@ fn malformed_link_and_bool_are_rejected() {
         1,
         ClientMsg::Send {
             to: PeerId([0; 32]),
+            device: DeviceId::FIRST,
             want_ack: true,
             body: Bytes::new(),
         },
     )
     .encode()
     .to_vec();
-    raw[37] = 7;
+    raw[SEND_HEADER_LEN - 1] = 7;
     assert_eq!(
         Frame::<ClientMsg>::decode(Bytes::from(raw)),
         Err(WireError::Malformed)
     );
+}
+
+/// Device zero names nobody: a frame carrying it is refused wherever a
+/// device appears.
+#[test]
+fn device_zero_is_refused() {
+    let hello = Frame::new(
+        1,
+        ClientMsg::Hello {
+            version: 3,
+            peer: PeerId([1; 32]),
+            device: DeviceId(0),
+        },
+    );
+    assert_eq!(
+        Frame::<ClientMsg>::decode(hello.encode()),
+        Err(WireError::Malformed)
+    );
+    let send = Frame::new(
+        1,
+        ClientMsg::Send {
+            to: PeerId([1; 32]),
+            device: DeviceId(0),
+            want_ack: false,
+            body: Bytes::new(),
+        },
+    )
+    .encode();
+    assert_eq!(
+        Frame::<ClientMsg>::decode(send.clone()),
+        Err(WireError::Malformed)
+    );
+    assert!(peek_send(&send).is_none());
+    let recv = encode_recv(&PeerId([1; 32]), DeviceId(0), b"");
+    assert_eq!(Frame::<ServerMsg>::decode(recv), Err(WireError::Malformed));
 }
 
 #[test]
@@ -211,11 +252,12 @@ fn recv_hot_path_matches_generic_encoder() {
         0,
         ServerMsg::Recv {
             from,
+            device: DeviceId(5),
             body: body.clone(),
         },
     )
     .encode();
-    assert_eq!(encode_recv(&from, &body), generic);
+    assert_eq!(encode_recv(&from, DeviceId(5), &body), generic);
 }
 
 #[test]
@@ -224,17 +266,24 @@ fn peek_send_matches_decoder_and_shares_buffer() {
         42,
         ClientMsg::Send {
             to: PeerId([1; 32]),
+            device: DeviceId(9),
             want_ack: true,
             body: Bytes::from_static(b"xyz"),
         },
     )
     .encode();
-    let (req_id, to, want_ack, body) = peek_send(&frame).unwrap();
+    let view = peek_send(&frame).unwrap();
     assert_eq!(
-        (req_id, to, want_ack, &body[..]),
-        (42, PeerId([1; 32]), true, &b"xyz"[..])
+        view,
+        SendView {
+            req_id: 42,
+            to: PeerId([1; 32]),
+            device: DeviceId(9),
+            want_ack: true,
+            body: Bytes::from_static(b"xyz"),
+        }
     );
-    assert_eq!(body.as_ptr(), frame[38..].as_ptr());
+    assert_eq!(view.body.as_ptr(), frame[SEND_HEADER_LEN..].as_ptr());
     assert!(peek_send(&Frame::new(1, ClientMsg::Ping).encode()).is_none());
 }
 

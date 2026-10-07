@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use cypher_crypto::PrekeyBundle;
-use cypher_types::{LinkId, PeerId};
+use cypher_types::{Addr, LinkId, PeerId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, MAX_INBOX_BATCH, ServerMsg, inbox_id};
 use rand::RngCore;
 use tracing::warn;
@@ -96,9 +96,13 @@ impl Handler {
                 },
                 Some(peer),
             ) => self.publish_keys(&peer, &base, &opks, replace_opks).await,
-            (ClientMsg::FetchKeys { peer: target }, Some(peer)) => {
-                self.fetch_keys(&peer, &target).await
-            }
+            (
+                ClientMsg::FetchKeys {
+                    peer: target,
+                    device,
+                },
+                Some(peer),
+            ) => self.fetch_keys(&peer, Addr::new(target, device)).await,
             (ClientMsg::CreateLink, Some(peer)) => self.create_link(&peer).await,
             (ClientMsg::ResolveLink { link }, Some(_)) => self.resolve_link(&link).await,
             (ClientMsg::InboxPut { inbox, item }, _) => self.inbox_put(&inbox, &item).await,
@@ -243,24 +247,31 @@ impl Handler {
     ) -> redis::RedisResult<ServerMsg> {
         let mut full = base.to_vec();
         full.push(0);
-        let valid =
-            PrekeyBundle::decode(&full).is_ok_and(|b| b.identity == *peer && b.verify().is_ok());
-        if !valid {
+        // Any device of the identity may publish; the bundle names which.
+        let device = PrekeyBundle::decode(&full)
+            .ok()
+            .filter(|b| b.identity == *peer && b.verify().is_ok())
+            .map(|b| b.device);
+        let Some(device) = device else {
             return Ok(error(ErrorCode::BadRequest));
-        }
-        let opks_left = self.store.publish_keys(peer, base, opks, replace).await?;
+        };
+        let addr = Addr::new(*peer, device);
+        let opks_left = self.store.publish_keys(addr, base, opks, replace).await?;
         Ok(ServerMsg::KeysAck { opks_left })
     }
 
-    async fn fetch_keys(
-        &self,
-        requester: &PeerId,
-        target: &PeerId,
-    ) -> redis::RedisResult<ServerMsg> {
+    async fn fetch_keys(&self, requester: &PeerId, target: Addr) -> redis::RedisResult<ServerMsg> {
         if !self.admit(b"fk:", requester, KEY_FETCHES_PER_HOUR).await? {
             return Ok(error(ErrorCode::RateLimited));
         }
-        let with_opk = self.admit(b"ok:", target, OPKS_PER_TARGET_PER_HOUR).await?;
+        // One-time prekeys are spent per device, so they are rationed per
+        // device too.
+        let device = target.device.0.to_le_bytes();
+        let bucket = [b"ok:", target.peer.as_bytes().as_slice(), &device].concat();
+        let with_opk = self
+            .store
+            .admit(&bucket, OPKS_PER_TARGET_PER_HOUR, HOUR_SECS)
+            .await?;
         Ok(match self.store.fetch_keys(target, with_opk).await? {
             Some((base, opk)) => ServerMsg::Keys { base, opk },
             None => error(ErrorCode::NotFound),

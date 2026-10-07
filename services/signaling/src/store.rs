@@ -1,7 +1,7 @@
 //! Redis persistence. Keys are short binary prefixes plus raw ids.
 
 use bytes::Bytes;
-use cypher_types::{LinkId, PeerId};
+use cypher_types::{Addr, LinkId, PeerId};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
 
@@ -27,6 +27,13 @@ fn key(prefix: &[u8], id: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(prefix.len() + id.len());
     k.extend_from_slice(prefix);
     k.extend_from_slice(id);
+    k
+}
+
+/// Key of something one device of a peer owns: `prefix ‖ peer ‖ device`.
+fn device_key(prefix: &[u8], addr: Addr) -> Vec<u8> {
+    let mut k = key(prefix, addr.peer.as_bytes());
+    k.extend_from_slice(&addr.device.0.to_le_bytes());
     k
 }
 
@@ -110,17 +117,18 @@ impl Store {
         })
     }
 
+    /// Stores one device's bundle and one-time prekeys.
     pub(crate) async fn publish_keys(
         &self,
-        peer: &PeerId,
+        addr: Addr,
         base: &[u8],
         opks: &[(u32, [u8; 32])],
         replace: bool,
     ) -> redis::RedisResult<u16> {
-        let opk_key = key(b"o:", peer.as_bytes());
+        let opk_key = device_key(b"o:", addr);
         let mut pipe = redis::pipe();
         pipe.atomic()
-            .set_ex(key(b"k:", peer.as_bytes()), base, KEYS_TTL_SECS)
+            .set_ex(device_key(b"k:", addr), base, KEYS_TTL_SECS)
             .ignore();
         if replace {
             pipe.del(&opk_key).ignore();
@@ -146,19 +154,19 @@ impl Store {
         Ok(u16::try_from(left).unwrap_or(u16::MAX))
     }
 
-    /// The bundle of `peer`, with one of its one-time prekeys unless
-    /// `with_opk` is false.
+    /// The bundle of one device of a peer, with one of its one-time
+    /// prekeys unless `with_opk` is false.
     pub(crate) async fn fetch_keys(
         &self,
-        peer: &PeerId,
+        addr: Addr,
         with_opk: bool,
     ) -> redis::RedisResult<Option<(Bytes, Option<(u32, [u8; 32])>)>> {
         let mut redis = self.redis.clone();
-        let base_key = key(b"k:", peer.as_bytes());
+        let base_key = device_key(b"k:", addr);
         let (base, opk): (Option<Vec<u8>>, Option<Vec<u8>>) = if with_opk {
             redis::pipe()
                 .get(base_key)
-                .lpop(key(b"o:", peer.as_bytes()), None)
+                .lpop(device_key(b"o:", addr), None)
                 .query_async(&mut redis)
                 .await?
         } else {

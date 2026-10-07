@@ -109,6 +109,19 @@ impl DeviceId {
     }
 }
 
+/// One device of one identity: where a relayed message goes.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct Addr {
+    pub peer: PeerId,
+    pub device: DeviceId,
+}
+
+impl Addr {
+    pub fn new(peer: PeerId, device: DeviceId) -> Self {
+        Self { peer, device }
+    }
+}
+
 impl fmt::Display for DeviceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use cypher_types::PeerId;
+use cypher_types::{DeviceId, PeerId};
 use cypher_wire::{ClientMsg, Frame, encode_recv, peek_send};
 
 fn send_frame(len: usize) -> Bytes {
@@ -13,6 +13,7 @@ fn send_frame(len: usize) -> Bytes {
         7,
         ClientMsg::Send {
             to: PeerId([9; 32]),
+            device: DeviceId::FIRST,
             want_ack: true,
             body: Bytes::from(vec![0xA5; len]),
         },
@@ -36,7 +37,7 @@ fn frames(c: &mut Criterion) {
             b.iter(|| peek_send(&frame).unwrap());
         });
         group.bench_function(format!("encode_recv_{name}"), |b| {
-            b.iter(|| encode_recv(&PeerId([3; 32]), &body));
+            b.iter(|| encode_recv(&PeerId([3; 32]), DeviceId::FIRST, &body));
         });
     }
     group.finish();

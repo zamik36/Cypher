@@ -4,7 +4,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use cypher_crypto::chunk::ACK_TAG_LEN;
 use cypher_crypto::double_ratchet::HEADER_LEN;
 use cypher_crypto::{Header, InitHeader};
-use cypher_types::{FileId, PeerId};
+use cypher_types::{Addr, FileId};
+use cypher_wire::SEND_HEADER_LEN;
 
 use crate::CoreError;
 
@@ -12,8 +13,6 @@ const TAG_MESSAGE: u8 = 0;
 const TAG_CHUNK: u8 = 1;
 const TAG_ACK: u8 = 2;
 
-/// Bytes of `ClientMsg::Send` framing before the relay body.
-pub const SEND_HEADER_LEN: usize = 38;
 pub const CHUNK_HEADER_LEN: usize = 1 + 16 + 4;
 /// Space a driver must reserve in front of chunk data read from disk.
 pub const CHUNK_HEADROOM: usize = SEND_HEADER_LEN + CHUNK_HEADER_LEN;
@@ -98,7 +97,7 @@ fn take<const N: usize>(rest: &mut &[u8]) -> Result<[u8; N], CoreError> {
 /// Builds a full `ClientMsg::Send` frame for a ratchet message.
 pub fn message_frame(
     req_id: u32,
-    to: &PeerId,
+    to: Addr,
     init: Option<&InitHeader>,
     header: &Header,
     ciphertext: &[u8],
@@ -131,7 +130,7 @@ pub fn message_body(init: Option<&InitHeader>, header: &Header, ciphertext: &[u8
 /// chunk read from disk.
 pub fn write_chunk_headers(
     headroom: &mut [u8; CHUNK_HEADROOM],
-    to: &PeerId,
+    to: Addr,
     file_id: &FileId,
     index: u32,
 ) {
@@ -142,7 +141,7 @@ pub fn write_chunk_headers(
 }
 
 pub fn ack_frame(
-    to: &PeerId,
+    to: Addr,
     file_id: &FileId,
     next: u32,
     sack: u64,
@@ -158,29 +157,37 @@ pub fn ack_frame(
     b.freeze()
 }
 
-fn put_send_header(b: &mut BytesMut, req_id: u32, to: &PeerId, want_ack: bool) {
+fn put_send_header(b: &mut BytesMut, req_id: u32, to: Addr, want_ack: bool) {
     b.put_slice(&send_header(req_id, to, want_ack));
 }
 
-/// `ClientMsg::Send` framing: `[kind][req_id][to][want_ack]`.
-fn send_header(req_id: u32, to: &PeerId, want_ack: bool) -> [u8; SEND_HEADER_LEN] {
+/// `ClientMsg::Send` framing: `[kind][req_id][to][device][want_ack]`.
+fn send_header(req_id: u32, to: Addr, want_ack: bool) -> [u8; SEND_HEADER_LEN] {
     const KIND_SEND: u8 = 0x10;
     let mut out = [0u8; SEND_HEADER_LEN];
     out[0] = KIND_SEND;
     out[1..5].copy_from_slice(&req_id.to_le_bytes());
-    out[5..37].copy_from_slice(to.as_bytes());
-    out[37] = u8::from(want_ack);
+    out[5..37].copy_from_slice(to.peer.as_bytes());
+    out[37..41].copy_from_slice(&to.device.0.to_le_bytes());
+    out[41] = u8::from(want_ack);
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cypher_types::{DeviceId, PeerId};
     use cypher_wire::{ClientMsg, Frame};
 
-    fn decode_send(frame: Bytes) -> (PeerId, Bytes) {
+    fn to() -> Addr {
+        Addr::new(PeerId([10; 32]), DeviceId(3))
+    }
+
+    fn decode_send(frame: Bytes) -> (Addr, Bytes) {
         match Frame::<ClientMsg>::decode(frame).unwrap().msg {
-            ClientMsg::Send { to, body, .. } => (to, body),
+            ClientMsg::Send {
+                to, device, body, ..
+            } => (Addr::new(to, device), body),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -200,9 +207,9 @@ mod tests {
             signature: [8; 64],
         };
         for init in [None, Some(init)] {
-            let frame = message_frame(9, &PeerId([10; 32]), init.as_ref(), &header, b"ct");
-            let (to, body) = decode_send(frame);
-            assert_eq!(to, PeerId([10; 32]));
+            let frame = message_frame(9, to(), init.as_ref(), &header, b"ct");
+            let (addr, body) = decode_send(frame);
+            assert_eq!(addr, to());
             assert_eq!(&body[..], &message_body(init.as_ref(), &header, b"ct")[..]);
             assert_eq!(
                 RelayBody::decode(&body).unwrap(),
@@ -220,8 +227,9 @@ mod tests {
         let mut buf = vec![0u8; CHUNK_HEADROOM + 3];
         buf[CHUNK_HEADROOM..].copy_from_slice(b"abc");
         let headroom = buf.first_chunk_mut::<CHUNK_HEADROOM>().unwrap();
-        write_chunk_headers(headroom, &PeerId([1; 32]), &FileId([2; 16]), 5);
-        let (_, body) = decode_send(Bytes::from(buf));
+        write_chunk_headers(headroom, to(), &FileId([2; 16]), 5);
+        let (addr, body) = decode_send(Bytes::from(buf));
+        assert_eq!(addr, to());
         assert_eq!(
             RelayBody::decode(&body).unwrap(),
             RelayBody::Chunk {
@@ -234,13 +242,7 @@ mod tests {
 
     #[test]
     fn ack_roundtrip_and_garbage() {
-        let (_, body) = decode_send(ack_frame(
-            &PeerId([1; 32]),
-            &FileId([3; 16]),
-            4,
-            5,
-            &[6; 16],
-        ));
+        let (_, body) = decode_send(ack_frame(to(), &FileId([3; 16]), 4, 5, &[6; 16]));
         assert_eq!(
             RelayBody::decode(&body).unwrap(),
             RelayBody::Ack {

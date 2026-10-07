@@ -1,5 +1,5 @@
 use bytes::{BufMut, Bytes, BytesMut};
-use cypher_types::{LinkId, PeerId};
+use cypher_types::{DeviceId, LinkId, PeerId};
 
 use crate::codec::{Reader, WriteExt, field_len};
 use crate::{
@@ -24,18 +24,21 @@ impl<M> Frame<M> {
 /// Client → server messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
+    /// Opens a session as one device of an identity.
     Hello {
         version: u16,
         peer: PeerId,
+        device: DeviceId,
     },
     Auth {
         signature: [u8; 64],
     },
     Ping,
-    /// Relay an opaque end-to-end body to `to`. With `want_ack` the server
-    /// answers with [`ServerMsg::SendAck`].
+    /// Relay an opaque end-to-end body to one device of `to`. With
+    /// `want_ack` the server answers with [`ServerMsg::SendAck`].
     Send {
         to: PeerId,
+        device: DeviceId,
         want_ack: bool,
         body: Bytes,
     },
@@ -47,6 +50,7 @@ pub enum ClientMsg {
     },
     FetchKeys {
         peer: PeerId,
+        device: DeviceId,
     },
     CreateLink,
     ResolveLink {
@@ -89,10 +93,11 @@ pub enum ServerMsg {
     },
     Ready,
     Pong,
-    /// A relayed body; `from` is stamped by the gateway from the
-    /// authenticated session and cannot be forged by the sender.
+    /// A relayed body; `from` and `device` are stamped by the gateway from
+    /// the authenticated session and cannot be forged by the sender.
     Recv {
         from: PeerId,
+        device: DeviceId,
         body: Bytes,
     },
     SendAck {
@@ -128,7 +133,8 @@ pub enum ServerMsg {
     Error {
         code: ErrorCode,
     },
-    /// The same identity authenticated on another connection.
+    /// The same device of this identity authenticated on another
+    /// connection.
     Superseded,
 }
 
@@ -230,10 +236,15 @@ impl Frame<ClientMsg> {
         use ClientMsg as M;
         let id = self.req_id;
         let b = match &self.msg {
-            M::Hello { version, peer } => {
-                let mut b = header(kind::HELLO, id, 34);
+            M::Hello {
+                version,
+                peer,
+                device,
+            } => {
+                let mut b = header(kind::HELLO, id, 38);
                 b.put_u16_le(*version);
                 b.put_slice(peer.as_bytes());
+                b.put_u32_le(device.0);
                 b
             }
             M::Auth { signature } => {
@@ -242,9 +253,15 @@ impl Frame<ClientMsg> {
                 b
             }
             M::Ping => header(kind::PING, id, 0),
-            M::Send { to, want_ack, body } => {
-                let mut b = header(kind::SEND, id, body.len().saturating_add(33));
+            M::Send {
+                to,
+                device,
+                want_ack,
+                body,
+            } => {
+                let mut b = header(kind::SEND, id, body.len().saturating_add(37));
                 b.put_slice(to.as_bytes());
+                b.put_u32_le(device.0);
                 b.put_u8(u8::from(*want_ack));
                 b.put_slice(body);
                 b
@@ -271,9 +288,10 @@ impl Frame<ClientMsg> {
                 }
                 b
             }
-            M::FetchKeys { peer } => {
-                let mut b = header(kind::FETCH_KEYS, id, 32);
+            M::FetchKeys { peer, device } => {
+                let mut b = header(kind::FETCH_KEYS, id, 36);
                 b.put_slice(peer.as_bytes());
+                b.put_u32_le(device.0);
                 b
             }
             M::CreateLink => header(kind::CREATE_LINK, id, 0),
@@ -335,6 +353,7 @@ impl Frame<ClientMsg> {
             kind::HELLO => M::Hello {
                 version: r.u16()?,
                 peer: PeerId(r.array()?),
+                device: r.device()?,
             },
             kind::AUTH => M::Auth {
                 signature: r.array()?,
@@ -342,12 +361,19 @@ impl Frame<ClientMsg> {
             kind::PING => M::Ping,
             kind::SEND => {
                 let to = PeerId(r.array()?);
+                let device = r.device()?;
                 let want_ack = read_bool(&mut r)?;
                 let body = r.rest();
                 if body.len() > MAX_BODY_LEN {
                     return Err(WireError::TooLarge);
                 }
-                return Ok(Self::new(req_id, M::Send { to, want_ack, body }));
+                let send = M::Send {
+                    to,
+                    device,
+                    want_ack,
+                    body,
+                };
+                return Ok(Self::new(req_id, send));
             }
             kind::PUBLISH_KEYS => {
                 let base = Bytes::copy_from_slice(&r.array::<BUNDLE_BASE_LEN>()?);
@@ -367,6 +393,7 @@ impl Frame<ClientMsg> {
             }
             kind::FETCH_KEYS => M::FetchKeys {
                 peer: PeerId(r.array()?),
+                device: r.device()?,
             },
             kind::CREATE_LINK => M::CreateLink,
             kind::RESOLVE_LINK => M::ResolveLink {
@@ -415,7 +442,7 @@ impl Frame<ServerMsg> {
             }
             M::Ready => header(kind::READY, id, 0),
             M::Pong => header(kind::PONG, id, 0),
-            M::Recv { from, body } => return recv_frame(id, from, body),
+            M::Recv { from, device, body } => return recv_frame(id, from, *device, body),
             M::SendAck { status } => {
                 let mut b = header(kind::SEND_ACK, id, 1);
                 b.put_u8(*status as u8);
@@ -502,13 +529,13 @@ impl Frame<ServerMsg> {
             kind::PONG => M::Pong,
             kind::RECV => {
                 let from = PeerId(r.array()?);
-                return Ok(Self::new(
-                    req_id,
-                    M::Recv {
-                        from,
-                        body: r.rest(),
-                    },
-                ));
+                let device = r.device()?;
+                let recv = M::Recv {
+                    from,
+                    device,
+                    body: r.rest(),
+                };
+                return Ok(Self::new(req_id, recv));
             }
             kind::SEND_ACK => M::SendAck {
                 status: match r.u8()? {
@@ -570,37 +597,56 @@ impl Frame<ServerMsg> {
 }
 
 /// Hot-path encoder used by the gateway: one allocation, one body copy.
-pub fn encode_recv(from: &PeerId, body: &[u8]) -> Bytes {
-    recv_frame(0, from, body)
+pub fn encode_recv(from: &PeerId, device: DeviceId, body: &[u8]) -> Bytes {
+    recv_frame(0, from, device, body)
 }
 
-fn recv_frame(req_id: u32, from: &PeerId, body: &[u8]) -> Bytes {
-    let mut b = header(kind::RECV, req_id, body.len().saturating_add(32));
+fn recv_frame(req_id: u32, from: &PeerId, device: DeviceId, body: &[u8]) -> Bytes {
+    let mut b = header(kind::RECV, req_id, body.len().saturating_add(36));
     b.put_slice(from.as_bytes());
+    b.put_u32_le(device.0);
     b.put_slice(body);
     b.freeze()
 }
 
-/// `[kind][req_id][to 32][want_ack]` in front of a client `Send` body.
-const SEND_HEADER_LEN: usize = FRAME_HEADER_LEN + 33;
+/// `[kind][req_id][to 32][device 4][want_ack]` in front of a client `Send`
+/// body.
+pub const SEND_HEADER_LEN: usize = FRAME_HEADER_LEN + 37;
+
+/// A client `Send` as the gateway router sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendView {
+    pub req_id: u32,
+    pub to: PeerId,
+    pub device: DeviceId,
+    pub want_ack: bool,
+    pub body: Bytes,
+}
 
 /// Zero-copy view of a client `Send` used by the gateway router: peeks at the
 /// destination without decoding the whole frame.
-pub fn peek_send(frame: &Bytes) -> Option<(u32, PeerId, bool, Bytes)> {
+pub fn peek_send(frame: &Bytes) -> Option<SendView> {
     let (&[k], rest) = frame.split_first_chunk::<1>()?;
     let (req_id, rest) = rest.split_first_chunk::<4>()?;
     let (to, rest) = rest.split_first_chunk::<32>()?;
+    let (device, rest) = rest.split_first_chunk::<4>()?;
     let (&[ack], body) = rest.split_first_chunk::<1>()?;
     let want_ack = match ack {
         0 => false,
         1 => true,
         _ => return None,
     };
-    if k != kind::SEND || body.len() > MAX_BODY_LEN {
+    let device = DeviceId(u32::from_le_bytes(*device));
+    if k != kind::SEND || !device.is_valid() || body.len() > MAX_BODY_LEN {
         return None;
     }
-    let body = frame.slice(SEND_HEADER_LEN..);
-    Some((u32::from_le_bytes(*req_id), PeerId(*to), want_ack, body))
+    Some(SendView {
+        req_id: u32::from_le_bytes(*req_id),
+        to: PeerId(*to),
+        device,
+        want_ack,
+        body: frame.slice(SEND_HEADER_LEN..),
+    })
 }
 
 /// Validated relay address for [`ServerMsg::BootstrapInfo`].

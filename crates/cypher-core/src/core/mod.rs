@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use cypher_crypto::{IdentityKeyPair, IdentitySeed};
-use cypher_types::{DeviceId, FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
@@ -79,6 +79,11 @@ enum Pending {
 }
 
 /// What a server error means for the request it answers.
+/// Where a contact's messages go: for now, its first device.
+fn contact(peer: PeerId) -> Addr {
+    Addr::new(peer, DeviceId::FIRST)
+}
+
 fn failure(code: ErrorCode) -> FailReason {
     match code {
         ErrorCode::NotFound => FailReason::NotFound,
@@ -111,6 +116,8 @@ pub struct Core<R> {
     now: u64,
     identity: IdentityKeyPair,
     peer_id: PeerId,
+    /// Which of the identity's devices this one is.
+    device: DeviceId,
     inbox_secret: Zeroizing<[u8; 32]>,
     inbox_id: [u8; 32],
     vault: Vault,
@@ -159,13 +166,8 @@ impl<R: CryptoRngCore> Core<R> {
         let inbox_secret = seed.derive_inbox_secret(DeviceId::FIRST);
 
         let mut skipped = Skipped::default();
-        let stored_prekeys =
-            load_meta::<PrekeysRecord>(&vault, &snapshot.meta, META_PREKEYS, &mut skipped)?;
-        let fresh_prekeys = stored_prekeys.is_none();
-        let prekeys = stored_prekeys.map_or_else(
-            || Prekeys::generate(now_ms, &mut rng),
-            |r| Prekeys::from_record(&r),
-        );
+        let (prekeys, fresh_prekeys) =
+            load_prekeys(&vault, &snapshot.meta, now_ms, &mut rng, &mut skipped)?;
 
         let profile_name = load_profile(&vault, &snapshot.meta, &mut skipped)?;
         let own_links = load_meta::<OwnLinks>(&vault, &snapshot.meta, META_LINKS, &mut skipped)?
@@ -179,6 +181,7 @@ impl<R: CryptoRngCore> Core<R> {
             rng,
             now: now_ms,
             peer_id: identity.peer_id(),
+            device: DeviceId::FIRST,
             identity,
             inbox_id: cypher_wire::inbox_id(&inbox_secret),
             inbox_secret,
@@ -276,6 +279,7 @@ impl<R: CryptoRngCore> Core<R> {
             ClientMsg::Hello {
                 version: PROTOCOL_VERSION,
                 peer: self.peer_id,
+                device: self.device,
             },
         );
     }
@@ -334,7 +338,9 @@ impl<R: CryptoRngCore> Core<R> {
                 self.emit(Event::Superseded);
                 self.effects.push(Effect::Disconnect { reconnect: false });
             }
-            ServerMsg::Recv { from, body } => self.on_relay(from, &body, false),
+            ServerMsg::Recv { from, device, body } => {
+                self.on_relay(Addr::new(from, device), &body, false);
+            }
             msg @ (ServerMsg::SendAck { .. }
             | ServerMsg::Keys { .. }
             | ServerMsg::KeysAck { .. }
@@ -381,9 +387,10 @@ impl<R: CryptoRngCore> Core<R> {
         if self.conn != Conn::Authenticating {
             return;
         }
-        let mut signed = Vec::with_capacity(SESSION_AUTH_CONTEXT.len() + 32);
+        let mut signed = Vec::with_capacity(SESSION_AUTH_CONTEXT.len() + 36);
         signed.extend_from_slice(SESSION_AUTH_CONTEXT);
         signed.extend_from_slice(nonce);
+        signed.extend_from_slice(&self.device.0.to_le_bytes());
         let signature = self.identity.sign(&signed).to_bytes();
         self.transmit(0, ClientMsg::Auth { signature });
     }
@@ -620,7 +627,10 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.last_repair.insert(peer, self.now);
         self.request(
-            ClientMsg::FetchKeys { peer },
+            ClientMsg::FetchKeys {
+                peer,
+                device: DeviceId::FIRST,
+            },
             Pending::Repair { peer },
             false,
         );
@@ -649,7 +659,7 @@ impl<R: CryptoRngCore> Core<R> {
         } else {
             Vec::new()
         };
-        let base = Bytes::from(self.prekeys.base_bundle(&self.identity));
+        let base = Bytes::from(self.prekeys.base_bundle(&self.identity, self.device));
         self.request(
             ClientMsg::PublishKeys {
                 base,
@@ -690,10 +700,18 @@ impl<R: CryptoRngCore> Core<R> {
             let Ok(plain) = cypher_crypto::sealed::open(&self.identity.dh_secret, &item) else {
                 continue;
             };
-            let Some((from, body)) = plain.split_first_chunk::<32>() else {
+            let Some((from, rest)) = plain.split_first_chunk::<32>() else {
                 continue;
             };
-            self.on_relay(PeerId(*from), &Bytes::copy_from_slice(body), true);
+            let Some((device, body)) = rest.split_first_chunk::<4>() else {
+                continue;
+            };
+            let device = DeviceId(u32::from_le_bytes(*device));
+            if !device.is_valid() {
+                continue;
+            }
+            let from = Addr::new(PeerId(*from), device);
+            self.on_relay(from, &Bytes::copy_from_slice(body), true);
         }
         self.request(
             ClientMsg::InboxAck {
@@ -740,7 +758,10 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.request(
-            ClientMsg::FetchKeys { peer },
+            ClientMsg::FetchKeys {
+                peer,
+                device: DeviceId::FIRST,
+            },
             Pending::FetchKeys { link, peer },
             false,
         );
@@ -873,6 +894,21 @@ fn load_outbox(
 }
 
 type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
+
+/// Our saved prekeys, or a fresh set (`true`) when there are none.
+fn load_prekeys(
+    vault: &Vault,
+    meta: &Rows,
+    now_ms: u64,
+    rng: &mut impl CryptoRngCore,
+    skipped: &mut Skipped,
+) -> Result<(Prekeys, bool), CoreError> {
+    let stored = load_meta::<PrekeysRecord>(vault, meta, META_PREKEYS, skipped)?;
+    Ok(match stored {
+        Some(record) => (Prekeys::from_record(&record), false),
+        None => (Prekeys::generate(now_ms, rng), true),
+    })
+}
 
 fn load_meta<T: Record>(
     vault: &Vault,

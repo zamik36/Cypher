@@ -1,4 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use cypher_types::DeviceId;
 
 use crate::WireError;
 
@@ -32,6 +33,16 @@ impl Reader {
 
     pub(crate) fn u32(&mut self) -> Result<u32, WireError> {
         Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    /// A device id; zero is never one.
+    pub(crate) fn device(&mut self) -> Result<DeviceId, WireError> {
+        let device = DeviceId(self.u32()?);
+        if device.is_valid() {
+            Ok(device)
+        } else {
+            Err(WireError::Malformed)
+        }
     }
 
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {

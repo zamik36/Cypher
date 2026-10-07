@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bytes::Bytes;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault};
-use cypher_crypto::IdentitySeed;
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
-use cypher_types::{FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_crypto::{IdentitySeed, PrekeyBundle};
+use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg};
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -24,9 +24,9 @@ struct Keys {
 
 #[derive(Default)]
 pub(crate) struct Server {
-    online: HashMap<PeerId, usize>,
-    challenges: HashMap<usize, ([u8; 32], PeerId)>,
-    keys: HashMap<PeerId, Keys>,
+    online: HashMap<Addr, usize>,
+    challenges: HashMap<usize, ([u8; 32], Addr)>,
+    keys: HashMap<Addr, Keys>,
     links: HashMap<String, PeerId>,
     inboxes: HashMap<[u8; 32], Vec<Bytes>>,
     claims: HashMap<[u8; 16], ([u8; 32], usize)>,
@@ -149,7 +149,7 @@ impl World {
         let peer = self.peer(i);
         self.server
             .online
-            .retain(|p, idx| !(*p == peer && *idx == i));
+            .retain(|p, idx| !(p.peer == peer && *idx == i));
         self.clients[i].connected = false;
         self.clients[i].inputs.push_back(Input::Disconnected);
         self.run();
@@ -187,8 +187,7 @@ impl World {
     }
 
     pub(crate) fn restart(&mut self, i: usize) {
-        let peer = self.peer(i);
-        self.server.online.retain(|p, _| *p != peer);
+        self.server.online.retain(|_, idx| *idx != i);
         self.boot(i);
         self.connect(i);
         self.run();
@@ -253,7 +252,11 @@ impl World {
     /// saved state fell behind what it had published.
     pub(crate) fn foreign_opks(&mut self, i: usize) {
         let peer = self.peer(i);
-        let entry = self.server.keys.get_mut(&peer).expect("keys published");
+        let entry = self
+            .server
+            .keys
+            .get_mut(&Addr::new(peer, DeviceId::FIRST))
+            .expect("keys published");
         entry.opks = (9000..9010)
             .map(|id| {
                 let secret = StaticSecret::from(self.rng.r#gen::<[u8; 32]>());
@@ -452,17 +455,19 @@ impl World {
             .find(|(_, idx)| **idx == from)
             .map(|(p, _)| *p);
         match msg {
-            ClientMsg::Hello { peer, .. } => {
+            ClientMsg::Hello { peer, device, .. } => {
                 let nonce: [u8; 32] = self.server.rng.as_mut().unwrap().r#gen();
-                self.server.challenges.insert(from, (nonce, peer));
+                let addr = Addr::new(peer, device);
+                self.server.challenges.insert(from, (nonce, addr));
                 self.respond(from, &reply(ServerMsg::Challenge { nonce }));
             }
             ClientMsg::Auth { signature } => {
-                let (nonce, peer) = self.server.challenges.remove(&from).expect("hello first");
+                let (nonce, addr) = self.server.challenges.remove(&from).expect("hello first");
                 let mut signed = SESSION_AUTH_CONTEXT.to_vec();
                 signed.extend_from_slice(&nonce);
-                verify_signature(&peer, &signed, &signature).expect("valid auth signature");
-                self.server.online.insert(peer, from);
+                signed.extend_from_slice(&addr.device.0.to_le_bytes());
+                verify_signature(&addr.peer, &signed, &signature).expect("valid auth signature");
+                self.server.online.insert(addr, from);
                 self.respond(from, &reply(ServerMsg::Ready));
             }
             ClientMsg::InboxPut { .. }
@@ -501,28 +506,39 @@ impl World {
             }
             _ if authed.is_none() || self.onion_ctx.is_some() => panic!("unauthenticated request"),
             ClientMsg::Ping => self.respond(from, &reply(ServerMsg::Pong)),
-            ClientMsg::Send { to, want_ack, body } => {
+            ClientMsg::Send {
+                to,
+                device,
+                want_ack,
+                body,
+            } => {
                 let sender = authed.unwrap();
                 let is_chunk = body.first() == Some(&1);
                 let lost = !is_chunk
-                    && self.server.lose_from.get_mut(&sender).is_some_and(|left| {
-                        let lose = *left > 0;
-                        *left = left.saturating_sub(1);
-                        lose
-                    });
+                    && self
+                        .server
+                        .lose_from
+                        .get_mut(&sender.peer)
+                        .is_some_and(|left| {
+                            let lose = *left > 0;
+                            *left = left.saturating_sub(1);
+                            lose
+                        });
                 let dropped = lost
                     || is_chunk
                         && self.server.drop_chunks_every.is_some_and(|n| {
                             self.server.chunk_counter += 1;
                             self.server.chunk_counter.is_multiple_of(n)
                         });
-                let status = match self.server.online.get(&to).copied() {
+                let status = match self.server.online.get(&Addr::new(to, device)).copied() {
                     Some(idx) if self.clients[idx].connected => {
                         if !dropped {
-                            self.deliver(
-                                idx,
-                                &Frame::new(0, ServerMsg::Recv { from: sender, body }),
-                            );
+                            let recv = ServerMsg::Recv {
+                                from: sender.peer,
+                                device: sender.device,
+                                body,
+                            };
+                            self.deliver(idx, &Frame::new(0, recv));
                         }
                         DeliveryStatus::Delivered
                     }
@@ -537,13 +553,14 @@ impl World {
                 opks,
                 replace_opks,
             } => {
-                let peer = authed.unwrap();
+                let addr = authed.unwrap();
+                let bundle = PrekeyBundle::decode(&[&base[..], &[0]].concat()).unwrap();
                 assert_eq!(
-                    &base[..32],
-                    peer.as_bytes(),
+                    Addr::new(bundle.identity, bundle.device),
+                    addr,
                     "bundle must belong to publisher"
                 );
-                let entry = self.server.keys.entry(peer).or_default();
+                let entry = self.server.keys.entry(addr).or_default();
                 entry.base = base;
                 if replace_opks {
                     entry.opks = opks;
@@ -553,8 +570,8 @@ impl World {
                 let opks_left = entry.opks.len() as u16;
                 self.respond(from, &reply(ServerMsg::KeysAck { opks_left }));
             }
-            ClientMsg::FetchKeys { peer } => {
-                let msg = match self.server.keys.get_mut(&peer) {
+            ClientMsg::FetchKeys { peer, device } => {
+                let msg = match self.server.keys.get_mut(&Addr::new(peer, device)) {
                     Some(k) => ServerMsg::Keys {
                         base: k.base.clone(),
                         opk: k.opks.pop(),
@@ -567,7 +584,9 @@ impl World {
             }
             ClientMsg::CreateLink => {
                 let link = LinkId::random(self.server.rng.as_mut().unwrap());
-                self.server.links.insert(link.to_string(), authed.unwrap());
+                self.server
+                    .links
+                    .insert(link.to_string(), authed.unwrap().peer);
                 self.respond(from, &reply(ServerMsg::LinkCreated { link }));
             }
             ClientMsg::ResolveLink { link } => {

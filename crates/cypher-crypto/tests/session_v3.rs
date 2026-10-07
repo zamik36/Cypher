@@ -9,10 +9,16 @@ use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
     CryptoError, Header, IdentityKeyPair, IdentitySeed, OneTimePreKey, PrekeyBundle, Ratchet,
 };
+use cypher_types::DeviceId;
 use proptest::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::OsRng;
 use rand_chacha::ChaCha20Rng;
+
+/// The initiator's device in these sessions.
+const ALICE: DeviceId = DeviceId(1);
+/// The responder's device.
+const BOB: DeviceId = DeviceId(2);
 
 struct Responder {
     ik: IdentityKeyPair,
@@ -30,7 +36,7 @@ impl Responder {
     }
 
     fn bundle(&self, with_opk: bool) -> PrekeyBundle {
-        PrekeyBundle::new(&self.ik, &self.spk, with_opk.then_some(&self.opk))
+        PrekeyBundle::new(&self.ik, BOB, &self.spk, with_opk.then_some(&self.opk))
     }
 
     fn accept(
@@ -39,14 +45,22 @@ impl Responder {
         header: &InitHeader,
     ) -> Result<Ratchet, CryptoError> {
         let opk = header.opk_id.map(|_| &self.opk);
-        handshake::respond(&self.ik, &self.spk, opk, &initiator.peer_id(), header)
+        handshake::respond(
+            &self.ik,
+            BOB,
+            &self.spk,
+            opk,
+            (&initiator.peer_id(), ALICE),
+            header,
+        )
     }
 }
 
 fn establish(with_opk: bool) -> (Ratchet, Ratchet) {
     let alice = IdentityKeyPair::generate();
     let bob = Responder::new();
-    let (mut a, header) = handshake::initiate(&alice, &bob.bundle(with_opk), &mut OsRng).unwrap();
+    let (mut a, header) =
+        handshake::initiate(&alice, ALICE, &bob.bundle(with_opk), &mut OsRng).unwrap();
     let mut b = bob.accept(&alice, &header).unwrap();
 
     let (h, ct) = a.encrypt(b"hello", b"").unwrap();
@@ -80,7 +94,7 @@ fn handshake_with_and_without_opk_then_both_directions() {
 fn responder_cannot_send_before_first_message() {
     let alice = IdentityKeyPair::generate();
     let bob = Responder::new();
-    let (_, header) = handshake::initiate(&alice, &bob.bundle(true), &mut OsRng).unwrap();
+    let (_, header) = handshake::initiate(&alice, ALICE, &bob.bundle(true), &mut OsRng).unwrap();
     let mut b = bob.accept(&alice, &header).unwrap();
     assert!(!b.can_send());
     assert_eq!(b.encrypt(b"x", b"").unwrap_err(), CryptoError::NotReady);
@@ -91,7 +105,8 @@ fn forged_init_header_is_rejected() {
     let alice = IdentityKeyPair::generate();
     let mallory = IdentityKeyPair::generate();
     let bob = Responder::new();
-    let (_, mut header) = handshake::initiate(&alice, &bob.bundle(false), &mut OsRng).unwrap();
+    let (_, mut header) =
+        handshake::initiate(&alice, ALICE, &bob.bundle(false), &mut OsRng).unwrap();
 
     header.identity_dh = mallory.dh_public_key().to_bytes();
     assert_eq!(
@@ -99,9 +114,38 @@ fn forged_init_header_is_rejected() {
         CryptoError::Signature
     );
 
-    let (_, header) = handshake::initiate(&alice, &bob.bundle(false), &mut OsRng).unwrap();
+    let (_, header) = handshake::initiate(&alice, ALICE, &bob.bundle(false), &mut OsRng).unwrap();
     assert_eq!(
         bob.accept(&mallory, &header).unwrap_err(),
+        CryptoError::Signature
+    );
+}
+
+/// The devices a session joins are signed into its first message: a server
+/// that relabels the sender's device, or delivers the message to another
+/// device of the responder, gets it refused.
+#[test]
+fn relabelled_devices_are_rejected() {
+    let alice = IdentityKeyPair::generate();
+    let bob = Responder::new();
+    let (_, header) = handshake::initiate(&alice, ALICE, &bob.bundle(false), &mut OsRng).unwrap();
+    let as_device = |ours: DeviceId, theirs: DeviceId| {
+        handshake::respond(
+            &bob.ik,
+            ours,
+            &bob.spk,
+            None,
+            (&alice.peer_id(), theirs),
+            &header,
+        )
+    };
+    as_device(BOB, ALICE).unwrap();
+    assert_eq!(
+        as_device(BOB, DeviceId(9)).unwrap_err(),
+        CryptoError::Signature
+    );
+    assert_eq!(
+        as_device(DeviceId(9), ALICE).unwrap_err(),
         CryptoError::Signature
     );
 }
@@ -110,16 +154,25 @@ fn forged_init_header_is_rejected() {
 fn wrong_prekey_ids_are_rejected() {
     let alice = IdentityKeyPair::generate();
     let bob = Responder::new();
-    let (_, header) = handshake::initiate(&alice, &bob.bundle(true), &mut OsRng).unwrap();
-    let err = handshake::respond(&bob.ik, &bob.spk, None, &alice.peer_id(), &header).unwrap_err();
+    let (_, header) = handshake::initiate(&alice, ALICE, &bob.bundle(true), &mut OsRng).unwrap();
+    let err = handshake::respond(
+        &bob.ik,
+        BOB,
+        &bob.spk,
+        None,
+        (&alice.peer_id(), ALICE),
+        &header,
+    )
+    .unwrap_err();
     assert_eq!(err, CryptoError::Malformed);
 
     let other_spk = SignedPreKey::generate(2, &mut OsRng);
     let err = handshake::respond(
         &bob.ik,
+        BOB,
         &other_spk,
         Some(&bob.opk),
-        &alice.peer_id(),
+        (&alice.peer_id(), ALICE),
         &header,
     )
     .unwrap_err();
@@ -131,7 +184,8 @@ fn init_header_roundtrip() {
     let alice = IdentityKeyPair::generate();
     let bob = Responder::new();
     for with_opk in [false, true] {
-        let (_, header) = handshake::initiate(&alice, &bob.bundle(with_opk), &mut OsRng).unwrap();
+        let (_, header) =
+            handshake::initiate(&alice, ALICE, &bob.bundle(with_opk), &mut OsRng).unwrap();
         let mut buf = Vec::new();
         header.encode(&mut buf);
         buf.extend_from_slice(b"tail");
@@ -274,8 +328,8 @@ fn deterministic_with_seeded_rng() {
         let bob = IdentitySeed([2; 32]).derive_identity();
         let spk = SignedPreKey::generate(1, &mut rng);
         let opk = OneTimePreKey::generate(2, &mut rng);
-        let bundle = PrekeyBundle::new(&bob, &spk, Some(&opk));
-        let (mut a, header) = handshake::initiate(&alice, &bundle, &mut rng).unwrap();
+        let bundle = PrekeyBundle::new(&bob, BOB, &spk, Some(&opk));
+        let (mut a, header) = handshake::initiate(&alice, ALICE, &bundle, &mut rng).unwrap();
         let (h, ct) = a.encrypt(b"vector", b"").unwrap();
         let mut out = Vec::new();
         header.encode(&mut out);

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{IdentityKeyPair, OneTimePreKey, PrekeyBundle};
+use cypher_types::DeviceId;
 use cypher_wire::BUNDLE_BASE_LEN;
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
@@ -35,10 +36,11 @@ impl Prekeys {
         }
     }
 
-    /// Signed bundle without a one-time prekey, as published to the server.
-    pub(crate) fn base_bundle(&self, identity: &IdentityKeyPair) -> Vec<u8> {
+    /// `device`'s signed bundle without a one-time prekey, as published to
+    /// the server.
+    pub(crate) fn base_bundle(&self, identity: &IdentityKeyPair, device: DeviceId) -> Vec<u8> {
         let mut out = Vec::with_capacity(PrekeyBundle::MAX_LEN);
-        PrekeyBundle::new(identity, &self.spk, None).encode(&mut out);
+        PrekeyBundle::new(identity, device, &self.spk, None).encode(&mut out);
         out.truncate(BUNDLE_BASE_LEN);
         out
     }
@@ -149,12 +151,15 @@ mod tests {
     fn base_bundle_decodes_with_opk_flag() {
         let ik = IdentityKeyPair::generate();
         let pk = Prekeys::generate(0, &mut OsRng);
-        let mut full = pk.base_bundle(&ik);
+        let mut full = pk.base_bundle(&ik, DeviceId(2));
         assert_eq!(full.len(), BUNDLE_BASE_LEN);
         full.push(0);
         let bundle = PrekeyBundle::decode(&full).unwrap();
         bundle.verify().unwrap();
-        assert_eq!(bundle.identity, ik.peer_id());
+        assert_eq!(
+            (bundle.identity, bundle.device),
+            (ik.peer_id(), DeviceId(2))
+        );
     }
 
     #[test]

@@ -15,11 +15,12 @@ pub const SIG_REQUEST_SUBJECT: &str = "sig.req";
 pub const SIG_ONION_SUBJECT: &str = "sig.onion";
 pub const SIG_QUEUE_GROUP: &str = "signaling";
 
-/// Subject on which a connected peer's gateway accepts relayed frames. An
-/// empty message on it evicts the session holding it: relayed frames are
-/// never empty, and one subscription per connection halves NATS state.
-pub fn peer_subject(peer_hex: &str) -> String {
-    format!("peer.{peer_hex}")
+/// Subject on which the gateway of one connected device of a peer accepts
+/// relayed frames. An empty message on it evicts the session holding it:
+/// relayed frames are never empty, and one subscription per connection
+/// halves NATS state.
+pub fn peer_subject(peer_hex: &str, device: cypher_types::DeviceId) -> String {
+    format!("peer.{peer_hex}.{device}")
 }
 
 /// Everything a service's `main` does: `<service> health` asks a running
@@ -279,6 +280,6 @@ mod tests {
 
     #[test]
     fn subjects() {
-        assert_eq!(peer_subject("ab"), "peer.ab");
+        assert_eq!(peer_subject("ab", cypher_types::DeviceId(7)), "peer.ab.7");
     }
 }

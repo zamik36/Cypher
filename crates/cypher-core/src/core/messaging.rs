@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use cypher_crypto::{Header, InitHeader, PrekeyBundle, handshake, sealed};
-use cypher_types::{MsgId, PeerId};
+use cypher_types::{Addr, DeviceId, MsgId, PeerId};
 use cypher_wire::{ClientMsg, DeliveryStatus};
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
@@ -384,6 +384,7 @@ impl<R: CryptoRngCore> Core<R> {
             req_id,
             ClientMsg::Send {
                 to: peer_id,
+                device: DeviceId::FIRST,
                 want_ack: true,
                 body,
             },
@@ -436,6 +437,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let mut plain = Zeroizing::new(Vec::with_capacity(32 + body.len()));
         plain.extend_from_slice(self.peer_id.as_bytes());
+        plain.extend_from_slice(&self.device.0.to_le_bytes());
         plain.extend_from_slice(body);
         match sealed::seal(identity_dh, &plain, &mut self.rng) {
             Ok(item) => self.request(
@@ -622,8 +624,9 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let bundle = PrekeyBundle::decode(&raw)
             .ok()
-            .filter(|b| b.identity == peer)?;
-        let (ratchet, init) = handshake::initiate(&self.identity, &bundle, &mut self.rng).ok()?;
+            .filter(|b| b.identity == peer && b.device == DeviceId::FIRST)?;
+        let (ratchet, init) =
+            handshake::initiate(&self.identity, self.device, &bundle, &mut self.rng).ok()?;
         Some(Peer::new(ratchet, bundle.identity_dh, Some(init)))
     }
 
@@ -660,13 +663,14 @@ impl<R: CryptoRngCore> Core<R> {
         self.flush_outbox();
     }
 
-    pub(super) fn on_relay(&mut self, from: PeerId, body: &Bytes, via_inbox: bool) {
+    pub(super) fn on_relay(&mut self, sender: Addr, body: &Bytes, via_inbox: bool) {
+        let from = sender.peer;
         match RelayBody::decode(body) {
             Ok(RelayBody::Message {
                 init,
                 header,
                 ciphertext,
-            }) => self.on_message(from, init.as_ref(), &header, &ciphertext),
+            }) => self.on_message(sender, init.as_ref(), &header, &ciphertext),
             Ok(RelayBody::Chunk {
                 file_id,
                 index,
@@ -684,12 +688,13 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    fn on_message(&mut self, from: PeerId, init: Option<&InitHeader>, header: &Header, ct: &[u8]) {
+    fn on_message(&mut self, sender: Addr, init: Option<&InitHeader>, header: &Header, ct: &[u8]) {
+        let from = sender.peer;
         if self.peers.get(&from).is_some_and(|p| p.blocked) {
             return;
         }
         let result = match init {
-            Some(init) => self.accept_init(from, init, header, ct),
+            Some(init) => self.accept_init(sender, init, header, ct),
             None => self.decrypt_existing(from, header, ct),
         };
         let plaintext = match result {
@@ -733,11 +738,15 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn accept_init(
         &mut self,
-        from: PeerId,
+        sender: Addr,
         init: &InitHeader,
         header: &Header,
         ct: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
+        let Addr {
+            peer: from,
+            device: from_device,
+        } = sender;
         if let Some(p) = self.peers.get_mut(&from)
             && p.accepted_ephemerals.contains(&init.ephemeral)
         {
@@ -759,7 +768,14 @@ impl<R: CryptoRngCore> Core<R> {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
             None => None,
         };
-        let mut ratchet = handshake::respond(&self.identity, spk, opk, &from, init)?;
+        let mut ratchet = handshake::respond(
+            &self.identity,
+            self.device,
+            spk,
+            opk,
+            (&from, from_device),
+            init,
+        )?;
         let pt = ratchet.decrypt(header, ct, b"", &mut self.rng)?;
 
         if let Some(existing) = self.peers.get(&from)

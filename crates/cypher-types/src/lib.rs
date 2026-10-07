@@ -5,10 +5,10 @@ mod error;
 mod id;
 
 pub use error::{Error, Result};
-pub use id::{DeviceId, FileId, LinkId, MsgId, PeerId, base32};
+pub use id::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, base32};
 
 /// Domain-separation prefix for the gateway session proof-of-possession.
-pub const SESSION_AUTH_CONTEXT: &[u8] = b"cypher-session-auth-v2";
+pub const SESSION_AUTH_CONTEXT: &[u8] = b"cypher-session-auth-v3";
 
 /// Most devices one identity can have.
 pub const MAX_DEVICES: usize = 6;

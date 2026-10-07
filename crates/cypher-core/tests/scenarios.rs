@@ -13,7 +13,7 @@ mod harness;
 use bytes::Bytes;
 use cypher_core::{Command, Content, Event, FailReason, MediaKind, MessageStatus, Table, Vault};
 use cypher_crypto::IdentitySeed;
-use cypher_types::{FileId, PeerId};
+use cypher_types::{DeviceId, FileId, PeerId};
 use cypher_wire::{Frame, ServerMsg};
 use harness::World;
 
@@ -438,7 +438,7 @@ fn messages_survive_restarts_without_key_reuse() {
     let mut headers = std::collections::HashSet::new();
     for (_, raw) in &w.server.delivered {
         if let Ok(Frame {
-            msg: ServerMsg::Recv { from, body },
+            msg: ServerMsg::Recv { from, body, .. },
             ..
         }) = Frame::<ServerMsg>::decode(raw.clone())
             && body.first() == Some(&0)
@@ -677,6 +677,7 @@ fn server_forgeries_are_ignored() {
             0,
             ServerMsg::Recv {
                 from: a,
+                device: DeviceId::FIRST,
                 body: Bytes::from(forged_chunk),
             },
         )
@@ -694,6 +695,7 @@ fn server_forgeries_are_ignored() {
             0,
             ServerMsg::Recv {
                 from: b,
+                device: DeviceId::FIRST,
                 body: Bytes::from(forged_ack),
             },
         )
@@ -706,6 +708,7 @@ fn server_forgeries_are_ignored() {
             0,
             ServerMsg::Recv {
                 from: PeerId([5; 32]),
+                device: DeviceId::FIRST,
                 body: Bytes::from_static(b"\x00\x00junk"),
             },
         )
@@ -722,7 +725,12 @@ fn replayed_init_message_does_not_reset_the_session() {
         .server
         .delivered
         .iter()
-        .find(|(to, raw)| *to == A && raw.len() > 45 && raw[5 + 32] == 0 && raw[5 + 33] == 1)
+        .find(|(to, raw)| {
+            let recv = Frame::<ServerMsg>::decode(raw.clone()).map(|f| f.msg);
+            // A ratchet message (tag 0) carrying an init header (flag 1).
+            *to == A
+                && matches!(recv, Ok(ServerMsg::Recv { body, .. }) if body.starts_with(&[0, 1]))
+        })
         .map(|(_, raw)| raw.clone())
         .expect("initial message with init header");
     w.send_text(A, B, "one");

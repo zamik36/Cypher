@@ -1,4 +1,4 @@
-//! Cypher wire protocol v2: the only messages the server infrastructure
+//! Cypher wire protocol v3: the only messages the server infrastructure
 //! understands. Everything end-to-end lives inside opaque `body` fields.
 //!
 //! Layout: `[kind u8][req_id u32 LE][fields...]`, little-endian integers,
@@ -15,19 +15,19 @@ mod codec;
 mod message;
 
 pub use message::{
-    ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg, encode_recv, peek_send,
-    relay_addr_is_valid,
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, SEND_HEADER_LEN, SendView, ServerMsg, encode_recv,
+    peek_send, relay_addr_is_valid,
 };
 
 /// Bumped on any incompatible change; the gateway rejects other versions.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Size of the fixed frame prefix (`kind` + `req_id`).
 pub const FRAME_HEADER_LEN: usize = 5;
 
-/// Encoded prekey bundle without the one-time prekey part:
-/// identity(32) ‖ `identity_dh(32)` ‖ `spk_id(4)` ‖ spk(32) ‖ signature(64).
-pub const BUNDLE_BASE_LEN: usize = 164;
+/// Encoded prekey bundle without the one-time prekey part: identity(32) ‖
+/// device(4) ‖ `identity_dh(32)` ‖ `spk_id(4)` ‖ spk(32) ‖ signature(64).
+pub const BUNDLE_BASE_LEN: usize = 168;
 
 pub const MAX_BODY_LEN: usize = cypher_types::MAX_FRAME_SIZE - FRAME_HEADER_LEN - 64;
 pub const MAX_INBOX_ITEM_LEN: usize = 72 * 1024;

@@ -4,7 +4,7 @@ use cypher_crypto::chunk::CHUNK_TAG_LEN;
 use cypher_types::{FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
-use super::Core;
+use super::{Core, contact};
 use crate::api::{Content, Effect, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
 use crate::envelope::{
     Body, FILE_CHUNK_SIZE, FileCtl, FileDesc, MAX_FILE_SIZE, MAX_INLINE_LEN, MAX_MIME_LEN,
@@ -383,7 +383,7 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(headroom) = buf.first_chunk_mut::<CHUNK_HEADROOM>() else {
             return;
         };
-        relay::write_chunk_headers(headroom, &out.peer, &file_id, index);
+        relay::write_chunk_headers(headroom, contact(out.peer), &file_id, index);
         let frame = Bytes::from(buf);
 
         if out.kind.is_media() && out.stored_copy.set(index) {
@@ -440,7 +440,7 @@ impl<R: CryptoRngCore> Core<R> {
         };
         let (next, sack) = inc.ack_state();
         let tag = inc.cipher.ack_tag(next, sack);
-        let frame = relay::ack_frame(&inc.peer, file_id, next, sack, &tag);
+        let frame = relay::ack_frame(contact(inc.peer), file_id, next, sack, &tag);
         if self.is_ready() {
             self.effects.push(Effect::Transmit(frame));
         }

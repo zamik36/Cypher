@@ -76,7 +76,7 @@ just desktop-dev              # или десктоп
 | Документ | О чём |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Устройство системы: сервисы, крейты, потоки данных, хранение |
-| [docs/protocol-v2.md](docs/protocol-v2.md) | Протокол клиент ↔ сервер и end-to-end уровень |
+| [docs/protocol-v3.md](docs/protocol-v3.md) | Протокол клиент ↔ сервер и end-to-end уровень |
 | [docs/threat-model.md](docs/threat-model.md) | Что защищается, от кого, где границы |
 | [docs/assessment.md](docs/assessment.md) | Оценка готовности: сильные стороны и проблемы по серьёзности |
 | [docs/roadmap.md](docs/roadmap.md) | План по этапам до версии 1.0 |
