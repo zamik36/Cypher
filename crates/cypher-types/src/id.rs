@@ -83,6 +83,38 @@ impl MsgId {
     }
 }
 
+/// One device of an identity. Devices share the identity, and so the peer
+/// id, but each keeps its own prekeys, inbox and sessions. Zero is never a
+/// device.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct DeviceId(pub u32);
+
+impl DeviceId {
+    /// A new identity's first device, and every install from before an
+    /// identity could have several.
+    pub const FIRST: Self = Self(1);
+
+    pub fn is_valid(self) -> bool {
+        self.0 != 0
+    }
+
+    /// A random valid id, for a device joining an identity.
+    pub fn random(rng: &mut impl CryptoRngCore) -> Self {
+        loop {
+            let id = Self(rng.next_u32());
+            if id.is_valid() {
+                return id;
+            }
+        }
+    }
+}
+
+impl fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Share-link identifier: 128 random bits in lowercase RFC 4648 base32.
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LinkId(String);
@@ -154,6 +186,14 @@ mod tests {
     #[test]
     fn base32_known_vector() {
         assert_eq!(base32(b"foobar"), "mzxw6ytboi");
+    }
+
+    #[test]
+    fn random_device_ids_are_valid() {
+        assert!(!DeviceId(0).is_valid());
+        assert!(DeviceId::FIRST.is_valid());
+        assert!(DeviceId::random(&mut rand::rngs::OsRng).is_valid());
+        assert_eq!(DeviceId(42).to_string(), "42");
     }
 
     #[test]

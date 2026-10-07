@@ -7,6 +7,7 @@
 
 pub mod aead;
 pub mod chunk;
+pub mod devices;
 pub mod double_ratchet;
 mod error;
 pub mod fingerprint;
@@ -20,6 +21,7 @@ mod reader;
 pub mod sealed;
 
 pub use chunk::{ChunkCipher, FileKey};
+pub use devices::DeviceList;
 pub use double_ratchet::{Header, Ratchet};
 pub use error::CryptoError;
 pub use handshake::InitHeader;

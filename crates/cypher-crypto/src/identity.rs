@@ -1,4 +1,4 @@
-use cypher_types::PeerId;
+use cypher_types::{DeviceId, PeerId};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -46,10 +46,18 @@ impl IdentitySeed {
         *hkdf::<32>(None, &self.0, b"cypher-storage-key")
     }
 
-    /// Bearer secret for the owner's blind inbox. Peers only ever see
-    /// `cypher_wire::inbox_id(secret)`, which grants write but not read access.
-    pub fn derive_inbox_secret(&self) -> Zeroizing<[u8; 32]> {
-        hkdf::<32>(None, &self.0, b"cypher/v2/inbox-secret")
+    /// Bearer secret for one device's blind inbox. Peers only ever see
+    /// `cypher_wire::inbox_id(secret)`, which grants write but not read
+    /// access. The first device keeps the secret from before devices, so
+    /// the inbox contacts already know stays valid.
+    pub fn derive_inbox_secret(&self, device: DeviceId) -> Zeroizing<[u8; 32]> {
+        if device == DeviceId::FIRST {
+            return hkdf::<32>(None, &self.0, b"cypher/v2/inbox-secret");
+        }
+        let mut info = [0u8; 27];
+        info[..23].copy_from_slice(b"cypher/v3/inbox-secret/");
+        info[23..].copy_from_slice(&device.0.to_le_bytes());
+        hkdf::<32>(None, &self.0, &info)
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -160,11 +168,27 @@ mod tests {
         assert_eq!(a.dh_public_key().as_bytes(), b.dh_public_key().as_bytes());
         let sek = seed.derive_storage_key();
         assert_ne!(&sek, a.peer_id().as_bytes());
-        assert_ne!(sek, *seed.derive_inbox_secret());
+        assert_ne!(sek, *seed.derive_inbox_secret(DeviceId::FIRST));
         assert_ne!(
             IdentitySeed::generate().derive_identity().peer_id(),
             a.peer_id()
         );
+    }
+
+    /// Each device reads its own inbox; the first keeps the one contacts
+    /// knew before an identity could have several devices.
+    #[test]
+    fn every_device_has_its_own_inbox() {
+        let seed = IdentitySeed([7; 32]);
+        let first = seed.derive_inbox_secret(DeviceId::FIRST);
+        assert_eq!(
+            *first,
+            *hkdf::<32>(None, &seed.0, b"cypher/v2/inbox-secret")
+        );
+        let second = seed.derive_inbox_secret(DeviceId(2));
+        assert_ne!(*first, *second);
+        assert_ne!(*second, *seed.derive_inbox_secret(DeviceId(3)));
+        assert_eq!(*second, *seed.derive_inbox_secret(DeviceId(2)));
     }
 
     #[test]

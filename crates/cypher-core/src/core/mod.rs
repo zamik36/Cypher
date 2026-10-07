@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use cypher_crypto::{IdentityKeyPair, IdentitySeed};
-use cypher_types::{FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{DeviceId, FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
@@ -156,7 +156,7 @@ impl<R: CryptoRngCore> Core<R> {
     ) -> Result<(Self, Vec<Effect>), CoreError> {
         let identity = seed.derive_identity();
         let vault = Vault::new(seed.derive_storage_key());
-        let inbox_secret = seed.derive_inbox_secret();
+        let inbox_secret = seed.derive_inbox_secret(DeviceId::FIRST);
 
         let mut skipped = Skipped::default();
         let stored_prekeys =

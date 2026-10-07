@@ -31,6 +31,10 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
+    pub(crate) fn u64(&mut self) -> Result<u64, CryptoError> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
     pub(crate) fn rest(self) -> &'a [u8] {
         self.buf
     }
