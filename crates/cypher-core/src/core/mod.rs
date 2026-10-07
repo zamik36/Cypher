@@ -32,6 +32,9 @@ const INBOX_POLL_MS: u64 = 5 * 60_000;
 const RESYNC_INTERVAL_MS: u64 = 60 * 60_000;
 /// Least time between two fresh sessions started with one contact.
 const REPAIR_INTERVAL_MS: u64 = 10 * 60_000;
+/// How long a contact's device may hold our first message unanswered
+/// before we take it that our prekeys were gone and start again.
+const INIT_TIMEOUT_MS: u64 = 5 * 60_000;
 const RECENT_IDS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +129,9 @@ pub struct Core<R> {
     last_resync: Option<u64>,
     /// When a fresh session was last started with a contact, per contact.
     last_repair: HashMap<PeerId, u64>,
+    /// When a message carrying our unanswered first one reached the
+    /// contact's device, per contact.
+    init_heard: HashMap<PeerId, u64>,
     recent: RecentIds,
     /// Our messages the contact has read, so a late receipt cannot undo it.
     read: RecentIds,
@@ -190,6 +196,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_inbox_fetch: 0,
             last_resync: None,
             last_repair: HashMap::new(),
+            init_heard: HashMap::new(),
             recent: RecentIds::default(),
             read: RecentIds::default(),
             progress_at: HashMap::new(),
@@ -562,6 +569,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.persist_prekeys();
             self.publish_keys(false);
         }
+        self.restart_unanswered_inits();
         self.retransmit_expired();
         self.flush_outbox();
     }
@@ -569,17 +577,45 @@ impl<R: CryptoRngCore> Core<R> {
     /// A known contact's message did not decrypt: the two sessions drifted
     /// apart (state lost on one side), and every later message would fail
     /// too. Starts a fresh one from their published keys, keeping the
-    /// contact; at most every ten minutes per contact.
+    /// contact.
     pub(super) fn repair_session(&mut self, peer: PeerId) {
         let settled = self
             .peers
             .get(&peer)
-            .is_some_and(|p| !p.request && !p.blocked && !p.is_unconfirmed_initiator());
+            .is_some_and(|p| !p.request && !p.is_unconfirmed_initiator());
+        if settled {
+            self.refetch_keys(peer);
+        }
+    }
+
+    /// Our first message reached the contact's device, yet nothing came
+    /// back: it no longer has the prekeys we used (replaced after we fetched
+    /// them), so it cannot answer. Starts again from its current keys.
+    fn restart_unanswered_inits(&mut self) {
+        let peers = &self.peers;
+        self.init_heard
+            .retain(|peer, _| peers.get(peer).is_some_and(Peer::is_unconfirmed_initiator));
+        let due: Vec<PeerId> = self
+            .init_heard
+            .iter()
+            .filter(|(_, at)| self.now.saturating_sub(**at) >= INIT_TIMEOUT_MS)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in due {
+            self.init_heard.remove(&peer);
+            self.refetch_keys(peer);
+        }
+    }
+
+    /// Fetches a contact's keys for a fresh session; at most every ten
+    /// minutes per contact.
+    fn refetch_keys(&mut self, peer: PeerId) {
+        let blocked = self.peers.get(&peer).is_none_or(|p| p.blocked);
         let recent = self
             .last_repair
             .get(&peer)
             .is_some_and(|at| self.now.saturating_sub(*at) < REPAIR_INTERVAL_MS);
-        if !settled || recent || self.conn != Conn::Ready {
+        if blocked || recent || self.conn != Conn::Ready {
             return;
         }
         self.last_repair.insert(peer, self.now);

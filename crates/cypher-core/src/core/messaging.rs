@@ -398,7 +398,16 @@ impl<R: CryptoRngCore> Core<R> {
         status: DeliveryStatus,
     ) {
         match status {
-            DeliveryStatus::Delivered => self.complete_outbox(msg_id, MessageStatus::Sent),
+            DeliveryStatus::Delivered => {
+                if self
+                    .peers
+                    .get(&peer)
+                    .is_some_and(Peer::is_unconfirmed_initiator)
+                {
+                    self.init_heard.entry(peer).or_insert(self.now);
+                }
+                self.complete_outbox(msg_id, MessageStatus::Sent);
+            }
             DeliveryStatus::Offline => match self
                 .peers
                 .get(&peer)

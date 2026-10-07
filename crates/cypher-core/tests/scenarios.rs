@@ -186,6 +186,28 @@ fn prekeys_the_server_has_but_we_lack_are_replaced() {
     assert!(joined(&w, F));
 }
 
+/// The host lost the prekeys a joiner used (the joiner fetched them just
+/// before the host replaced its set): the host cannot answer, so after a
+/// while the joiner starts again from the host's current keys, and what it
+/// wrote in the meantime arrives.
+#[test]
+fn a_joiner_whose_prekey_is_gone_starts_again() {
+    let mut w = World::new(2);
+    w.foreign_opks(A);
+    w.pair(A, B);
+    let b = w.peer(B);
+    let waiting = w.send_text(B, A, "are you there?");
+    assert!(!w.texts(A).contains(&"are you there?".to_owned()));
+
+    w.advance(5 * 60_000);
+    assert!(w.has_event(
+        A,
+        |e| matches!(e, Event::PeerAdded { peer, .. } if *peer == b)
+    ));
+    assert_eq!(w.texts(A), ["are you there?"]);
+    assert_eq!(w.status_of(B, waiting), Some(MessageStatus::Delivered));
+}
+
 /// One side's session went back in time (its saved state was overwritten
 /// by an older copy): the other cannot decrypt it, starts a fresh session
 /// from published keys, and the two talk again, as the same contacts.
