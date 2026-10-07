@@ -45,6 +45,8 @@ pub(crate) struct Server {
     /// Push endpoint per inbox, and the inboxes signalled so far.
     pub pushes: HashMap<[u8; 32], String>,
     pub signals: Vec<[u8; 32]>,
+    /// `FetchKeys` requests served.
+    pub key_fetches: usize,
 }
 
 pub(crate) struct Client {
@@ -571,6 +573,7 @@ impl World {
                 self.respond(from, &reply(ServerMsg::KeysAck { opks_left }));
             }
             ClientMsg::FetchKeys { peer, device } => {
+                self.server.key_fetches += 1;
                 let msg = match self.server.keys.get_mut(&Addr::new(peer, device)) {
                     Some(k) => ServerMsg::Keys {
                         base: k.base.clone(),

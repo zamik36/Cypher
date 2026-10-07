@@ -400,10 +400,15 @@ impl<R: CryptoRngCore> Core<R> {
     ) {
         match status {
             DeliveryStatus::Delivered => {
-                if self
-                    .peers
-                    .get(&peer)
-                    .is_some_and(Peer::is_unconfirmed_initiator)
+                // Only a message the contact always answers (with a receipt)
+                // tells that silence means trouble: a host does not answer
+                // the Hello of someone it has not accepted yet.
+                let answered = self.outbox.get(&msg_id).is_some_and(|i| i.tracked);
+                if answered
+                    && self
+                        .peers
+                        .get(&peer)
+                        .is_some_and(Peer::is_unconfirmed_initiator)
                 {
                     self.init_heard.entry(peer).or_insert(self.now);
                 }

@@ -208,6 +208,19 @@ fn a_joiner_whose_prekey_is_gone_starts_again() {
     assert_eq!(w.status_of(B, waiting), Some(MessageStatus::Delivered));
 }
 
+/// A joiner the host has not accepted gets no answer to its Hello, and that
+/// alone is no reason to spend the host's prekeys on starting again.
+#[test]
+fn a_joiner_waiting_to_be_accepted_does_not_start_again() {
+    let mut w = World::new(3);
+    let link = w.create_link(A);
+    w.command(B, Command::JoinLink { link: link.clone() });
+    w.command(C, Command::JoinLink { link });
+    let fetches = w.server.key_fetches;
+    w.advance(30 * 60_000);
+    assert_eq!(w.server.key_fetches, fetches, "no new keys fetched");
+}
+
 /// One side's session went back in time (its saved state was overwritten
 /// by an older copy): the other cannot decrypt it, starts a fresh session
 /// from published keys, and the two talk again, as the same contacts.
