@@ -15,6 +15,7 @@ fn an_unsupported_version_stops_the_client_and_asks_for_an_update() {
     let seed = IdentitySeed::generate();
     let (mut core, _) = Core::restore(
         &seed,
+        cypher_types::DeviceId::FIRST,
         &Snapshot::default(),
         NOW,
         ChaCha20Rng::seed_from_u64(1),

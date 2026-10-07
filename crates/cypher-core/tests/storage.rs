@@ -8,7 +8,9 @@ use rand_chacha::ChaCha20Rng;
 const NOW: u64 = 1_700_000_000_000;
 
 fn restore(seed: &IdentitySeed, snapshot: &Snapshot) -> Result<Vec<Effect>, CoreError> {
-    Core::restore(seed, snapshot, NOW, ChaCha20Rng::seed_from_u64(1)).map(|(_, effects)| effects)
+    let first = cypher_types::DeviceId::FIRST;
+    Core::restore(seed, first, snapshot, NOW, ChaCha20Rng::seed_from_u64(1))
+        .map(|(_, effects)| effects)
 }
 
 /// A peer row sealed as record `version`, as another release would write it.

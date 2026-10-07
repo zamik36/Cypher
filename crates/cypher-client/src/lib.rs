@@ -20,7 +20,7 @@ use cypher_core::{
     Vault, message_key,
 };
 use cypher_crypto::IdentitySeed;
-use cypher_types::{FileId, MsgId, PeerId};
+use cypher_types::{DeviceId, FileId, MsgId, PeerId};
 use rand::rngs::OsRng;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -177,6 +177,7 @@ impl Client {
     /// Restores persisted state for `seed` and starts connecting.
     pub async fn start(
         seed: &IdentitySeed,
+        device: DeviceId,
         config: Config,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), ClientError> {
         let peer_id = seed.derive_identity().peer_id();
@@ -196,7 +197,7 @@ impl Client {
         };
         let vault = Vault::new(seed.derive_storage_key());
         let files = load_files(&store, &vault).await?;
-        let (core, initial) = Core::restore(seed, &snapshot, now_ms(), OsRng)?;
+        let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (req_tx, req_rx) = mpsc::channel(256);

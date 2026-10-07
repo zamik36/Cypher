@@ -161,17 +161,19 @@ pub struct Core<R> {
 }
 
 impl<R: CryptoRngCore> Core<R> {
-    /// Builds the core from the identity seed and previously persisted state.
-    /// Returns persistence effects when fresh prekeys had to be generated.
+    /// Builds the core for one device of the identity `seed` from previously
+    /// persisted state. Returns persistence effects when fresh prekeys had to
+    /// be generated.
     pub fn restore(
         seed: &IdentitySeed,
+        device: DeviceId,
         snapshot: &Snapshot,
         now_ms: u64,
         mut rng: R,
     ) -> Result<(Self, Vec<Effect>), CoreError> {
         let identity = seed.derive_identity();
         let vault = Vault::new(seed.derive_storage_key());
-        let inbox_secret = seed.derive_inbox_secret(DeviceId::FIRST);
+        let inbox_secret = seed.derive_inbox_secret(device);
 
         let mut skipped = Skipped::default();
         let (prekeys, fresh_prekeys) =
@@ -190,7 +192,7 @@ impl<R: CryptoRngCore> Core<R> {
             rng,
             now: now_ms,
             peer_id: identity.peer_id(),
-            device: DeviceId::FIRST,
+            device,
             identity,
             inbox_id: cypher_wire::inbox_id(&inbox_secret),
             inbox_secret,

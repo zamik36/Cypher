@@ -53,6 +53,8 @@ pub(crate) struct Server {
 
 pub(crate) struct Client {
     pub seed: [u8; 32],
+    /// Which of its identity's devices this client is.
+    pub device: DeviceId,
     pub core: Option<Core<Rng>>,
     pub kv: BTreeMap<(u8, Vec<u8>), Vec<u8>>,
     pub sources: HashMap<FileId, Vec<u8>>,
@@ -96,6 +98,7 @@ impl World {
             let seed: [u8; 32] = rng.r#gen();
             world.clients.push(Client {
                 seed,
+                device: DeviceId::FIRST,
                 core: None,
                 kv: BTreeMap::new(),
                 sources: HashMap::new(),
@@ -136,7 +139,7 @@ impl World {
         };
         let rng = Rng::seed_from_u64(self.rng.r#gen());
         let (core, effects) =
-            Core::restore(&IdentitySeed(c.seed), &snapshot, self.now, rng).unwrap();
+            Core::restore(&IdentitySeed(c.seed), c.device, &snapshot, self.now, rng).unwrap();
         c.core = Some(core);
         c.connected = false;
         self.apply(i, effects);

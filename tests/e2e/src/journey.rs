@@ -73,7 +73,8 @@ struct Peer {
 
 impl Peer {
     async fn start(target: &Target, seed: IdentitySeed, dir: TempDir) -> Self {
-        let (client, events) = Client::start(&seed, target.client_config(dir.path()))
+        let first = cypher_types::DeviceId::FIRST;
+        let (client, events) = Client::start(&seed, first, target.client_config(dir.path()))
             .await
             .unwrap();
         let mut peer = Self {

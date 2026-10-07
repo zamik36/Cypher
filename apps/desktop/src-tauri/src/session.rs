@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use cypher_client::{Client, Config, TorConfig};
+use cypher_client::{Client, Config, TorConfig, Unlocked};
 use cypher_core::Event;
-use cypher_crypto::IdentitySeed;
 use cypher_media::Recorder;
 use cypher_types::{FileId, PeerId};
 use tauri::{AppHandle, Manager, Runtime};
@@ -20,11 +19,6 @@ pub(crate) type CmdResult<T> = Result<T, String>;
 
 pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
-}
-
-struct Identity {
-    seed: IdentitySeed,
-    nickname: String,
 }
 
 struct Session {
@@ -86,7 +80,7 @@ impl Paths {
 pub(crate) struct AppState {
     paths: Paths,
     tls: Arc<rustls::ClientConfig>,
-    identity: Mutex<Option<Identity>>,
+    identity: Mutex<Option<Unlocked>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
     pub offers: Offers,
@@ -114,9 +108,9 @@ impl AppState {
         &self.paths
     }
 
-    pub(crate) async fn set_identity(&self, seed: IdentitySeed, nickname: String) {
+    pub(crate) async fn set_identity(&self, identity: Unlocked) {
         self.stop().await;
-        *self.identity.lock().await = Some(Identity { seed, nickname });
+        *self.identity.lock().await = Some(identity);
     }
 
     /// The safety number with `peer`; needs only the unlocked identity.
@@ -169,7 +163,9 @@ impl AppState {
             }),
         };
         *self.endpoint.lock().await = endpoint;
-        let (client, mut rx) = Client::start(&identity.seed, config).await.map_err(err)?;
+        let (client, mut rx) = Client::start(&identity.seed, identity.device, config)
+            .await
+            .map_err(err)?;
         // Before anything else is sent: contacts greeted later hear it too.
         client
             .set_profile_name(Some(identity.nickname.clone()))

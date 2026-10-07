@@ -7,7 +7,7 @@ mod convert;
 
 use cypher_core::{Core, Effect, Input, Table, Vault, message_key, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
-use cypher_types::MsgId;
+use cypher_types::{DeviceId, MsgId};
 use js_sys::Array;
 use rand::rngs::OsRng;
 use wasm_bindgen::prelude::*;
@@ -39,6 +39,7 @@ pub fn waveform_from_rms(frames: &[f32]) -> Vec<u8> {
 #[wasm_bindgen]
 pub struct Identity {
     seed: IdentitySeed,
+    device: DeviceId,
     nickname: String,
 }
 
@@ -79,8 +80,12 @@ impl Identity {
     }
 
     pub fn unlock(blob: &[u8], passphrase: &str) -> Result<Self, JsError> {
-        let (seed, nickname) = identity_file::open(blob, passphrase).map_err(js_err)?;
-        Ok(Self { seed, nickname })
+        let file = identity_file::open(blob, passphrase).map_err(js_err)?;
+        Ok(Self {
+            seed: file.seed,
+            device: file.device,
+            nickname: file.nickname,
+        })
     }
 
     fn seal(
@@ -88,10 +93,15 @@ impl Identity {
         nickname: &str,
         passphrase: &str,
     ) -> Result<SealedIdentity, JsError> {
-        let blob = identity_file::seal(&seed, nickname, passphrase, &mut OsRng).map_err(js_err)?;
+        // Contacts reach only an identity's first device until they learn
+        // of others.
+        let device = DeviceId::FIRST;
+        let blob =
+            identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng).map_err(js_err)?;
         Ok(SealedIdentity {
             identity: Self {
                 seed,
+                device,
                 nickname: nickname.to_owned(),
             },
             blob,
@@ -139,8 +149,14 @@ impl Client {
         now_ms: f64,
     ) -> Result<Self, JsError> {
         let snapshot = snapshot_from_js(state)?;
-        let (core, startup) =
-            Core::restore(&identity.seed, &snapshot, now(now_ms), OsRng).map_err(js_err)?;
+        let (core, startup) = Core::restore(
+            &identity.seed,
+            identity.device,
+            &snapshot,
+            now(now_ms),
+            OsRng,
+        )
+        .map_err(js_err)?;
         Ok(Self {
             core,
             vault: Vault::new(identity.seed.derive_storage_key()),

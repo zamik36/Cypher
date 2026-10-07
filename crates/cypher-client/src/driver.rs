@@ -571,7 +571,14 @@ mod tests {
     fn driver(store: Store) -> (Driver, mpsc::UnboundedReceiver<Event>) {
         let dir = tempfile::tempdir().unwrap();
         let seed = IdentitySeed::generate();
-        let (core, _) = Core::restore(&seed, &Snapshot::default(), now_ms(), OsRng).unwrap();
+        let (core, _) = Core::restore(
+            &seed,
+            cypher_types::DeviceId::FIRST,
+            &Snapshot::default(),
+            now_ms(),
+            OsRng,
+        )
+        .unwrap();
         let (events, events_rx) = mpsc::unbounded_channel();
         let (net_tx, _) = mpsc::unbounded_channel();
         let (io_tx, _) = mpsc::unbounded_channel();

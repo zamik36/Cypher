@@ -21,7 +21,7 @@ async fn with_store<T: Send + 'static>(
 
 async fn activate(state: &AppState, unlocked: Unlocked) -> String {
     let peer = unlocked.seed.derive_identity().peer_id().to_hex();
-    state.set_identity(unlocked.seed, unlocked.nickname).await;
+    state.set_identity(unlocked).await;
     peer
 }
 

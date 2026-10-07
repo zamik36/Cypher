@@ -6,16 +6,14 @@ use std::path::{Path, PathBuf};
 
 use cypher_crypto::IdentitySeed;
 use cypher_crypto::identity_file::{self, IdentityFileError};
+use cypher_types::DeviceId;
 use rand::rngs::OsRng;
 
 use crate::ClientError;
 
 const FILE_NAME: &str = "identity.v2";
 
-pub struct Unlocked {
-    pub seed: IdentitySeed,
-    pub nickname: String,
-}
+pub use identity_file::Unsealed as Unlocked;
 
 pub struct IdentityStore {
     path: PathBuf,
@@ -57,6 +55,8 @@ impl IdentityStore {
     ) -> Result<Unlocked, ClientError> {
         let seed = IdentitySeed::from_mnemonic(mnemonic.trim())
             .map_err(|_| ClientError::InvalidMnemonic)?;
+        // Contacts reach only an identity's first device until they learn
+        // of others.
         self.save_new(seed, nickname, passphrase)
     }
 
@@ -90,8 +90,7 @@ impl IdentityStore {
     }
 
     pub fn unlock(&self, passphrase: &str) -> Result<Unlocked, ClientError> {
-        let (seed, nickname) = identity_file::open(&fs::read(&self.path)?, passphrase)?;
-        Ok(Unlocked { seed, nickname })
+        Ok(identity_file::open(&fs::read(&self.path)?, passphrase)?)
     }
 
     fn save_new(
@@ -103,10 +102,12 @@ impl IdentityStore {
         if self.exists() {
             return Err(ClientError::IdentityExists);
         }
-        let blob = identity_file::seal(&seed, nickname, passphrase, &mut OsRng)?;
+        let device = DeviceId::FIRST;
+        let blob = identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng)?;
         write_atomic(&self.path, &blob)?;
         Ok(Unlocked {
             seed,
+            device,
             nickname: nickname.to_owned(),
         })
     }
