@@ -90,6 +90,12 @@ export const tauriPlatform: Platform = {
   revealFile: (fileId) => command("reveal_file", { fileId }),
   generateQr: (linkId) => invoke<string>("generate_qr", { linkId }),
   ...(isAndroid && {
+    // UnifiedPush through the phone's distributor (ntfy and the like).
+    push: {
+      enable: () => command("push_enable"),
+      subscribe: (key) => invoke<boolean>("push_subscribe", { key }),
+      disable: () => command("push_disable"),
+    },
     scanQr: async () => {
       const scanner = await import("@tauri-apps/plugin-barcode-scanner");
       if ((await scanner.requestPermissions()) !== "granted") {

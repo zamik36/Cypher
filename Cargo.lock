@@ -1809,6 +1809,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-barcode-scanner",
  "tauri-plugin-cypher-files",
+ "tauri-plugin-cypher-push",
  "tauri-plugin-deep-link",
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
@@ -7556,6 +7557,15 @@ name = "tauri-plugin-cypher-files"
 version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
+ "serde",
+ "tauri",
+ "tauri-plugin",
+]
+
+[[package]]
+name = "tauri-plugin-cypher-push"
+version = "0.3.0"
+dependencies = [
  "serde",
  "tauri",
  "tauri-plugin",

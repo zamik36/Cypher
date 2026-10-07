@@ -260,6 +260,14 @@ async fn commands_fail_cleanly_before_connecting() {
 
     let not_connected = Err("not connected".to_owned());
     assert_eq!(call("get_conversations", json!({})).await, not_connected);
+    // Push: desktops have no distributor, so no subscription and no client.
+    assert_eq!(call("push_enable", json!({})).await, not_connected);
+    assert_eq!(call("push_disable", json!({})).await, not_connected);
+    let key = |k: String| json!({ "key": k });
+    let subscribed = call("push_subscribe", key(format!("04{}", "ab".repeat(64)))).await;
+    assert_eq!(subscribed, Ok(Value::Bool(false)));
+    let bad = call("push_subscribe", key("04".into())).await;
+    assert_eq!(bad.unwrap_err(), "invalid push key");
     assert_eq!(call("reconnect", json!({})).await, not_connected);
     let send = |peer_id: &str| json!({ "peerId": peer_id, "text": "x" });
     assert_eq!(call("send_message", send(&peer)).await, not_connected);
@@ -414,6 +422,8 @@ async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
     let invalid = b.call("rename_peer", json!({ "peerId": "zz", "alias": "x" }));
     assert_eq!(invalid.await.unwrap_err(), "invalid peer id");
     block_then_unblock(b, a_id).await;
+    b.call("push_enable", json!({})).await.unwrap();
+    b.call("push_disable", json!({})).await.unwrap();
 
     b.call("delete_conversation", json!({ "peerId": a_id }))
         .await

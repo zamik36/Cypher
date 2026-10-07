@@ -7,6 +7,7 @@ pub(crate) mod identity;
 pub(crate) mod ipc;
 pub(crate) mod link;
 pub(crate) mod media;
+pub(crate) mod push;
 pub(crate) mod qr;
 pub(crate) mod settings;
 pub(crate) mod transfer;

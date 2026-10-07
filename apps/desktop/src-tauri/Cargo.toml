@@ -25,6 +25,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-cypher-files = { path = "plugins/cypher-files" }
+tauri-plugin-cypher-push = { path = "plugins/cypher-push" }
 tauri-plugin-deep-link = "2"
 mime_guess = "2"
 percent-encoding = "2"

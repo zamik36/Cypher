@@ -4,7 +4,14 @@
 # end up. Floors come from the Linux CI job.
 # Rewritten by `--bump`; edit targets and `excluded` by hand.
 
-excluded = ["cypher-wasm", "e2e", "load-test", "tauri-plugin-cypher-files", "xtask"]
+excluded = [
+    "cypher-wasm",
+    "e2e",
+    "load-test",
+    "tauri-plugin-cypher-files",
+    "tauri-plugin-cypher-push",
+    "xtask",
+]
 
 [crates]
 cypher-client = { floor = 88.5, target = 80 }

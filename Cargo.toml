@@ -19,6 +19,7 @@ members = [
     "tests/e2e",
     "apps/desktop/src-tauri",
     "apps/desktop/src-tauri/plugins/cypher-files",
+    "apps/desktop/src-tauri/plugins/cypher-push",
 ]
 default-members = [
     "crates/cypher-types",

@@ -1,0 +1,19 @@
+[package]
+name = "tauri-plugin-cypher-push"
+description = "Wake-ups on Android through UnifiedPush: subscribe, and a notification when the inbox has news"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "tauri-plugin-cypher-push"
+
+[dependencies]
+serde.workspace = true
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[lints]
+workspace = true

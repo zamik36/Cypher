@@ -8,7 +8,7 @@ mod shell;
 #[cfg(test)]
 mod tests;
 
-use commands::{chat, identity, link, media, qr, settings, transfer};
+use commands::{chat, identity, link, media, push, qr, settings, transfer};
 use tauri::{Emitter, Manager, Runtime};
 
 #[cfg(mobile)]
@@ -44,6 +44,7 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_cypher_files::init())
+        .plugin(tauri_plugin_cypher_push::init())
         .setup(|app| {
             let paths = session::Paths::resolve(app.handle())?;
             app.manage(session::AppState::new(paths, session::tls_from_env()?));
@@ -125,6 +126,9 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             media::voice_cancel,
             media::send_video_note,
             qr::generate_qr,
+            push::push_enable,
+            push::push_subscribe,
+            push::push_disable,
             shell::set_tray,
             shell::set_close_to_tray,
         ])
