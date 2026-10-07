@@ -233,9 +233,12 @@ const en = {
   notif_unsupported: "This device does not support notifications.",
   anon_status_onion: "Protected route",
   anon_status_direct: "Direct route",
+  anon_status_held: "Waiting for the onion relay",
   anon_status_unknown: "Not connected",
   anon_desc_onion: "Messages that wait for you are fetched through an onion relay, so the server cannot tell who asks.",
   anon_desc_direct: "The onion relay is unreachable. Waiting messages arrive over the regular connection.",
+  anon_desc_held:
+    "The onion relay is unreachable. Waiting messages arrive once it is back: in anonymous mode they never come over the regular connection.",
   anon_desc_unknown: "The route appears once the app is connected.",
   lock_title: "Lock",
   lock_auto: "Lock after",

@@ -68,7 +68,12 @@ export async function startApp(): Promise<() => void> {
   setInvitesReady(true);
   setSharesReady(true);
   const unsubscribe = await Promise.all([
-    onConnected(() => linkEvent("connected")),
+    onConnected(() => {
+      linkEvent("connected");
+      // Every session asks again: a restarted client (new network settings)
+      // starts without it, and registering renews the server's copy.
+      void startPush();
+    }),
     onDisconnected(() => {
       linkEvent("disconnected");
       setAllOffline();
@@ -141,7 +146,6 @@ export async function startApp(): Promise<() => void> {
     api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines),
   );
   await refreshConversations();
-  void startPush();
 
   return () => {
     setInvitesReady(false);

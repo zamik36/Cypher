@@ -335,10 +335,18 @@ function Privacy() {
   };
   const changed = () =>
     anonymous() !== anonymousSettings.enabled || bridgeLines().join("\n") !== anonymousSettings.bridgeLines.join("\n");
-  const statusTitle = () =>
-    onionUp() === null ? t().anon_status_unknown : onionUp() ? t().anon_status_onion : t().anon_status_direct;
-  const statusText = () =>
-    onionUp() === null ? t().anon_desc_unknown : onionUp() ? t().anon_desc_onion : t().anon_desc_direct;
+  // Without the relay, anonymous mode waits rather than use the session.
+  const held = () => onionUp() === false && anonymousSettings.enabled;
+  const statusTitle = () => {
+    if (onionUp() === null) return t().anon_status_unknown;
+    if (held()) return t().anon_status_held;
+    return onionUp() ? t().anon_status_onion : t().anon_status_direct;
+  };
+  const statusText = () => {
+    if (onionUp() === null) return t().anon_desc_unknown;
+    if (held()) return t().anon_desc_held;
+    return onionUp() ? t().anon_desc_onion : t().anon_desc_direct;
+  };
 
   async function apply() {
     const next = { enabled: anonymous(), bridgeLines: bridgeLines() };
