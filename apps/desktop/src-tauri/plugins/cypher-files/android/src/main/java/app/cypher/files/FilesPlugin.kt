@@ -14,7 +14,10 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.annotation.RequiresApi
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -52,6 +55,21 @@ class CypherFileProvider : FileProvider()
 @TauriPlugin
 class FilesPlugin(private val activity: Activity) : Plugin(activity) {
     private val resolver get() = activity.contentResolver
+
+    /**
+     * Back walks the app's own history; on the chat list, where there is
+     * none left, it sends the app to the background instead of finishing
+     * the activity, which would drop the session and lock the profile.
+     * Registered after the webview's own callback, so it runs first.
+     */
+    override fun load(webView: WebView) {
+        val host = activity as? AppCompatActivity ?: return
+        host.onBackPressedDispatcher.addCallback(host, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (webView.canGoBack()) webView.goBack() else host.moveTaskToBack(true)
+            }
+        })
+    }
 
     /** Moves a received file into Downloads/Cypher and answers its URI. */
     @Command
