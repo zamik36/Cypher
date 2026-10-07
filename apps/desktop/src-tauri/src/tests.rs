@@ -463,7 +463,15 @@ async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {
         .unwrap();
     let link = text(&created["link_id"]);
     let join = |link: String| json!({ "linkId": link });
-    let joined = once_online(|| b.call("join_link", join(format!("  {link} ")))).await;
+    // The host publishes its keys as it comes online; until signaling has
+    // stored them, joining finds none.
+    let joined = eventually(|| async {
+        match once_online(|| b.call("join_link", join(format!("  {link} ")))).await {
+            Err(e) if e == "NotFound" => None,
+            other => Some(other),
+        }
+    })
+    .await;
     assert_eq!(text(&joined.unwrap()).len(), 64);
     let conversations = eventually(|| async {
         let list = a.call("get_conversations", json!({})).await.unwrap();
