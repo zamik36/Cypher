@@ -1792,7 +1792,6 @@ dependencies = [
  "base64 0.22.1",
  "cypher-client",
  "cypher-core",
- "cypher-crypto",
  "cypher-media",
  "cypher-tls",
  "cypher-transport",

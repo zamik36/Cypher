@@ -16,7 +16,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 cypher-client = { workspace = true, features = ["tor"] }
 cypher-core.workspace = true
-cypher-crypto.workspace = true
 cypher-media = { workspace = true, features = ["capture"] }
 cypher-tls.workspace = true
 cypher-transport.workspace = true
