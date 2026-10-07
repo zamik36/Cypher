@@ -11,6 +11,7 @@ import { blockedContacts, displayName, loadConversations, setContactBlocked } fr
 import { isWide } from "../stores/layout";
 import { back, push, type SettingsSection } from "../stores/nav";
 import { nickname } from "../stores/profile";
+import { pushState, pushSupported, pushWanted, setPushWanted, startPush, stopPush } from "../stores/push";
 import { setThemePref, themePref, type ThemePref } from "../stores/theme";
 import { closeToTray, setCloseToTray } from "../stores/window";
 import { addToast, toastError } from "../stores/toasts";
@@ -265,6 +266,7 @@ function Notifications() {
     if (enabled()) {
       setNotificationsEnabled(false);
       setEnabled(false);
+      void stopPush();
       return;
     }
     const granted = await requestNotificationAccess();
@@ -272,6 +274,7 @@ function Notifications() {
     if (granted === "granted") {
       setNotificationsEnabled(true);
       setEnabled(true);
+      void startPush();
     } else {
       addToast(t().toast_notif_denied, "error");
     }
@@ -291,6 +294,15 @@ function Notifications() {
             setPreview(!preview());
           }}
         />
+        <Show when={pushSupported()}>
+          <SwitchRow
+            label={t().notif_closed}
+            hint={pushState() === "unavailable" ? t().notif_closed_unavailable : t().notif_closed_hint}
+            checked={enabled() && pushWanted()}
+            disabled={!enabled()}
+            onChange={() => void setPushWanted(!pushWanted())}
+          />
+        </Show>
       </div>
       <Show when={permission() === "denied"}>
         <p class="error-text settings__note">{t().settings_notif_blocked}</p>

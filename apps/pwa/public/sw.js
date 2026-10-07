@@ -25,6 +25,38 @@ self.addEventListener("activate", (e) => {
   );
 });
 
+/** Text of the wake-up notification; the worker knows nothing more. */
+function wakeUp() {
+  const ru = (self.navigator.language || "").toLowerCase().startsWith("ru");
+  return ru ? ["Шифр", "Новое сообщение"] : ["Cypher", "New message"];
+}
+
+// The server signals only that the inbox has news. An open, visible app
+// fetches it itself; otherwise the user learns there is something to read.
+self.addEventListener("push", (e) => {
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      if (clients.some((c) => c.visibilityState === "visible")) return undefined;
+      const [title, body] = wakeUp();
+      return self.registration.showNotification(title, {
+        body,
+        tag: "messages",
+        icon: "/icons/icon-192.png",
+      });
+    }),
+  );
+});
+
+// The browser replaced the subscription: an open app registers it again
+// (registration needs the identity, which only the app holds).
+self.addEventListener("pushsubscriptionchange", (e) => {
+  e.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => clients.forEach((c) => c.postMessage("PUSH_RENEW"))),
+  );
+});
+
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
   e.waitUntil(

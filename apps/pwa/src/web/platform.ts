@@ -56,6 +56,51 @@ function pickFiles(): Promise<File[]> {
   });
 }
 
+function hexBytes(hex: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array((hex.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+}
+
+function sameBytes(a: ArrayBuffer | null | undefined, b: Uint8Array): boolean {
+  const view = new Uint8Array(a ?? new ArrayBuffer(0));
+  return view.length === b.length && view.every((v, i) => v === b[i]);
+}
+
+/** Web Push: the subscription lives with the service worker. */
+const webPush: Platform["push"] =
+  "serviceWorker" in navigator && "PushManager" in self
+    ? {
+        enable: async () => {
+          await call("command", { type: "enable_push" });
+        },
+        subscribe: async (keyHex) => {
+          const key = hexBytes(keyHex);
+          const reg = await navigator.serviceWorker.ready;
+          let sub = await reg.pushManager.getSubscription();
+          // A subscription made with an older server key no longer works.
+          if (sub && !sameBytes(sub.options.applicationServerKey, key)) {
+            await sub.unsubscribe();
+            sub = null;
+          }
+          sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+          const p256dh = sub.getKey("p256dh");
+          const auth = sub.getKey("auth");
+          if (!p256dh || !auth) return false;
+          await call("command", {
+            type: "register_push",
+            endpoint: sub.endpoint,
+            p256dh: new Uint8Array(p256dh),
+            auth: new Uint8Array(auth),
+          });
+          return true;
+        },
+        disable: async () => {
+          const reg = await navigator.serviceWorker.getRegistration();
+          await (await reg?.pushManager.getSubscription())?.unsubscribe();
+          await call("command", { type: "disable_push" });
+        },
+      }
+    : undefined;
+
 /** The web client always talks to the origin that served it (CSP `connect-src 'self'`). */
 function endpoints(): [string, string] {
   const origin = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
@@ -170,6 +215,7 @@ export const webPlatform: Platform = {
       set.delete(handler);
     });
   },
+  ...(webPush && { push: webPush }),
   notifications: {
     supported: () => "Notification" in self,
     permission: () => Promise.resolve(Notification.permission),

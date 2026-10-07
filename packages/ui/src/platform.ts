@@ -121,6 +121,10 @@ export interface Events {
   file_failed: { file_id: string; reason: string };
   error: string;
   anonymity_level: AnonymityLevelPayload;
+  /** The server's push key (hex), to subscribe this device with. */
+  push_key: string;
+  /** Whether the server will wake this device while the app is closed. */
+  push_state: "registered" | "unavailable";
 }
 
 export interface Notifications {
@@ -154,6 +158,18 @@ export interface Platform {
   shell?: {
     setTray(open: string, quit: string, tooltip: string): Promise<void>;
     setCloseToTray(enabled: boolean): Promise<void>;
+  };
+  /**
+   * Wake-ups while the app is closed (Web Push); absent where the platform
+   * has none. The server learns only "this inbox has news".
+   */
+  push?: {
+    /** Asks the server for its key, which arrives on `push_key`. */
+    enable(): Promise<void>;
+    /** Subscribes this device with that key and registers it; false if refused. */
+    subscribe(keyHex: string): Promise<boolean>;
+    /** Unsubscribes and has the server forget the subscription. */
+    disable(): Promise<void>;
   };
   /** Stops the client and drops the identity from memory until unlocked. */
   lock(): Promise<void>;

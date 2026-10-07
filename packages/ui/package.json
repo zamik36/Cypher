@@ -9,6 +9,7 @@
     "./i18n": "./src/i18n/index.ts",
     "./invite": "./src/stores/invite.ts",
     "./share": "./src/stores/share.ts",
+    "./push": "./src/stores/push.ts",
     "./index.css": "./src/index.css",
     "./components/*": "./src/components/*.tsx"
   },

@@ -60,6 +60,16 @@ pub(crate) enum JsCommand {
     UnblockPeer {
         peer: String,
     },
+    EnablePush,
+    /// The browser's push subscription: keys as raw bytes.
+    RegisterPush {
+        endpoint: String,
+        #[serde(with = "serde_bytes")]
+        p256dh: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        auth: Vec<u8>,
+    },
+    DisablePush,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +105,8 @@ pub(crate) enum CommandError {
     Message,
     #[error("invalid file size")]
     Size,
+    #[error("invalid push subscription")]
+    Push,
 }
 
 /// A core command plus the ids generated for it, returned to the UI.
@@ -163,6 +175,28 @@ impl JsCommand {
             Self::AcceptContact { peer: p } => plain(Command::AcceptContact { peer: peer(&p)? }),
             Self::BlockPeer { peer: p } => plain(Command::BlockPeer { peer: peer(&p)? }),
             Self::UnblockPeer { peer: p } => plain(Command::UnblockPeer { peer: peer(&p)? }),
+            push @ (Self::EnablePush | Self::RegisterPush { .. } | Self::DisablePush) => {
+                plain(push.push_command()?)
+            }
+        })
+    }
+}
+
+impl JsCommand {
+    fn push_command(self) -> Result<Command, CommandError> {
+        Ok(match self {
+            Self::EnablePush => Command::EnablePush,
+            Self::RegisterPush {
+                endpoint,
+                p256dh,
+                auth,
+            } => Command::RegisterPush {
+                endpoint,
+                p256dh: p256dh.try_into().map_err(|_| CommandError::Push)?,
+                auth: auth.try_into().map_err(|_| CommandError::Push)?,
+            },
+            Self::DisablePush => Command::DisablePush,
+            _ => return Err(CommandError::Push),
         })
     }
 }
@@ -313,6 +347,26 @@ mod tests {
         assert_eq!(prepare(bad).unwrap_err(), CommandError::Peer);
         let named = prepare(json!({ "type": "set_profile_name", "name": "Anna" })).unwrap();
         assert!(matches!(named.command, Command::SetProfileName { name: Some(n) } if n == "Anna"));
+    }
+
+    #[test]
+    fn push_subscriptions_carry_whole_keys() {
+        let register = |p256dh: usize, auth: usize| {
+            prepare(json!({
+                "type": "register_push", "endpoint": "https://ntfy.sh/up",
+                "p256dh": vec![4u8; p256dh], "auth": vec![1u8; auth]
+            }))
+        };
+        let Command::RegisterPush { endpoint, .. } = register(65, 16).unwrap().command else {
+            panic!("not a registration");
+        };
+        assert_eq!(endpoint, "https://ntfy.sh/up");
+        assert_eq!(register(64, 16).unwrap_err(), CommandError::Push);
+        assert_eq!(register(65, 8).unwrap_err(), CommandError::Push);
+        let enable = prepare(json!({ "type": "enable_push" })).unwrap();
+        assert!(matches!(enable.command, Command::EnablePush));
+        let disable = prepare(json!({ "type": "disable_push" })).unwrap();
+        assert!(matches!(disable.command, Command::DisablePush));
     }
 
     #[test]

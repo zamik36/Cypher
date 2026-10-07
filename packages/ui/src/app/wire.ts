@@ -33,6 +33,7 @@ import { addMessage, peerOf, setMessageStatus } from "../stores/chat";
 import { hasTransfer, upsertTransfer } from "../stores/transfers";
 import { setMediaProgress, trackMedia } from "../stores/media";
 import { setInvitesReady } from "../stores/invite";
+import { onPushKey, onPushState, startPush } from "../stores/push";
 import { setSharesReady } from "../stores/share";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
@@ -132,12 +133,15 @@ export async function startApp(): Promise<() => void> {
     }),
     onError(toastError),
     onAnonymityLevel(({ level }) => setOnionUp(level > 0)),
+    api.on("push_key", (key) => void onPushKey(key)),
+    api.on("push_state", onPushState),
   ]);
 
   await connectGateway(() =>
     api.connectToGateway(connection.gatewayAddr, anonymousSettings.enabled, anonymousSettings.bridgeLines),
   );
   await refreshConversations();
+  void startPush();
 
   return () => {
     setInvitesReady(false);

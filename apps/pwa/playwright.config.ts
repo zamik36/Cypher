@@ -28,6 +28,9 @@ export default defineConfig({
       name: "chromium",
       use: {
         ...devices["Desktop Chrome"],
+        // Full Chromium in its new headless mode: unlike the headless shell it
+        // grants notifications, which the push test needs.
+        channel: "chromium",
         launchOptions: {
           args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
         },

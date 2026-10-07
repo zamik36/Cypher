@@ -2,6 +2,7 @@ import { render } from "solid-js/web";
 import App from "@cypher/ui/App";
 import { registerPlatform } from "@cypher/ui/platform";
 import { receiveInvite } from "@cypher/ui/invite";
+import { startPush } from "@cypher/ui/push";
 import { receiveShare } from "@cypher/ui/share";
 import "@cypher/ui/index.css";
 import "./index.css";
@@ -28,6 +29,13 @@ if (location.search === "?share") {
       if (share && !(share.files.length === 0 && receiveInvite(share.text))) receiveShare(share);
     })
     .catch((e: unknown) => console.warn("share:", e));
+}
+
+// The browser replaced the push subscription; register the new one.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", ({ data }) => {
+    if (data === "PUSH_RENEW") void startPush();
+  });
 }
 
 const root = document.getElementById("root");
