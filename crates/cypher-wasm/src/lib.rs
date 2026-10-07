@@ -5,7 +5,7 @@
 mod command;
 mod convert;
 
-use cypher_core::{Core, Effect, Input, Snapshot, Table, Vault, message_key, ui};
+use cypher_core::{Core, Effect, Input, Table, Vault, message_key, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
 use cypher_types::MsgId;
 use js_sys::Array;
@@ -13,7 +13,7 @@ use rand::rngs::OsRng;
 use wasm_bindgen::prelude::*;
 
 use command::{JsCommand, Prepared, file, peer};
-use convert::{effects_to_js, pairs_from_js, to_js};
+use convert::{effects_to_js, snapshot_from_js, to_js};
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
@@ -130,23 +130,15 @@ pub struct Client {
 
 #[wasm_bindgen]
 impl Client {
-    /// Restores the core from `IndexedDB` rows: each argument is an array of
-    /// `[key, value]` byte pairs from the matching table.
+    /// Restores the core from `IndexedDB` rows: `[key, value]` byte pairs
+    /// from each store the core keeps its state in.
     #[wasm_bindgen(constructor)]
     pub fn new(
         identity: &Identity,
-        #[wasm_bindgen(unchecked_param_type = "Row[]")] meta: &Array,
-        #[wasm_bindgen(unchecked_param_type = "Row[]")] peers: &Array,
-        #[wasm_bindgen(unchecked_param_type = "Row[]")] outbox: &Array,
-        #[wasm_bindgen(unchecked_param_type = "Row[]")] transfers: &Array,
+        #[wasm_bindgen(unchecked_param_type = "StoredState")] state: &JsValue,
         now_ms: f64,
     ) -> Result<Self, JsError> {
-        let snapshot = Snapshot {
-            meta: pairs_from_js(meta)?,
-            peers: pairs_from_js(peers)?,
-            outbox: pairs_from_js(outbox)?,
-            transfers: pairs_from_js(transfers)?,
-        };
+        let snapshot = snapshot_from_js(state)?;
         let (core, startup) =
             Core::restore(&identity.seed, &snapshot, now(now_ms), OsRng).map_err(js_err)?;
         Ok(Self {

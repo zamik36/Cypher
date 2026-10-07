@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use cypher_crypto::aead;
-use cypher_types::{FileId, MsgId, PeerId};
+use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -29,10 +29,13 @@ pub enum Table {
     /// Key: `file_id` → [`crate::MediaKey`] of a voice or video note kept
     /// sealed at rest.
     Media = 7,
+    /// Key: `peer ‖ device (BE)` → the session with that device of a
+    /// contact (or of our own identity), see [`session_key`].
+    Sessions = 8,
 }
 
 impl Table {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Meta,
         Self::Peers,
         Self::Outbox,
@@ -40,6 +43,7 @@ impl Table {
         Self::Messages,
         Self::MessageStatus,
         Self::Media,
+        Self::Sessions,
     ];
 
     pub fn name(self) -> &'static str {
@@ -51,6 +55,7 @@ impl Table {
             Self::Messages => "messages",
             Self::MessageStatus => "message_status",
             Self::Media => "media",
+            Self::Sessions => "sessions",
         }
     }
 }
@@ -94,6 +99,22 @@ pub trait Record: Serialize + DeserializeOwned {
     fn upgrade(_version: u8, _body: &[u8]) -> Result<Self, CoreError> {
         Err(CoreError::Storage)
     }
+}
+
+/// Where the session with one device is stored; a prefix scan by peer
+/// yields all of that peer's sessions.
+pub fn session_key(addr: Addr) -> Vec<u8> {
+    let mut k = Vec::with_capacity(32 + 4);
+    k.extend_from_slice(addr.peer.as_bytes());
+    k.extend_from_slice(&addr.device.0.to_be_bytes());
+    k
+}
+
+/// The device a [`session_key`] names.
+pub(crate) fn session_addr(key: &[u8]) -> Option<Addr> {
+    let (peer, device) = key.split_first_chunk::<32>()?;
+    let device = DeviceId(u32::from_be_bytes(device.try_into().ok()?));
+    device.is_valid().then(|| Addr::new(PeerId(*peer), device))
 }
 
 pub fn message_key(peer: &PeerId, sent_at_ms: u64, msg_id: &MsgId) -> Vec<u8> {

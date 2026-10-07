@@ -11,9 +11,10 @@ export const STORES = [
   "media",
   "identity",
   "files",
+  "sessions",
 ];
 /** Bumped whenever STORES grows; the upgrade creates any missing store. */
-const VERSION = 2;
+const VERSION = 3;
 
 /** The request's or transaction's own error, or a generic one when it has none. */
 const failure = (source: IDBRequest | IDBTransaction) => source.error ?? new DOMException("aborted", "AbortError");

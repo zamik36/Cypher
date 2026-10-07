@@ -8,17 +8,11 @@ const MAX_REMEMBERED_INITS: usize = 16;
 /// Longest name kept for anyone (a contact, or this user), in characters.
 pub(crate) const MAX_NAME_CHARS: usize = 64;
 
+/// What we know of a contact, whichever of their devices we talk to.
 pub(crate) struct Peer {
-    pub ratchet: Ratchet,
-    /// Initiator side: attached to every message until the responder has
-    /// provably received one (any reply decrypts).
-    pub pending_init: Option<InitHeader>,
-    /// Responder side: ephemeral keys of inits already accepted, so repeated
-    /// or replayed copies reuse the live session instead of resetting it.
-    pub accepted_ephemerals: Vec<[u8; 32]>,
+    /// The contact's X25519 identity key: their devices share it, and
+    /// sealed inbox items are addressed to it.
     pub identity_dh: [u8; 32],
-    pub inbox: Option<[u8; 32]>,
-    pub hello_sent: bool,
     /// The name the user gave this contact; only ever stored on this device.
     pub alias: Option<String>,
     /// The name the contact goes by, as they last sent it.
@@ -30,6 +24,21 @@ pub(crate) struct Peer {
     pub blocked: bool,
     /// The invite we joined them by, told in our `Hello`.
     pub via: Option<String>,
+}
+
+/// One Double Ratchet session with one device of a contact.
+pub(crate) struct Session {
+    pub ratchet: Ratchet,
+    /// Initiator side: attached to every message until the responder has
+    /// provably received one (any reply decrypts).
+    pub pending_init: Option<InitHeader>,
+    /// Responder side: ephemeral keys of inits already accepted, so repeated
+    /// or replayed copies reuse the live session instead of resetting it.
+    pub accepted_ephemerals: Vec<[u8; 32]>,
+    /// That device's inbox, as its `Hello` told.
+    pub inbox: Option<[u8; 32]>,
+    /// Whether our `Hello` went out on this session.
+    pub hello_sent: bool,
 }
 
 /// A name as someone typed it, made safe to show: control characters
@@ -48,19 +57,10 @@ pub(crate) fn clean_name(raw: &str) -> Option<String> {
 }
 
 impl Peer {
-    /// A session just made with someone not known before.
-    pub(crate) fn new(
-        ratchet: Ratchet,
-        identity_dh: [u8; 32],
-        pending_init: Option<InitHeader>,
-    ) -> Self {
+    /// Someone not known before.
+    pub(crate) fn new(identity_dh: [u8; 32]) -> Self {
         Self {
-            ratchet,
-            pending_init,
-            accepted_ephemerals: Vec::new(),
             identity_dh,
-            inbox: None,
-            hello_sent: false,
             alias: None,
             name: None,
             request: false,
@@ -69,50 +69,75 @@ impl Peer {
         }
     }
 
-    /// Keeps what belongs to the contact rather than the old session: their
-    /// inbox, names, request and block state, the invite, inits seen.
+    pub(crate) fn to_record(&self) -> PeerRecord {
+        PeerRecord {
+            identity_dh: self.identity_dh,
+            alias: self.alias.clone(),
+            name: self.name.clone(),
+            request: self.request,
+            blocked: self.blocked,
+            via: self.via.clone(),
+            legacy: None,
+        }
+    }
+
+    pub(crate) fn from_record(r: &PeerRecord) -> Self {
+        Self {
+            identity_dh: r.identity_dh,
+            alias: r.alias.clone(),
+            name: r.name.clone(),
+            request: r.request,
+            blocked: r.blocked,
+            via: r.via.clone(),
+        }
+    }
+}
+
+impl Session {
+    /// A session just made with one device.
+    pub(crate) fn new(ratchet: Ratchet, pending_init: Option<InitHeader>) -> Self {
+        Self {
+            ratchet,
+            pending_init,
+            accepted_ephemerals: Vec::new(),
+            inbox: None,
+            hello_sent: false,
+        }
+    }
+
+    /// Keeps what belongs to the device rather than the old session: its
+    /// inbox and the inits seen from it. Our `Hello` goes out again.
     pub(crate) fn carry_over(&mut self, old: Self) {
         self.inbox = old.inbox;
         self.accepted_ephemerals = old.accepted_ephemerals;
-        self.alias = old.alias;
-        self.name = old.name;
-        self.request = old.request;
-        self.blocked = old.blocked;
-        self.via = old.via;
     }
 
     pub(crate) fn is_unconfirmed_initiator(&self) -> bool {
         self.pending_init.is_some()
     }
 
-    pub(crate) fn remember_ephemeral(list: &mut Vec<[u8; 32]>, ephemeral: [u8; 32]) {
-        if list.len() >= MAX_REMEMBERED_INITS {
-            list.remove(0);
+    pub(crate) fn remember_ephemeral(&mut self, ephemeral: [u8; 32]) {
+        if self.accepted_ephemerals.len() >= MAX_REMEMBERED_INITS {
+            self.accepted_ephemerals.remove(0);
         }
-        list.push(ephemeral);
+        self.accepted_ephemerals.push(ephemeral);
     }
 
-    pub(crate) fn to_record(&self) -> PeerRecord {
+    pub(crate) fn to_record(&self) -> SessionRecord {
         let mut init = Vec::new();
         if let Some(h) = &self.pending_init {
             h.encode(&mut init);
         }
-        PeerRecord {
+        SessionRecord {
             ratchet: self.ratchet.to_bytes(),
             pending_init: init,
             accepted_ephemerals: self.accepted_ephemerals.clone(),
-            identity_dh: self.identity_dh,
             inbox: self.inbox,
             hello_sent: self.hello_sent,
-            alias: self.alias.clone(),
-            name: self.name.clone(),
-            request: self.request,
-            blocked: self.blocked,
-            via: self.via.clone(),
         }
     }
 
-    pub(crate) fn from_record(r: &PeerRecord) -> Result<Self, CoreError> {
+    pub(crate) fn from_record(r: &SessionRecord) -> Result<Self, CoreError> {
         let pending_init = if r.pending_init.is_empty() {
             None
         } else {
@@ -127,20 +152,71 @@ impl Peer {
             ratchet: Ratchet::from_bytes(&r.ratchet).map_err(|_| CoreError::Storage)?,
             pending_init,
             accepted_ephemerals: r.accepted_ephemerals.clone(),
-            identity_dh: r.identity_dh,
             inbox: r.inbox,
             hello_sent: r.hello_sent,
-            alias: r.alias.clone(),
-            name: r.name.clone(),
-            request: r.request,
-            blocked: r.blocked,
-            via: r.via.clone(),
         })
     }
 }
 
+/// A contact as stored: who they are to the user. Their sessions are kept
+/// apart, one per device ([`SessionRecord`]).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PeerRecord {
+    identity_dh: [u8; 32],
+    pub(crate) alias: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) request: bool,
+    pub(crate) blocked: bool,
+    via: Option<String>,
+    /// The one session a record from before devices held, to be moved to
+    /// its own row (as the contact's first device) on load.
+    #[serde(skip)]
+    pub(crate) legacy: Option<SessionRecord>,
+}
+
+impl crate::Record for PeerRecord {
+    const VERSION: u8 = 5;
+
+    /// Up to version 4 a contact and its one session were stored together:
+    /// the session comes out as `legacy`.
+    fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        let v4 = PeerRecordV4::upgrade(version, body)?;
+        Ok(Self {
+            identity_dh: v4.identity_dh,
+            alias: v4.alias,
+            name: v4.name,
+            request: v4.request,
+            blocked: v4.blocked,
+            via: v4.via,
+            legacy: Some(SessionRecord {
+                ratchet: v4.ratchet,
+                pending_init: v4.pending_init,
+                accepted_ephemerals: v4.accepted_ephemerals,
+                inbox: v4.inbox,
+                hello_sent: v4.hello_sent,
+            }),
+        })
+    }
+}
+
+/// One session with one device of a contact, as stored.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SessionRecord {
+    #[serde(with = "zeroizing_bytes")]
+    ratchet: Zeroizing<Vec<u8>>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    inbox: Option<[u8; 32]>,
+    hello_sent: bool,
+}
+
+impl crate::Record for SessionRecord {
+    const VERSION: u8 = 1;
+}
+
+/// [`PeerRecord`] as version 4 stored it, a contact and its session.
+#[derive(Deserialize)]
+struct PeerRecordV4 {
     #[serde(with = "zeroizing_bytes")]
     ratchet: Zeroizing<Vec<u8>>,
     pending_init: Vec<u8>,
@@ -148,22 +224,27 @@ pub(crate) struct PeerRecord {
     identity_dh: [u8; 32],
     inbox: Option<[u8; 32]>,
     hello_sent: bool,
-    pub(crate) alias: Option<String>,
-    pub(crate) name: Option<String>,
-    pub(crate) request: bool,
-    pub(crate) blocked: bool,
+    alias: Option<String>,
+    name: Option<String>,
+    request: bool,
+    blocked: bool,
     via: Option<String>,
 }
 
-impl crate::Record for PeerRecord {
-    const VERSION: u8 = 4;
+fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, CoreError> {
+    postcard::from_bytes(body).map_err(|_| CoreError::Storage)
+}
 
+impl PeerRecordV4 {
     /// Version 1 had no names, version 2 only the user's own for the
     /// contact, version 3 no request or block state: everyone stored before
     /// is a contact the user already has.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        if version == 4 {
+            return parse(body);
+        }
         if version == 3 {
-            let v3: PeerRecordV3 = postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+            let v3: PeerRecordV3 = parse(body)?;
             return Ok(Self {
                 ratchet: v3.ratchet,
                 pending_init: v3.pending_init,
@@ -180,8 +261,7 @@ impl crate::Record for PeerRecord {
         }
         let v2: PeerRecordV2 = match version {
             1 => {
-                let v1: PeerRecordV1 =
-                    postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
+                let v1: PeerRecordV1 = parse(body)?;
                 PeerRecordV2 {
                     ratchet: v1.ratchet,
                     pending_init: v1.pending_init,
@@ -192,7 +272,7 @@ impl crate::Record for PeerRecord {
                     alias: None,
                 }
             }
-            2 => postcard::from_bytes(body).map_err(|_| CoreError::Storage)?,
+            2 => parse(body)?,
             _ => return Err(CoreError::Storage),
         };
         Ok(Self {
@@ -336,8 +416,9 @@ mod tests {
         let sealed = vault.seal(Table::Peers, b"peer", &old, &mut OsRng);
         let record: PeerRecord = vault.open(Table::Peers, b"peer", &sealed).unwrap();
         assert_eq!(record.alias, None);
-        assert_eq!(record.inbox, Some([4; 32]));
-        assert!(record.hello_sent);
+        let session = record.legacy.unwrap();
+        assert_eq!(session.inbox, Some([4; 32]));
+        assert!(session.hello_sent);
         let names = vault.open_contact(b"peer", &sealed).unwrap();
         assert_eq!((names.alias, names.name), (None, None));
     }

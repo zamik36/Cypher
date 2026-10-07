@@ -1,20 +1,20 @@
 use bytes::Bytes;
 use cypher_crypto::{Header, InitHeader, PrekeyBundle, handshake, sealed};
-use cypher_types::{Addr, DeviceId, MsgId, PeerId};
+use cypher_types::{Addr, MsgId, PeerId};
 use cypher_wire::{ClientMsg, DeliveryStatus};
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::anon::Readiness;
-use super::{Core, Pending};
+use super::{Core, Pending, contact};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind};
-use crate::peer::{OwnLinks, Peer, ProfileRecord, clean_name};
+use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
 use crate::relay::{self, RelayBody};
 use crate::share::ShareLink;
-use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key};
+use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key, session_key};
 
 /// First wait before retrying a message, by why it did not go out; each
 /// further attempt doubles it, up to [`MAX_RETRY_MS`].
@@ -175,16 +175,22 @@ impl<R: CryptoRngCore> Core<R> {
             &mut self.rng,
         );
         self.persist(op);
-        let mut greeted: Vec<PeerId> = self
-            .peers
+        let mut greeted: Vec<Addr> = self
+            .sessions
             .iter()
-            .filter(|(_, p)| p.hello_sent && !p.request && !p.blocked)
-            .map(|(id, _)| *id)
+            .filter(|(addr, s)| {
+                s.hello_sent
+                    && self
+                        .peers
+                        .get(&addr.peer)
+                        .is_some_and(|p| !p.request && !p.blocked)
+            })
+            .map(|(addr, _)| *addr)
             .collect();
-        greeted.sort_unstable_by_key(|id| *id.as_bytes());
-        for peer in greeted {
-            let hello = self.hello(&peer);
-            self.send_control(peer, hello);
+        greeted.sort_unstable();
+        for addr in greeted {
+            let hello = self.hello(&addr.peer);
+            self.send_control(addr.peer, hello);
         }
     }
 
@@ -248,7 +254,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         p.request = false;
         self.persist_peer(peer);
-        self.send_hello(*peer);
+        self.send_hello(contact(*peer));
     }
 
     /// Blocking drops whatever they send, unread, and stops what goes to
@@ -281,6 +287,19 @@ impl<R: CryptoRngCore> Core<R> {
             table: Table::Peers,
             key: peer.to_vec(),
         });
+        let devices: Vec<Addr> = self
+            .sessions
+            .keys()
+            .filter(|a| a.peer == *peer)
+            .copied()
+            .collect();
+        for addr in devices {
+            self.sessions.remove(&addr);
+            self.persist(StoreOp::Delete {
+                table: Table::Sessions,
+                key: session_key(addr),
+            });
+        }
         let stale: Vec<MsgId> = self
             .outbox
             .values()
@@ -350,24 +369,25 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(item) = self.outbox.get_mut(&msg_id) else {
             return;
         };
-        let Some(peer) = self.peers.get_mut(&item.peer) else {
+        let addr = contact(item.peer);
+        let Some(session) = self.sessions.get_mut(&addr) else {
             return;
         };
-        if item.in_flight || item.awaiting || !peer.ratchet.can_send() {
+        if item.in_flight || item.awaiting || !session.ratchet.can_send() {
             return;
         }
-        let Ok((header, ct)) = peer.ratchet.encrypt(&item.envelope, b"") else {
+        let Ok((header, ct)) = session.ratchet.encrypt(&item.envelope, b"") else {
             return;
         };
         let body = Bytes::from(relay::message_body(
-            peer.pending_init.as_ref(),
+            session.pending_init.as_ref(),
             &header,
             &ct,
         ));
         item.in_flight = true;
         let peer_id = item.peer;
 
-        self.persist_peer(&peer_id);
+        self.persist_session(addr);
         let req_id = self.alloc_req();
         self.pending.insert(
             req_id,
@@ -383,8 +403,8 @@ impl<R: CryptoRngCore> Core<R> {
         self.transmit(
             req_id,
             ClientMsg::Send {
-                to: peer_id,
-                device: DeviceId::FIRST,
+                to: addr.peer,
+                device: addr.device,
                 want_ack: true,
                 body,
             },
@@ -406,18 +426,19 @@ impl<R: CryptoRngCore> Core<R> {
                 let answered = self.outbox.get(&msg_id).is_some_and(|i| i.tracked);
                 if answered
                     && self
-                        .peers
-                        .get(&peer)
-                        .is_some_and(Peer::is_unconfirmed_initiator)
+                        .sessions
+                        .get(&contact(peer))
+                        .is_some_and(Session::is_unconfirmed_initiator)
                 {
                     self.init_heard.entry(peer).or_insert(self.now);
                 }
                 self.complete_outbox(msg_id, MessageStatus::Sent);
             }
             DeliveryStatus::Offline => match self
-                .peers
-                .get(&peer)
-                .and_then(|p| p.inbox.map(|i| (i, p.identity_dh)))
+                .sessions
+                .get(&contact(peer))
+                .and_then(|s| s.inbox)
+                .zip(self.peers.get(&peer).map(|p| p.identity_dh))
             {
                 Some((inbox, identity_dh)) => self.put_inbox(msg_id, inbox, &identity_dh, body),
                 None => self.retry_later(msg_id, RETRY_OFFLINE_MS),
@@ -556,7 +577,7 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        let Some(mut fresh) = self.initiate(peer, base, opk) else {
+        let Some((mut fresh, identity_dh)) = self.initiate(peer, base, opk) else {
             self.emit(Event::JoinFailed {
                 link,
                 reason: FailReason::InvalidKeys,
@@ -564,28 +585,37 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         };
 
-        if let Some(existing) = self.peers.get(&peer)
-            && !existing.is_unconfirmed_initiator()
-        {
+        let addr = contact(peer);
+        let settled = self
+            .sessions
+            .get(&addr)
+            .is_some_and(|s| !s.is_unconfirmed_initiator());
+        if settled && self.peers.contains_key(&peer) {
             self.emit(Event::PeerAdded {
                 peer,
                 initiated_by_us: true,
             });
             return;
         }
-        if let Some(old) = self.peers.remove(&peer) {
+        if let Some(old) = self.sessions.remove(&addr) {
             fresh.carry_over(old);
         }
+        self.sessions.insert(addr, fresh);
         // We asked for this contact, by this invite.
-        fresh.request = false;
-        fresh.via = ShareLink::parse(&link).map(|share| share.link().as_str().to_owned());
-        self.peers.insert(peer, fresh);
+        let p = self
+            .peers
+            .entry(peer)
+            .or_insert_with(|| Peer::new(identity_dh));
+        p.request = false;
+        p.via = ShareLink::parse(&link).map(|share| share.link().as_str().to_owned());
+        self.persist_peer(&peer);
+        self.persist_session(addr);
         self.requeue_for(&peer);
         self.emit(Event::PeerAdded {
             peer,
             initiated_by_us: true,
         });
-        self.send_hello(peer);
+        self.send_hello(addr);
     }
 
     /// A fresh session with a contact whose messages stopped decrypting.
@@ -599,24 +629,27 @@ impl<R: CryptoRngCore> Core<R> {
         if !self.peers.contains_key(&peer) {
             return;
         }
-        let Some(mut fresh) = self.initiate(peer, base, opk) else {
+        let Some((mut fresh, _)) = self.initiate(peer, base, opk) else {
             return;
         };
-        if let Some(old) = self.peers.remove(&peer) {
+        let addr = contact(peer);
+        if let Some(old) = self.sessions.remove(&addr) {
             fresh.carry_over(old);
         }
-        self.peers.insert(peer, fresh);
+        self.sessions.insert(addr, fresh);
+        self.persist_session(addr);
         self.requeue_for(&peer);
-        self.send_hello(peer);
+        self.send_hello(addr);
     }
 
-    /// Our side of a new session with `peer` from its published bundle.
+    /// Our side of a new session with a device of `peer` from its published
+    /// bundle, and the identity key that bundle carries.
     fn initiate(
         &mut self,
         peer: PeerId,
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
-    ) -> Option<Peer> {
+    ) -> Option<(Session, [u8; 32])> {
         let mut raw = Vec::with_capacity(PrekeyBundle::MAX_LEN);
         raw.extend_from_slice(base);
         match opk {
@@ -629,23 +662,29 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let bundle = PrekeyBundle::decode(&raw)
             .ok()
-            .filter(|b| b.identity == peer && b.device == DeviceId::FIRST)?;
+            .filter(|b| b.identity == peer && b.device == contact(peer).device)?;
         let (ratchet, init) =
             handshake::initiate(&self.identity, self.device, &bundle, &mut self.rng).ok()?;
-        Some(Peer::new(ratchet, bundle.identity_dh, Some(init)))
+        Some((Session::new(ratchet, Some(init)), bundle.identity_dh))
     }
 
-    fn send_hello(&mut self, peer: PeerId) {
-        let Some(p) = self.peers.get_mut(&peer) else {
+    /// Greets one device of a contact, once per session; a request or a
+    /// blocked contact hears nothing.
+    fn send_hello(&mut self, addr: Addr) {
+        let open = self
+            .peers
+            .get(&addr.peer)
+            .is_some_and(|p| !p.request && !p.blocked);
+        let Some(s) = self.sessions.get_mut(&addr) else {
             return;
         };
-        if p.hello_sent || p.request || p.blocked {
+        if s.hello_sent || !open {
             return;
         }
-        p.hello_sent = true;
-        self.persist_peer(&peer);
-        let hello = self.hello(&peer);
-        self.send_control(peer, hello);
+        s.hello_sent = true;
+        self.persist_session(addr);
+        let hello = self.hello(&addr.peer);
+        self.send_control(addr.peer, hello);
     }
 
     /// Sends `peer`'s waiting messages again on a freshly established
@@ -700,7 +739,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let result = match init {
             Some(init) => self.accept_init(sender, init, header, ct),
-            None => self.decrypt_existing(from, header, ct),
+            None => self.decrypt_existing(sender, header, ct),
         };
         let plaintext = match result {
             Ok(pt) => Zeroizing::new(pt),
@@ -715,7 +754,7 @@ impl<R: CryptoRngCore> Core<R> {
                 return;
             }
         };
-        self.persist_peer(&from);
+        self.persist_session(sender);
         let Ok(env) = Envelope::decode(&plaintext) else {
             return;
         };
@@ -726,18 +765,18 @@ impl<R: CryptoRngCore> Core<R> {
             }
             return;
         }
-        self.dispatch(from, env);
+        self.dispatch(sender, env);
     }
 
     fn decrypt_existing(
         &mut self,
-        from: PeerId,
+        sender: Addr,
         header: &Header,
         ct: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
-        let peer = self.peers.get_mut(&from).ok_or(CoreError::Crypto)?;
-        let pt = peer.ratchet.decrypt(header, ct, b"", &mut self.rng)?;
-        peer.pending_init = None;
+        let session = self.sessions.get_mut(&sender).ok_or(CoreError::Crypto)?;
+        let pt = session.ratchet.decrypt(header, ct, b"", &mut self.rng)?;
+        session.pending_init = None;
         Ok(pt)
     }
 
@@ -752,10 +791,10 @@ impl<R: CryptoRngCore> Core<R> {
             peer: from,
             device: from_device,
         } = sender;
-        if let Some(p) = self.peers.get_mut(&from)
-            && p.accepted_ephemerals.contains(&init.ephemeral)
+        if let Some(s) = self.sessions.get_mut(&sender)
+            && s.accepted_ephemerals.contains(&init.ephemeral)
         {
-            return Ok(p.ratchet.decrypt(header, ct, b"", &mut self.rng)?);
+            return Ok(s.ratchet.decrypt(header, ct, b"", &mut self.rng)?);
         }
 
         if !self.peers.contains_key(&from) && self.pending_requests() >= MAX_PENDING_REQUESTS {
@@ -783,9 +822,13 @@ impl<R: CryptoRngCore> Core<R> {
         )?;
         let pt = ratchet.decrypt(header, ct, b"", &mut self.rng)?;
 
-        if let Some(existing) = self.peers.get(&from)
-            && existing.is_unconfirmed_initiator()
-            && self.peer_id < from
+        // Both sides started a session at once: the lower device keeps its
+        // own and ignores the other's.
+        if self
+            .sessions
+            .get(&sender)
+            .is_some_and(Session::is_unconfirmed_initiator)
+            && (self.peer_id, self.device) < (from, from_device)
         {
             return Err(CoreError::Conflict);
         }
@@ -796,19 +839,26 @@ impl<R: CryptoRngCore> Core<R> {
 
         // Someone new is a request until their `Hello` names one of our
         // invites; someone known keeps what they were.
-        let mut fresh = Peer::new(ratchet, init.identity_dh, None);
-        fresh.request = true;
-        if let Some(old) = self.peers.remove(&from) {
+        let p = self.peers.entry(from).or_insert_with(|| {
+            let mut stranger = Peer::new(init.identity_dh);
+            stranger.request = true;
+            stranger
+        });
+        p.identity_dh = init.identity_dh;
+        self.persist_peer(&from);
+        let mut fresh = Session::new(ratchet, None);
+        if let Some(old) = self.sessions.remove(&sender) {
             fresh.carry_over(old);
         }
-        Peer::remember_ephemeral(&mut fresh.accepted_ephemerals, init.ephemeral);
-        self.peers.insert(from, fresh);
+        fresh.remember_ephemeral(init.ephemeral);
+        self.sessions.insert(sender, fresh);
         self.requeue_for(&from);
-        self.send_hello(from);
+        self.send_hello(sender);
         Ok(pt)
     }
 
-    fn dispatch(&mut self, from: PeerId, env: Envelope) {
+    fn dispatch(&mut self, sender: Addr, env: Envelope) {
+        let from = sender.peer;
         let Envelope {
             msg_id,
             sent_at_ms,
@@ -819,8 +869,10 @@ impl<R: CryptoRngCore> Core<R> {
                 let invited = via.as_deref().is_some_and(|code| self.take_own_link(code));
                 let name = name.as_deref().and_then(clean_name);
                 let mut renamed = false;
+                if let Some(s) = self.sessions.get_mut(&sender) {
+                    s.inbox = Some(inbox);
+                }
                 if let Some(p) = self.peers.get_mut(&from) {
-                    p.inbox = Some(inbox);
                     renamed = p.name != name;
                     p.name.clone_from(&name);
                 }
@@ -839,7 +891,8 @@ impl<R: CryptoRngCore> Core<R> {
                     _ => {}
                 }
                 self.persist_peer(&from);
-                self.send_hello(from);
+                self.persist_session(sender);
+                self.send_hello(sender);
             }
             Body::Text { text, reply_to } => {
                 self.store_message(StoredMessage {

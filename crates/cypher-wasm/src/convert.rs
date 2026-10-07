@@ -1,4 +1,4 @@
-use cypher_core::{Effect, Event, Rows, StoreOp, ui};
+use cypher_core::{Effect, Event, Rows, Snapshot, StoreOp, Table, ui};
 use js_sys::{Array, Uint8Array};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -9,6 +9,15 @@ use wasm_bindgen::prelude::*;
 const TS_TYPES: &str = r#"
 /** One `IndexedDB` row: key and value bytes. */
 export type Row = [Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>];
+
+/** The rows the client restores from, by `IndexedDB` store. */
+export interface StoredState {
+  meta: Row[];
+  peers: Row[];
+  sessions: Row[];
+  outbox: Row[];
+  transfers: Row[];
+}
 
 /** A storage operation; a batch of them is applied atomically. */
 export type Op =
@@ -208,6 +217,24 @@ fn js_number(v: u64) -> f64 {
 }
 
 /// `[[Uint8Array, Uint8Array], ...]` → owned key/value pairs.
+/// The snapshot a `StoredState` holds.
+pub(crate) fn snapshot_from_js(state: &JsValue) -> Result<Snapshot, JsError> {
+    let table = |t: Table| -> Result<Rows, JsError> {
+        let rows = js_sys::Reflect::get(state, &JsValue::from_str(t.name()))
+            .map_err(|_| JsError::new("stored state must be an object"))?
+            .dyn_into::<Array>()
+            .map_err(|_| JsError::new("each store must be an array of rows"))?;
+        pairs_from_js(&rows)
+    };
+    Ok(Snapshot {
+        meta: table(Table::Meta)?,
+        peers: table(Table::Peers)?,
+        sessions: table(Table::Sessions)?,
+        outbox: table(Table::Outbox)?,
+        transfers: table(Table::Transfers)?,
+    })
+}
+
 pub(crate) fn pairs_from_js(rows: &Array) -> Result<Rows, JsError> {
     rows.iter()
         .map(|row| {

@@ -190,6 +190,7 @@ impl Client {
         let snapshot = Snapshot {
             meta: store.scan(Table::Meta.name()).await?,
             peers: store.scan(Table::Peers.name()).await?,
+            sessions: store.scan(Table::Sessions.name()).await?,
             outbox: store.scan(Table::Outbox.name()).await?,
             transfers: store.scan(Table::Transfers.name()).await?,
         };

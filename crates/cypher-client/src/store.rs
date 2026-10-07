@@ -58,7 +58,7 @@ pub(crate) struct Store {
 /// Layout of the database: its tables and key formats. Bump it when they
 /// change and migrate in [`Store::open`]; a database from a newer release
 /// is refused rather than written in a layout it does not expect.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self, ClientError> {

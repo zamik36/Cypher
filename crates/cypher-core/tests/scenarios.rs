@@ -990,3 +990,125 @@ fn push_waits_for_the_relay() {
     assert!(push_events(&w, A).0);
     assert_eq!(w.server.session_push_ops, 0);
 }
+
+/// Contacts stored before an identity could have several devices held
+/// their one session inside: after the update it moves to its own row, as
+/// the session with the contact's first device, and keeps working.
+#[test]
+fn sessions_stored_with_their_contact_move_out_and_keep_working() {
+    let mut w = paired();
+    w.send_text(A, B, "before");
+    w.send_text(B, A, "heard");
+    let b = w.peer(B);
+    legacy::store_as_v4(&mut w, A, b, "Bob");
+    let session_row = legacy::session_row(b);
+    assert!(!w.clients[A].kv.contains_key(&session_row));
+
+    w.restart(A);
+    assert!(
+        w.clients[A].kv.contains_key(&session_row),
+        "the session has its own row"
+    );
+    assert_eq!(w.alias(A, b).as_deref(), Some("Bob"));
+    w.send_text(A, B, "after the update");
+    w.send_text(B, A, "still here");
+    assert_eq!(w.texts(B).last().unwrap(), "after the update");
+    assert_eq!(w.texts(A).last().unwrap(), "still here");
+    assert!(!w.has_event(A, |e| matches!(
+        e,
+        Event::Warning {
+            reason: FailReason::DecryptFailed | FailReason::Corrupted
+        }
+    )));
+}
+
+/// Records as releases before devices stored them.
+mod legacy {
+    use cypher_core::{Record, Table, Vault, session_key};
+    use cypher_crypto::IdentitySeed;
+    use cypher_types::{Addr, DeviceId, PeerId};
+    use serde::{Deserialize, Serialize};
+
+    use crate::harness::World;
+
+    #[derive(Serialize, Deserialize)]
+    struct SessionV1 {
+        ratchet: Vec<u8>,
+        pending_init: Vec<u8>,
+        accepted_ephemerals: Vec<[u8; 32]>,
+        inbox: Option<[u8; 32]>,
+        hello_sent: bool,
+    }
+
+    impl Record for SessionV1 {
+        const VERSION: u8 = 1;
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ContactV5 {
+        identity_dh: [u8; 32],
+        alias: Option<String>,
+        name: Option<String>,
+        request: bool,
+        blocked: bool,
+        via: Option<String>,
+    }
+
+    impl Record for ContactV5 {
+        const VERSION: u8 = 5;
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PeerV4 {
+        ratchet: Vec<u8>,
+        pending_init: Vec<u8>,
+        accepted_ephemerals: Vec<[u8; 32]>,
+        identity_dh: [u8; 32],
+        inbox: Option<[u8; 32]>,
+        hello_sent: bool,
+        alias: Option<String>,
+        name: Option<String>,
+        request: bool,
+        blocked: bool,
+        via: Option<String>,
+    }
+
+    impl Record for PeerV4 {
+        const VERSION: u8 = 4;
+    }
+
+    pub(crate) fn session_row(peer: PeerId) -> (u8, Vec<u8>) {
+        let addr = Addr::new(peer, DeviceId::FIRST);
+        (Table::Sessions as u8, session_key(addr))
+    }
+
+    /// Rewrites client `i`'s contact `peer` and its session as one version 4
+    /// record, with `alias`.
+    pub(crate) fn store_as_v4(w: &mut World, i: usize, peer: PeerId, alias: &str) {
+        let vault = Vault::new(IdentitySeed(w.clients[i].seed).derive_storage_key());
+        let (session_row, peer_row) = (session_row(peer), (Table::Peers as u8, peer.to_vec()));
+        let kv = &mut w.clients[i].kv;
+        let sealed_session = kv.remove(&session_row).unwrap();
+        let session: SessionV1 = vault
+            .open(Table::Sessions, &session_row.1, &sealed_session)
+            .unwrap();
+        let contact: ContactV5 = vault
+            .open(Table::Peers, &peer_row.1, &kv[&peer_row])
+            .unwrap();
+        let old = PeerV4 {
+            ratchet: session.ratchet,
+            pending_init: session.pending_init,
+            accepted_ephemerals: session.accepted_ephemerals,
+            identity_dh: contact.identity_dh,
+            inbox: session.inbox,
+            hello_sent: session.hello_sent,
+            alias: Some(alias.to_owned()),
+            name: contact.name,
+            request: contact.request,
+            blocked: contact.blocked,
+            via: contact.via,
+        };
+        let sealed = vault.seal(Table::Peers, &peer_row.1, &old, &mut rand::rngs::OsRng);
+        kv.insert(peer_row, sealed);
+    }
+}

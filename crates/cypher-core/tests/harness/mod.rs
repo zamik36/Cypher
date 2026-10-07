@@ -130,6 +130,7 @@ impl World {
         let snapshot = Snapshot {
             meta: pick(Table::Meta),
             peers: pick(Table::Peers),
+            sessions: pick(Table::Sessions),
             outbox: pick(Table::Outbox),
             transfers: pick(Table::Transfers),
         };

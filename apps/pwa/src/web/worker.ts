@@ -256,14 +256,15 @@ async function adopt(sealed: SealedIdentity): Promise<string> {
 
 async function startClient(): Promise<Client> {
   if (!identity) throw new Error("identity is locked");
-  const [meta, peers, outbox, transfers] = await Promise.all([
+  const [meta, peers, sessions, outbox, transfers] = await Promise.all([
     scan(db, "meta"),
     scan(db, "peers"),
+    scan(db, "sessions"),
     scan(db, "outbox"),
     scan(db, "transfers"),
   ]);
   client?.free();
-  client = new Client(identity, meta, peers, outbox, transfers, Date.now());
+  client = new Client(identity, { meta, peers, sessions, outbox, transfers }, Date.now());
   await apply(client.startupEffects());
   return client;
 }

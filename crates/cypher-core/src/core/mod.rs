@@ -3,6 +3,7 @@ mod files;
 mod messaging;
 mod push;
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
@@ -14,10 +15,13 @@ use zeroize::Zeroizing;
 
 use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
-use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord};
+use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
-use crate::store::{META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault};
+use crate::store::{
+    META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault, session_addr,
+    session_key,
+};
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
@@ -103,6 +107,7 @@ fn failure(code: ErrorCode) -> FailReason {
 pub struct Snapshot {
     pub meta: Rows,
     pub peers: Rows,
+    pub sessions: Rows,
     pub outbox: Rows,
     pub transfers: Rows,
 }
@@ -124,6 +129,8 @@ pub struct Core<R> {
     vault: Vault,
     prekeys: Prekeys,
     peers: HashMap<PeerId, Peer>,
+    /// One per device of a contact we talk to.
+    sessions: HashMap<Addr, Session>,
     outbox: BTreeMap<MsgId, OutboxItem>,
     outgoing: HashMap<FileId, Outgoing>,
     incoming: HashMap<FileId, Incoming>,
@@ -174,7 +181,8 @@ impl<R: CryptoRngCore> Core<R> {
         let own_links = load_meta::<OwnLinks>(&vault, &snapshot.meta, META_LINKS, &mut skipped)?
             .map(|record| record.links)
             .unwrap_or_default();
-        let peers = load_peers(&vault, &snapshot.peers, &mut skipped)?;
+        let (peers, legacy) = load_peers(&vault, &snapshot.peers, &mut skipped)?;
+        let sessions = load_sessions(&vault, &snapshot.sessions, &peers, &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
         let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
 
@@ -189,6 +197,7 @@ impl<R: CryptoRngCore> Core<R> {
             vault,
             prekeys,
             peers,
+            sessions,
             outbox,
             outgoing,
             incoming,
@@ -210,6 +219,7 @@ impl<R: CryptoRngCore> Core<R> {
             own_links,
             effects: Vec::new(),
         };
+        core.adopt_legacy_sessions(legacy, &mut skipped);
         if fresh_prekeys {
             core.persist_prekeys();
         }
@@ -589,10 +599,11 @@ impl<R: CryptoRngCore> Core<R> {
     /// too. Starts a fresh one from their published keys, keeping the
     /// contact.
     pub(super) fn repair_session(&mut self, peer: PeerId) {
-        let settled = self
-            .peers
-            .get(&peer)
-            .is_some_and(|p| !p.request && !p.is_unconfirmed_initiator());
+        let settled = self.peers.get(&peer).is_some_and(|p| !p.request)
+            && !self
+                .sessions
+                .get(&contact(peer))
+                .is_some_and(Session::is_unconfirmed_initiator);
         if settled {
             self.refetch_keys(peer);
         }
@@ -602,9 +613,12 @@ impl<R: CryptoRngCore> Core<R> {
     /// back: it no longer has the prekeys we used (replaced after we fetched
     /// them), so it cannot answer. Starts again from its current keys.
     fn restart_unanswered_inits(&mut self) {
-        let peers = &self.peers;
-        self.init_heard
-            .retain(|peer, _| peers.get(peer).is_some_and(Peer::is_unconfirmed_initiator));
+        let sessions = &self.sessions;
+        self.init_heard.retain(|peer, _| {
+            sessions
+                .get(&contact(*peer))
+                .is_some_and(Session::is_unconfirmed_initiator)
+        });
         let due: Vec<PeerId> = self
             .init_heard
             .iter()
@@ -835,6 +849,42 @@ impl<R: CryptoRngCore> Core<R> {
             self.effects.push(Effect::Persist(op));
         }
     }
+
+    fn persist_session(&mut self, addr: Addr) {
+        if let Some(s) = self.sessions.get(&addr) {
+            let op = self.vault.put(
+                Table::Sessions,
+                session_key(addr),
+                &s.to_record(),
+                &mut self.rng,
+            );
+            self.effects.push(Effect::Persist(op));
+        }
+    }
+
+    /// Contacts stored before devices held their one session inside: it
+    /// becomes the session with their first device, in its own row, before
+    /// the contact is stored again without it. Should the app stop between
+    /// the two writes, the next start does it again.
+    fn adopt_legacy_sessions(
+        &mut self,
+        legacy: Vec<(PeerId, SessionRecord)>,
+        skipped: &mut Skipped,
+    ) {
+        for (peer, record) in legacy {
+            let addr = contact(peer);
+            if let Entry::Vacant(slot) = self.sessions.entry(addr) {
+                match Session::from_record(&record) {
+                    Ok(session) => {
+                        slot.insert(session);
+                        self.persist_session(addr);
+                    }
+                    Err(_) => skipped.0 = skipped.0.saturating_add(1),
+                }
+            }
+            self.persist_peer(&peer);
+        }
+    }
 }
 
 /// Records `restore` could not read. One damaged row must not lock the user
@@ -863,23 +913,49 @@ impl Skipped {
     }
 }
 
-fn load_peers(
+/// Contacts, and the sessions that records from before devices still held.
+type LoadedPeers = (HashMap<PeerId, Peer>, Vec<(PeerId, SessionRecord)>);
+
+fn load_peers(vault: &Vault, rows: &Rows, skipped: &mut Skipped) -> Result<LoadedPeers, CoreError> {
+    let mut peers = HashMap::with_capacity(rows.len());
+    let mut legacy = Vec::new();
+    for (k, v) in rows {
+        let Some(mut record) = skipped.open::<PeerRecord>(vault, Table::Peers, k, v)? else {
+            continue;
+        };
+        let Some(id) = PeerId::from_bytes(k) else {
+            skipped.0 = skipped.0.saturating_add(1);
+            continue;
+        };
+        if let Some(session) = record.legacy.take() {
+            legacy.push((id, session));
+        }
+        peers.insert(id, Peer::from_record(&record));
+    }
+    Ok((peers, legacy))
+}
+
+/// Sessions with the devices of known contacts; any other is left behind.
+fn load_sessions(
     vault: &Vault,
     rows: &Rows,
+    peers: &HashMap<PeerId, Peer>,
     skipped: &mut Skipped,
-) -> Result<HashMap<PeerId, Peer>, CoreError> {
-    let mut peers = HashMap::with_capacity(rows.len());
+) -> Result<HashMap<Addr, Session>, CoreError> {
+    let mut sessions = HashMap::with_capacity(rows.len());
     for (k, v) in rows {
-        let record = skipped.open::<PeerRecord>(vault, Table::Peers, k, v)?;
-        match (PeerId::from_bytes(k), record.map(|r| Peer::from_record(&r))) {
-            (Some(id), Some(Ok(peer))) => {
-                peers.insert(id, peer);
+        let Some(record) = skipped.open::<SessionRecord>(vault, Table::Sessions, k, v)? else {
+            continue;
+        };
+        match (session_addr(k), Session::from_record(&record)) {
+            (Some(addr), Ok(session)) if peers.contains_key(&addr.peer) => {
+                sessions.insert(addr, session);
             }
-            (_, None) => {}
+            (Some(_), Ok(_)) => {}
             _ => skipped.0 = skipped.0.saturating_add(1),
         }
     }
-    Ok(peers)
+    Ok(sessions)
 }
 
 fn load_outbox(
