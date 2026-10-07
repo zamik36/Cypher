@@ -37,6 +37,15 @@ fn device_key(prefix: &[u8], addr: Addr) -> Vec<u8> {
     k
 }
 
+/// KEYS: list, version. ARGV: version (fixed-width decimal, so string order
+/// is number order), list, ttl. Only a newer version replaces the stored one.
+const DEVICES_SCRIPT: &str = r"
+    local stored = redis.call('GET', KEYS[2])
+    if stored and stored >= ARGV[1] then return 0 end
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[3])
+    return 1";
+
 pub(crate) enum PutOutcome {
     Stored,
     Full,
@@ -52,6 +61,7 @@ pub(crate) struct Store {
     fetch_script: Script,
     ack_script: Script,
     admit_script: Script,
+    devices_script: Script,
 }
 
 impl Store {
@@ -114,6 +124,7 @@ impl Store {
                 if n > tonumber(ARGV[1]) then return 0 end
                 return 1",
             ),
+            devices_script: Script::new(DEVICES_SCRIPT),
         })
     }
 
@@ -147,7 +158,14 @@ impl Store {
                 .ltrim(&opk_key, -MAX_STORED_OPKS, -1)
                 .ignore();
         }
-        pipe.expire(&opk_key, i64::try_from(KEYS_TTL_SECS).unwrap_or(i64::MAX))
+        // A device that keeps publishing keeps its identity's device list
+        // alive too.
+        let ttl = i64::try_from(KEYS_TTL_SECS).unwrap_or(i64::MAX);
+        pipe.expire(key(b"d:", addr.peer.as_bytes()), ttl)
+            .ignore()
+            .expire(key(b"dv:", addr.peer.as_bytes()), ttl)
+            .ignore()
+            .expire(&opk_key, ttl)
             .ignore()
             .llen(&opk_key);
         let (left,): (u64,) = pipe.query_async(&mut self.redis.clone()).await?;
@@ -177,6 +195,38 @@ impl Store {
             Some((id, e.get(4..36)?.try_into().ok()?))
         });
         Ok(base.map(|b| (Bytes::from(b), opk)))
+    }
+
+    /// Stores `peer`'s signed device list unless one at `version` or newer
+    /// is stored already; `false` then.
+    pub(crate) async fn publish_devices(
+        &self,
+        peer: &PeerId,
+        version: u64,
+        list: &[u8],
+    ) -> redis::RedisResult<bool> {
+        let stored: i64 = self
+            .devices_script
+            .key(key(b"d:", peer.as_bytes()))
+            .key(key(b"dv:", peer.as_bytes()))
+            .arg(format!("{version:020}"))
+            .arg(list)
+            .arg(KEYS_TTL_SECS)
+            .invoke_async(&mut self.redis.clone())
+            .await?;
+        Ok(stored == 1)
+    }
+
+    /// `peer`'s signed device list, as published.
+    pub(crate) async fn fetch_devices(&self, peer: &PeerId) -> redis::RedisResult<Option<Bytes>> {
+        let list: Option<Vec<u8>> = self.redis.clone().get(key(b"d:", peer.as_bytes())).await?;
+        Ok(list.map(Bytes::from))
+    }
+
+    /// Forgets the keys of a device its identity no longer lists.
+    pub(crate) async fn forget_device_keys(&self, addr: Addr) -> redis::RedisResult<()> {
+        let keys = [device_key(b"k:", addr), device_key(b"o:", addr)];
+        self.redis.clone().del(&keys).await
     }
 
     pub(crate) async fn create_link(

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cypher_crypto::PrekeyBundle;
+use cypher_crypto::{DeviceList, PrekeyBundle};
 use cypher_types::{Addr, LinkId, PeerId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, MAX_INBOX_BATCH, ServerMsg, inbox_id};
 use rand::RngCore;
@@ -23,6 +23,12 @@ const KEY_FETCHES_PER_HOUR: u32 = 60;
 /// comes without one: pairing still works (forward secrecy then rests on
 /// the signed prekey) but a victim's keys cannot be drained quickly.
 const OPKS_PER_TARGET_PER_HOUR: u32 = 20;
+/// Device lists one identity may look up per hour: its contacts' and its
+/// own, refreshed now and then.
+const DEVICE_FETCHES_PER_HOUR: u32 = 120;
+/// Device lists one identity may publish per hour: linking and unlinking
+/// are rare.
+const DEVICE_PUBLISHES_PER_HOUR: u32 = 10;
 const HOUR_SECS: u64 = 3600;
 
 pub(crate) struct Handler {
@@ -103,6 +109,12 @@ impl Handler {
                 },
                 Some(peer),
             ) => self.fetch_keys(&peer, Addr::new(target, device)).await,
+            (ClientMsg::PublishDevices { list }, Some(peer)) => {
+                self.publish_devices(&peer, &list).await
+            }
+            (ClientMsg::FetchDevices { peer: target }, Some(peer)) => {
+                self.fetch_devices(&peer, &target).await
+            }
             (ClientMsg::CreateLink, Some(peer)) => self.create_link(&peer).await,
             (ClientMsg::ResolveLink { link }, Some(_)) => self.resolve_link(&link).await,
             (ClientMsg::InboxPut { inbox, item }, _) => self.inbox_put(&inbox, &item).await,
@@ -274,6 +286,55 @@ impl Handler {
             .await?;
         Ok(match self.store.fetch_keys(target, with_opk).await? {
             Some((base, opk)) => ServerMsg::Keys { base, opk },
+            None => error(ErrorCode::NotFound),
+        })
+    }
+
+    /// Replaces `peer`'s device list with a newer one it signed, and forgets
+    /// the keys of the devices it dropped.
+    async fn publish_devices(&self, peer: &PeerId, list: &[u8]) -> redis::RedisResult<ServerMsg> {
+        let Ok(new) = DeviceList::decode(list) else {
+            return Ok(error(ErrorCode::BadRequest));
+        };
+        if new.identity() != *peer {
+            return Ok(error(ErrorCode::BadRequest));
+        }
+        if !self.admit(b"pd:", peer, DEVICE_PUBLISHES_PER_HOUR).await? {
+            return Ok(error(ErrorCode::RateLimited));
+        }
+        let old = self.store.fetch_devices(peer).await?;
+        if !self
+            .store
+            .publish_devices(peer, new.version(), list)
+            .await?
+        {
+            return Ok(error(ErrorCode::Conflict));
+        }
+        // Best effort: keys expire on their own anyway.
+        let old = old.and_then(|o| DeviceList::decode(&o).ok());
+        for &device in old.iter().flat_map(DeviceList::devices) {
+            if !new.contains(device) {
+                self.store
+                    .forget_device_keys(Addr::new(*peer, device))
+                    .await?;
+            }
+        }
+        Ok(ServerMsg::Done)
+    }
+
+    async fn fetch_devices(
+        &self,
+        requester: &PeerId,
+        target: &PeerId,
+    ) -> redis::RedisResult<ServerMsg> {
+        if !self
+            .admit(b"fd:", requester, DEVICE_FETCHES_PER_HOUR)
+            .await?
+        {
+            return Ok(error(ErrorCode::RateLimited));
+        }
+        Ok(match self.store.fetch_devices(target).await? {
+            Some(list) => ServerMsg::Devices { list },
             None => error(ErrorCode::NotFound),
         })
     }

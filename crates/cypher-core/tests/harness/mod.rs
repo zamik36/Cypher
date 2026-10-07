@@ -7,7 +7,7 @@ use bytes::Bytes;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault};
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
-use cypher_crypto::{IdentitySeed, PrekeyBundle};
+use cypher_crypto::{DeviceList, IdentitySeed, PrekeyBundle};
 use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg};
 use rand::{Rng as _, SeedableRng};
@@ -27,6 +27,8 @@ pub(crate) struct Server {
     online: HashMap<Addr, usize>,
     challenges: HashMap<usize, ([u8; 32], Addr)>,
     keys: HashMap<Addr, Keys>,
+    /// Signed device lists, by identity.
+    pub devices: HashMap<PeerId, DeviceList>,
     links: HashMap<String, PeerId>,
     inboxes: HashMap<[u8; 32], Vec<Bytes>>,
     claims: HashMap<[u8; 16], ([u8; 32], usize)>,
@@ -578,6 +580,44 @@ impl World {
                     Some(k) => ServerMsg::Keys {
                         base: k.base.clone(),
                         opk: k.opks.pop(),
+                    },
+                    None => ServerMsg::Error {
+                        code: ErrorCode::NotFound,
+                    },
+                };
+                self.respond(from, &reply(msg));
+            }
+            ClientMsg::PublishDevices { list } => {
+                let me = authed.unwrap().peer;
+                let msg = match DeviceList::decode(&list) {
+                    Ok(list) if list.identity() != me => ServerMsg::Error {
+                        code: ErrorCode::BadRequest,
+                    },
+                    Ok(list)
+                        if self
+                            .server
+                            .devices
+                            .get(&me)
+                            .is_some_and(|stored| stored.version() >= list.version()) =>
+                    {
+                        ServerMsg::Error {
+                            code: ErrorCode::Conflict,
+                        }
+                    }
+                    Ok(list) => {
+                        self.server.devices.insert(me, list);
+                        ServerMsg::Done
+                    }
+                    Err(_) => ServerMsg::Error {
+                        code: ErrorCode::BadRequest,
+                    },
+                };
+                self.respond(from, &reply(msg));
+            }
+            ClientMsg::FetchDevices { peer } => {
+                let msg = match self.server.devices.get(&peer) {
+                    Some(list) => ServerMsg::Devices {
+                        list: Bytes::from(list.encode()),
                     },
                     None => ServerMsg::Error {
                         code: ErrorCode::NotFound,

@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use cypher_crypto::prekey::SignedPreKey;
-use cypher_crypto::{IdentityKeyPair, PrekeyBundle};
+use cypher_crypto::{DeviceList, IdentityKeyPair, PrekeyBundle};
 use cypher_types::{DeviceId, LinkId, PeerId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg, inbox_id};
 use rand::RngCore as _;
@@ -212,6 +212,114 @@ async fn anonymous_inbox_put_fetch_and_ack() {
     assert!(items.is_empty(), "acknowledged items are gone");
 }
 
+fn publish_devices(list: &DeviceList) -> ClientMsg {
+    ClientMsg::PublishDevices {
+        list: Bytes::from(list.encode()),
+    }
+}
+
+fn fetch_devices(peer: PeerId) -> ClientMsg {
+    ClientMsg::FetchDevices { peer }
+}
+
+/// The server keeps the newest list an identity signed: an equal or older
+/// version, as a replayed or rolled-back list would be, is refused.
+#[tokio::test]
+async fn device_list_only_moves_forward() {
+    let Some(h) = handler(None).await else { return };
+    let (alice, bob) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+    let me = Some(alice.peer_id());
+    assert!(is_error(
+        &ask(&h, Some(bob.peer_id()), fetch_devices(alice.peer_id())).await,
+        ErrorCode::NotFound
+    ));
+    let first = DeviceList::sign(&alice, 1, [DeviceId(1)]).unwrap();
+    let second = first.with(&alice, DeviceId(2)).unwrap();
+    assert_eq!(ask(&h, me, publish_devices(&first)).await, ServerMsg::Done);
+    assert_eq!(ask(&h, me, publish_devices(&second)).await, ServerMsg::Done);
+    for stale in [&first, &second] {
+        assert!(is_error(
+            &ask(&h, me, publish_devices(stale)).await,
+            ErrorCode::Conflict
+        ));
+    }
+    let ServerMsg::Devices { list } =
+        ask(&h, Some(bob.peer_id()), fetch_devices(alice.peer_id())).await
+    else {
+        panic!("no list");
+    };
+    assert_eq!(DeviceList::decode(&list).unwrap(), second);
+}
+
+/// Only the identity a list names may publish it, and only a list it
+/// signed.
+#[tokio::test]
+async fn a_device_list_for_another_identity_is_refused() {
+    let Some(h) = handler(None).await else { return };
+    let (alice, mallory) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+    let list = DeviceList::sign(&alice, 1, [DeviceId(1)]).unwrap();
+    let forged = ask(&h, Some(mallory.peer_id()), publish_devices(&list)).await;
+    assert!(is_error(&forged, ErrorCode::BadRequest));
+    let mut tampered = list.encode();
+    tampered[40] ^= 1;
+    let tampered = ClientMsg::PublishDevices {
+        list: Bytes::from(tampered),
+    };
+    assert!(is_error(
+        &ask(&h, Some(alice.peer_id()), tampered).await,
+        ErrorCode::BadRequest
+    ));
+}
+
+/// A device dropped from the list loses its keys: nobody starts a session
+/// with it any more.
+#[tokio::test]
+async fn removed_devices_lose_their_keys() {
+    let Some(h) = handler(None).await else { return };
+    let (alice, bob) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+    let me = Some(alice.peer_id());
+    for device in [DeviceId(1), DeviceId(2)] {
+        let publish = ClientMsg::PublishKeys {
+            base: device_bundle(&alice, device),
+            opks: vec![(1, random32())],
+            replace_opks: true,
+        };
+        ask(&h, me, publish).await;
+    }
+    let both = DeviceList::sign(&alice, 1, [DeviceId(1), DeviceId(2)]).unwrap();
+    ask(&h, me, publish_devices(&both)).await;
+    let one = both.without(&alice, DeviceId(2)).unwrap();
+    assert_eq!(ask(&h, me, publish_devices(&one)).await, ServerMsg::Done);
+    let keys = |device| ClientMsg::FetchKeys {
+        peer: alice.peer_id(),
+        device,
+    };
+    let asker = Some(bob.peer_id());
+    assert!(matches!(
+        ask(&h, asker, keys(DeviceId(1))).await,
+        ServerMsg::Keys { .. }
+    ));
+    assert!(is_error(
+        &ask(&h, asker, keys(DeviceId(2))).await,
+        ErrorCode::NotFound
+    ));
+}
+
+#[tokio::test]
+async fn fetching_device_lists_is_rate_limited() {
+    let Some(h) = handler(None).await else { return };
+    let asker = Some(IdentityKeyPair::generate().peer_id());
+    let target = IdentityKeyPair::generate().peer_id();
+    for _ in 0..120 {
+        let answer = ask(&h, asker, fetch_devices(target)).await;
+        assert!(is_error(&answer, ErrorCode::NotFound), "{answer:?}");
+    }
+    assert!(is_error(
+        &ask(&h, asker, fetch_devices(target)).await,
+        ErrorCode::RateLimited
+    ));
+}
+
 #[tokio::test]
 async fn identity_requests_need_an_authenticated_peer() {
     let Some(h) = handler(None).await else { return };
@@ -222,6 +330,7 @@ async fn identity_requests_need_an_authenticated_peer() {
             peer: PeerId([2; 32]),
             device: DeviceId::FIRST,
         },
+        fetch_devices(PeerId([2; 32])),
         ClientMsg::ResolveLink {
             link: LinkId::random(&mut OsRng),
         },

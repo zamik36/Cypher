@@ -88,6 +88,7 @@ fn failure(code: ErrorCode) -> FailReason {
     match code {
         ErrorCode::NotFound => FailReason::NotFound,
         ErrorCode::Unauthorized => FailReason::Unauthorized,
+        ErrorCode::Conflict => FailReason::Rejected,
         ErrorCode::RateLimited | ErrorCode::Unavailable => FailReason::Offline,
         ErrorCode::BadRequest | ErrorCode::TooLarge | ErrorCode::Internal => {
             FailReason::ServerError
@@ -344,6 +345,7 @@ impl<R: CryptoRngCore> Core<R> {
             msg @ (ServerMsg::SendAck { .. }
             | ServerMsg::Keys { .. }
             | ServerMsg::KeysAck { .. }
+            | ServerMsg::Devices { .. }
             | ServerMsg::LinkCreated { .. }
             | ServerMsg::LinkResolved { .. }
             | ServerMsg::InboxBatch { .. }
@@ -379,6 +381,7 @@ impl<R: CryptoRngCore> Core<R> {
             | ErrorCode::RateLimited
             | ErrorCode::TooLarge
             | ErrorCode::Unavailable
+            | ErrorCode::Conflict
             | ErrorCode::Internal => {}
         }
     }

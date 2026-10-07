@@ -3,8 +3,8 @@ use cypher_types::{DeviceId, LinkId, PeerId};
 
 use crate::codec::{Reader, WriteExt, field_len};
 use crate::{
-    BUNDLE_BASE_LEN, FRAME_HEADER_LEN, MAX_BODY_LEN, MAX_INBOX_BATCH, MAX_INBOX_ITEM_LEN,
-    MAX_OPKS_PER_PUBLISH, MAX_PUSH_ENDPOINT_LEN, MAX_RELAY_ADDR_LEN, WireError,
+    BUNDLE_BASE_LEN, FRAME_HEADER_LEN, MAX_BODY_LEN, MAX_DEVICE_LIST_LEN, MAX_INBOX_BATCH,
+    MAX_INBOX_ITEM_LEN, MAX_OPKS_PER_PUBLISH, MAX_PUSH_ENDPOINT_LEN, MAX_RELAY_ADDR_LEN, WireError,
 };
 
 /// A message plus the request id that correlates it with its reply.
@@ -51,6 +51,14 @@ pub enum ClientMsg {
     FetchKeys {
         peer: PeerId,
         device: DeviceId,
+    },
+    /// Replaces the identity's signed device list with a newer version.
+    PublishDevices {
+        list: Bytes,
+    },
+    /// The signed device list of `peer`.
+    FetchDevices {
+        peer: PeerId,
     },
     CreateLink,
     ResolveLink {
@@ -110,6 +118,10 @@ pub enum ServerMsg {
     KeysAck {
         opks_left: u16,
     },
+    /// A signed device list, as its identity published it.
+    Devices {
+        list: Bytes,
+    },
     LinkCreated {
         link: LinkId,
     },
@@ -158,6 +170,9 @@ pub enum ErrorCode {
     Internal = 7,
     /// The server does not speak the client's protocol version.
     UnsupportedVersion = 8,
+    /// A newer version of what the client tried to replace is already
+    /// stored.
+    Conflict = 9,
 }
 
 mod kind {
@@ -175,6 +190,9 @@ mod kind {
     pub(super) const FETCH_KEYS: u8 = 0x21;
     pub(super) const KEYS: u8 = 0x22;
     pub(super) const KEYS_ACK: u8 = 0x23;
+    pub(super) const PUBLISH_DEVICES: u8 = 0x24;
+    pub(super) const FETCH_DEVICES: u8 = 0x25;
+    pub(super) const DEVICES: u8 = 0x26;
     pub(super) const CREATE_LINK: u8 = 0x30;
     pub(super) const RESOLVE_LINK: u8 = 0x31;
     pub(super) const LINK_CREATED: u8 = 0x32;
@@ -294,6 +312,16 @@ impl Frame<ClientMsg> {
                 b.put_u32_le(device.0);
                 b
             }
+            M::PublishDevices { list } => {
+                let mut b = header(kind::PUBLISH_DEVICES, id, list.len().saturating_add(4));
+                b.put_bytes_prefixed(list);
+                b
+            }
+            M::FetchDevices { peer } => {
+                let mut b = header(kind::FETCH_DEVICES, id, 32);
+                b.put_slice(peer.as_bytes());
+                b
+            }
             M::CreateLink => header(kind::CREATE_LINK, id, 0),
             M::ResolveLink { link } => {
                 let mut b = header(kind::RESOLVE_LINK, id, LinkId::ENCODED_LEN);
@@ -395,6 +423,12 @@ impl Frame<ClientMsg> {
                 peer: PeerId(r.array()?),
                 device: r.device()?,
             },
+            kind::PUBLISH_DEVICES => M::PublishDevices {
+                list: r.bytes(MAX_DEVICE_LIST_LEN)?,
+            },
+            kind::FETCH_DEVICES => M::FetchDevices {
+                peer: PeerId(r.array()?),
+            },
             kind::CREATE_LINK => M::CreateLink,
             kind::RESOLVE_LINK => M::ResolveLink {
                 link: read_link(&mut r)?,
@@ -464,6 +498,11 @@ impl Frame<ServerMsg> {
             M::KeysAck { opks_left } => {
                 let mut b = header(kind::KEYS_ACK, id, 2);
                 b.put_u16_le(*opks_left);
+                b
+            }
+            M::Devices { list } => {
+                let mut b = header(kind::DEVICES, id, list.len().saturating_add(4));
+                b.put_bytes_prefixed(list);
                 b
             }
             M::LinkCreated { link } => {
@@ -552,6 +591,9 @@ impl Frame<ServerMsg> {
             kind::KEYS_ACK => M::KeysAck {
                 opks_left: r.u16()?,
             },
+            kind::DEVICES => M::Devices {
+                list: r.bytes(MAX_DEVICE_LIST_LEN)?,
+            },
             kind::LINK_CREATED => M::LinkCreated {
                 link: read_link(&mut r)?,
             },
@@ -585,6 +627,7 @@ impl Frame<ServerMsg> {
                     5 => ErrorCode::TooLarge,
                     6 => ErrorCode::Unavailable,
                     8 => ErrorCode::UnsupportedVersion,
+                    9 => ErrorCode::Conflict,
                     _ => ErrorCode::Internal,
                 },
             },

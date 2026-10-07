@@ -59,6 +59,12 @@ fn client_samples() -> Vec<ClientMsg> {
             peer: PeerId([7; 32]),
             device: DeviceId(2),
         },
+        ClientMsg::PublishDevices {
+            list: Bytes::from_static(b"signed list"),
+        },
+        ClientMsg::FetchDevices {
+            peer: PeerId([8; 32]),
+        },
         ClientMsg::CreateLink,
         ClientMsg::ResolveLink { link: link() },
         ClientMsg::InboxPut {
@@ -104,6 +110,9 @@ fn server_samples() -> Vec<ServerMsg> {
             opk: None,
         },
         ServerMsg::KeysAck { opks_left: 17 },
+        ServerMsg::Devices {
+            list: Bytes::from_static(b"signed list"),
+        },
         ServerMsg::LinkCreated { link: link() },
         ServerMsg::LinkResolved {
             peer: PeerId([5; 32]),
@@ -309,6 +318,29 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn device_lists_are_bounded() {
+    let list = |len| ClientMsg::PublishDevices {
+        list: Bytes::from(vec![1; len]),
+    };
+    let longest = cypher_wire::MAX_DEVICE_LIST_LEN;
+    Frame::<ClientMsg>::decode(Frame::new(1, list(longest)).encode()).unwrap();
+    assert_eq!(
+        Frame::<ClientMsg>::decode(Frame::new(1, list(longest + 1)).encode()),
+        Err(WireError::TooLarge)
+    );
+    let conflict = Frame::new(
+        1,
+        ServerMsg::Error {
+            code: ErrorCode::Conflict,
+        },
+    );
+    assert_eq!(
+        Frame::<ServerMsg>::decode(conflict.encode()).unwrap(),
+        conflict
+    );
 }
 
 #[test]

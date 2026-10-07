@@ -34,6 +34,8 @@ pub const MAX_INBOX_ITEM_LEN: usize = 72 * 1024;
 pub const MAX_INBOX_BATCH: usize = 64;
 pub const MAX_OPKS_PER_PUBLISH: usize = 200;
 pub const MAX_RELAY_ADDR_LEN: usize = 255;
+/// Longest signed device list: identity, version, count, ids, signature.
+pub const MAX_DEVICE_LIST_LEN: usize = 32 + 8 + 1 + 4 * cypher_types::MAX_DEVICES + 64;
 /// Longest Web Push endpoint URL a client may register.
 pub const MAX_PUSH_ENDPOINT_LEN: usize = 1024;
 
