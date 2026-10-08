@@ -60,6 +60,31 @@ impl IdentityStore {
         self.save_new(seed, nickname, passphrase)
     }
 
+    /// Keeps an identity another device handed over, as the device it was
+    /// given, under a passphrase of this device's own.
+    pub fn adopt(
+        &self,
+        linked: cypher_core::link::Linked,
+        passphrase: &str,
+    ) -> Result<Unlocked, ClientError> {
+        if self.exists() {
+            return Err(ClientError::IdentityExists);
+        }
+        let blob = identity_file::seal(
+            &linked.seed,
+            linked.device,
+            &linked.nickname,
+            passphrase,
+            &mut OsRng,
+        )?;
+        write_atomic(&self.path, &blob)?;
+        Ok(Unlocked {
+            seed: linked.seed,
+            device: linked.device,
+            nickname: linked.nickname,
+        })
+    }
+
     /// Deletes everything the app keeps next to the identity: conversations,
     /// contacts, media, then the identity itself, so a failure part way
     /// leaves the profile in place to try again. Files the user saved

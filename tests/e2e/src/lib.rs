@@ -11,5 +11,5 @@
 mod journey;
 mod stack;
 
-pub use journey::{Target, run as journey};
+pub use journey::{Target, linking, run as journey};
 pub use stack::Stack;

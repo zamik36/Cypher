@@ -63,6 +63,80 @@ pub async fn run(target: &Target) {
     a.client.shutdown().await;
 }
 
+/// A second device joins an identity by the offer it shows, through the real
+/// gateway and signaling, and gets what a contact sends from then on.
+pub async fn linking(target: &Target) {
+    let mut a = Peer::start(
+        target,
+        IdentitySeed::generate(),
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+    let mut b = Peer::start(
+        target,
+        IdentitySeed::generate(),
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+    pair_through_a_link(&mut a, &mut b).await;
+
+    let waiting = cypher_client::provision(
+        target.gateway_addr.clone(),
+        Arc::clone(&target.tls),
+        "Laptop",
+    );
+    link_from(&mut a, waiting.offer()).await;
+    let linked = tokio::time::timeout(WAIT, waiting.linked())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(linked.seed.as_bytes(), a.seed.as_bytes());
+    let mut laptop = Peer::start_device(
+        target,
+        linked.seed,
+        linked.device,
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+
+    let a_id = a.seed.derive_identity().peer_id();
+    let hello = Command::SendText {
+        peer: a_id,
+        msg_id: cypher_types::MsgId([7; 16]),
+        text: "to both of you".into(),
+        reply_to: None,
+    };
+    b.client.command(hello).await.unwrap();
+    assert_eq!(a.text_from_peer().await, "to both of you");
+    assert_eq!(laptop.text_from_peer().await, "to both of you");
+    for peer in [a, b, laptop] {
+        peer.client.shutdown().await;
+    }
+}
+
+/// Links the device showing `offer` from `a`, trying again while the new
+/// device's throwaway session is still signing in.
+async fn link_from(a: &mut Peer, offer: &str) {
+    for _ in 0..50 {
+        let link = Command::LinkDevice {
+            offer: offer.to_owned(),
+        };
+        a.client.command(link).await.unwrap();
+        let linked = a
+            .wait(|e| match e {
+                Event::DeviceLinked { .. } => Some(true),
+                Event::LinkFailed { .. } => Some(false),
+                _ => None,
+            })
+            .await;
+        if linked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the new device was never reached");
+}
+
 /// A running client with its identity, event stream and data directory.
 struct Peer {
     seed: IdentitySeed,
@@ -73,8 +147,16 @@ struct Peer {
 
 impl Peer {
     async fn start(target: &Target, seed: IdentitySeed, dir: TempDir) -> Self {
-        let first = cypher_types::DeviceId::FIRST;
-        let (client, events) = Client::start(&seed, first, target.client_config(dir.path()))
+        Self::start_device(target, seed, cypher_types::DeviceId::FIRST, dir).await
+    }
+
+    async fn start_device(
+        target: &Target,
+        seed: IdentitySeed,
+        device: cypher_types::DeviceId,
+        dir: TempDir,
+    ) -> Self {
+        let (client, events) = Client::start(&seed, device, target.client_config(dir.path()))
             .await
             .unwrap();
         let mut peer = Self {

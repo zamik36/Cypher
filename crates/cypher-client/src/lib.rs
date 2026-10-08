@@ -4,6 +4,7 @@
 mod driver;
 mod files;
 pub mod identity;
+mod link;
 mod media;
 mod net;
 mod store;
@@ -30,6 +31,7 @@ use store::{FILES_TABLE, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
+pub use link::{Provisioning, provision};
 pub use media::{MAX_RANGE_LEN, MediaSlice};
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +61,9 @@ pub enum ClientError {
     /// The bytes asked for are still on their way (a note being received).
     #[error("not downloaded yet")]
     NotReady,
+    /// Nobody linked this device in time.
+    #[error("the offer expired")]
+    Expired,
 }
 
 #[derive(Clone)]
