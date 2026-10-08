@@ -117,6 +117,29 @@ impl World {
         world
     }
 
+    /// Another device of client `owner`'s identity, online: the index of
+    /// the new client.
+    pub(crate) fn add_device(&mut self, owner: usize, device: u32) -> usize {
+        let seed = self.clients[owner].seed;
+        self.clients.push(Client {
+            seed,
+            device: DeviceId(device),
+            core: None,
+            kv: BTreeMap::new(),
+            sources: HashMap::new(),
+            sinks: HashMap::new(),
+            closed: HashMap::new(),
+            events: Vec::new(),
+            connected: false,
+            inputs: VecDeque::new(),
+        });
+        let i = self.clients.len() - 1;
+        self.boot(i);
+        self.connect(i);
+        self.run();
+        i
+    }
+
     pub(crate) fn peer(&self, i: usize) -> PeerId {
         self.clients[i].core.as_ref().unwrap().peer_id()
     }

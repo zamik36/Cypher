@@ -1,13 +1,15 @@
 mod anon;
+mod devices;
 mod files;
 mod messaging;
+mod outbox;
 mod push;
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
-use cypher_crypto::{IdentityKeyPair, IdentitySeed};
+use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed};
 use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
@@ -19,13 +21,15 @@ use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRec
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
 use crate::store::{
-    META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault, session_addr,
-    session_key,
+    META_DEVICES, META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault,
+    session_addr, session_key,
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
-use messaging::OutboxItem;
+use devices::{Devices, DevicesFor, OwnDevices};
+use messaging::Joining;
+use outbox::OutboxItem;
 use push::{PushState, Subscription};
 
 const REQUEST_TIMEOUT_MS: u64 = 15_000;
@@ -54,25 +58,34 @@ enum Pending {
     Resolve {
         link: ShareLink,
     },
+    /// Keys of one device of the host of an invite we are joining by.
     FetchKeys {
         link: String,
-        peer: PeerId,
+        addr: Addr,
     },
-    /// Keys for a fresh session with a contact whose messages stopped
-    /// decrypting.
-    Repair {
+    /// Keys for a session with one device of a contact: one it has none
+    /// with yet, or one whose messages stopped decrypting.
+    SessionKeys {
+        addr: Addr,
+    },
+    FetchDevices {
         peer: PeerId,
+        purpose: DevicesFor,
+    },
+    PublishDevices {
+        list: DeviceList,
     },
     Publish {
         batch: bool,
     },
     Send {
         msg_id: MsgId,
-        peer: PeerId,
+        addr: Addr,
         body: Bytes,
     },
     InboxPut {
         msg_id: MsgId,
+        addr: Addr,
     },
     InboxFetch,
     InboxAck,
@@ -83,11 +96,6 @@ enum Pending {
 }
 
 /// What a server error means for the request it answers.
-/// Where a contact's messages go: for now, its first device.
-fn contact(peer: PeerId) -> Addr {
-    Addr::new(peer, DeviceId::FIRST)
-}
-
 fn failure(code: ErrorCode) -> FailReason {
     match code {
         ErrorCode::NotFound => FailReason::NotFound,
@@ -120,6 +128,8 @@ pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 pub struct Core<R> {
     rng: R,
     now: u64,
+    /// Kept to derive the inboxes of this identity's other devices.
+    seed: IdentitySeed,
     identity: IdentityKeyPair,
     peer_id: PeerId,
     /// Which of the identity's devices this one is.
@@ -142,11 +152,14 @@ pub struct Core<R> {
     last_inbox_fetch: u64,
     /// When keys were last republished because the server's were not ours.
     last_resync: Option<u64>,
-    /// When a fresh session was last started with a contact, per contact.
-    last_repair: HashMap<PeerId, u64>,
-    /// When a message carrying our unanswered first one reached the
-    /// contact's device, per contact.
-    init_heard: HashMap<PeerId, u64>,
+    /// When a fresh session was last started with a device of a contact.
+    last_repair: HashMap<Addr, u64>,
+    /// When a message carrying our unanswered first one reached a
+    /// contact's device.
+    init_heard: HashMap<Addr, u64>,
+    /// Invites being joined by, while the host's devices answer.
+    joining: HashMap<PeerId, Joining>,
+    devices: Devices,
     recent: RecentIds,
     /// Our messages the contact has read, so a late receipt cannot undo it.
     read: RecentIds,
@@ -179,10 +192,7 @@ impl<R: CryptoRngCore> Core<R> {
         let (prekeys, fresh_prekeys) =
             load_prekeys(&vault, &snapshot.meta, now_ms, &mut rng, &mut skipped)?;
 
-        let profile_name = load_profile(&vault, &snapshot.meta, &mut skipped)?;
-        let own_links = load_meta::<OwnLinks>(&vault, &snapshot.meta, META_LINKS, &mut skipped)?
-            .map(|record| record.links)
-            .unwrap_or_default();
+        let own = load_own(&vault, &snapshot.meta, &mut skipped)?;
         let (peers, legacy) = load_peers(&vault, &snapshot.peers, &mut skipped)?;
         let sessions = load_sessions(&vault, &snapshot.sessions, &peers, &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
@@ -193,6 +203,7 @@ impl<R: CryptoRngCore> Core<R> {
             now: now_ms,
             peer_id: identity.peer_id(),
             device,
+            seed: IdentitySeed(*seed.as_bytes()),
             identity,
             inbox_id: cypher_wire::inbox_id(&inbox_secret),
             inbox_secret,
@@ -212,13 +223,15 @@ impl<R: CryptoRngCore> Core<R> {
             last_resync: None,
             last_repair: HashMap::new(),
             init_heard: HashMap::new(),
+            joining: HashMap::new(),
+            devices: own.devices,
             recent: RecentIds::default(),
             read: RecentIds::default(),
             progress_at: HashMap::new(),
             anon: Anon::default(),
             push: PushState::default(),
-            profile_name,
-            own_links,
+            profile_name: own.profile_name,
+            own_links: own.links,
             effects: Vec::new(),
         };
         core.adopt_legacy_sessions(legacy, &mut skipped);
@@ -317,6 +330,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.publish_keys(false);
         self.request(ClientMsg::Bootstrap, Pending::Bootstrap, false);
         self.last_inbox_fetch = 0;
+        self.check_own_devices();
         self.flush_outbox();
         self.resume_transfers();
     }
@@ -434,21 +448,27 @@ impl<R: CryptoRngCore> Core<R> {
             (Pending::Resolve { link }, ServerMsg::LinkResolved { peer }) => {
                 self.on_link_resolved(&link, peer);
             }
-            (Pending::FetchKeys { link, peer }, ServerMsg::Keys { base, opk }) => {
-                self.on_keys(link, peer, &base, opk);
+            (Pending::FetchKeys { link, addr }, ServerMsg::Keys { base, opk }) => {
+                self.on_keys(&link, addr, &base, opk);
             }
-            (Pending::Repair { peer }, ServerMsg::Keys { base, opk }) => {
-                self.on_repair_keys(peer, &base, opk);
+            (Pending::SessionKeys { addr }, ServerMsg::Keys { base, opk }) => {
+                self.on_session_keys(addr, &base, opk);
             }
+            (Pending::FetchDevices { peer, purpose }, ServerMsg::Devices { list }) => {
+                self.on_devices(peer, purpose, Some(&list));
+            }
+            (Pending::PublishDevices { list }, ServerMsg::Done) => self.on_own_published(list),
             (Pending::Publish { batch }, ServerMsg::KeysAck { opks_left }) => {
                 if !batch && opks_left < OPK_LOW_WATER {
                     self.publish_keys(true);
                 }
             }
-            (Pending::Send { msg_id, peer, body }, ServerMsg::SendAck { status }) => {
-                self.on_send_ack(msg_id, peer, &body, status);
+            (Pending::Send { msg_id, addr, body }, ServerMsg::SendAck { status }) => {
+                self.on_send_ack(msg_id, addr, &body, status);
             }
-            (Pending::InboxPut { msg_id }, ServerMsg::Done) => self.on_inbox_queued(msg_id),
+            (Pending::InboxPut { msg_id, addr }, ServerMsg::Done) => {
+                self.on_inbox_queued(msg_id, addr.device);
+            }
             (Pending::InboxFetch, ServerMsg::InboxBatch { claim, items }) => {
                 self.on_inbox_batch(claim, items);
             }
@@ -480,7 +500,25 @@ impl<R: CryptoRngCore> Core<R> {
                 link: link.to_string(),
                 reason,
             }),
-            Pending::FetchKeys { link, .. } => self.emit(Event::JoinFailed { link, reason }),
+            Pending::FetchKeys { addr, .. } => self.on_join_keys_failed(addr.peer, reason),
+            Pending::FetchDevices { peer, purpose } => match (purpose, reason) {
+                (purpose, FailReason::NotFound) => self.on_devices(peer, purpose, None),
+                (DevicesFor::Join { link }, reason) => {
+                    self.emit(Event::JoinFailed { link, reason });
+                }
+                (DevicesFor::Own | DevicesFor::Refresh, _) => {}
+            },
+            Pending::PublishDevices { .. } => {
+                if reason == FailReason::Rejected {
+                    self.on_own_conflict();
+                }
+            }
+            Pending::SessionKeys { addr } => {
+                // The device is gone: nothing more goes to it.
+                if reason == FailReason::NotFound {
+                    self.drop_targets(addr);
+                }
+            }
             Pending::Bootstrap => {
                 self.anon.on_bootstrap(None, self.now);
                 self.fetch_inbox();
@@ -488,10 +526,14 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::CreateLink | Pending::InboxFetch => {
                 self.emit(Event::Warning { reason });
             }
-            Pending::Send { msg_id, .. } | Pending::InboxPut { msg_id } => {
-                self.on_send_failed(msg_id);
+            // An inbox nobody reads any more: that device is gone.
+            Pending::InboxPut { msg_id, addr } if reason == FailReason::NotFound => {
+                self.drop_target(msg_id, addr.device);
             }
-            Pending::Publish { .. } | Pending::InboxAck | Pending::Repair { .. } => {}
+            Pending::Send { msg_id, addr, .. } | Pending::InboxPut { msg_id, addr } => {
+                self.on_send_failed(msg_id, addr.device);
+            }
+            Pending::Publish { .. } | Pending::InboxAck => {}
             Pending::PushKey | Pending::PushRegister | Pending::PushUnregister => {
                 self.on_push_failed(&pending, reason);
             }
@@ -592,6 +634,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.publish_keys(false);
         }
         self.restart_unanswered_inits();
+        self.check_own_devices();
         self.retransmit_expired();
         self.flush_outbox();
     }
@@ -600,14 +643,14 @@ impl<R: CryptoRngCore> Core<R> {
     /// apart (state lost on one side), and every later message would fail
     /// too. Starts a fresh one from their published keys, keeping the
     /// contact.
-    pub(super) fn repair_session(&mut self, peer: PeerId) {
-        let settled = self.peers.get(&peer).is_some_and(|p| !p.request)
+    pub(super) fn repair_session(&mut self, addr: Addr) {
+        let settled = self.peers.get(&addr.peer).is_some_and(|p| !p.request)
             && !self
                 .sessions
-                .get(&contact(peer))
+                .get(&addr)
                 .is_some_and(Session::is_unconfirmed_initiator);
         if settled {
-            self.refetch_keys(peer);
+            self.open_session(addr);
         }
     }
 
@@ -616,41 +659,41 @@ impl<R: CryptoRngCore> Core<R> {
     /// them), so it cannot answer. Starts again from its current keys.
     fn restart_unanswered_inits(&mut self) {
         let sessions = &self.sessions;
-        self.init_heard.retain(|peer, _| {
+        self.init_heard.retain(|addr, _| {
             sessions
-                .get(&contact(*peer))
+                .get(addr)
                 .is_some_and(Session::is_unconfirmed_initiator)
         });
-        let due: Vec<PeerId> = self
+        let due: Vec<Addr> = self
             .init_heard
             .iter()
             .filter(|(_, at)| self.now.saturating_sub(**at) >= INIT_TIMEOUT_MS)
-            .map(|(peer, _)| *peer)
+            .map(|(addr, _)| *addr)
             .collect();
-        for peer in due {
-            self.init_heard.remove(&peer);
-            self.refetch_keys(peer);
+        for addr in due {
+            self.init_heard.remove(&addr);
+            self.open_session(addr);
         }
     }
 
-    /// Fetches a contact's keys for a fresh session; at most every ten
-    /// minutes per contact.
-    fn refetch_keys(&mut self, peer: PeerId) {
-        let blocked = self.peers.get(&peer).is_none_or(|p| p.blocked);
+    /// Fetches the keys of one device of a contact for a fresh session with
+    /// it; at most every ten minutes per device.
+    pub(super) fn open_session(&mut self, addr: Addr) {
+        let blocked = self.peers.get(&addr.peer).is_none_or(|p| p.blocked);
         let recent = self
             .last_repair
-            .get(&peer)
+            .get(&addr)
             .is_some_and(|at| self.now.saturating_sub(*at) < REPAIR_INTERVAL_MS);
         if blocked || recent || self.conn != Conn::Ready {
             return;
         }
-        self.last_repair.insert(peer, self.now);
+        self.last_repair.insert(addr, self.now);
         self.request(
             ClientMsg::FetchKeys {
-                peer,
-                device: DeviceId::FIRST,
+                peer: addr.peer,
+                device: addr.device,
             },
-            Pending::Repair { peer },
+            Pending::SessionKeys { addr },
             false,
         );
     }
@@ -777,11 +820,11 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.request(
-            ClientMsg::FetchKeys {
+            ClientMsg::FetchDevices { peer },
+            Pending::FetchDevices {
                 peer,
-                device: DeviceId::FIRST,
+                purpose: DevicesFor::Join { link },
             },
-            Pending::FetchKeys { link, peer },
             false,
         );
     }
@@ -874,7 +917,7 @@ impl<R: CryptoRngCore> Core<R> {
         skipped: &mut Skipped,
     ) {
         for (peer, record) in legacy {
-            let addr = contact(peer);
+            let addr = Addr::new(peer, DeviceId::FIRST);
             if let Entry::Vacant(slot) = self.sessions.entry(addr) {
                 match Session::from_record(&record) {
                     Ok(session) => {
@@ -1003,6 +1046,23 @@ fn load_meta<T: Record>(
         .map(|(k, v)| skipped.open::<T>(vault, Table::Meta, k, v))
         .transpose()?
         .flatten())
+}
+
+/// What `meta` keeps of this user besides prekeys.
+struct Own {
+    profile_name: Option<String>,
+    links: Vec<(String, u64)>,
+    devices: Devices,
+}
+
+fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, CoreError> {
+    Ok(Own {
+        profile_name: load_profile(vault, meta, skipped)?,
+        links: load_meta::<OwnLinks>(vault, meta, META_LINKS, skipped)?
+            .map(|record| record.links)
+            .unwrap_or_default(),
+        devices: Devices::from_record(load_meta::<OwnDevices>(vault, meta, META_DEVICES, skipped)?),
+    })
 }
 
 fn load_profile(

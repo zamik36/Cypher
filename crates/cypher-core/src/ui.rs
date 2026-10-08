@@ -125,6 +125,13 @@ pub fn message(m: &StoredMessage) -> UiMessage {
     }
 }
 
+fn status_of(msg_id: &MsgId, s: MessageStatus) -> UiPayload {
+    UiPayload::Status {
+        msg_id: msg_id.to_hex(),
+        status: status(s),
+    }
+}
+
 /// Maps a core event to its UI channel; `None` for internal-only events.
 pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
     Some(match e {
@@ -133,6 +140,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         // Both stop the client until the user acts, so they get their own
         // channels rather than a passing error.
         Event::Superseded => ("superseded", UiPayload::None),
+        Event::DeviceUnlinked => ("unlinked", UiPayload::None),
         Event::Warning {
             reason: FailReason::UpdateRequired,
         } => ("update_required", UiPayload::None),
@@ -141,13 +149,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::PeerProfile { peer, name } => ("peer_profile", profile(peer, name.clone())),
         Event::ContactRequest { peer } => ("contact_request", UiPayload::Text(peer.to_hex())),
         Event::Message(m) if !m.outgoing => ("message", UiPayload::Message(message(m))),
-        Event::MessageStatus { msg_id, status: s } => (
-            "message_status",
-            UiPayload::Status {
-                msg_id: msg_id.to_hex(),
-                status: status(*s),
-            },
-        ),
+        Event::MessageStatus { msg_id, status } => ("message_status", status_of(msg_id, *status)),
         Event::TransferOffered {
             peer,
             file_id,
@@ -283,6 +285,7 @@ mod tests {
         assert_eq!(ui(&Event::Connected), ("connected", Value::Null));
         assert_eq!(ui(&Event::Disconnected), ("disconnected", Value::Null));
         assert_eq!(ui(&Event::Superseded), ("superseded", Value::Null));
+        assert_eq!(ui(&Event::DeviceUnlinked), ("unlinked", Value::Null));
         assert_eq!(
             ui(&Event::Warning {
                 reason: FailReason::UpdateRequired

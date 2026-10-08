@@ -1,4 +1,5 @@
-use cypher_crypto::{InitHeader, Ratchet};
+use cypher_crypto::{DeviceList, InitHeader, Ratchet};
+use cypher_types::DeviceId;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -24,6 +25,12 @@ pub(crate) struct Peer {
     pub blocked: bool,
     /// The invite we joined them by, told in our `Hello`.
     pub via: Option<String>,
+    /// Their devices, as their identity last listed them; unknown for a
+    /// contact who has not told us yet, taken as their first device only.
+    pub devices: Option<DeviceList>,
+    /// Inboxes of their devices, as they announced them: a device can be
+    /// written to offline before its own `Hello` reached us.
+    pub inboxes: Vec<(DeviceId, [u8; 32])>,
 }
 
 /// One Double Ratchet session with one device of a contact.
@@ -66,7 +73,32 @@ impl Peer {
             request: false,
             blocked: false,
             via: None,
+            devices: None,
+            inboxes: Vec::new(),
         }
+    }
+
+    /// The devices of theirs to write to.
+    pub(crate) fn device_ids(&self) -> Vec<DeviceId> {
+        self.devices
+            .as_ref()
+            .map_or_else(|| vec![DeviceId::FIRST], |list| list.devices().to_vec())
+    }
+
+    /// Whether `device` is one their identity lists (the first, while we
+    /// know no list).
+    pub(crate) fn lists(&self, device: DeviceId) -> bool {
+        self.devices
+            .as_ref()
+            .map_or(device == DeviceId::FIRST, |list| list.contains(device))
+    }
+
+    /// The inbox their `device` announced.
+    pub(crate) fn inbox_of(&self, device: DeviceId) -> Option<[u8; 32]> {
+        self.inboxes
+            .iter()
+            .find(|(d, _)| *d == device)
+            .map(|(_, inbox)| *inbox)
     }
 
     pub(crate) fn to_record(&self) -> PeerRecord {
@@ -77,6 +109,8 @@ impl Peer {
             request: self.request,
             blocked: self.blocked,
             via: self.via.clone(),
+            devices: self.devices.as_ref().map(DeviceList::encode),
+            inboxes: self.inboxes.iter().map(|(d, i)| (d.0, *i)).collect(),
             legacy: None,
         }
     }
@@ -89,6 +123,17 @@ impl Peer {
             request: r.request,
             blocked: r.blocked,
             via: r.via.clone(),
+            // Signed, so a list that no longer verifies is simply unknown.
+            devices: r
+                .devices
+                .as_deref()
+                .and_then(|l| DeviceList::decode(l).ok()),
+            inboxes: r
+                .inboxes
+                .iter()
+                .map(|(d, i)| (DeviceId(*d), *i))
+                .filter(|(d, _)| d.is_valid())
+                .collect(),
         }
     }
 }
@@ -168,6 +213,8 @@ pub(crate) struct PeerRecord {
     pub(crate) request: bool,
     pub(crate) blocked: bool,
     via: Option<String>,
+    devices: Option<Vec<u8>>,
+    inboxes: Vec<(u32, [u8; 32])>,
     /// The one session a record from before devices held, to be moved to
     /// its own row (as the contact's first device) on load.
     #[serde(skip)]
@@ -175,11 +222,26 @@ pub(crate) struct PeerRecord {
 }
 
 impl crate::Record for PeerRecord {
-    const VERSION: u8 = 5;
+    const VERSION: u8 = 6;
 
-    /// Up to version 4 a contact and its one session were stored together:
-    /// the session comes out as `legacy`.
+    /// Version 5 knew nothing of the contact's devices. Up to version 4 a
+    /// contact and its one session were stored together: the session comes
+    /// out as `legacy`.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        if version == 5 {
+            let v5: PeerRecordV5 = parse(body)?;
+            return Ok(Self {
+                identity_dh: v5.identity_dh,
+                alias: v5.alias,
+                name: v5.name,
+                request: v5.request,
+                blocked: v5.blocked,
+                via: v5.via,
+                devices: None,
+                inboxes: Vec::new(),
+                legacy: None,
+            });
+        }
         let v4 = PeerRecordV4::upgrade(version, body)?;
         Ok(Self {
             identity_dh: v4.identity_dh,
@@ -188,6 +250,8 @@ impl crate::Record for PeerRecord {
             request: v4.request,
             blocked: v4.blocked,
             via: v4.via,
+            devices: None,
+            inboxes: Vec::new(),
             legacy: Some(SessionRecord {
                 ratchet: v4.ratchet,
                 pending_init: v4.pending_init,
@@ -212,6 +276,17 @@ pub(crate) struct SessionRecord {
 
 impl crate::Record for SessionRecord {
     const VERSION: u8 = 1;
+}
+
+/// [`PeerRecord`] as version 5 stored it.
+#[derive(Deserialize)]
+struct PeerRecordV5 {
+    identity_dh: [u8; 32],
+    alias: Option<String>,
+    name: Option<String>,
+    request: bool,
+    blocked: bool,
+    via: Option<String>,
 }
 
 /// [`PeerRecord`] as version 4 stored it, a contact and its session.

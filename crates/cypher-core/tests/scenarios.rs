@@ -1022,6 +1022,124 @@ fn sessions_stored_with_their_contact_move_out_and_keep_working() {
     )));
 }
 
+/// Every device of a contact gets what is sent to them, each on its own
+/// session, and the sender hears back from them.
+#[test]
+fn every_device_of_a_contact_gets_the_message() {
+    let mut w = World::new(2);
+    let a2 = w.add_device(A, 2);
+    w.pair(A, B);
+    let sent = w.send_text(B, A, "to both");
+    assert_eq!(w.texts(A), ["to both"]);
+    assert_eq!(w.texts(a2), ["to both"]);
+    assert_eq!(w.status_of(B, sent), Some(MessageStatus::Delivered));
+    let b = w.peer(B);
+    assert!(w.has_session(A, b) && w.has_session(a2, b));
+}
+
+/// A device added later is announced to the contacts once the identity's
+/// other device sees it listed; from then on they write to it too.
+#[test]
+fn a_new_device_is_announced_to_contacts() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    w.send_text(B, A, "before it is known");
+    assert!(w.texts(a2).is_empty(), "not announced yet");
+
+    w.advance(60 * 60_000);
+    w.send_text(B, A, "to both");
+    assert_eq!(w.texts(A).last().unwrap(), "to both");
+    assert_eq!(w.texts(a2), ["to both"]);
+}
+
+/// A device that is away gets what was sent meanwhile from its own inbox,
+/// even the very first message of a session with it.
+#[test]
+fn a_device_offline_reads_it_from_its_own_inbox() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    w.advance(60 * 60_000);
+    w.disconnect(a2);
+    let sent = w.send_text(B, A, "while you were away");
+    assert_eq!(w.status_of(B, sent), Some(MessageStatus::Delivered));
+    w.connect(a2);
+    w.advance(10_000);
+    assert_eq!(w.texts(a2), ["while you were away"]);
+    assert_eq!(
+        w.status_of(B, sent),
+        Some(MessageStatus::Delivered),
+        "a late answer from one device does not take the status back"
+    );
+}
+
+/// A device taken off its identity's list finds out and stops; contacts
+/// learn of the new list and forget their session with it.
+#[test]
+fn a_device_taken_off_the_list_stops_and_is_forgotten() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    w.advance(60 * 60_000);
+    w.send_text(B, A, "to both");
+    let (a, b) = (w.peer(A), w.peer(B));
+    let a2_session = devices::session_row(a, 2);
+    assert!(w.clients[B].kv.contains_key(&a2_session));
+
+    let identity = IdentitySeed(w.clients[A].seed).derive_identity();
+    let shorter = w.server.devices[&a]
+        .without(&identity, DeviceId(2))
+        .unwrap();
+    w.server.devices.insert(a, shorter);
+    w.advance(60 * 60_000);
+    assert!(w.has_event(a2, |e| matches!(e, Event::DeviceUnlinked)));
+    assert!(!w.has_event(A, |e| matches!(e, Event::DeviceUnlinked)));
+    assert!(
+        !w.clients[B].kv.contains_key(&a2_session),
+        "{b:?} forgot the session with the removed device"
+    );
+    w.send_text(B, A, "to the one left");
+    assert_eq!(w.texts(A).last().unwrap(), "to the one left");
+}
+
+/// A file offered to a contact with two devices goes to the one that
+/// accepts first; the other, accepting later, is told it is not for it.
+#[test]
+fn a_file_goes_to_the_device_that_accepts_it_first() {
+    let mut w = World::new(2);
+    let b2 = w.add_device(B, 2);
+    w.pair(B, A);
+    let data = pattern(300 * 1024);
+    let file_id = offer_file(&mut w, A, B, data.clone(), "doc.pdf", MediaKind::File);
+    for device in [B, b2] {
+        assert!(w.has_event(device, |e| matches!(
+            e,
+            Event::TransferOffered { file_id: f, .. } if *f == file_id
+        )));
+    }
+    w.command(b2, Command::AcceptFile { file_id });
+    assert_eq!(w.clients[b2].sinks[&file_id], data);
+    assert!(w.has_event(A, |e| matches!(e, Event::TransferComplete { .. })));
+
+    w.command(B, Command::AcceptFile { file_id });
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::TransferFailed {
+            reason: FailReason::Cancelled,
+            ..
+        }
+    )));
+    assert!(w.clients[B].sinks.get(&file_id).is_none_or(|d| *d != data));
+}
+
+mod devices {
+    use cypher_core::{Table, session_key};
+    use cypher_types::{Addr, DeviceId, PeerId};
+
+    pub(crate) fn session_row(peer: PeerId, device: u32) -> (u8, Vec<u8>) {
+        let addr = Addr::new(peer, DeviceId(device));
+        (Table::Sessions as u8, session_key(addr))
+    }
+}
+
 /// Records as releases before devices stored them.
 mod legacy {
     use cypher_core::{Record, Table, Vault, session_key};
@@ -1044,18 +1162,21 @@ mod legacy {
         const VERSION: u8 = 1;
     }
 
+    /// A contact as stored now.
     #[derive(Serialize, Deserialize)]
-    struct ContactV5 {
+    pub(crate) struct Contact {
         identity_dh: [u8; 32],
-        alias: Option<String>,
+        pub(crate) alias: Option<String>,
         name: Option<String>,
         request: bool,
         blocked: bool,
         via: Option<String>,
+        devices: Option<Vec<u8>>,
+        inboxes: Vec<(u32, [u8; 32])>,
     }
 
-    impl Record for ContactV5 {
-        const VERSION: u8 = 5;
+    impl Record for Contact {
+        const VERSION: u8 = 6;
     }
 
     #[derive(Serialize, Deserialize)]
@@ -1092,7 +1213,7 @@ mod legacy {
         let session: SessionV1 = vault
             .open(Table::Sessions, &session_row.1, &sealed_session)
             .unwrap();
-        let contact: ContactV5 = vault
+        let contact: Contact = vault
             .open(Table::Peers, &peer_row.1, &kv[&peer_row])
             .unwrap();
         let old = PeerV4 {

@@ -76,6 +76,7 @@ pub enum StoreOp {
 pub(crate) const META_PREKEYS: &[u8] = b"prekeys";
 pub(crate) const META_PROFILE: &[u8] = b"profile";
 pub(crate) const META_LINKS: &[u8] = b"links";
+pub(crate) const META_DEVICES: &[u8] = b"devices";
 
 /// What the UI shows of a contact: the name the user gave them, the one
 /// they go by, and whether they are a request or blocked.

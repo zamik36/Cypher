@@ -1,29 +1,19 @@
 use bytes::Bytes;
-use cypher_crypto::{Header, InitHeader, PrekeyBundle, handshake, sealed};
-use cypher_types::{Addr, MsgId, PeerId};
-use cypher_wire::{ClientMsg, DeliveryStatus};
+use cypher_crypto::{DeviceList, Header, InitHeader, PrekeyBundle, handshake};
+use cypher_types::{Addr, DeviceId, MsgId, PeerId};
+use cypher_wire::ClientMsg;
 use rand_core::CryptoRngCore;
-use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-use super::anon::Readiness;
-use super::{Core, Pending, contact};
+use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind};
 use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
-use crate::relay::{self, RelayBody};
+use crate::relay::RelayBody;
 use crate::share::ShareLink;
 use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key, session_key};
 
-/// First wait before retrying a message, by why it did not go out; each
-/// further attempt doubles it, up to [`MAX_RETRY_MS`].
-const RETRY_OFFLINE_MS: u64 = 30_000;
-const RETRY_BUSY_MS: u64 = 2_000;
-const RETRY_FAILED_MS: u64 = 5_000;
-const MAX_RETRY_MS: u64 = 10 * 60_000;
-/// Doublings before the backoff stops growing (2^10 × the base > the cap).
-const MAX_DOUBLINGS: u32 = 10;
 /// How long an invite admits a contact; the server keeps links as long.
 const LINK_TTL_MS: u64 = 24 * 3600 * 1000;
 /// Invites remembered at once; the oldest go first.
@@ -31,76 +21,15 @@ const MAX_OWN_LINKS: usize = 32;
 /// Strangers waiting for an answer at once; more are not let in.
 const MAX_PENDING_REQUESTS: usize = 20;
 
-/// An end-to-end message on its way. Stored as padded plaintext and
-/// encrypted at send time, so a session reset never strands it. A message
-/// the user sees stays after the server took it, until the contact's
-/// receipt: if their side could not read it, a fresh session sends it again.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct OutboxItem {
-    pub msg_id: MsgId,
-    pub peer: PeerId,
-    envelope: Vec<u8>,
-    /// User-visible message whose status the UI tracks.
-    tracked: bool,
-    /// Taken by the server; waiting for the contact's receipt.
-    awaiting: bool,
-    #[serde(skip)]
-    in_flight: bool,
-    #[serde(skip)]
-    next_try: u64,
-    /// Failed attempts since the app started; resets on restart, which is
-    /// a reasonable moment to try again promptly.
-    #[serde(skip)]
-    attempts: u32,
-}
-
-impl crate::Record for OutboxItem {
-    const VERSION: u8 = 2;
-
-    fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
-        /// Version 1: dropped once the server took it.
-        #[derive(Deserialize)]
-        struct V1 {
-            msg_id: MsgId,
-            peer: PeerId,
-            envelope: Vec<u8>,
-            tracked: bool,
-        }
-        if version != 1 {
-            return Err(CoreError::Storage);
-        }
-        let mut old: V1 = postcard::from_bytes(body).map_err(|_| CoreError::Storage)?;
-        Ok(Self {
-            msg_id: old.msg_id,
-            peer: old.peer,
-            envelope: std::mem::take(&mut old.envelope),
-            tracked: old.tracked,
-            awaiting: false,
-            in_flight: false,
-            next_try: 0,
-            attempts: 0,
-        })
-    }
-}
-
-/// Messages to one contact kept for a receipt; older ones are let go.
-const MAX_AWAITING_PER_PEER: usize = 500;
-
-impl Drop for OutboxItem {
-    fn drop(&mut self) {
-        self.envelope.zeroize();
-    }
-}
-
-/// Wait before the next attempt after `attempts` failures: `base` doubled
-/// per failure up to [`MAX_RETRY_MS`], then a point in its upper half picked
-/// by `roll`.
-fn retry_delay(base: u64, attempts: u32, roll: u64) -> u64 {
-    let backoff = base
-        .saturating_mul(1 << attempts.min(MAX_DOUBLINGS))
-        .min(MAX_RETRY_MS);
-    let half = backoff / 2;
-    half + roll % (half + 1)
+/// An invite being joined by, while the host's devices answer one by one.
+pub(super) struct Joining {
+    link: String,
+    /// Key lookups not answered yet.
+    outstanding: usize,
+    /// The host's devices, to remember once the host is a contact.
+    devices: Option<DeviceList>,
+    /// The UI was told the contact is there.
+    added: bool,
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -190,7 +119,7 @@ impl<R: CryptoRngCore> Core<R> {
         greeted.sort_unstable();
         for addr in greeted {
             let hello = self.hello(&addr.peer);
-            self.send_control(addr.peer, hello);
+            self.send_control_to(addr, hello);
         }
     }
 
@@ -254,7 +183,16 @@ impl<R: CryptoRngCore> Core<R> {
         }
         p.request = false;
         self.persist_peer(peer);
-        self.send_hello(contact(*peer));
+        let mut devices: Vec<Addr> = self
+            .sessions
+            .keys()
+            .filter(|a| a.peer == *peer)
+            .copied()
+            .collect();
+        devices.sort_unstable();
+        for addr in devices {
+            self.send_hello(addr);
+        }
     }
 
     /// Blocking drops whatever they send, unread, and stops what goes to
@@ -266,15 +204,7 @@ impl<R: CryptoRngCore> Core<R> {
         p.blocked = blocked;
         self.persist_peer(peer);
         if blocked {
-            let stale: Vec<MsgId> = self
-                .outbox
-                .values()
-                .filter(|i| i.peer == *peer)
-                .map(|i| i.msg_id)
-                .collect();
-            for id in stale {
-                self.drop_outbox(&id);
-            }
+            self.drop_outbox_for(peer);
             self.cancel_transfers_with(peer);
         }
     }
@@ -300,256 +230,8 @@ impl<R: CryptoRngCore> Core<R> {
                 key: session_key(addr),
             });
         }
-        let stale: Vec<MsgId> = self
-            .outbox
-            .values()
-            .filter(|i| i.peer == *peer)
-            .map(|i| i.msg_id)
-            .collect();
-        for id in stale {
-            self.drop_outbox(&id);
-        }
+        self.drop_outbox_for(peer);
         self.cancel_transfers_with(peer);
-    }
-
-    /// Sends a protocol message that has no UI representation.
-    pub(super) fn send_control(&mut self, peer: PeerId, body: Body) {
-        let mut id = [0u8; 16];
-        self.rng.fill_bytes(&mut id);
-        self.enqueue(peer, MsgId(id), body, false);
-    }
-
-    pub(super) fn enqueue(&mut self, peer: PeerId, msg_id: MsgId, body: Body, tracked: bool) {
-        let envelope = Envelope {
-            msg_id,
-            sent_at_ms: self.now,
-            body,
-        }
-        .encode();
-        let item = OutboxItem {
-            msg_id,
-            peer,
-            envelope,
-            tracked,
-            awaiting: false,
-            in_flight: false,
-            next_try: 0,
-            attempts: 0,
-        };
-        let op = self
-            .vault
-            .put(Table::Outbox, msg_id.to_vec(), &item, &mut self.rng);
-        self.persist(op);
-        self.outbox.insert(msg_id, item);
-        self.send_item(msg_id);
-    }
-
-    pub(super) fn flush_outbox(&mut self) {
-        if !self.is_ready() {
-            return;
-        }
-        let due: Vec<MsgId> = self
-            .outbox
-            .values()
-            .filter(|i| !i.in_flight && !i.awaiting && i.next_try <= self.now)
-            .map(|i| i.msg_id)
-            .collect();
-        for id in due {
-            self.send_item(id);
-        }
-    }
-
-    /// Encrypts and sends one outbox item. The advanced ratchet is persisted
-    /// before the ciphertext is handed to the transport, so a crash can never
-    /// lead to message-key reuse.
-    fn send_item(&mut self, msg_id: MsgId) {
-        if !self.is_ready() {
-            return;
-        }
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
-            return;
-        };
-        let addr = contact(item.peer);
-        let Some(session) = self.sessions.get_mut(&addr) else {
-            return;
-        };
-        if item.in_flight || item.awaiting || !session.ratchet.can_send() {
-            return;
-        }
-        let Ok((header, ct)) = session.ratchet.encrypt(&item.envelope, b"") else {
-            return;
-        };
-        let body = Bytes::from(relay::message_body(
-            session.pending_init.as_ref(),
-            &header,
-            &ct,
-        ));
-        item.in_flight = true;
-        let peer_id = item.peer;
-
-        self.persist_session(addr);
-        let req_id = self.alloc_req();
-        self.pending.insert(
-            req_id,
-            (
-                Pending::Send {
-                    msg_id,
-                    peer: peer_id,
-                    body: body.clone(),
-                },
-                self.now + super::REQUEST_TIMEOUT_MS,
-            ),
-        );
-        self.transmit(
-            req_id,
-            ClientMsg::Send {
-                to: addr.peer,
-                device: addr.device,
-                want_ack: true,
-                body,
-            },
-        );
-    }
-
-    pub(super) fn on_send_ack(
-        &mut self,
-        msg_id: MsgId,
-        peer: PeerId,
-        body: &Bytes,
-        status: DeliveryStatus,
-    ) {
-        match status {
-            DeliveryStatus::Delivered => {
-                // Only a message the contact always answers (with a receipt)
-                // tells that silence means trouble: a host does not answer
-                // the Hello of someone it has not accepted yet.
-                let answered = self.outbox.get(&msg_id).is_some_and(|i| i.tracked);
-                if answered
-                    && self
-                        .sessions
-                        .get(&contact(peer))
-                        .is_some_and(Session::is_unconfirmed_initiator)
-                {
-                    self.init_heard.entry(peer).or_insert(self.now);
-                }
-                self.complete_outbox(msg_id, MessageStatus::Sent);
-            }
-            DeliveryStatus::Offline => match self
-                .sessions
-                .get(&contact(peer))
-                .and_then(|s| s.inbox)
-                .zip(self.peers.get(&peer).map(|p| p.identity_dh))
-            {
-                Some((inbox, identity_dh)) => self.put_inbox(msg_id, inbox, &identity_dh, body),
-                None => self.retry_later(msg_id, RETRY_OFFLINE_MS),
-            },
-            DeliveryStatus::Busy => self.retry_later(msg_id, RETRY_BUSY_MS),
-        }
-    }
-
-    pub(super) fn on_send_failed(&mut self, msg_id: MsgId) {
-        self.retry_later(msg_id, RETRY_FAILED_MS);
-    }
-
-    pub(super) fn on_inbox_queued(&mut self, msg_id: MsgId) {
-        self.complete_outbox(msg_id, MessageStatus::Queued);
-    }
-
-    fn put_inbox(&mut self, msg_id: MsgId, inbox: [u8; 32], identity_dh: &[u8; 32], body: &[u8]) {
-        match self.anon.readiness(self.now) {
-            Readiness::Onion | Readiness::Session => {}
-            Readiness::Wait => return self.retry_later(msg_id, RETRY_BUSY_MS),
-            Readiness::Unavailable => return self.retry_later(msg_id, RETRY_OFFLINE_MS),
-        }
-        let mut plain = Zeroizing::new(Vec::with_capacity(32 + body.len()));
-        plain.extend_from_slice(self.peer_id.as_bytes());
-        plain.extend_from_slice(&self.device.0.to_le_bytes());
-        plain.extend_from_slice(body);
-        match sealed::seal(identity_dh, &plain, &mut self.rng) {
-            Ok(item) => self.request(
-                ClientMsg::InboxPut {
-                    inbox,
-                    item: Bytes::from(item),
-                },
-                Pending::InboxPut { msg_id },
-                true,
-            ),
-            Err(_) => self.retry_later(msg_id, RETRY_OFFLINE_MS),
-        }
-    }
-
-    /// Schedules another attempt: `base` doubled per earlier failure, capped,
-    /// then drawn from its upper half so that clients cut off together do
-    /// not all come back at the same moment.
-    fn retry_later(&mut self, msg_id: MsgId, base: u64) {
-        let roll = self.rng.next_u64();
-        if let Some(item) = self.outbox.get_mut(&msg_id) {
-            item.in_flight = false;
-            item.next_try = self.now + retry_delay(base, item.attempts, roll);
-            item.attempts = item.attempts.saturating_add(1);
-        }
-    }
-
-    /// The server took the message. Control traffic is done; a message the
-    /// user sees waits for the contact's receipt.
-    fn complete_outbox(&mut self, msg_id: MsgId, status: MessageStatus) {
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
-            return;
-        };
-        if !item.tracked {
-            self.drop_outbox(&msg_id);
-            return;
-        }
-        item.awaiting = true;
-        item.in_flight = false;
-        let peer = item.peer;
-        self.persist_outbox(&msg_id);
-        self.set_status(msg_id, status);
-        self.trim_awaiting(&peer);
-    }
-
-    /// Keeps at most [`MAX_AWAITING_PER_PEER`] messages waiting for one
-    /// contact's receipts, letting the oldest go.
-    fn trim_awaiting(&mut self, peer: &PeerId) {
-        let mut waiting: Vec<(u64, MsgId)> = self
-            .outbox
-            .values()
-            .filter(|i| i.awaiting && i.peer == *peer)
-            .map(|i| {
-                let sent = Envelope::decode(&i.envelope).map_or(0, |e| e.sent_at_ms);
-                (sent, i.msg_id)
-            })
-            .collect();
-        if waiting.len() <= MAX_AWAITING_PER_PEER {
-            return;
-        }
-        waiting.sort_unstable();
-        let excess = waiting.len() - MAX_AWAITING_PER_PEER;
-        for (_, id) in waiting.into_iter().take(excess) {
-            self.drop_outbox(&id);
-        }
-    }
-
-    fn persist_outbox(&mut self, msg_id: &MsgId) {
-        if let Some(item) = self.outbox.get(msg_id) {
-            let op = self
-                .vault
-                .put(Table::Outbox, msg_id.to_vec(), item, &mut self.rng);
-            self.persist(op);
-        }
-    }
-
-    pub(super) fn discard_outgoing(&mut self, msg_id: &MsgId) {
-        self.drop_outbox(msg_id);
-    }
-
-    fn drop_outbox(&mut self, msg_id: &MsgId) {
-        if self.outbox.remove(msg_id).is_some() {
-            self.persist(StoreOp::Delete {
-                table: Table::Outbox,
-                key: msg_id.to_vec(),
-            });
-        }
     }
 
     pub(super) fn store_message(&mut self, msg: StoredMessage) {
@@ -570,83 +252,133 @@ impl<R: CryptoRngCore> Core<R> {
         self.emit(Event::MessageStatus { msg_id, status });
     }
 
+    /// The host of an invite we are joining by has these devices (its first
+    /// only, as far as anyone knows, without a list): ask for each one's keys.
+    pub(super) fn join_devices(&mut self, link: &str, peer: PeerId, list: Option<DeviceList>) {
+        let devices = list
+            .as_ref()
+            .map_or_else(|| vec![DeviceId::FIRST], |l| l.devices().to_vec());
+        let joining = Joining {
+            link: link.to_owned(),
+            outstanding: devices.len(),
+            devices: list,
+            added: false,
+        };
+        self.joining.insert(peer, joining);
+        for device in devices {
+            let addr = Addr::new(peer, device);
+            let link = link.to_owned();
+            self.request(
+                ClientMsg::FetchKeys { peer, device },
+                Pending::FetchKeys { link, addr },
+                false,
+            );
+        }
+    }
+
+    /// Keys of one of the host's devices: a session with it.
     pub(super) fn on_keys(
         &mut self,
-        link: String,
-        peer: PeerId,
+        link: &str,
+        addr: Addr,
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        let Some((mut fresh, identity_dh)) = self.initiate(peer, base, opk) else {
-            self.emit(Event::JoinFailed {
-                link,
-                reason: FailReason::InvalidKeys,
-            });
+        let Some((mut fresh, identity_dh)) = self.initiate(addr, base, opk) else {
+            return self.join_answered(addr.peer, Some(FailReason::InvalidKeys));
+        };
+        let peer = addr.peer;
+        let settled = self.peers.contains_key(&peer)
+            && self
+                .sessions
+                .get(&addr)
+                .is_some_and(|s| !s.is_unconfirmed_initiator());
+        if !settled {
+            if let Some(old) = self.sessions.remove(&addr) {
+                fresh.carry_over(old);
+            }
+            self.sessions.insert(addr, fresh);
+            let devices = self.joining.get_mut(&peer).and_then(|j| j.devices.take());
+            // We asked for this contact, by this invite.
+            let p = self
+                .peers
+                .entry(peer)
+                .or_insert_with(|| Peer::new(identity_dh));
+            p.request = false;
+            p.via = ShareLink::parse(link).map(|share| share.link().as_str().to_owned());
+            if p.devices.is_none() {
+                p.devices = devices;
+            }
+            self.persist_peer(&peer);
+            self.persist_session(addr);
+            self.requeue_for(addr);
+            self.send_hello(addr);
+        }
+        self.join_answered(peer, None);
+    }
+
+    pub(super) fn on_join_keys_failed(&mut self, peer: PeerId, reason: FailReason) {
+        self.join_answered(peer, Some(reason));
+    }
+
+    /// One of the host's devices answered, or could not be reached. The UI
+    /// hears once that the contact is there, or that joining failed when no
+    /// device of theirs could be.
+    fn join_answered(&mut self, peer: PeerId, failure: Option<FailReason>) {
+        let Some(joining) = self.joining.get_mut(&peer) else {
             return;
         };
-
-        let addr = contact(peer);
-        let settled = self
-            .sessions
-            .get(&addr)
-            .is_some_and(|s| !s.is_unconfirmed_initiator());
-        if settled && self.peers.contains_key(&peer) {
+        joining.outstanding = joining.outstanding.saturating_sub(1);
+        let first = failure.is_none() && !joining.added;
+        joining.added |= first;
+        let (finished, added, link) = (
+            joining.outstanding == 0,
+            joining.added,
+            joining.link.clone(),
+        );
+        if finished {
+            self.joining.remove(&peer);
+        }
+        if first {
             self.emit(Event::PeerAdded {
                 peer,
                 initiated_by_us: true,
             });
-            return;
+        } else if finished && !added {
+            let reason = failure.unwrap_or(FailReason::ServerError);
+            self.emit(Event::JoinFailed { link, reason });
         }
-        if let Some(old) = self.sessions.remove(&addr) {
-            fresh.carry_over(old);
-        }
-        self.sessions.insert(addr, fresh);
-        // We asked for this contact, by this invite.
-        let p = self
-            .peers
-            .entry(peer)
-            .or_insert_with(|| Peer::new(identity_dh));
-        p.request = false;
-        p.via = ShareLink::parse(&link).map(|share| share.link().as_str().to_owned());
-        self.persist_peer(&peer);
-        self.persist_session(addr);
-        self.requeue_for(&peer);
-        self.emit(Event::PeerAdded {
-            peer,
-            initiated_by_us: true,
-        });
-        self.send_hello(addr);
     }
 
-    /// A fresh session with a contact whose messages stopped decrypting.
-    /// Messages still waiting go out on it; theirs follow once they accept.
-    pub(super) fn on_repair_keys(
+    /// A fresh session with one device of a contact: one we had none with,
+    /// or one whose messages stopped decrypting. What waits for that device
+    /// goes out on it; theirs follow once it accepts.
+    pub(super) fn on_session_keys(
         &mut self,
-        peer: PeerId,
+        addr: Addr,
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        if !self.peers.contains_key(&peer) {
+        if !self.peers.contains_key(&addr.peer) {
             return;
         }
-        let Some((mut fresh, _)) = self.initiate(peer, base, opk) else {
+        let Some((mut fresh, _)) = self.initiate(addr, base, opk) else {
             return;
         };
-        let addr = contact(peer);
         if let Some(old) = self.sessions.remove(&addr) {
             fresh.carry_over(old);
         }
         self.sessions.insert(addr, fresh);
         self.persist_session(addr);
-        self.requeue_for(&peer);
+        self.requeue_for(addr);
         self.send_hello(addr);
     }
 
-    /// Our side of a new session with a device of `peer` from its published
-    /// bundle, and the identity key that bundle carries.
+    /// Our side of a new session with a device from its published bundle,
+    /// and the identity key that bundle carries.
     fn initiate(
         &mut self,
-        peer: PeerId,
+        addr: Addr,
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) -> Option<(Session, [u8; 32])> {
@@ -662,7 +394,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let bundle = PrekeyBundle::decode(&raw)
             .ok()
-            .filter(|b| b.identity == peer && b.device == contact(peer).device)?;
+            .filter(|b| b.identity == addr.peer && b.device == addr.device)?;
         let (ratchet, init) =
             handshake::initiate(&self.identity, self.device, &bundle, &mut self.rng).ok()?;
         Some((Session::new(ratchet, Some(init)), bundle.identity_dh))
@@ -684,31 +416,10 @@ impl<R: CryptoRngCore> Core<R> {
         s.hello_sent = true;
         self.persist_session(addr);
         let hello = self.hello(&addr.peer);
-        self.send_control(addr.peer, hello);
-    }
-
-    /// Sends `peer`'s waiting messages again on a freshly established
-    /// session: those in flight, and those the server took but the contact
-    /// never confirmed (they may have been lost with the old session).
-    fn requeue_for(&mut self, peer: &PeerId) {
-        let mut confirmed_none = Vec::new();
-        for item in self.outbox.values_mut().filter(|i| i.peer == *peer) {
-            item.in_flight = false;
-            item.next_try = 0;
-            if item.awaiting {
-                item.awaiting = false;
-                confirmed_none.push(item.msg_id);
-            }
-        }
-        for id in confirmed_none {
-            self.persist_outbox(&id);
-        }
-        // At once, so they arrive before anything written from now on.
-        self.flush_outbox();
+        self.send_control_to(addr, hello);
     }
 
     pub(super) fn on_relay(&mut self, sender: Addr, body: &Bytes, via_inbox: bool) {
-        let from = sender.peer;
         match RelayBody::decode(body) {
             Ok(RelayBody::Message {
                 init,
@@ -720,14 +431,14 @@ impl<R: CryptoRngCore> Core<R> {
                 index,
                 data,
             }) if !via_inbox => {
-                self.on_chunk(from, file_id, index, &data);
+                self.on_chunk(sender, file_id, index, &data);
             }
             Ok(RelayBody::Ack {
                 file_id,
                 next,
                 sack,
                 tag,
-            }) if !via_inbox => self.on_file_ack(from, file_id, next, sack, &tag),
+            }) if !via_inbox => self.on_file_ack(sender, file_id, next, sack, &tag),
             _ => {}
         }
     }
@@ -749,7 +460,7 @@ impl<R: CryptoRngCore> Core<R> {
                     reason: FailReason::DecryptFailed,
                 });
                 if init.is_none() {
-                    self.repair_session(from);
+                    self.repair_session(sender);
                 }
                 return;
             }
@@ -766,6 +477,15 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.dispatch(sender, env);
+        // A device their identity has not listed (to our knowledge): their
+        // list may have grown.
+        if self
+            .peers
+            .get(&from)
+            .is_some_and(|p| !p.lists(sender.device))
+        {
+            self.refresh_devices(from);
+        }
     }
 
     fn decrypt_existing(
@@ -852,7 +572,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         fresh.remember_ephemeral(init.ephemeral);
         self.sessions.insert(sender, fresh);
-        self.requeue_for(&from);
+        self.requeue_for(sender);
         self.send_hello(sender);
         Ok(pt)
     }
@@ -906,31 +626,33 @@ impl<R: CryptoRngCore> Core<R> {
                 self.send_receipt(from, msg_id);
             }
             Body::File { desc, kind } => {
-                self.on_file_offer(from, msg_id, sent_at_ms, desc, kind);
+                self.on_file_offer(sender, msg_id, sent_at_ms, desc, kind);
                 self.send_receipt(from, msg_id);
             }
-            Body::FileCtl(ctl) => self.on_file_ctl(from, ctl),
-            Body::Receipt { kind, ids } => self.on_receipt(from, kind, ids),
+            Body::FileCtl(ctl) => self.on_file_ctl(sender, ctl),
+            Body::Receipt { kind, ids } => self.on_receipt(sender, kind, ids),
+            Body::Devices { list, inboxes } => self.on_devices_body(from, &list, inboxes),
         }
     }
 
     /// The contact got (or read) our messages: they stop waiting, and their
     /// status moves on, never back from "read".
-    fn on_receipt(&mut self, from: PeerId, kind: ReceiptKind, ids: Vec<MsgId>) {
+    /// One device of a contact confirms our messages: they are done there.
+    fn on_receipt(&mut self, sender: Addr, kind: ReceiptKind, ids: Vec<MsgId>) {
         let status = match kind {
             ReceiptKind::Delivered => MessageStatus::Delivered,
             ReceiptKind::Read => MessageStatus::Read,
         };
         for id in ids {
-            if self.outbox.get(&id).is_some_and(|i| i.peer == from) {
-                self.drop_outbox(&id);
+            if self.outbox.get(&id).is_some_and(|i| i.peer == sender.peer) {
+                self.drop_target(id, sender.device);
             }
             if status == MessageStatus::Read {
                 self.read.insert(id);
             } else if self.read.contains(&id) {
                 continue;
             }
-            self.set_status(id, status);
+            self.report(id, status);
         }
     }
 
@@ -941,71 +663,6 @@ impl<R: CryptoRngCore> Core<R> {
                 kind: ReceiptKind::Delivered,
                 ids: vec![id],
             },
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retries_back_off_exponentially_with_jitter_up_to_a_cap() {
-        // `roll` 0 gives the bottom of the range, `roll` = half its top.
-        let bounds = |attempts, half| {
-            (
-                retry_delay(RETRY_FAILED_MS, attempts, 0),
-                retry_delay(RETRY_FAILED_MS, attempts, half),
-            )
-        };
-        assert_eq!(
-            bounds(0, 2_500),
-            (2_500, 5_000),
-            "the first wait is the base, jittered"
-        );
-        assert_eq!(bounds(1, 5_000), (5_000, 10_000), "each failure doubles it");
-        assert_eq!(
-            bounds(30, MAX_RETRY_MS / 2),
-            (MAX_RETRY_MS / 2, MAX_RETRY_MS),
-            "until the cap"
-        );
-        for roll in [1, 7, 12_345, u64::MAX / 3, u64::MAX] {
-            let d = retry_delay(RETRY_BUSY_MS, 3, roll);
-            assert!((8_000..=16_000).contains(&d), "{d}");
-        }
-    }
-
-    #[test]
-    fn outbox_items_from_before_receipts_load_as_not_yet_taken() {
-        #[derive(Serialize)]
-        struct V1<'a> {
-            msg_id: MsgId,
-            peer: PeerId,
-            envelope: &'a [u8],
-            tracked: bool,
-        }
-        let vault = crate::Vault::new([4; 32]);
-        let mut plain = vec![1u8];
-        let old = V1 {
-            msg_id: MsgId([1; 16]),
-            peer: PeerId([2; 32]),
-            envelope: b"padded envelope",
-            tracked: true,
-        };
-        plain.extend(postcard::to_allocvec(&old).unwrap());
-        let sealed = vault.seal_bytes(Table::Outbox, b"k", &plain, &mut rand::rngs::OsRng);
-        let item: OutboxItem = vault.open(Table::Outbox, b"k", &sealed).unwrap();
-        assert_eq!((item.msg_id, item.peer), (MsgId([1; 16]), PeerId([2; 32])));
-        assert_eq!(item.envelope, b"padded envelope");
-        assert!(item.tracked && !item.awaiting);
-
-        let mut other = vec![7u8];
-        other.extend(postcard::to_allocvec(&old).unwrap());
-        let sealed = vault.seal_bytes(Table::Outbox, b"k", &other, &mut rand::rngs::OsRng);
-        assert!(
-            vault
-                .open::<OutboxItem>(Table::Outbox, b"k", &sealed)
-                .is_err()
         );
     }
 }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use cypher_crypto::chunk::CHUNK_TAG_LEN;
 use cypher_crypto::{ChunkCipher, FileKey};
-use cypher_types::PeerId;
+use cypher_types::{Addr, DeviceId, PeerId};
 use serde::{Deserialize, Serialize};
 
 use crate::api::MediaKind;
@@ -137,6 +137,8 @@ struct Flight {
 
 pub(crate) struct Outgoing {
     pub peer: PeerId,
+    /// The device of theirs that accepted it; the file goes there only.
+    pub receiver: Option<DeviceId>,
     pub desc: FileDesc,
     pub kind: MediaKind,
     pub cipher: ChunkCipher,
@@ -159,6 +161,7 @@ impl Outgoing {
         let cipher = cipher_for(&desc);
         Self {
             peer,
+            receiver: None,
             kind,
             cipher,
             state: OutState::Offered,
@@ -275,10 +278,16 @@ impl Outgoing {
         acked_bytes(&self.acked, &self.desc)
     }
 
+    /// Where its chunks go, once a device accepted it.
+    pub(crate) fn to(&self) -> Option<Addr> {
+        self.receiver.map(|device| Addr::new(self.peer, device))
+    }
+
     pub(crate) fn to_record(&self) -> TransferRecord {
         TransferRecord {
             outgoing: true,
             peer: self.peer,
+            device: self.receiver,
             desc: self.desc.clone(),
             kind: self.kind.clone(),
             done: self.acked.to_bytes(),
@@ -292,6 +301,7 @@ impl Outgoing {
         t.stored_copy = t.acked.clone();
         if r.accepted {
             t.state = OutState::Stalled;
+            t.receiver = Some(r.device.unwrap_or(DeviceId::FIRST));
         }
         t
     }
@@ -305,6 +315,8 @@ pub(crate) enum InState {
 
 pub(crate) struct Incoming {
     pub peer: PeerId,
+    /// The device of theirs that offered it, and sends its chunks.
+    pub device: DeviceId,
     pub desc: FileDesc,
     pub kind: MediaKind,
     pub cipher: ChunkCipher,
@@ -326,10 +338,11 @@ pub(crate) enum ChunkOutcome {
 }
 
 impl Incoming {
-    pub(crate) fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
+    pub(crate) fn new(from: Addr, desc: FileDesc, kind: MediaKind) -> Self {
         let received = Bitmap::new(desc.chunk_count());
         Self {
-            peer,
+            peer: from.peer,
+            device: from.device,
             cipher: cipher_for(&desc),
             kind,
             state: InState::Offered,
@@ -402,10 +415,16 @@ impl Incoming {
         acked_bytes(&self.received, &self.desc)
     }
 
+    /// The device it comes from.
+    pub(crate) fn from(&self) -> Addr {
+        Addr::new(self.peer, self.device)
+    }
+
     pub(crate) fn to_record(&self) -> TransferRecord {
         TransferRecord {
             outgoing: false,
             peer: self.peer,
+            device: Some(self.device),
             desc: self.desc.clone(),
             kind: self.kind.clone(),
             done: self.received.to_bytes(),
@@ -414,7 +433,8 @@ impl Incoming {
     }
 
     pub(crate) fn from_record(r: TransferRecord) -> Self {
-        let mut t = Self::new(r.peer, r.desc, r.kind);
+        let from = Addr::new(r.peer, r.device.unwrap_or(DeviceId::FIRST));
+        let mut t = Self::new(from, r.desc, r.kind);
         t.received = Bitmap::from_bytes(t.received.len(), &r.done);
         if r.accepted {
             t.state = InState::Receiving;
@@ -427,6 +447,8 @@ impl Incoming {
 pub(crate) struct TransferRecord {
     pub outgoing: bool,
     pub peer: PeerId,
+    /// Incoming: the device it comes from; outgoing: the one that accepted.
+    pub device: Option<DeviceId>,
     pub desc: FileDesc,
     pub kind: MediaKind,
     pub done: Vec<u8>,
@@ -434,7 +456,34 @@ pub(crate) struct TransferRecord {
 }
 
 impl crate::Record for TransferRecord {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
+
+    /// Version 1 went to or came from the contact's one device.
+    fn upgrade(version: u8, body: &[u8]) -> Result<Self, crate::CoreError> {
+        #[derive(Deserialize)]
+        struct V1 {
+            outgoing: bool,
+            peer: PeerId,
+            desc: FileDesc,
+            kind: MediaKind,
+            done: Vec<u8>,
+            accepted: bool,
+        }
+        if version != 1 {
+            return Err(crate::CoreError::Storage);
+        }
+        let v1: V1 = postcard::from_bytes(body).map_err(|_| crate::CoreError::Storage)?;
+        let device = (!v1.outgoing || v1.accepted).then_some(DeviceId::FIRST);
+        Ok(Self {
+            outgoing: v1.outgoing,
+            peer: v1.peer,
+            device,
+            desc: v1.desc,
+            kind: v1.kind,
+            done: v1.done,
+            accepted: v1.accepted,
+        })
+    }
 }
 
 pub(crate) fn cipher_for(desc: &FileDesc) -> ChunkCipher {
@@ -532,8 +581,12 @@ mod tests {
         assert!(out.schedule(t).is_empty());
     }
 
+    fn sender() -> Addr {
+        Addr::new(PeerId([3; 32]), DeviceId(2))
+    }
+
     fn receiving(d: &FileDesc) -> Incoming {
-        let mut inc = Incoming::new(PeerId([3; 32]), d.clone(), MediaKind::File);
+        let mut inc = Incoming::new(sender(), d.clone(), MediaKind::File);
         inc.state = InState::Receiving;
         inc
     }
@@ -541,7 +594,7 @@ mod tests {
     #[test]
     fn receiver_ignores_chunks_before_accepting() {
         let d = desc(2500, 1024);
-        let mut inc = Incoming::new(PeerId([3; 32]), d.clone(), MediaKind::File);
+        let mut inc = Incoming::new(sender(), d.clone(), MediaKind::File);
         assert!(matches!(
             inc.on_chunk(0, &seal(&d, 0)),
             ChunkOutcome::Rejected
@@ -605,7 +658,7 @@ mod tests {
     fn media_is_stored_sealed_with_tag_stride() {
         let d = desc(100, 64);
         let mut inc = Incoming::new(
-            PeerId([3; 32]),
+            sender(),
             d.clone(),
             MediaKind::Voice {
                 duration_ms: 1,
@@ -633,9 +686,10 @@ mod tests {
         assert_eq!(restored.state, OutState::Stalled);
         assert_eq!(restored.acked_bytes(), 1024);
 
-        let mut inc = Incoming::new(PeerId([3; 32]), d, MediaKind::File);
+        let mut inc = Incoming::new(sender(), d, MediaKind::File);
         inc.state = InState::Receiving;
         let restored = Incoming::from_record(inc.to_record());
         assert_eq!(restored.state, InState::Receiving);
+        assert_eq!(restored.from(), sender(), "the sending device is kept");
     }
 }

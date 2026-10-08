@@ -173,6 +173,9 @@ pub enum Event {
     Connected,
     Disconnected,
     Superseded,
+    /// This device was removed from its identity's list: it stopped, and
+    /// stays stopped.
+    DeviceUnlinked,
     /// The anonymous relay channel went up or down.
     Onion {
         up: bool,

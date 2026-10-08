@@ -1,10 +1,10 @@
 use bytes::Bytes;
 use cypher_crypto::FileKey;
 use cypher_crypto::chunk::CHUNK_TAG_LEN;
-use cypher_types::{FileId, MsgId, PeerId};
+use cypher_types::{Addr, FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
-use super::{Core, contact};
+use super::Core;
 use crate::api::{Content, Effect, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
 use crate::envelope::{
     Body, FILE_CHUNK_SIZE, FileCtl, FileDesc, MAX_FILE_SIZE, MAX_INLINE_LEN, MAX_MIME_LEN,
@@ -139,13 +139,13 @@ impl<R: CryptoRngCore> Core<R> {
 
     pub(super) fn on_file_offer(
         &mut self,
-        from: PeerId,
+        sender: Addr,
         msg_id: MsgId,
         sent_at_ms: u64,
         desc: FileDesc,
         kind: MediaKind,
     ) {
-        let file_id = desc.file_id;
+        let (from, file_id) = (sender.peer, desc.file_id);
         if self.incoming.contains_key(&file_id) || self.outgoing.contains_key(&file_id) {
             return;
         }
@@ -174,7 +174,7 @@ impl<R: CryptoRngCore> Core<R> {
 
         let media = kind.is_media();
         let (size, mime) = (desc.size, desc.mime.clone());
-        let inc = Incoming::new(from, desc, kind);
+        let inc = Incoming::new(sender, desc, kind);
         self.persist_transfer_record(file_id, &inc.to_record());
         self.incoming.insert(file_id, inc);
         if media {
@@ -222,7 +222,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         inc.state = InState::Receiving;
-        let (peer, len, sealed) = (inc.peer, inc.stored_len(), inc.sealed_at_rest());
+        let (from, len, sealed) = (inc.from(), inc.stored_len(), inc.sealed_at_rest());
         if sealed {
             let key = MediaKey::from_desc(&inc.desc);
             self.persist_media(&key);
@@ -233,8 +233,8 @@ impl<R: CryptoRngCore> Core<R> {
             sealed,
         });
         self.persist_incoming(file_id);
-        self.send_control(
-            peer,
+        self.send_control_to(
+            from,
             Body::FileCtl(FileCtl::Accept {
                 file_id: *file_id,
                 have: Vec::new(),
@@ -242,20 +242,44 @@ impl<R: CryptoRngCore> Core<R> {
         );
     }
 
-    pub(super) fn on_file_ctl(&mut self, from: PeerId, ctl: FileCtl) {
+    /// One device of the contact accepted or refused a file. It goes to the
+    /// first device that accepts; another that accepts later is told no.
+    pub(super) fn on_file_ctl(&mut self, sender: Addr, ctl: FileCtl) {
         match ctl {
             FileCtl::Accept { file_id, have } => {
-                let Some(out) = self.outgoing.get_mut(&file_id).filter(|o| o.peer == from) else {
+                let Some(out) = self
+                    .outgoing
+                    .get_mut(&file_id)
+                    .filter(|o| o.peer == sender.peer)
+                else {
+                    // Finished, or taken by another device: the contact's
+                    // device would wait for it forever.
+                    if self.peers.contains_key(&sender.peer) {
+                        let cancel = Body::FileCtl(FileCtl::Cancel { file_id });
+                        self.send_control_to(sender, cancel);
+                    }
                     return;
                 };
+                if *out.receiver.get_or_insert(sender.device) != sender.device {
+                    let cancel = Body::FileCtl(FileCtl::Cancel { file_id });
+                    return self.send_control_to(sender, cancel);
+                }
                 out.accept(&have);
                 let record = out.to_record();
                 self.persist_transfer_record(file_id, &record);
                 self.pump(&file_id);
             }
             FileCtl::Cancel { file_id } => {
-                let ours = self.outgoing.get(&file_id).is_some_and(|o| o.peer == from)
-                    || self.incoming.get(&file_id).is_some_and(|i| i.peer == from);
+                // A refusal ends an offer only when no other device of theirs
+                // could still take it.
+                let only = self.devices_of(sender.peer) == [sender.device];
+                let ours = self.outgoing.get(&file_id).is_some_and(|o| {
+                    o.peer == sender.peer
+                        && (o.receiver == Some(sender.device) || o.receiver.is_none() && only)
+                }) || self
+                    .incoming
+                    .get(&file_id)
+                    .is_some_and(|i| i.from() == sender);
                 if ours {
                     self.drop_transfer(&file_id, Some(FailReason::Cancelled), false);
                 }
@@ -264,14 +288,45 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub(super) fn cancel_transfer(&mut self, file_id: &FileId) {
-        let peer = self
-            .outgoing
-            .get(file_id)
-            .map(|o| o.peer)
-            .or_else(|| self.incoming.get(file_id).map(|i| i.peer));
-        if let Some(peer) = peer {
-            self.send_control(peer, Body::FileCtl(FileCtl::Cancel { file_id: *file_id }));
+        if self.tell_cancelled(file_id) {
             self.drop_transfer(file_id, Some(FailReason::Cancelled), false);
+        }
+    }
+
+    /// Tells whoever takes part in a transfer that it ends: the device it
+    /// comes from or goes to, or every device of theirs while none accepted.
+    fn tell_cancelled(&mut self, file_id: &FileId) -> bool {
+        let cancel = Body::FileCtl(FileCtl::Cancel { file_id: *file_id });
+        if let Some(out) = self.outgoing.get(file_id) {
+            match out.to() {
+                Some(to) => self.send_control_to(to, cancel),
+                None => self.send_control(out.peer, cancel),
+            }
+            true
+        } else if let Some(from) = self.incoming.get(file_id).map(Incoming::from) {
+            self.send_control_to(from, cancel);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Ends the transfers with one device of a contact.
+    pub(super) fn cancel_transfers_with_device(&mut self, addr: Addr) {
+        let ids: Vec<FileId> = self
+            .outgoing
+            .iter()
+            .filter(|(_, o)| o.to() == Some(addr))
+            .map(|(id, _)| *id)
+            .chain(
+                self.incoming
+                    .iter()
+                    .filter(|(_, i)| i.from() == addr)
+                    .map(|(id, _)| *id),
+            )
+            .collect();
+        for id in ids {
+            self.drop_transfer(&id, Some(FailReason::Cancelled), false);
         }
     }
 
@@ -294,8 +349,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub(super) fn fail_outgoing(&mut self, file_id: &FileId, reason: FailReason) {
-        if let Some(peer) = self.outgoing.get(file_id).map(|o| o.peer) {
-            self.send_control(peer, Body::FileCtl(FileCtl::Cancel { file_id: *file_id }));
+        if self.outgoing.contains_key(file_id) && self.tell_cancelled(file_id) {
             self.drop_transfer(file_id, Some(reason), false);
         }
     }
@@ -380,10 +434,10 @@ impl<R: CryptoRngCore> Core<R> {
         };
         buf.reserve_exact(CHUNK_TAG_LEN);
         buf.extend_from_slice(&tag);
-        let Some(headroom) = buf.first_chunk_mut::<CHUNK_HEADROOM>() else {
+        let (Some(to), Some(headroom)) = (out.to(), buf.first_chunk_mut::<CHUNK_HEADROOM>()) else {
             return;
         };
-        relay::write_chunk_headers(headroom, contact(out.peer), &file_id, index);
+        relay::write_chunk_headers(headroom, to, &file_id, index);
         let frame = Bytes::from(buf);
 
         if out.kind.is_media() && out.stored_copy.set(index) {
@@ -399,8 +453,12 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    pub(super) fn on_chunk(&mut self, from: PeerId, file_id: FileId, index: u32, data: &[u8]) {
-        let Some(inc) = self.incoming.get_mut(&file_id).filter(|i| i.peer == from) else {
+    pub(super) fn on_chunk(&mut self, sender: Addr, file_id: FileId, index: u32, data: &[u8]) {
+        let Some(inc) = self
+            .incoming
+            .get_mut(&file_id)
+            .filter(|i| i.from() == sender)
+        else {
             return;
         };
         match inc.on_chunk(index, data) {
@@ -440,7 +498,7 @@ impl<R: CryptoRngCore> Core<R> {
         };
         let (next, sack) = inc.ack_state();
         let tag = inc.cipher.ack_tag(next, sack);
-        let frame = relay::ack_frame(contact(inc.peer), file_id, next, sack, &tag);
+        let frame = relay::ack_frame(inc.from(), file_id, next, sack, &tag);
         if self.is_ready() {
             self.effects.push(Effect::Transmit(frame));
         }
@@ -448,13 +506,17 @@ impl<R: CryptoRngCore> Core<R> {
 
     pub(super) fn on_file_ack(
         &mut self,
-        from: PeerId,
+        sender: Addr,
         file_id: FileId,
         next: u32,
         sack: u64,
         tag: &[u8; 16],
     ) {
-        let Some(out) = self.outgoing.get_mut(&file_id).filter(|o| o.peer == from) else {
+        let Some(out) = self
+            .outgoing
+            .get_mut(&file_id)
+            .filter(|o| o.to() == Some(sender))
+        else {
             return;
         };
         if !out.cipher.verify_ack(next, sack, tag) {
@@ -506,14 +568,14 @@ impl<R: CryptoRngCore> Core<R> {
         for id in resumable {
             self.pump(&id);
         }
-        let receiving: Vec<(FileId, PeerId, Vec<u8>)> = self
+        let receiving: Vec<(FileId, Addr, Vec<u8>)> = self
             .incoming
             .iter()
             .filter(|(_, i)| i.state == InState::Receiving)
-            .map(|(id, i)| (*id, i.peer, i.received.to_bytes()))
+            .map(|(id, i)| (*id, i.from(), i.received.to_bytes()))
             .collect();
-        for (file_id, peer, have) in receiving {
-            self.send_control(peer, Body::FileCtl(FileCtl::Accept { file_id, have }));
+        for (file_id, from, have) in receiving {
+            self.send_control_to(from, Body::FileCtl(FileCtl::Accept { file_id, have }));
         }
     }
 

@@ -56,6 +56,12 @@ pub enum Body {
         kind: ReceiptKind,
         ids: Vec<MsgId>,
     },
+    /// The sender's identity lists these devices now: its signed list, and
+    /// the inbox of each device (`device id`, inbox id).
+    Devices {
+        list: Vec<u8>,
+        inboxes: Vec<(u32, [u8; 32])>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +178,10 @@ impl Envelope {
                 have.len() <= (u32::MAX as usize).div_ceil(8)
             }
             Body::Receipt { ids, .. } => ids.len() <= MAX_RECEIPT_IDS,
+            Body::Devices { list, inboxes } => {
+                list.len() <= cypher_wire::MAX_DEVICE_LIST_LEN
+                    && inboxes.len() <= cypher_types::MAX_DEVICES
+            }
         };
         if ok { Ok(()) } else { Err(CoreError::Invalid) }
     }
