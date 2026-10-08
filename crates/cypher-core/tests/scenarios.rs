@@ -1100,10 +1100,39 @@ fn a_device_taken_off_the_list_stops_and_is_forgotten() {
     assert_eq!(w.texts(A).last().unwrap(), "to the one left");
 }
 
-/// A file offered to a contact with two devices goes to the one that
-/// accepts first; the other, accepting later, is told it is not for it.
+/// A voice note is taken by every device of the contact at once, each at
+/// its own pace, and is sent in full to each.
 #[test]
-fn a_file_goes_to_the_device_that_accepts_it_first() {
+fn a_voice_note_reaches_every_device() {
+    let mut w = World::new(2);
+    let b2 = w.add_device(B, 2);
+    w.pair(B, A);
+    let voice = pattern(200 * 1024);
+    let kind = MediaKind::Voice {
+        duration_ms: 5_000,
+        waveform: vec![3; 64],
+    };
+    let file_id = offer_file(&mut w, A, B, voice, "voice.webm", kind);
+    let a_copy = &w.clients[A].sinks[&file_id];
+    for device in [B, b2] {
+        assert_eq!(
+            &w.clients[device].sinks[&file_id], a_copy,
+            "device {device}"
+        );
+        assert_eq!(w.clients[device].closed.get(&file_id), Some(&true));
+    }
+    let completions = w.clients[A]
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::TransferComplete { .. }))
+        .count();
+    assert_eq!(completions, 1, "the sender sees one transfer");
+}
+
+/// A file offered to a contact with two devices goes to the one that
+/// accepts it; the other, accepting once it was sent, is told it is gone.
+#[test]
+fn a_file_accepted_after_it_was_sent_is_gone() {
     let mut w = World::new(2);
     let b2 = w.add_device(B, 2);
     w.pair(B, A);

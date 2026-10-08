@@ -164,6 +164,8 @@ pub struct Core<R> {
     /// Our messages the contact has read, so a late receipt cannot undo it.
     read: RecentIds,
     progress_at: HashMap<FileId, u64>,
+    /// Chunks read from disk for the devices waiting for them.
+    reads: HashMap<(FileId, u32), Vec<DeviceId>>,
     anon: Anon,
     push: PushState,
     /// The name this user goes by, sent to contacts with `Hello`.
@@ -228,6 +230,7 @@ impl<R: CryptoRngCore> Core<R> {
             recent: RecentIds::default(),
             read: RecentIds::default(),
             progress_at: HashMap::new(),
+            reads: HashMap::new(),
             anon: Anon::default(),
             push: PushState::default(),
             profile_name: own.profile_name,

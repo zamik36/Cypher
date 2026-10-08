@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use cypher_crypto::FileKey;
 use cypher_crypto::chunk::CHUNK_TAG_LEN;
-use cypher_types::{Addr, FileId, MsgId, PeerId};
+use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
 use super::Core;
@@ -15,8 +15,7 @@ use crate::media::MediaKey;
 use crate::relay::{self, CHUNK_HEADROOM};
 use crate::store::{StoreOp, Table};
 use crate::transfer::{
-    AckOutcome, ChunkOutcome, InState, Incoming, OutState, Outgoing, chunk_offset, cipher_for,
-    stored_len,
+    AckOutcome, ChunkOutcome, InState, Incoming, Outgoing, chunk_offset, cipher_for, stored_len,
 };
 
 const PROGRESS_INTERVAL_MS: u64 = 100;
@@ -260,28 +259,20 @@ impl<R: CryptoRngCore> Core<R> {
                     }
                     return;
                 };
-                if *out.receiver.get_or_insert(sender.device) != sender.device {
-                    let cancel = Body::FileCtl(FileCtl::Cancel { file_id });
-                    return self.send_control_to(sender, cancel);
-                }
-                out.accept(&have);
+                out.accept(sender.device, &have);
                 let record = out.to_record();
                 self.persist_transfer_record(file_id, &record);
                 self.pump(&file_id);
             }
             FileCtl::Cancel { file_id } => {
-                // A refusal ends an offer only when no other device of theirs
-                // could still take it.
-                let only = self.devices_of(sender.peer) == [sender.device];
-                let ours = self.outgoing.get(&file_id).is_some_and(|o| {
-                    o.peer == sender.peer
-                        && (o.receiver == Some(sender.device) || o.receiver.is_none() && only)
-                }) || self
+                if self
                     .incoming
                     .get(&file_id)
-                    .is_some_and(|i| i.from() == sender);
-                if ours {
+                    .is_some_and(|i| i.from() == sender)
+                {
                     self.drop_transfer(&file_id, Some(FailReason::Cancelled), false);
+                } else {
+                    self.stop_sending(file_id, sender);
                 }
             }
         }
@@ -293,15 +284,34 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    /// One device of theirs refused a file, or stopped taking it. The file
+    /// stays offered to the others: it ends when the last device receiving it
+    /// stops and no other could still take it.
+    fn stop_sending(&mut self, file_id: FileId, sender: Addr) {
+        let Some(out) = self
+            .outgoing
+            .get_mut(&file_id)
+            .filter(|o| o.peer == sender.peer)
+        else {
+            return;
+        };
+        out.receivers.remove(&sender.device);
+        let idle = out.receivers.is_empty();
+        let others = self
+            .devices_of(sender.peer)
+            .into_iter()
+            .any(|d| d != sender.device);
+        if idle && !others {
+            self.drop_transfer(&file_id, Some(FailReason::Cancelled), false);
+        }
+    }
+
     /// Tells whoever takes part in a transfer that it ends: the device it
-    /// comes from or goes to, or every device of theirs while none accepted.
+    /// comes from, or every device of theirs it was offered to.
     fn tell_cancelled(&mut self, file_id: &FileId) -> bool {
         let cancel = Body::FileCtl(FileCtl::Cancel { file_id: *file_id });
-        if let Some(out) = self.outgoing.get(file_id) {
-            match out.to() {
-                Some(to) => self.send_control_to(to, cancel),
-                None => self.send_control(out.peer, cancel),
-            }
+        if let Some(peer) = self.outgoing.get(file_id).map(|o| o.peer) {
+            self.send_control(peer, cancel);
             true
         } else if let Some(from) = self.incoming.get(file_id).map(Incoming::from) {
             self.send_control_to(from, cancel);
@@ -313,17 +323,14 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Ends the transfers with one device of a contact.
     pub(super) fn cancel_transfers_with_device(&mut self, addr: Addr) {
+        for out in self.outgoing.values_mut().filter(|o| o.peer == addr.peer) {
+            out.receivers.remove(&addr.device);
+        }
         let ids: Vec<FileId> = self
-            .outgoing
+            .incoming
             .iter()
-            .filter(|(_, o)| o.to() == Some(addr))
+            .filter(|(_, i)| i.from() == addr)
             .map(|(id, _)| *id)
-            .chain(
-                self.incoming
-                    .iter()
-                    .filter(|(_, i)| i.from() == addr)
-                    .map(|(id, _)| *id),
-            )
             .collect();
         for id in ids {
             self.drop_transfer(&id, Some(FailReason::Cancelled), false);
@@ -395,16 +402,26 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(out) = self.outgoing.get_mut(file_id) else {
             return;
         };
-        let indices = out.schedule(self.now);
-        for index in indices {
-            self.request_chunk(file_id, index);
+        let wanted = out.schedule(self.now);
+        for (device, index) in wanted {
+            self.request_chunk(file_id, device, index);
         }
     }
 
-    fn request_chunk(&mut self, file_id: &FileId, index: u32) {
+    /// Asks the driver for a chunk `device` is due; devices waiting for the
+    /// same chunk share one read.
+    fn request_chunk(&mut self, file_id: &FileId, device: DeviceId, index: u32) {
         let Some(out) = self.outgoing.get(file_id) else {
             return;
         };
+        let waiting = self.reads.entry((*file_id, index)).or_default();
+        let reading = !waiting.is_empty();
+        if !waiting.contains(&device) {
+            waiting.push(device);
+        }
+        if reading {
+            return;
+        }
         self.effects.push(Effect::ReadChunk {
             file_id: *file_id,
             index,
@@ -415,12 +432,15 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// Seals the chunk in place inside the driver's read buffer and sends it
-    /// as a complete frame: the chunk data is never copied after the disk read.
+    /// as a complete frame to each device waiting for it: for one device the
+    /// chunk data is never copied after the disk read.
     pub(super) fn on_chunk_read(&mut self, file_id: FileId, index: u32, mut buf: Vec<u8>) {
+        let waiting = self.reads.remove(&(file_id, index)).unwrap_or_default();
         let Some(out) = self.outgoing.get_mut(&file_id) else {
             return;
         };
-        if out.state != OutState::Sending {
+        let devices: Vec<DeviceId> = waiting.into_iter().filter(|d| out.sending_to(*d)).collect();
+        if devices.is_empty() {
             return;
         }
         let expected = CHUNK_HEADROOM + out.desc.chunk_len(index) as usize;
@@ -434,13 +454,24 @@ impl<R: CryptoRngCore> Core<R> {
         };
         buf.reserve_exact(CHUNK_TAG_LEN);
         buf.extend_from_slice(&tag);
-        let (Some(to), Some(headroom)) = (out.to(), buf.first_chunk_mut::<CHUNK_HEADROOM>()) else {
-            return;
-        };
-        relay::write_chunk_headers(headroom, to, &file_id, index);
-        let frame = Bytes::from(buf);
+        let mut frames = Vec::with_capacity(devices.len());
+        for (n, device) in devices.iter().enumerate() {
+            let mut frame = if n + 1 == devices.len() {
+                std::mem::take(&mut buf)
+            } else {
+                buf.clone()
+            };
+            let Some(headroom) = frame.first_chunk_mut::<CHUNK_HEADROOM>() else {
+                return;
+            };
+            relay::write_chunk_headers(headroom, out.to(*device), &file_id, index);
+            frames.push(Bytes::from(frame));
+        }
 
-        if out.kind.is_media() && out.stored_copy.set(index) {
+        if out.kind.is_media()
+            && out.stored_copy.set(index)
+            && let Some(frame) = frames.first()
+        {
             let offset = chunk_offset(&out.desc, index, true);
             self.effects.push(Effect::WriteChunk {
                 file_id,
@@ -449,7 +480,8 @@ impl<R: CryptoRngCore> Core<R> {
             });
         }
         if self.is_ready() {
-            self.effects.push(Effect::Transmit(frame));
+            self.effects
+                .extend(frames.into_iter().map(Effect::Transmit));
         }
     }
 
@@ -515,23 +547,31 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(out) = self
             .outgoing
             .get_mut(&file_id)
-            .filter(|o| o.to() == Some(sender))
+            .filter(|o| o.peer == sender.peer)
         else {
             return;
         };
         if !out.cipher.verify_ack(next, sack, tag) {
             return;
         }
-        match out.on_ack(next, sack) {
+        match out.on_ack(sender.device, next, sack) {
             AckOutcome::Ignored => {}
             AckOutcome::Progress => {
                 let (bytes, total) = (out.acked_bytes(), out.desc.size);
                 self.report_progress(file_id, bytes, total);
                 self.pump(&file_id);
             }
+            // That device has it all; the transfer is done once every device
+            // that took it has.
             AckOutcome::Complete => {
-                let copy_complete = !out.kind.is_media() || out.stored_copy.is_full();
-                self.drop_transfer(&file_id, None, copy_complete);
+                out.receivers.remove(&sender.device);
+                if out.receivers.is_empty() {
+                    let copy_complete = !out.kind.is_media() || out.stored_copy.is_full();
+                    self.drop_transfer(&file_id, None, copy_complete);
+                } else {
+                    let record = out.to_record();
+                    self.persist_transfer_record(file_id, &record);
+                }
             }
         }
     }
@@ -540,12 +580,10 @@ impl<R: CryptoRngCore> Core<R> {
         let now = self.now;
         let mut resend = Vec::new();
         for (id, out) in &mut self.outgoing {
-            if out.state == OutState::Sending {
-                resend.extend(out.expired(now).into_iter().map(|i| (*id, i)));
-            }
+            resend.extend(out.expired(now).into_iter().map(|(d, i)| (*id, d, i)));
         }
-        for (id, index) in resend {
-            self.request_chunk(&id, index);
+        for (id, device, index) in resend {
+            self.request_chunk(&id, device, index);
         }
     }
 
@@ -553,17 +591,15 @@ impl<R: CryptoRngCore> Core<R> {
         for out in self.outgoing.values_mut() {
             out.pause();
         }
+        // Reads still on their way come back to nobody.
+        self.reads.clear();
     }
 
     pub(super) fn resume_transfers(&mut self) {
         let resumable: Vec<FileId> = self
             .outgoing
             .iter_mut()
-            .filter(|(_, o)| o.state == OutState::Stalled)
-            .map(|(id, o)| {
-                o.resume();
-                *id
-            })
+            .filter_map(|(id, o)| o.resume().then_some(*id))
             .collect();
         for id in resumable {
             self.pump(&id);

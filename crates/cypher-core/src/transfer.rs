@@ -122,9 +122,8 @@ fn window_chunks(chunk_size: u32) -> usize {
         .clamp(MIN_WINDOW, MAX_WINDOW)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutState {
-    Offered,
     Sending,
     Stalled,
 }
@@ -135,75 +134,35 @@ struct Flight {
     retries: u8,
 }
 
-pub(crate) struct Outgoing {
-    pub peer: PeerId,
-    /// The device of theirs that accepted it; the file goes there only.
-    pub receiver: Option<DeviceId>,
-    pub desc: FileDesc,
-    pub kind: MediaKind,
-    pub cipher: ChunkCipher,
-    pub state: OutState,
-    acked: Bitmap,
-    in_flight: BTreeMap<u32, Flight>,
-    /// Chunks already written to the sender's own sealed media copy.
-    pub stored_copy: Bitmap,
-}
-
 pub(crate) enum AckOutcome {
     Ignored,
     Progress,
     Complete,
 }
 
-impl Outgoing {
-    pub(crate) fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
-        let count = desc.chunk_count();
-        let cipher = cipher_for(&desc);
+/// One receiving device's progress through an outgoing file.
+pub(crate) struct Window {
+    pub state: OutState,
+    acked: Bitmap,
+    in_flight: BTreeMap<u32, Flight>,
+}
+
+impl Window {
+    /// A device accepted (or asked to resume) with a bitmap of the chunks it
+    /// holds.
+    fn new(chunks: u32, have: &[u8]) -> Self {
         Self {
-            peer,
-            receiver: None,
-            kind,
-            cipher,
-            state: OutState::Offered,
-            acked: Bitmap::new(count),
+            state: OutState::Sending,
+            acked: Bitmap::from_bytes(chunks, have),
             in_flight: BTreeMap::new(),
-            stored_copy: Bitmap::new(count),
-            desc,
         }
     }
 
-    /// Peer accepted (or asked to resume) with a bitmap of chunks it holds.
-    pub(crate) fn accept(&mut self, have: &[u8]) {
-        let theirs = Bitmap::from_bytes(self.acked.len(), have);
-        for i in 0..self.acked.len() {
-            if theirs.get(i) {
-                self.acked.set(i);
-            }
-        }
-        self.in_flight.clear();
-        self.state = OutState::Sending;
-    }
-
-    /// Connection lost: forget in-flight chunks until the session is back.
-    pub(crate) fn pause(&mut self) {
-        if self.state == OutState::Sending {
-            self.in_flight.clear();
-            self.state = OutState::Stalled;
-        }
-    }
-
-    pub(crate) fn resume(&mut self) {
-        if self.state == OutState::Stalled {
-            self.state = OutState::Sending;
-        }
-    }
-
-    /// Chunk indices the driver should read now, marking them in flight.
-    pub(crate) fn schedule(&mut self, now_ms: u64) -> Vec<u32> {
+    /// Chunk indices to send it now, marking them in flight.
+    fn schedule(&mut self, now_ms: u64, window: usize) -> Vec<u32> {
         if self.state != OutState::Sending {
             return Vec::new();
         }
-        let window = window_chunks(self.desc.chunk_size);
         let mut out = Vec::new();
         let mut i = 0;
         while self.in_flight.len() < window {
@@ -226,7 +185,7 @@ impl Outgoing {
         out
     }
 
-    pub(crate) fn on_ack(&mut self, next: u32, sack: u64) -> AckOutcome {
+    fn on_ack(&mut self, next: u32, sack: u64) -> AckOutcome {
         if self.state != OutState::Sending || next > self.acked.len() {
             return AckOutcome::Ignored;
         }
@@ -252,8 +211,11 @@ impl Outgoing {
         }
     }
 
-    /// Returns chunks to resend; flips to `Stalled` when retries run out.
-    pub(crate) fn expired(&mut self, now_ms: u64) -> Vec<u32> {
+    /// Chunks to resend; flips to `Stalled` when retries run out.
+    fn expired(&mut self, now_ms: u64) -> Vec<u32> {
+        if self.state != OutState::Sending {
+            return Vec::new();
+        }
         let mut resend = Vec::new();
         for (&i, f) in &mut self.in_flight {
             if now_ms.saturating_sub(f.sent_ms) < RTO_MS << f.retries.min(4) {
@@ -273,35 +235,132 @@ impl Outgoing {
         }
         resend
     }
+}
 
-    pub(crate) fn acked_bytes(&self) -> u64 {
-        acked_bytes(&self.acked, &self.desc)
+/// A file offered to a contact. Each of their devices that accepts it gets
+/// it at its own pace; chunks are encrypted with the file's key, so the
+/// same ciphertext serves them all.
+pub(crate) struct Outgoing {
+    pub peer: PeerId,
+    pub desc: FileDesc,
+    pub kind: MediaKind,
+    pub cipher: ChunkCipher,
+    /// The devices of theirs that accepted it.
+    pub receivers: BTreeMap<DeviceId, Window>,
+    /// Chunks already written to the sender's own sealed media copy.
+    pub stored_copy: Bitmap,
+}
+
+impl Outgoing {
+    pub(crate) fn new(peer: PeerId, desc: FileDesc, kind: MediaKind) -> Self {
+        let count = desc.chunk_count();
+        let cipher = cipher_for(&desc);
+        Self {
+            peer,
+            kind,
+            cipher,
+            receivers: BTreeMap::new(),
+            stored_copy: Bitmap::new(count),
+            desc,
+        }
     }
 
-    /// Where its chunks go, once a device accepted it.
-    pub(crate) fn to(&self) -> Option<Addr> {
-        self.receiver.map(|device| Addr::new(self.peer, device))
+    /// `device` accepted, or asked to resume, holding the chunks in `have`.
+    pub(crate) fn accept(&mut self, device: DeviceId, have: &[u8]) {
+        let window = Window::new(self.desc.chunk_count(), have);
+        self.receivers.insert(device, window);
+    }
+
+    /// Whether `device` is receiving it now.
+    pub(crate) fn sending_to(&self, device: DeviceId) -> bool {
+        self.receivers
+            .get(&device)
+            .is_some_and(|w| w.state == OutState::Sending)
+    }
+
+    /// Chunks to send now, to which device.
+    pub(crate) fn schedule(&mut self, now_ms: u64) -> Vec<(DeviceId, u32)> {
+        let window = window_chunks(self.desc.chunk_size);
+        self.receivers
+            .iter_mut()
+            .flat_map(|(device, w)| w.schedule(now_ms, window).into_iter().map(|i| (*device, i)))
+            .collect()
+    }
+
+    pub(crate) fn on_ack(&mut self, device: DeviceId, next: u32, sack: u64) -> AckOutcome {
+        self.receivers
+            .get_mut(&device)
+            .map_or(AckOutcome::Ignored, |w| w.on_ack(next, sack))
+    }
+
+    /// Chunks to resend, to which device.
+    pub(crate) fn expired(&mut self, now_ms: u64) -> Vec<(DeviceId, u32)> {
+        self.receivers
+            .iter_mut()
+            .flat_map(|(device, w)| w.expired(now_ms).into_iter().map(|i| (*device, i)))
+            .collect()
+    }
+
+    /// Connection lost: forget in-flight chunks until the session is back.
+    pub(crate) fn pause(&mut self) {
+        for w in self.receivers.values_mut() {
+            w.in_flight.clear();
+            w.state = OutState::Stalled;
+        }
+    }
+
+    /// Back online: whether any device is waiting for more.
+    pub(crate) fn resume(&mut self) -> bool {
+        for w in self.receivers.values_mut() {
+            w.state = OutState::Sending;
+        }
+        !self.receivers.is_empty()
+    }
+
+    /// The furthest any device got, for the progress the user sees.
+    pub(crate) fn acked_bytes(&self) -> u64 {
+        self.receivers
+            .values()
+            .map(|w| acked_bytes(&w.acked, &self.desc))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Where chunks for `device` go.
+    pub(crate) fn to(&self, device: DeviceId) -> Addr {
+        Addr::new(self.peer, device)
     }
 
     pub(crate) fn to_record(&self) -> TransferRecord {
         TransferRecord {
             outgoing: true,
             peer: self.peer,
-            device: self.receiver,
+            device: DeviceId::FIRST,
             desc: self.desc.clone(),
             kind: self.kind.clone(),
-            done: self.acked.to_bytes(),
-            accepted: self.state != OutState::Offered,
+            done: Vec::new(),
+            accepted: false,
+            receivers: self
+                .receivers
+                .iter()
+                .map(|(device, w)| (*device, w.acked.to_bytes()))
+                .collect(),
         }
     }
 
+    /// Back from storage: every device that had accepted waits to resume.
     pub(crate) fn from_record(r: TransferRecord) -> Self {
         let mut t = Self::new(r.peer, r.desc, r.kind);
-        t.acked = Bitmap::from_bytes(t.acked.len(), &r.done);
-        t.stored_copy = t.acked.clone();
-        if r.accepted {
-            t.state = OutState::Stalled;
-            t.receiver = Some(r.device.unwrap_or(DeviceId::FIRST));
+        for (device, have) in &r.receivers {
+            let mut window = Window::new(t.desc.chunk_count(), have);
+            window.state = OutState::Stalled;
+            // Whatever a device confirmed was read, so it is in our copy.
+            for i in 0..window.acked.len() {
+                if window.acked.get(i) {
+                    t.stored_copy.set(i);
+                }
+            }
+            t.receivers.insert(*device, window);
         }
         t
     }
@@ -424,7 +483,8 @@ impl Incoming {
         TransferRecord {
             outgoing: false,
             peer: self.peer,
-            device: Some(self.device),
+            device: self.device,
+            receivers: Vec::new(),
             desc: self.desc.clone(),
             kind: self.kind.clone(),
             done: self.received.to_bytes(),
@@ -433,7 +493,7 @@ impl Incoming {
     }
 
     pub(crate) fn from_record(r: TransferRecord) -> Self {
-        let from = Addr::new(r.peer, r.device.unwrap_or(DeviceId::FIRST));
+        let from = Addr::new(r.peer, r.device);
         let mut t = Self::new(from, r.desc, r.kind);
         t.received = Bitmap::from_bytes(t.received.len(), &r.done);
         if r.accepted {
@@ -447,12 +507,16 @@ impl Incoming {
 pub(crate) struct TransferRecord {
     pub outgoing: bool,
     pub peer: PeerId,
-    /// Incoming: the device it comes from; outgoing: the one that accepted.
-    pub device: Option<DeviceId>,
+    /// Incoming: the device it comes from.
+    pub device: DeviceId,
     pub desc: FileDesc,
     pub kind: MediaKind,
+    /// Incoming: the chunks held.
     pub done: Vec<u8>,
+    /// Incoming: the user took it.
     pub accepted: bool,
+    /// Outgoing: each device that accepted it, with the chunks it confirmed.
+    pub receivers: Vec<(DeviceId, Vec<u8>)>,
 }
 
 impl crate::Record for TransferRecord {
@@ -473,15 +537,20 @@ impl crate::Record for TransferRecord {
             return Err(crate::CoreError::Storage);
         }
         let v1: V1 = postcard::from_bytes(body).map_err(|_| crate::CoreError::Storage)?;
-        let device = (!v1.outgoing || v1.accepted).then_some(DeviceId::FIRST);
+        let receivers = if v1.outgoing && v1.accepted {
+            vec![(DeviceId::FIRST, v1.done.clone())]
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             outgoing: v1.outgoing,
             peer: v1.peer,
-            device,
+            device: DeviceId::FIRST,
             desc: v1.desc,
             kind: v1.kind,
             done: v1.done,
             accepted: v1.accepted,
+            receivers,
         })
     }
 }
@@ -551,24 +620,47 @@ mod tests {
         assert_eq!(back, b);
     }
 
+    const ONE: DeviceId = DeviceId(1);
+    const TWO: DeviceId = DeviceId(2);
+
     #[test]
     fn sender_window_ack_and_completion() {
         let d = desc(10 * 1024, 1024);
         let mut out = Outgoing::new(PeerId([2; 32]), d, MediaKind::File);
         assert!(out.schedule(0).is_empty());
-        out.accept(&[0b0000_0011]);
+        out.accept(ONE, &[0b0000_0011]);
         let first = out.schedule(0);
-        assert_eq!(first, (2..10).collect::<Vec<_>>());
-        assert!(matches!(out.on_ack(5, 0b1), AckOutcome::Progress));
+        assert_eq!(first, (2..10).map(|i| (ONE, i)).collect::<Vec<_>>());
+        assert!(matches!(out.on_ack(ONE, 5, 0b1), AckOutcome::Progress));
         assert!(out.schedule(0).is_empty());
-        assert!(matches!(out.on_ack(100, 0), AckOutcome::Ignored));
-        assert!(matches!(out.on_ack(10, 0), AckOutcome::Complete));
+        assert!(matches!(out.on_ack(ONE, 100, 0), AckOutcome::Ignored));
+        assert!(matches!(out.on_ack(TWO, 10, 0), AckOutcome::Ignored));
+        assert!(matches!(out.on_ack(ONE, 10, 0), AckOutcome::Complete));
+    }
+
+    /// Two devices take the same file at their own pace.
+    #[test]
+    fn each_receiving_device_has_its_own_window() {
+        let d = desc(4 * 1024, 1024);
+        let mut out = Outgoing::new(PeerId([2; 32]), d, MediaKind::File);
+        out.accept(ONE, &[0b0011]);
+        out.accept(TWO, &[]);
+        let mut sent = out.schedule(0);
+        sent.sort_unstable();
+        assert_eq!(
+            sent,
+            [(ONE, 2), (ONE, 3), (TWO, 0), (TWO, 1), (TWO, 2), (TWO, 3)]
+        );
+        assert!(matches!(out.on_ack(ONE, 4, 0), AckOutcome::Complete));
+        assert_eq!(out.acked_bytes(), 4096, "progress shows the furthest");
+        assert!(out.sending_to(TWO));
+        assert!(matches!(out.on_ack(TWO, 1, 0), AckOutcome::Progress));
     }
 
     #[test]
     fn sender_retransmits_then_stalls() {
         let mut out = Outgoing::new(PeerId([2; 32]), desc(4096, 1024), MediaKind::File);
-        out.accept(&[]);
+        out.accept(ONE, &[]);
         out.schedule(0);
         assert!(out.expired(RTO_MS - 1).is_empty());
         assert_eq!(out.expired(RTO_MS).len(), 4);
@@ -577,8 +669,10 @@ mod tests {
             t += RTO_MS << 4;
             out.expired(t);
         }
-        assert_eq!(out.state, OutState::Stalled);
+        assert!(!out.sending_to(ONE));
         assert!(out.schedule(t).is_empty());
+        out.pause();
+        assert!(out.resume() && out.sending_to(ONE));
     }
 
     fn sender() -> Addr {
@@ -681,10 +775,11 @@ mod tests {
     fn records_roundtrip() {
         let d = desc(4096, 1024);
         let mut out = Outgoing::new(PeerId([2; 32]), d.clone(), MediaKind::File);
-        out.accept(&[0b1]);
+        out.accept(TWO, &[0b1]);
         let restored = Outgoing::from_record(out.to_record());
-        assert_eq!(restored.state, OutState::Stalled);
+        assert!(!restored.sending_to(TWO), "waits to resume");
         assert_eq!(restored.acked_bytes(), 1024);
+        assert!(restored.receivers.contains_key(&TWO));
 
         let mut inc = Incoming::new(sender(), d, MediaKind::File);
         inc.state = InState::Receiving;
