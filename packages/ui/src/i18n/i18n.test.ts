@@ -43,6 +43,9 @@ describe("translations", () => {
       expect(table.toast_anonymous_save_failed("relay")).toContain("relay");
       expect(table.backup_word(17)).toContain("17");
       expect(table.settings_version("1.2.3")).toContain("1.2.3");
+      expect(table.devices_unnamed(4)).toContain("4");
+      expect(table.devices_confirm("Laptop")).toContain("Laptop");
+      expect(table.devices_linked("Laptop")).toContain("Laptop");
     }
   });
 

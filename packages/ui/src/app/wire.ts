@@ -34,6 +34,7 @@ import { hasTransfer, upsertTransfer } from "../stores/transfers";
 import { setMediaProgress, trackMedia } from "../stores/media";
 import { setInvitesReady } from "../stores/invite";
 import { onPushKey, onPushState, startPush } from "../stores/push";
+import { addOwnDevice, setOwnDevices } from "../stores/devices";
 import { setSharesReady } from "../stores/share";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
@@ -86,6 +87,13 @@ export async function startApp(): Promise<() => void> {
       linkEvent("update_required");
       setAllOffline();
     }),
+    api.on("unlinked", () => {
+      linkEvent("unlinked");
+      setAllOffline();
+    }),
+    api.on("devices", setOwnDevices),
+    api.on("contacts_changed", () => void refreshConversations()),
+    api.on("device_linked", addOwnDevice),
     onPeerConnected((peerId) => {
       ensureContact(peerId, true);
       // Someone used our invite (or we used theirs): open the new chat.
@@ -105,8 +113,11 @@ export async function startApp(): Promise<() => void> {
       const seen = viewing(ui.from);
       noteMessage(ui.from, msg, seen);
       setContactOnline(ui.from, true);
-      // Requests stay quiet until accepted.
-      if (!seen && !contacts[ui.from]?.request) void notifyMessage(displayName(ui.from), previewOf(msg).text);
+      // Requests stay quiet until accepted; what this profile sent from
+      // another device is no news.
+      if (!seen && !ui.outgoing && !contacts[ui.from]?.request) {
+        void notifyMessage(displayName(ui.from), previewOf(msg).text);
+      }
     }),
     onMessageStatus(({ msg_id, status }) => {
       setMessageStatus(msg_id, status);

@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 
-export type SettingsSection = "profile" | "appearance" | "notifications" | "privacy" | "storage";
+export type SettingsSection = "profile" | "devices" | "appearance" | "notifications" | "privacy" | "storage";
 
 /** Every screen the app can show; the chat list is always at the bottom. */
 export type Screen =

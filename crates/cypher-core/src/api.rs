@@ -204,6 +204,9 @@ pub enum Event {
     /// The new device received its identity; the driver takes it from the
     /// [`crate::link::Provision`].
     LinkedHere,
+    /// Another device of this identity changed the contacts: the list is to
+    /// be read again.
+    ContactsChanged,
     /// The anonymous relay channel went up or down.
     Onion {
         up: bool,

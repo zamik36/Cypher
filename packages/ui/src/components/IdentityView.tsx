@@ -3,6 +3,8 @@ import "./Onboarding.css";
 import Icon from "./Icon";
 import { api } from "../platform";
 import { t } from "../i18n";
+import { connection } from "../stores/connection";
+import { copyText } from "../utils/clipboard";
 import { reasonText } from "../utils/reasons";
 import { answersMatch, phraseWords, pickPositions } from "../utils/recovery";
 
@@ -13,8 +15,11 @@ interface IdentityViewProps {
   onUnlocked: (peerId: string, nickname: string) => void;
 }
 
-/** `forgot` explains a lost passphrase and offers to erase the device. */
-type Mode = "unlock" | "create" | "import" | "backup" | "forgot";
+/**
+ * `forgot` explains a lost passphrase and offers to erase the device;
+ * `link` makes this a new device of a profile used elsewhere.
+ */
+type Mode = "unlock" | "create" | "import" | "backup" | "forgot" | "link";
 
 /** A new identity, held back until its recovery phrase has been written down. */
 interface Pending {
@@ -41,6 +46,10 @@ export default function IdentityView(props: IdentityViewProps) {
   const [positions, setPositions] = createSignal<number[]>([]);
   const [answers, setAnswers] = createSignal<string[]>([]);
   const [eraseIn, setEraseIn] = createSignal(0);
+  const [deviceName, setDeviceName] = createSignal("");
+  /** The offer this device shows while it waits to be linked, and its QR. */
+  const [offer, setOffer] = createSignal<string | null>(null);
+  const [offerQr, setOfferQr] = createSignal("");
   let eraseTimer: ReturnType<typeof setInterval> | undefined;
   onCleanup(() => clearInterval(eraseTimer));
 
@@ -62,6 +71,16 @@ export default function IdentityView(props: IdentityViewProps) {
     setPassphrase("");
     setRepeat("");
     setError("");
+    if (offer()) {
+      setOffer(null);
+      void api.devices.cancelLink().catch(() => undefined);
+    }
+    if (next === "link" && !deviceName()) {
+      void api.devices
+        .defaultName()
+        .then((name) => setDeviceName((typed) => typed || name))
+        .catch(() => undefined);
+    }
     setMode(next);
     clearInterval(eraseTimer);
     if (next === "forgot") {
@@ -157,6 +176,31 @@ export default function IdentityView(props: IdentityViewProps) {
     }
   }
 
+  /** Shows the offer, then waits until a device of the profile links this one. */
+  async function handleLink() {
+    if (!deviceName().trim() || !passphraseValid()) return;
+    begin();
+    try {
+      const code = await api.devices.startLink(connection.gatewayAddr, deviceName().trim());
+      setOffer(code);
+      setOfferQr(await api.generateQr(code).catch(() => ""));
+      setBusy(false);
+      const [peerId, nick] = await api.devices.finishLink(passphrase());
+      setPassphrase("");
+      setRepeat("");
+      setOffer(null);
+      props.onUnlocked(peerId, nick);
+    } catch (e) {
+      // Leaving this screen cancels the wait; that is no failure to show.
+      if (mode() === "link") {
+        setOffer(null);
+        fail(e);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function finishBackup() {
     const done = pending();
     if (!done || !answersMatch(words(), positions(), answers())) return;
@@ -177,6 +221,7 @@ export default function IdentityView(props: IdentityViewProps) {
 
   const title = () => {
     if (mode() === "forgot") return t().identity_forgot_title;
+    if (mode() === "link") return t().identity_link_title;
     if (mode() !== "backup") return t().identity_title;
     return checking() ? t().backup_check_title : t().backup_title;
   };
@@ -194,6 +239,8 @@ export default function IdentityView(props: IdentityViewProps) {
         return checking() ? tr.backup_check_hint : tr.backup_hint;
       case "forgot":
         return tr.identity_forgot_text;
+      case "link":
+        return offer() ? tr.identity_link_scan : tr.identity_subtitle_link;
     }
   };
 
@@ -330,6 +377,59 @@ export default function IdentityView(props: IdentityViewProps) {
             <div class="onboard__links">
               <button class="btn btn--ghost" onClick={() => switchMode("import")}>
                 {t().identity_import_link}
+              </button>
+              <button class="btn btn--ghost" onClick={() => switchMode("link")}>
+                {t().identity_link_link}
+              </button>
+            </div>
+          </Show>
+
+          <Show when={mode() === "link"}>
+            <Show
+              when={offer()}
+              fallback={form(
+                handleLink,
+                <>
+                  <input
+                    class="field"
+                    type="text"
+                    placeholder={t().devices_name}
+                    aria-label={t().devices_name}
+                    value={deviceName()}
+                    onInput={(e) => setDeviceName(e.currentTarget.value)}
+                    autocomplete="off"
+                  />
+                  {passphrasePair()}
+                  <button
+                    class="btn btn--primary btn--block"
+                    type="submit"
+                    disabled={busy() || !deviceName().trim() || !passphraseValid()}
+                  >
+                    {t().identity_link_show}
+                  </button>
+                </>,
+              )}
+            >
+              {(code) => (
+                <div class="onboard__form onboard__offer">
+                  <Show when={offerQr()}>
+                    <img class="onboard__qr" src={offerQr()} alt={t().identity_link_title} />
+                  </Show>
+                  <code class="mono onboard__code" data-testid="device-offer">
+                    {code()}
+                  </code>
+                  <button class="btn btn--secondary btn--block" onClick={() => void copyText(code())}>
+                    <Icon name="copy" size={18} /> {t().common_copy}
+                  </button>
+                  <p class="hint" role="status">
+                    <span class="spinner" /> {t().identity_link_waiting}
+                  </p>
+                </div>
+              )}
+            </Show>
+            <div class="onboard__links">
+              <button class="btn btn--ghost" onClick={() => switchMode("create")}>
+                {t().common_back}
               </button>
             </div>
           </Show>

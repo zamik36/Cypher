@@ -6,7 +6,7 @@ use cypher_types::{Addr, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
 use super::Core;
-use crate::api::{Content, MessageStatus, StoredMessage};
+use crate::api::{Content, Event, MessageStatus, StoredMessage};
 use crate::envelope::{Body, ContactState, MAX_STATE_CONTACTS, SyncBody};
 use crate::peer::{Peer, clean_name};
 
@@ -112,8 +112,14 @@ impl<R: CryptoRngCore> Core<R> {
                     }
                 }
             }
-            SyncBody::Contact(state) => self.adopt_contact(state),
-            SyncBody::Removed { peer } => self.remove_peer(&peer),
+            SyncBody::Contact(state) => {
+                self.adopt_contact(state);
+                self.emit(Event::ContactsChanged);
+            }
+            SyncBody::Removed { peer } => {
+                self.remove_peer(&peer);
+                self.emit(Event::ContactsChanged);
+            }
             SyncBody::Profile { name } => {
                 self.adopt_profile_name(name.as_deref());
             }
@@ -133,6 +139,7 @@ impl<R: CryptoRngCore> Core<R> {
                 for (code, at_ms) in links {
                     self.adopt_link(&code, at_ms);
                 }
+                self.emit(Event::ContactsChanged);
             }
         }
     }

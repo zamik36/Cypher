@@ -58,6 +58,9 @@ describe("connection state", () => {
     expect(nextLink("online", "update_required")).toBe("update_required");
     expect(nextLink("update_required", "disconnected")).toBe("update_required");
     expect(nextLink("update_required", "start")).toBe("update_required");
+    expect(nextLink("online", "unlinked")).toBe("unlinked");
+    expect(nextLink("unlinked", "disconnected")).toBe("unlinked");
+    expect(nextLink("unlinked", "start")).toBe("unlinked");
   });
 
   it("reports why it could not start, and forgets it on the next attempt", async () => {

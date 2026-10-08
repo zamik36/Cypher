@@ -55,7 +55,14 @@ function cameraError(e: unknown): string {
  * the system scanner runs behind a transparent page; elsewhere the camera
  * shows in a frame here.
  */
-export default function QrScanner(props: { onCode: (code: string) => void; onClose: () => void }) {
+export default function QrScanner(props: {
+  onCode: (code: string) => void;
+  onClose: () => void;
+  /** What a scan must hold: the code inside it, or `null`. Invites by default. */
+  accept?: (text: string) => string | null;
+  /** Said when a scan holds something else. */
+  notMatching?: string;
+}) {
   const [error, setError] = createSignal<string | null>(null);
   const native = api.scanQr;
   let video: HTMLVideoElement | undefined;
@@ -64,11 +71,11 @@ export default function QrScanner(props: { onCode: (code: string) => void; onClo
   // Read from callbacks that outlive the component.
   const run = { stopped: false };
 
-  /** A code read from a QR: an invite goes back, anything else is said so. */
+  /** A code read from a QR: one it takes goes back, anything else is said so. */
   function read(text: string): boolean {
-    const code = findInvite(text);
+    const code = (props.accept ?? findInvite)(text);
     if (code) props.onCode(code);
-    else setError(t().scan_not_invite);
+    else setError(props.notMatching ?? t().scan_not_invite);
     return code !== null;
   }
 

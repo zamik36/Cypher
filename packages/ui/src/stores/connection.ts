@@ -7,22 +7,28 @@ import { createStore } from "solid-js/store";
  * - `online`: signed in (`Ready`); only now are messages sent directly.
  * - `reconnecting`: was online, retrying with backoff.
  * - `failed`: could not start (bad address, locked identity).
- * - `superseded`: another device signed in with this identity; stays until
- *   the user takes the session back.
+ * - `superseded`: this device's session opened elsewhere (another window, or
+ *   an install restored from the phrase); stays until the user takes it back.
  * - `update_required`: the server speaks another protocol; stays.
+ * - `unlinked`: this device was taken off its profile; stays.
  */
-export type LinkState = "idle" | "connecting" | "online" | "reconnecting" | "failed" | "superseded" | "update_required";
+export type LinkState =
+  "idle" | "connecting" | "online" | "reconnecting" | "failed" | "superseded" | "update_required" | "unlinked";
 
 /** What happened: a core event, or the user (re)starting the connection. */
-export type LinkEvent = "start" | "connected" | "disconnected" | "failed" | "superseded" | "update_required";
+export type LinkEvent =
+  "start" | "connected" | "disconnected" | "failed" | "superseded" | "update_required" | "unlinked";
 
 /** States the client left for good; only the user's action ends them. */
-const STOPPED: readonly LinkState[] = ["superseded", "update_required"];
+const STOPPED: readonly LinkState[] = ["superseded", "update_required", "unlinked"];
+
+/** States no reconnecting gets out of. */
+const FINAL: readonly LinkState[] = ["update_required", "unlinked"];
 
 export function nextLink(state: LinkState, event: LinkEvent): LinkState {
   switch (event) {
     case "start":
-      return state === "update_required" ? state : "connecting";
+      return FINAL.includes(state) ? state : "connecting";
     case "connected":
       return "online";
     case "disconnected":
@@ -31,6 +37,7 @@ export function nextLink(state: LinkState, event: LinkEvent): LinkState {
     case "failed":
     case "superseded":
     case "update_required":
+    case "unlinked":
       return event;
   }
 }

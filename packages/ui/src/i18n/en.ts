@@ -9,6 +9,33 @@ const en = {
   common_applying: "Applying…",
   common_retry: "Try again",
 
+  // -- Devices --
+  settings_devices: "Devices",
+  devices_this: "This device",
+  devices_unnamed: (id: number) => `Device ${id}`,
+  devices_link: "Link a device",
+  devices_link_hint: "On the new device choose \u201cI already use Cypher\u201d and scan the code it shows.",
+  devices_enter_code: "Enter the code instead",
+  devices_code_placeholder: "Code from the new device",
+  devices_confirm: (name: string) => `Link \u201c${name}\u201d? It will see all your chats and contacts.`,
+  devices_confirm_button: "Link",
+  devices_linked: (name: string) => `\u201c${name}\u201d is linked`,
+  devices_remove: "Remove",
+  devices_remove_confirm: "Remove for good",
+  devices_removed: "Device removed",
+  devices_name: "Device name",
+  scan_not_device: "This QR code is not a Cypher device code.",
+  identity_link_link: "I already use Cypher \u2014 link this device",
+  identity_link_title: "Link this device",
+  identity_subtitle_link: "Name this device and choose a passphrase for it.",
+  identity_link_show: "Show the code",
+  identity_link_scan:
+    "On a device where you already use Cypher, open Settings \u2192 Devices \u2192 Link a device and scan this code.",
+  identity_link_waiting: "Waiting for your other device\u2026",
+  banner_unlinked_title: "This device was removed",
+  banner_unlinked_text: "It was taken off your profile from another device and no longer receives messages.",
+  banner_erase: "Erase this device",
+
   // -- Connection --
   status_connected: "Connected",
   status_offline: "Offline",
@@ -16,8 +43,9 @@ const en = {
   status_reconnecting: "Reconnecting…",
   status_superseded: "Open on another device",
   status_update_required: "Update required",
-  banner_superseded_title: "Cypher is open on another device",
-  banner_superseded_text: "Your profile signed in somewhere else, so this window stopped receiving messages.",
+  banner_superseded_title: "Cypher is open elsewhere",
+  banner_superseded_text:
+    "This device's session opened again, in another window or on a device restored from the recovery phrase, so this one stopped receiving messages.",
   banner_use_here: "Use here",
   banner_update_title: "Update required",
 

@@ -178,6 +178,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::DeviceLinked { device, name } => ("device_linked", device_info(*device, name)),
         Event::LinkFailed { reason } => ("link_failed", UiPayload::Text(format!("{reason:?}"))),
         Event::LinkedHere => ("linked_here", UiPayload::None),
+        Event::ContactsChanged => ("contacts_changed", UiPayload::None),
         Event::Warning {
             reason: FailReason::UpdateRequired,
         } => ("update_required", UiPayload::None),
@@ -185,7 +186,8 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::PeerAdded { peer, .. } => ("peer_connected", UiPayload::Text(peer.to_hex())),
         Event::PeerProfile { peer, name } => ("peer_profile", profile(peer, name.clone())),
         Event::ContactRequest { peer } => ("contact_request", UiPayload::Text(peer.to_hex())),
-        Event::Message(m) if !m.outgoing => ("message", UiPayload::Message(message(m))),
+        // Outgoing ones too: another device of this identity sent them.
+        Event::Message(m) => ("message", UiPayload::Message(message(m))),
         Event::MessageStatus { msg_id, status } => ("message_status", status_of(msg_id, *status)),
         Event::TransferOffered {
             peer,
@@ -226,7 +228,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
             ("error", UiPayload::Text(format!("{reason:?}")))
         }
         Event::PushKey { .. } | Event::PushRegistered | Event::PushUnavailable => push(e),
-        Event::Message(_) | Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
+        Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
     })
 }
 
@@ -501,6 +503,7 @@ mod tests {
 
     #[test]
     fn internal_events_stay_internal() {
+        // Sent from another device of this identity: the UI shows it.
         let outgoing = Event::Message(stored(
             true,
             Content::Text {
@@ -508,8 +511,12 @@ mod tests {
                 reply_to: None,
             },
         ));
+        assert_eq!(event(&outgoing).map(|(channel, _)| channel), Some("message"));
+        assert_eq!(
+            event(&Event::ContactsChanged).map(|(channel, _)| channel),
+            Some("contacts_changed")
+        );
         for e in [
-            outgoing,
             Event::LinkCreated { link: "l".into() },
             Event::Bootstrap {
                 relay_addr: String::new(),

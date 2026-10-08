@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 import "./Settings.css";
 import Avatar from "../components/Avatar";
+import Devices from "./Devices";
 import Icon, { type IconName } from "../components/Icon";
 import TopBar from "../components/TopBar";
 import { api } from "../platform";
@@ -32,6 +33,7 @@ import { APP_VERSION } from "../version";
 import { locale, setLocale, t, type Locale } from "../i18n";
 
 const SECTIONS: readonly { id: SettingsSection; icon: IconName }[] = [
+  { id: "devices", icon: "devices" },
   { id: "appearance", icon: "palette" },
   { id: "notifications", icon: "bell" },
   { id: "privacy", icon: "lock" },
@@ -42,6 +44,7 @@ function sectionTitle(id: SettingsSection): string {
   const tr = t();
   return {
     profile: tr.settings_profile,
+    devices: tr.settings_devices,
     appearance: tr.settings_appearance,
     notifications: tr.settings_notifications,
     privacy: tr.settings_privacy,
@@ -578,6 +581,9 @@ export default function Settings(props: { section?: SettingsSection }) {
     <Switch fallback={<Root />}>
       <Match when={props.section === "profile"}>
         <Profile />
+      </Match>
+      <Match when={props.section === "devices"}>
+        <Devices />
       </Match>
       <Match when={props.section === "appearance"}>
         <Appearance />

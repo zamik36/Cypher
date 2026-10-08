@@ -9,6 +9,33 @@ function plural(n: number, one: string, few: string, many: string): string {
 }
 
 const ru: TranslationKeys = {
+  // -- Devices --
+  settings_devices: "Устройства",
+  devices_this: "Это устройство",
+  devices_unnamed: (id: number) => `Устройство ${id}`,
+  devices_link: "Привязать устройство",
+  devices_link_hint: "На новом устройстве выберите «Я уже пользуюсь Шифром» и отсканируйте показанный код.",
+  devices_enter_code: "Ввести код вручную",
+  devices_code_placeholder: "Код с нового устройства",
+  devices_confirm: (name: string) => `Привязать «${name}»? Оно увидит все ваши чаты и контакты.`,
+  devices_confirm_button: "Привязать",
+  devices_linked: (name: string) => `«${name}» привязано`,
+  devices_remove: "Удалить",
+  devices_remove_confirm: "Удалить насовсем",
+  devices_removed: "Устройство удалено",
+  devices_name: "Имя устройства",
+  scan_not_device: "Этот QR-код — не код устройства Шифра.",
+  identity_link_link: "Я уже пользуюсь Шифром — привязать это устройство",
+  identity_link_title: "Привязать устройство",
+  identity_subtitle_link: "Назовите это устройство и придумайте для него пароль.",
+  identity_link_show: "Показать код",
+  identity_link_scan:
+    "На устройстве, где вы уже пользуетесь Шифром, откройте Настройки → Устройства → Привязать устройство и отсканируйте этот код.",
+  identity_link_waiting: "Ждём ваше другое устройство…",
+  banner_unlinked_title: "Устройство удалено",
+  banner_unlinked_text: "Его убрали из вашего профиля с другого устройства, и сообщения сюда больше не приходят.",
+  banner_erase: "Стереть данные",
+
   common_back: "Назад",
   common_cancel: "Отмена",
   common_close: "Закрыть",
@@ -24,8 +51,9 @@ const ru: TranslationKeys = {
   status_reconnecting: "Переподключение…",
   status_superseded: "Открыт на другом устройстве",
   status_update_required: "Нужно обновление",
-  banner_superseded_title: "Шифр открыт на другом устройстве",
-  banner_superseded_text: "В ваш профиль вошли в другом месте, поэтому здесь сообщения больше не приходят.",
+  banner_superseded_title: "Шифр открыт в другом месте",
+  banner_superseded_text:
+    "Сеанс этого устройства открыли снова — в другом окне или на устройстве, восстановленном по фразе, поэтому здесь сообщения больше не приходят.",
   banner_use_here: "Открыть здесь",
   banner_update_title: "Нужно обновление",
 

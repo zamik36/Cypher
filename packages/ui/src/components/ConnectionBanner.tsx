@@ -8,6 +8,17 @@ import { t } from "../i18n";
 export default function ConnectionBanner() {
   const [busy, setBusy] = createSignal(false);
 
+  async function erase() {
+    setBusy(true);
+    try {
+      await api.eraseDevice();
+      location.reload();
+    } catch (e) {
+      linkEvent("failed", errorMessage(e));
+      setBusy(false);
+    }
+  }
+
   async function useHere() {
     setBusy(true);
     try {
@@ -30,6 +41,17 @@ export default function ConnectionBanner() {
           </div>
           <button class="btn btn--primary" disabled={busy()} onClick={() => void useHere()}>
             {t().banner_use_here}
+          </button>
+        </div>
+      </Match>
+      <Match when={connection.link === "unlinked"}>
+        <div class="banner" role="alert">
+          <div class="banner__text">
+            <strong>{t().banner_unlinked_title}</strong>
+            <p>{t().banner_unlinked_text}</p>
+          </div>
+          <button class="btn btn--danger" disabled={busy()} onClick={() => void erase()}>
+            {t().banner_erase}
           </button>
         </div>
       </Match>

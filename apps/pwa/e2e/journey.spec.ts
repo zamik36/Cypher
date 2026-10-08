@@ -161,9 +161,10 @@ test("a recovery phrase restores the identity on a new device", async ({ browser
   await expectConnected(restored);
   expect(await ownPeerId(restored)).toBe(peerId);
 
-  // One identity, one session: the new device takes it over, and the old one
-  // says so instead of silently going quiet, until it takes the session back.
-  const banner = original.getByRole("alert").filter({ hasText: "Cypher is open on another device" });
+  // Restored from the phrase, the new install is the same (first) device: it
+  // takes the session over, and the old one says so instead of silently going
+  // quiet, until it takes the session back.
+  const banner = original.getByRole("alert").filter({ hasText: "Cypher is open elsewhere" });
   await expect(banner).toBeVisible();
   await expect(linkStatus(original)).toHaveAttribute("data-state", "superseded");
   await banner.getByRole("button", { name: "Use here" }).click();

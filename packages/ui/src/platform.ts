@@ -135,6 +135,8 @@ export interface Events {
   device_linked: DeviceInfo;
   /** Linking a device did not work (the reason, as the core names it). */
   link_failed: string;
+  /** Another device of this profile changed the contacts. */
+  contacts_changed: null;
   /** The server's push key (hex), to subscribe this device with. */
   push_key: string;
   /** Whether the server will wake this device while the app is closed. */

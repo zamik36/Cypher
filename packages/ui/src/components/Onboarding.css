@@ -132,3 +132,23 @@
     grid-template-columns: repeat(3, 1fr);
   }
 }
+
+/* A new device's offer: its QR, and the code for whoever cannot scan. */
+.onboard__offer {
+  align-items: center;
+}
+
+.onboard__qr {
+  width: min(240px, 70vw);
+  aspect-ratio: 1;
+  border-radius: var(--radius-md, 12px);
+  background: var(--c-qr-paper);
+  padding: 8px;
+}
+
+.onboard__code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  user-select: all;
+}
