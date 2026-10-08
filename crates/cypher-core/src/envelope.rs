@@ -1,12 +1,12 @@
 //! End-to-end message envelope: everything here is encrypted by the ratchet
 //! and invisible to the server.
 
-use cypher_types::{FileId, MsgId};
+use cypher_types::{FileId, MsgId, PeerId};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use crate::CoreError;
-use crate::api::MediaKind;
+use crate::api::{Content, MediaKind};
 
 pub const MAX_TEXT_LEN: usize = 16 * 1024;
 pub const MAX_INLINE_LEN: usize = 32 * 1024;
@@ -19,6 +19,12 @@ pub const MAX_MIME_LEN: usize = 127;
 pub const MAX_WAVEFORM_LEN: usize = 128;
 pub const MAX_POSTER_LEN: usize = 16 * 1024;
 pub const MAX_RECEIPT_IDS: usize = 512;
+/// Contacts in one `SyncBody::State`, so it fits an inbox item.
+pub const MAX_STATE_CONTACTS: usize = 50;
+/// Invites in one `SyncBody::State`.
+pub const MAX_STATE_LINKS: usize = 32;
+/// A contact's name as this user gave it, in bytes.
+const MAX_ALIAS_LEN: usize = 256;
 pub const MAX_FILE_SIZE: u64 = 64 << 30;
 pub const MAX_CHUNK_SIZE: u32 = 1 << 20;
 pub const FILE_CHUNK_SIZE: u32 = 256 * 1024;
@@ -62,6 +68,109 @@ pub enum Body {
         list: Vec<u8>,
         inboxes: Vec<(u32, [u8; 32])>,
     },
+    /// Between devices of one identity only.
+    Sync(SyncBody),
+}
+
+/// What one device of an identity tells its other devices, so they show
+/// the same conversations. Accepted only from the same identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncBody {
+    /// A message this device sent to a contact.
+    Sent {
+        peer: PeerId,
+        msg_id: MsgId,
+        sent_at_ms: u64,
+        content: Content,
+    },
+    /// A contact's messages read on this device.
+    Read { peer: PeerId, ids: Vec<MsgId> },
+    /// A contact as this device keeps it now.
+    Contact(ContactState),
+    /// A contact forgotten on this device.
+    Removed { peer: PeerId },
+    /// The name this user goes by.
+    Profile { name: Option<String> },
+    /// An invite made on this device, and when.
+    Link { code: String, at_ms: u64 },
+    /// A device new to the identity asks the others what they know.
+    StateRequest,
+    /// Part of what this device knows, for a new one.
+    State {
+        profile: Option<String>,
+        contacts: Vec<ContactState>,
+        links: Vec<(String, u64)>,
+    },
+}
+
+/// A contact as one device keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactState {
+    pub peer: PeerId,
+    pub identity_dh: [u8; 32],
+    pub alias: Option<String>,
+    pub name: Option<String>,
+    pub request: bool,
+    pub blocked: bool,
+    pub via: Option<String>,
+    /// Their signed device list, if known.
+    pub devices: Option<Vec<u8>>,
+}
+
+impl ContactState {
+    fn valid(&self) -> bool {
+        self.alias.as_ref().is_none_or(|a| a.len() <= MAX_ALIAS_LEN)
+            && self
+                .name
+                .as_ref()
+                .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN)
+            && self.via.as_ref().is_none_or(|v| v.len() <= MAX_LINK_LEN)
+            && self
+                .devices
+                .as_ref()
+                .is_none_or(|d| d.len() <= cypher_wire::MAX_DEVICE_LIST_LEN)
+    }
+}
+
+impl SyncBody {
+    fn valid(&self) -> bool {
+        match self {
+            Self::Sent { content, .. } => match content {
+                Content::Text { text, .. } => text.len() <= MAX_TEXT_LEN,
+                Content::File {
+                    name, mime, kind, ..
+                } => name.len() <= MAX_NAME_LEN && mime.len() <= MAX_MIME_LEN && kind_valid(kind),
+            },
+            Self::Read { ids, .. } => ids.len() <= MAX_RECEIPT_IDS,
+            Self::Contact(contact) => contact.valid(),
+            Self::Removed { .. } | Self::StateRequest => true,
+            Self::Profile { name } => name
+                .as_ref()
+                .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN),
+            Self::Link { code, .. } => code.len() <= MAX_LINK_LEN,
+            Self::State {
+                profile,
+                contacts,
+                links,
+            } => {
+                profile
+                    .as_ref()
+                    .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN)
+                    && contacts.len() <= MAX_STATE_CONTACTS
+                    && contacts.iter().all(ContactState::valid)
+                    && links.len() <= MAX_STATE_LINKS
+                    && links.iter().all(|(code, _)| code.len() <= MAX_LINK_LEN)
+            }
+        }
+    }
+}
+
+fn kind_valid(kind: &MediaKind) -> bool {
+    match kind {
+        MediaKind::File => true,
+        MediaKind::Voice { waveform, .. } => waveform.len() <= MAX_WAVEFORM_LEN,
+        MediaKind::VideoNote { poster, .. } => poster.len() <= MAX_POSTER_LEN,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,11 +277,7 @@ impl Envelope {
             Body::Text { text, .. } => text.len() <= MAX_TEXT_LEN,
             Body::File { desc, kind } => {
                 desc.validate()?;
-                match kind {
-                    MediaKind::File => true,
-                    MediaKind::Voice { waveform, .. } => waveform.len() <= MAX_WAVEFORM_LEN,
-                    MediaKind::VideoNote { poster, .. } => poster.len() <= MAX_POSTER_LEN,
-                }
+                kind_valid(kind)
             }
             Body::FileCtl(FileCtl::Accept { have, .. }) => {
                 have.len() <= (u32::MAX as usize).div_ceil(8)
@@ -182,6 +287,7 @@ impl Envelope {
                 list.len() <= cypher_wire::MAX_DEVICE_LIST_LEN
                     && inboxes.len() <= cypher_types::MAX_DEVICES
             }
+            Body::Sync(sync) => sync.valid(),
         };
         if ok { Ok(()) } else { Err(CoreError::Invalid) }
     }

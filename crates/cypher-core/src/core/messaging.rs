@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
-use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind};
+use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody};
 use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
 use crate::relay::RelayBody;
 use crate::share::ShareLink;
@@ -58,7 +58,9 @@ impl<R: CryptoRngCore> Core<R> {
                 reply_to,
             },
         };
+        let content = stored.content.clone();
         self.store_message(stored);
+        self.sync_sent(peer, msg_id, content);
         self.enqueue(peer, msg_id, Body::Text { text, reply_to }, true);
     }
 
@@ -73,6 +75,10 @@ impl<R: CryptoRngCore> Core<R> {
                     ids: chunk.to_vec(),
                 },
             );
+            self.sync(SyncBody::Read {
+                peer,
+                ids: chunk.to_vec(),
+            });
         }
         for &msg_id in ids {
             self.set_status(msg_id, MessageStatus::Read);
@@ -90,20 +96,12 @@ impl<R: CryptoRngCore> Core<R> {
     /// Sets the name this user goes by and tells every contact already
     /// greeted; the others hear it in their first `Hello`.
     pub(super) fn set_profile_name(&mut self, name: Option<&str>) {
-        let name = name.and_then(clean_name);
-        if name == self.profile_name {
+        if !self.adopt_profile_name(name) {
             return;
         }
-        self.profile_name = name;
-        let op = self.vault.put(
-            Table::Meta,
-            META_PROFILE.to_vec(),
-            &ProfileRecord {
-                name: self.profile_name.clone(),
-            },
-            &mut self.rng,
-        );
-        self.persist(op);
+        self.sync(SyncBody::Profile {
+            name: self.profile_name.clone(),
+        });
         let mut greeted: Vec<Addr> = self
             .sessions
             .iter()
@@ -123,6 +121,26 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    /// Keeps the name this user goes by; whether it changed. Contacts hear
+    /// of it from the device it was changed on.
+    pub(super) fn adopt_profile_name(&mut self, name: Option<&str>) -> bool {
+        let name = name.and_then(clean_name);
+        if name == self.profile_name {
+            return false;
+        }
+        self.profile_name = name;
+        let op = self.vault.put(
+            Table::Meta,
+            META_PROFILE.to_vec(),
+            &ProfileRecord {
+                name: self.profile_name.clone(),
+            },
+            &mut self.rng,
+        );
+        self.persist(op);
+        true
+    }
+
     fn hello(&self, peer: &PeerId) -> Body {
         Body::Hello {
             inbox: self.inbox_id,
@@ -133,11 +151,14 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Remembers an invite this user made, so whoever joins by it is taken
     /// as a contact.
-    pub(super) fn remember_link(&mut self, code: &str) {
+    pub(super) fn remember_link(&mut self, code: &str, at_ms: u64) {
         let now = self.now;
         self.own_links
-            .retain(|(_, at)| now.saturating_sub(*at) < LINK_TTL_MS);
-        self.own_links.push((code.to_owned(), now));
+            .retain(|(c, at)| now.saturating_sub(*at) < LINK_TTL_MS && c != code);
+        if now.saturating_sub(at_ms) >= LINK_TTL_MS {
+            return self.persist_links();
+        }
+        self.own_links.push((code.to_owned(), at_ms));
         if self.own_links.len() > MAX_OWN_LINKS {
             self.own_links.remove(0);
         }
@@ -159,7 +180,7 @@ impl<R: CryptoRngCore> Core<R> {
         true
     }
 
-    fn persist_links(&mut self) {
+    pub(super) fn persist_links(&mut self) {
         let record = OwnLinks {
             links: self.own_links.clone(),
         };
@@ -313,6 +334,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.persist_session(addr);
             self.requeue_for(addr);
             self.send_hello(addr);
+            self.sync_contact(peer);
         }
         self.join_answered(peer, None);
     }
@@ -359,7 +381,7 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        if !self.peers.contains_key(&addr.peer) {
+        if addr.peer != self.peer_id && !self.peers.contains_key(&addr.peer) {
             return;
         }
         let Some((mut fresh, _)) = self.initiate(addr, base, opk) else {
@@ -479,7 +501,9 @@ impl<R: CryptoRngCore> Core<R> {
         self.dispatch(sender, env);
         // A device their identity has not listed (to our knowledge): their
         // list may have grown.
-        if self
+        if from == self.peer_id {
+            self.check_own_device(sender.device);
+        } else if self
             .peers
             .get(&from)
             .is_some_and(|p| !p.lists(sender.device))
@@ -517,7 +541,11 @@ impl<R: CryptoRngCore> Core<R> {
             return Ok(s.ratchet.decrypt(header, ct, b"", &mut self.rng)?);
         }
 
-        if !self.peers.contains_key(&from) && self.pending_requests() >= MAX_PENDING_REQUESTS {
+        let own = from == self.peer_id;
+        if !own
+            && !self.peers.contains_key(&from)
+            && self.pending_requests() >= MAX_PENDING_REQUESTS
+        {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
@@ -557,15 +585,9 @@ impl<R: CryptoRngCore> Core<R> {
             self.persist_prekeys();
         }
 
-        // Someone new is a request until their `Hello` names one of our
-        // invites; someone known keeps what they were.
-        let p = self.peers.entry(from).or_insert_with(|| {
-            let mut stranger = Peer::new(init.identity_dh);
-            stranger.request = true;
-            stranger
-        });
-        p.identity_dh = init.identity_dh;
-        self.persist_peer(&from);
+        if !own {
+            self.meet(from, init.identity_dh);
+        }
         let mut fresh = Session::new(ratchet, None);
         if let Some(old) = self.sessions.remove(&sender) {
             fresh.carry_over(old);
@@ -577,6 +599,51 @@ impl<R: CryptoRngCore> Core<R> {
         Ok(pt)
     }
 
+    /// Someone new is a request until their `Hello` names one of our
+    /// invites; someone known keeps what they were.
+    fn meet(&mut self, from: PeerId, identity_dh: [u8; 32]) {
+        let p = self.peers.entry(from).or_insert_with(|| {
+            let mut stranger = Peer::new(identity_dh);
+            stranger.request = true;
+            stranger
+        });
+        p.identity_dh = identity_dh;
+        self.persist_peer(&from);
+    }
+
+    /// One device of a contact greets us: its inbox, the name they go by,
+    /// and the invite they joined by, which makes a stranger a contact.
+    fn on_hello(&mut self, sender: Addr, inbox: [u8; 32], name: Option<&str>, via: Option<&str>) {
+        let from = sender.peer;
+        let invited = via.is_some_and(|code| self.take_own_link(code));
+        let name = name.and_then(clean_name);
+        let mut renamed = false;
+        if let Some(s) = self.sessions.get_mut(&sender) {
+            s.inbox = Some(inbox);
+        }
+        if let Some(p) = self.peers.get_mut(&from) {
+            renamed = p.name != name;
+            p.name.clone_from(&name);
+        }
+        if renamed {
+            self.emit(Event::PeerProfile { peer: from, name });
+        }
+        match self.peers.get_mut(&from) {
+            Some(p) if p.request && invited => {
+                p.request = false;
+                self.emit(Event::PeerAdded {
+                    peer: from,
+                    initiated_by_us: false,
+                });
+            }
+            Some(p) if p.request => self.emit(Event::ContactRequest { peer: from }),
+            _ => {}
+        }
+        self.persist_peer(&from);
+        self.persist_session(sender);
+        self.send_hello(sender);
+    }
+
     fn dispatch(&mut self, sender: Addr, env: Envelope) {
         let from = sender.peer;
         let Envelope {
@@ -584,35 +651,16 @@ impl<R: CryptoRngCore> Core<R> {
             sent_at_ms,
             body,
         } = env;
+        // Our own devices only keep each other in step; only they may.
+        if from == self.peer_id {
+            if let Body::Sync(sync) = body {
+                self.on_sync(sender, sync);
+            }
+            return;
+        }
         match body {
             Body::Hello { inbox, name, via } => {
-                let invited = via.as_deref().is_some_and(|code| self.take_own_link(code));
-                let name = name.as_deref().and_then(clean_name);
-                let mut renamed = false;
-                if let Some(s) = self.sessions.get_mut(&sender) {
-                    s.inbox = Some(inbox);
-                }
-                if let Some(p) = self.peers.get_mut(&from) {
-                    renamed = p.name != name;
-                    p.name.clone_from(&name);
-                }
-                if renamed {
-                    self.emit(Event::PeerProfile { peer: from, name });
-                }
-                match self.peers.get_mut(&from) {
-                    Some(p) if p.request && invited => {
-                        p.request = false;
-                        self.emit(Event::PeerAdded {
-                            peer: from,
-                            initiated_by_us: false,
-                        });
-                    }
-                    Some(p) if p.request => self.emit(Event::ContactRequest { peer: from }),
-                    _ => {}
-                }
-                self.persist_peer(&from);
-                self.persist_session(sender);
-                self.send_hello(sender);
+                self.on_hello(sender, inbox, name.as_deref(), via.as_deref());
             }
             Body::Text { text, reply_to } => {
                 self.store_message(StoredMessage {
@@ -632,6 +680,7 @@ impl<R: CryptoRngCore> Core<R> {
             Body::FileCtl(ctl) => self.on_file_ctl(sender, ctl),
             Body::Receipt { kind, ids } => self.on_receipt(sender, kind, ids),
             Body::Devices { list, inboxes } => self.on_devices_body(from, &list, inboxes),
+            Body::Sync(_) => {}
         }
     }
 

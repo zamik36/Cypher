@@ -44,20 +44,22 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let (peer, msg_id, kind) = (file.peer, file.msg_id, file.kind.clone());
         let desc = self.describe(file);
+        let content = Content::File {
+            file_id: desc.file_id,
+            name: desc.name.clone(),
+            mime: desc.mime.clone(),
+            size: desc.size,
+            kind: kind.clone(),
+        };
         self.store_message(StoredMessage {
             msg_id,
             peer,
             outgoing: true,
             sent_at_ms: self.now,
             status: MessageStatus::Pending,
-            content: Content::File {
-                file_id: desc.file_id,
-                name: desc.name.clone(),
-                mime: desc.mime.clone(),
-                size: desc.size,
-                kind: kind.clone(),
-            },
+            content: content.clone(),
         });
+        self.sync_sent(peer, msg_id, content);
         if let Some(data) = &desc.inline {
             self.store_inline(&desc, data);
         } else {

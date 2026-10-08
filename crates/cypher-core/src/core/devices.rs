@@ -43,6 +43,8 @@ pub(crate) struct OwnDevices {
     joined: bool,
     /// The list version contacts were last told of.
     announced: u64,
+    /// This device asked its siblings for what they know.
+    asked: bool,
 }
 
 impl crate::Record for OwnDevices {
@@ -55,6 +57,7 @@ pub(super) struct Devices {
     own: Option<DeviceList>,
     joined: bool,
     announced: u64,
+    pub(super) asked: bool,
     last_check: Option<u64>,
     conflicts: u8,
     last_refresh: HashMap<PeerId, u64>,
@@ -67,6 +70,7 @@ impl Devices {
             own: record.list.and_then(|l| DeviceList::decode(&l).ok()),
             joined: record.joined,
             announced: record.announced,
+            asked: record.asked,
             ..Self::default()
         }
     }
@@ -76,13 +80,25 @@ impl Devices {
             list: self.own.as_ref().map(DeviceList::encode),
             joined: self.joined,
             announced: self.announced,
+            asked: self.asked,
         }
     }
 }
 
 impl<R: CryptoRngCore> Core<R> {
-    /// The devices of `peer` a message goes to.
+    /// The devices of `peer` a message goes to; for this identity, its
+    /// other devices.
     pub(super) fn devices_of(&self, peer: PeerId) -> Vec<DeviceId> {
+        if peer == self.peer_id {
+            let own = self.devices.own.as_ref();
+            return own.map_or_else(Vec::new, |l| {
+                l.devices()
+                    .iter()
+                    .copied()
+                    .filter(|d| *d != self.device)
+                    .collect()
+            });
+        }
         self.peers
             .get(&peer)
             .map_or_else(|| vec![DeviceId::FIRST], Peer::device_ids)
@@ -108,6 +124,20 @@ impl<R: CryptoRngCore> Core<R> {
             },
             false,
         );
+    }
+
+    /// One of our own devices wrote: if this device does not know it yet,
+    /// the list grew and is looked up again now.
+    pub(super) fn check_own_device(&mut self, device: DeviceId) {
+        let known = self
+            .devices
+            .own
+            .as_ref()
+            .is_some_and(|l| l.contains(device));
+        if !known {
+            self.devices.last_check = None;
+            self.check_own_devices();
+        }
     }
 
     /// Looks up the devices of a contact, at most every ten minutes each.
@@ -203,7 +233,30 @@ impl<R: CryptoRngCore> Core<R> {
         self.devices.own = Some(list);
         self.devices.joined = true;
         self.persist_own_devices();
+        self.forget_unlisted_own();
         self.announce_devices();
+        self.ask_siblings();
+    }
+
+    /// Ends the sessions with our own devices the list no longer has.
+    fn forget_unlisted_own(&mut self) {
+        let Some(list) = &self.devices.own else {
+            return;
+        };
+        let gone: Vec<Addr> = self
+            .sessions
+            .keys()
+            .filter(|a| a.peer == self.peer_id && !list.contains(a.device))
+            .copied()
+            .collect();
+        for addr in gone {
+            self.sessions.remove(&addr);
+            self.persist(StoreOp::Delete {
+                table: Table::Sessions,
+                key: session_key(addr),
+            });
+            self.drop_targets(addr);
+        }
     }
 
     /// This device was taken off its identity's list: it stops, and the
@@ -252,7 +305,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist_own_devices();
     }
 
-    fn persist_own_devices(&mut self) {
+    pub(super) fn persist_own_devices(&mut self) {
         let record = self.devices.to_record();
         let op = self
             .vault
@@ -292,7 +345,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// A contact's list, unless it is older than one already seen: the
     /// server could hand out an old one to bring a removed device back.
-    fn learn_devices(&mut self, peer: PeerId, list: DeviceList) {
+    pub(super) fn learn_devices(&mut self, peer: PeerId, list: DeviceList) {
         let Some(p) = self.peers.get_mut(&peer) else {
             return;
         };

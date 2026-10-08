@@ -1037,16 +1037,18 @@ fn every_device_of_a_contact_gets_the_message() {
     assert!(w.has_session(A, b) && w.has_session(a2, b));
 }
 
-/// A device added later is announced to the contacts once the identity's
-/// other device sees it listed; from then on they write to it too.
+/// A device added later asks its sibling what it knows; the sibling, so
+/// learning of it, announces it to the contacts, who write to it too.
 #[test]
 fn a_new_device_is_announced_to_contacts() {
     let mut w = paired();
     let a2 = w.add_device(A, 2);
-    w.send_text(B, A, "before it is known");
-    assert!(w.texts(a2).is_empty(), "not announced yet");
+    let b = w.peer(B);
+    assert!(
+        !w.contact(a2, b).request,
+        "the sibling told it of its contacts"
+    );
 
-    w.advance(60 * 60_000);
     w.send_text(B, A, "to both");
     assert_eq!(w.texts(A).last().unwrap(), "to both");
     assert_eq!(w.texts(a2), ["to both"]);
@@ -1157,6 +1159,76 @@ fn a_file_accepted_after_it_was_sent_is_gone() {
         }
     )));
     assert!(w.clients[B].sinks.get(&file_id).is_none_or(|d| *d != data));
+}
+
+/// What one device sends shows on the identity's other devices as sent.
+#[test]
+fn a_message_sent_on_one_device_shows_on_the_other() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    let b = w.peer(B);
+    let sent = w.send_text(A, B, "from the first");
+    let mirrored = w.clients[a2].events.iter().find_map(|e| match e {
+        Event::Message(m) if m.msg_id == sent => Some(m.clone()),
+        _ => None,
+    });
+    let mirrored = mirrored.expect("shown on the other device");
+    assert!(mirrored.outgoing && mirrored.peer == b);
+    assert!(matches!(&mirrored.content, Content::Text { text, .. } if text == "from the first"));
+    assert_eq!(w.status_of(a2, sent), Some(MessageStatus::Delivered));
+    assert_eq!(w.texts(B), ["from the first"], "the contact gets it once");
+}
+
+/// Reading on one device marks the messages read on the others too.
+#[test]
+fn reading_on_one_device_marks_it_read_on_the_other() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    let msg = w.send_text(B, A, "read me");
+    let b = w.peer(B);
+    w.command(
+        A,
+        Command::MarkRead {
+            peer: b,
+            ids: vec![msg],
+        },
+    );
+    assert_eq!(w.status_of(a2, msg), Some(MessageStatus::Read));
+    assert_eq!(w.status_of(B, msg), Some(MessageStatus::Read));
+}
+
+/// Renaming or blocking a contact on one device does so on all of them.
+#[test]
+fn contacts_change_on_every_device() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    let b = w.peer(B);
+    w.command(
+        A,
+        Command::RenamePeer {
+            peer: b,
+            alias: Some("Bobby".into()),
+        },
+    );
+    assert_eq!(w.alias(a2, b).as_deref(), Some("Bobby"));
+    w.command(A, Command::BlockPeer { peer: b });
+    assert!(w.contact(a2, b).blocked);
+    w.send_text(B, A, "anyone?");
+    assert!(w.texts(a2).is_empty(), "blocked on the other device too");
+}
+
+/// An invite made on one device admits whoever joins by it on the others.
+#[test]
+fn an_invite_made_on_one_device_admits_on_another() {
+    let mut w = World::new(2);
+    let a2 = w.add_device(A, 2);
+    w.pair(A, B);
+    let b = w.peer(B);
+    assert!(!w.contact(A, b).request);
+    assert!(
+        !w.contact(a2, b).request,
+        "a contact there too, not a request"
+    );
 }
 
 mod devices {

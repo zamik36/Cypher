@@ -4,6 +4,7 @@ mod files;
 mod messaging;
 mod outbox;
 mod push;
+mod sync;
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -17,6 +18,7 @@ use zeroize::Zeroizing;
 
 use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
+use crate::envelope::SyncBody;
 use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
@@ -195,8 +197,8 @@ impl<R: CryptoRngCore> Core<R> {
             load_prekeys(&vault, &snapshot.meta, now_ms, &mut rng, &mut skipped)?;
 
         let own = load_own(&vault, &snapshot.meta, &mut skipped)?;
-        let (peers, legacy) = load_peers(&vault, &snapshot.peers, &mut skipped)?;
-        let sessions = load_sessions(&vault, &snapshot.sessions, &peers, &mut skipped)?;
+        let (peers, sessions, legacy) =
+            load_contacts(&vault, snapshot, identity.peer_id(), &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
         let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
 
@@ -443,7 +445,11 @@ impl<R: CryptoRngCore> Core<R> {
     fn on_success(&mut self, pending: Pending, msg: ServerMsg) {
         match (pending, msg) {
             (Pending::CreateLink, ServerMsg::LinkCreated { link }) => {
-                self.remember_link(link.as_str());
+                self.remember_link(link.as_str(), self.now);
+                self.sync(SyncBody::Link {
+                    code: link.as_str().to_owned(),
+                    at_ms: self.now,
+                });
                 self.emit(Event::LinkCreated {
                     link: ShareLink::new(link, &self.peer_id).to_string(),
                 });
@@ -578,12 +584,12 @@ impl<R: CryptoRngCore> Core<R> {
             Command::CancelTransfer { file_id } => self.cancel_transfer(&file_id),
             Command::MarkRead { peer, ids } => self.mark_read(peer, &ids),
             Command::FetchInbox => self.fetch_inbox(),
-            Command::RemovePeer { peer } => self.remove_peer(&peer),
-            Command::RenamePeer { peer, alias } => self.rename_peer(&peer, alias.as_deref()),
+            Command::RemovePeer { peer } => self.forget_contact(peer),
+            Command::RenamePeer { peer, alias } => self.rename_contact(peer, alias.as_deref()),
             Command::DiscardOutgoing { msg_id } => self.discard_outgoing(&msg_id),
-            Command::AcceptContact { peer } => self.accept_contact(&peer),
-            Command::BlockPeer { peer } => self.set_blocked(&peer, true),
-            Command::UnblockPeer { peer } => self.set_blocked(&peer, false),
+            Command::AcceptContact { peer } => self.accept_request(peer),
+            Command::BlockPeer { peer } => self.block_contact(peer, true),
+            Command::UnblockPeer { peer } => self.block_contact(peer, false),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
             Command::EnablePush => self.enable_push(),
@@ -647,7 +653,9 @@ impl<R: CryptoRngCore> Core<R> {
     /// too. Starts a fresh one from their published keys, keeping the
     /// contact.
     pub(super) fn repair_session(&mut self, addr: Addr) {
-        let settled = self.peers.get(&addr.peer).is_some_and(|p| !p.request)
+        let known =
+            addr.peer == self.peer_id || self.peers.get(&addr.peer).is_some_and(|p| !p.request);
+        let settled = known
             && !self
                 .sessions
                 .get(&addr)
@@ -682,7 +690,11 @@ impl<R: CryptoRngCore> Core<R> {
     /// Fetches the keys of one device of a contact for a fresh session with
     /// it; at most every ten minutes per device.
     pub(super) fn open_session(&mut self, addr: Addr) {
-        let blocked = self.peers.get(&addr.peer).is_none_or(|p| p.blocked);
+        let blocked = if addr.peer == self.peer_id {
+            addr.device == self.device
+        } else {
+            self.peers.get(&addr.peer).is_none_or(|p| p.blocked)
+        };
         let recent = self
             .last_repair
             .get(&addr)
@@ -964,6 +976,25 @@ impl Skipped {
 /// Contacts, and the sessions that records from before devices still held.
 type LoadedPeers = (HashMap<PeerId, Peer>, Vec<(PeerId, SessionRecord)>);
 
+/// Contacts, the sessions with their devices and ours, and the sessions that
+/// records from before devices still held.
+type LoadedContacts = (
+    HashMap<PeerId, Peer>,
+    HashMap<Addr, Session>,
+    Vec<(PeerId, SessionRecord)>,
+);
+
+fn load_contacts(
+    vault: &Vault,
+    snapshot: &Snapshot,
+    own: PeerId,
+    skipped: &mut Skipped,
+) -> Result<LoadedContacts, CoreError> {
+    let (peers, legacy) = load_peers(vault, &snapshot.peers, skipped)?;
+    let sessions = load_sessions(vault, &snapshot.sessions, &peers, own, skipped)?;
+    Ok((peers, sessions, legacy))
+}
+
 fn load_peers(vault: &Vault, rows: &Rows, skipped: &mut Skipped) -> Result<LoadedPeers, CoreError> {
     let mut peers = HashMap::with_capacity(rows.len());
     let mut legacy = Vec::new();
@@ -983,11 +1014,13 @@ fn load_peers(vault: &Vault, rows: &Rows, skipped: &mut Skipped) -> Result<Loade
     Ok((peers, legacy))
 }
 
-/// Sessions with the devices of known contacts; any other is left behind.
+/// Sessions with the devices of known contacts and our own other devices;
+/// any other is left behind.
 fn load_sessions(
     vault: &Vault,
     rows: &Rows,
     peers: &HashMap<PeerId, Peer>,
+    own: PeerId,
     skipped: &mut Skipped,
 ) -> Result<HashMap<Addr, Session>, CoreError> {
     let mut sessions = HashMap::with_capacity(rows.len());
@@ -996,7 +1029,7 @@ fn load_sessions(
             continue;
         };
         match (session_addr(k), Session::from_record(&record)) {
-            (Some(addr), Ok(session)) if peers.contains_key(&addr.peer) => {
+            (Some(addr), Ok(session)) if addr.peer == own || peers.contains_key(&addr.peer) => {
                 sessions.insert(addr, session);
             }
             (Some(_), Ok(_)) => {}

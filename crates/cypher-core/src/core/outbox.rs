@@ -344,19 +344,32 @@ impl<R: CryptoRngCore> Core<R> {
                 }
                 self.complete_target(msg_id, addr.device, MessageStatus::Sent);
             }
-            DeliveryStatus::Offline => {
-                let inbox = self.sessions.get(&addr).and_then(|s| s.inbox);
-                let peer = self.peers.get(&addr.peer);
-                let inbox = inbox.or_else(|| peer.and_then(|p| p.inbox_of(addr.device)));
-                match inbox.zip(peer.map(|p| p.identity_dh)) {
-                    Some((inbox, identity_dh)) => {
-                        self.put_inbox(msg_id, addr, inbox, &identity_dh, body);
-                    }
-                    None => self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS),
+            DeliveryStatus::Offline => match self.inbox_of(addr) {
+                Some((inbox, identity_dh)) => {
+                    self.put_inbox(msg_id, addr, inbox, &identity_dh, body);
                 }
-            }
+                None => self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS),
+            },
             DeliveryStatus::Busy => self.retry_later(msg_id, addr.device, RETRY_BUSY_MS),
         }
+    }
+
+    /// Where to leave a message for a device that is away, and the key to
+    /// seal it to: the inbox its `Hello` or its identity's announcement told,
+    /// or, for our own devices, the one this identity derives for it.
+    fn inbox_of(&self, addr: Addr) -> Option<([u8; 32], [u8; 32])> {
+        if addr.peer == self.peer_id {
+            let secret = self.seed.derive_inbox_secret(addr.device);
+            let own_dh = self.identity.dh_public_key().to_bytes();
+            return Some((cypher_wire::inbox_id(&secret), own_dh));
+        }
+        let peer = self.peers.get(&addr.peer)?;
+        let inbox = self
+            .sessions
+            .get(&addr)
+            .and_then(|s| s.inbox)
+            .or_else(|| peer.inbox_of(addr.device))?;
+        Some((inbox, peer.identity_dh))
     }
 
     pub(super) fn on_send_failed(&mut self, msg_id: MsgId, device: DeviceId) {
