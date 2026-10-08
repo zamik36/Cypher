@@ -48,6 +48,13 @@ export interface Methods {
   forgetPeer(peer: string): void;
   history(peer: string, limit: number, before?: number): unknown[];
   clearHistory(): void;
+  /** Starts waiting to be linked as `name` through `gatewayUrl`: the offer to show. */
+  startLink(gatewayUrl: string, name: string): string;
+  /** Waits for the hand-over and keeps it under `passphrase`: peer id and nickname. */
+  finishLink(passphrase: string): [string, string];
+  cancelLink(): void;
+  /** Links the new device showing `offer`; resolves once it is listed. */
+  linkDevice(offer: string): void;
 }
 
 export type Method = keyof Methods;

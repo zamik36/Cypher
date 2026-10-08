@@ -3,6 +3,7 @@ import init, {
   Client,
   historyRange,
   Identity,
+  Provision,
   qrSvg,
   waveformFromRms,
   type Effect,
@@ -79,6 +80,7 @@ const sinks: EffectSinks = {
 const apply = (effects: Effect[]) => applyEffects(effects, sinks);
 
 function onEvent(channel: string, payload: unknown) {
+  for (const w of linkWaiters) if (w(channel, payload)) linkWaiters.delete(w);
   switch (channel) {
     case "file_offered": {
       const offer = payload as { file_id: string; name: string };
@@ -193,6 +195,49 @@ const gateway = new Link(
   (data) => void feed((c, now) => c.frame(data, now)),
   () => void feed((c, now) => c.disconnected(now)),
 );
+
+/** This new device, waiting to be linked over its own gateway connection. */
+let provision: Provision | null = null;
+let linkTicker: ReturnType<typeof setInterval> | undefined;
+/** Settles once the hand-over arrived, or waiting ended without it. */
+let linkDone: { promise: Promise<void>; settle: (failure?: Error) => void } | null = null;
+
+function feedLink(call: (p: Provision, now: number) => Effect[]): Promise<void> {
+  return serial(async () => {
+    if (provision) await applyEffects(call(provision, Date.now()), linkSinks);
+  });
+}
+
+const linkSocket = new Link(
+  () => void feedLink((p, now) => p.connected(now)),
+  (data) => void feedLink((p, now) => p.frame(data, now)),
+  () => undefined,
+);
+
+const linkSinks: EffectSinks = {
+  persist: () => Promise.resolve(),
+  transmit: (data) => linkSocket.send(data),
+  anonymous: () => undefined,
+  event: (channel) => {
+    if (channel === "linked_here") linkDone?.settle();
+    else if (channel === "link_failed") linkDone?.settle(new Error("the offer expired"));
+  },
+  reply: () => undefined,
+  readChunk: () => undefined,
+  openSink: () => Promise.resolve(),
+  writeChunk: () => undefined,
+  closeSink: () => Promise.resolve(),
+  disconnect: () => linkSocket.stop(),
+};
+
+function stopLinking(failure?: Error) {
+  clearInterval(linkTicker);
+  linkSocket.stop();
+  linkDone?.settle(failure ?? new Error("cancelled"));
+}
+
+/** Resolves once the core reports linking the device it was given, or why not. */
+const linkWaiters = new Set<(channel: string, payload: unknown) => boolean>();
 
 const relay = new Link(
   () => void feed((c, now) => c.anonymousChannel(true, now)),
@@ -384,6 +429,50 @@ interface StoredView {
 type Handlers = { [M in Method]: (...args: Parameters<Methods[M]>) => Promise<ReturnType<Methods[M]>> };
 
 const handlers: Handlers = {
+  startLink: (gatewayUrl, name) => {
+    stopLinking();
+    provision?.free();
+    provision = new Provision(name, Date.now());
+    let settle: (failure?: Error) => void = () => undefined;
+    const promise = new Promise<void>((resolve, reject) => {
+      settle = (failure) => (failure ? reject(failure) : resolve());
+    });
+    // Waiting may end with nobody listening yet.
+    promise.catch(() => undefined);
+    linkDone = { promise, settle };
+    linkSocket.start(gatewayUrl);
+    linkTicker = setInterval(() => void feedLink((p, now) => p.tick(now)), TICK_MS);
+    return Promise.resolve(provision.offer());
+  },
+  finishLink: async (passphrase) => {
+    if (!provision || !linkDone) throw new Error("not waiting to be linked");
+    await linkDone.promise;
+    clearInterval(linkTicker);
+    const sealed = provision.finish(passphrase);
+    provision.free();
+    provision = null;
+    linkDone = null;
+    const peer = await adopt(sealed);
+    return [peer, requireIdentity().nickname];
+  },
+  cancelLink: () => {
+    stopLinking();
+    provision?.free();
+    provision = null;
+    return Promise.resolve();
+  },
+  linkDevice: async (offer) => {
+    const done = new Promise<void>((resolve, reject) => {
+      linkWaiters.add((channel, payload) => {
+        if (channel === "device_linked") resolve();
+        else if (channel === "link_failed") reject(new Error(String(payload)));
+        else return false;
+        return true;
+      });
+    });
+    await serial(() => run({ type: "link_device", offer }));
+    await done;
+  },
   hasIdentity: async () => (await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined,
   createIdentity: (nickname, passphrase) => adopt(Identity.create(nickname, passphrase)),
   importMnemonic: (mnemonic, nickname, passphrase) => adopt(Identity.import(mnemonic, nickname, passphrase)),

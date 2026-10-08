@@ -1,3 +1,4 @@
+import { browserName } from "./device";
 import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 import type { Method, Methods, WorkerMessage } from "./protocol";
 import { WebVoiceRecorder } from "./voice";
@@ -117,6 +118,16 @@ export const webPlatform: Platform = {
   eraseDevice: () => call("eraseDevice"),
   lock: () => call("lock"),
   exportMnemonic: (passphrase) => call("exportMnemonic", passphrase),
+  devices: {
+    defaultName: () => Promise.resolve(browserName()),
+    startLink: (_addr, name) => call("startLink", endpoints()[0], name),
+    finishLink: (passphrase) => call("finishLink", passphrase),
+    cancelLink: () => call("cancelLink"),
+    link: (offer) => call("linkDevice", offer),
+    unlink: async (deviceId) => {
+      await call("command", { type: "unlink_device", device: deviceId });
+    },
+  },
   connectToGateway: (_addr, anonymous) => call("connect", ...endpoints(), anonymous),
   applyAnonymousSettings: (anonymous) => call("setAnonymity", anonymous),
   createLink: async (): Promise<LinkInfo> => ({ link_id: await call("createLink") }),

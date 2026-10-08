@@ -95,7 +95,15 @@ impl Identity {
     ) -> Result<SealedIdentity, JsError> {
         // Contacts reach only an identity's first device until they learn
         // of others.
-        let device = DeviceId::FIRST;
+        Self::seal_device(seed, DeviceId::FIRST, nickname, passphrase)
+    }
+
+    fn seal_device(
+        seed: IdentitySeed,
+        device: DeviceId,
+        nickname: &str,
+        passphrase: &str,
+    ) -> Result<SealedIdentity, JsError> {
         let blob =
             identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng).map_err(js_err)?;
         Ok(SealedIdentity {
@@ -128,6 +136,57 @@ impl Identity {
     /// Recovery phrase; the UI must re-verify the passphrase (`unlock`) first.
     pub fn mnemonic(&self) -> String {
         self.seed.to_mnemonic()
+    }
+}
+
+/// A new device waiting to be linked, driven by the worker like `Client`
+/// over its own gateway connection.
+#[wasm_bindgen]
+pub struct Provision {
+    inner: cypher_core::link::Provision,
+}
+
+#[wasm_bindgen]
+impl Provision {
+    #[wasm_bindgen(constructor)]
+    pub fn new(name: &str, now_ms: f64) -> Self {
+        Self {
+            inner: cypher_core::link::Provision::new(name, now(now_ms), &mut OsRng),
+        }
+    }
+
+    /// What to show for a device of the identity to scan.
+    pub fn offer(&self) -> String {
+        self.inner.offer().to_text()
+    }
+
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
+    pub fn connected(&mut self, now_ms: f64) -> Result<Array, JsError> {
+        self.step(Input::Connected, now_ms)
+    }
+
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
+    pub fn frame(&mut self, data: &[u8], now_ms: f64) -> Result<Array, JsError> {
+        self.step(Input::Frame(bytes::Bytes::copy_from_slice(data)), now_ms)
+    }
+
+    #[wasm_bindgen(unchecked_return_type = "Effect[]")]
+    pub fn tick(&mut self, now_ms: f64) -> Result<Array, JsError> {
+        self.step(Input::Tick, now_ms)
+    }
+
+    /// The identity handed over (after `linked_here`), sealed under this
+    /// device's own `passphrase`; the seed never reaches JavaScript.
+    pub fn finish(&mut self, passphrase: &str) -> Result<SealedIdentity, JsError> {
+        let linked = self
+            .inner
+            .take_linked()
+            .ok_or_else(|| JsError::new("not linked yet"))?;
+        Identity::seal_device(linked.seed, linked.device, &linked.nickname, passphrase)
+    }
+
+    fn step(&mut self, input: Input, now_ms: f64) -> Result<Array, JsError> {
+        effects_to_js(&self.inner.handle(input, now(now_ms)))
     }
 }
 

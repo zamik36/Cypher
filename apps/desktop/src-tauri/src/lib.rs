@@ -8,7 +8,7 @@ mod shell;
 #[cfg(test)]
 mod tests;
 
-use commands::{chat, identity, link, media, push, qr, settings, transfer};
+use commands::{chat, devices, identity, link, media, push, qr, settings, transfer};
 use tauri::{Emitter, Manager, Runtime};
 
 #[cfg(mobile)]
@@ -109,6 +109,12 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             settings::reconnect,
             link::create_link,
             link::join_link,
+            devices::device_name,
+            devices::link_start,
+            devices::link_finish,
+            devices::link_cancel,
+            devices::link_device,
+            devices::unlink_device,
             chat::send_message,
             chat::delete_message,
             chat::mark_read,

@@ -393,11 +393,48 @@ async fn two_desktops_against_in_process_stack() {
     send_picked_files(&a, &b_id).await;
     send_and_preview_pictures(&a, &b, &b_id).await;
     name_then_forget_a_contact(&b, &a_id).await;
+    link_a_new_desktop(&stack.target().tls, &a, &a_id, &gateway).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
     a.call("apply_anonymous_settings", anonymity).await.unwrap();
     a.call("clear_chat_history", json!({})).await.unwrap();
     stack.stop().await;
+}
+
+/// A new desktop waits to be linked and the first links it: it becomes a
+/// device of the same identity. Waiting can be given up.
+async fn link_a_new_desktop(
+    tls: &Arc<rustls::ClientConfig>,
+    a: &Desktop,
+    a_id: &str,
+    gateway: &str,
+) {
+    let laptop = Desktop::new(Arc::clone(tls));
+    let name = laptop.call("device_name", json!({})).await.unwrap();
+    assert!(!text(&name).is_empty());
+    let start = json!({ "addr": gateway, "name": "Laptop" });
+    let offer = text(&laptop.call("link_start", start).await.unwrap());
+    let finish = laptop.call("link_finish", json!({ "passphrase": PASS }));
+    // The new desktop's throwaway session may still be signing in.
+    let link = eventually(|| {
+        let args = json!({ "offer": offer });
+        async move { a.call("link_device", args).await.ok() }
+    });
+    let (finished, _) = tokio::join!(finish, link);
+    let (peer, nickname): (String, String) = serde_json::from_value(finished.unwrap()).unwrap();
+    assert_eq!((peer.as_str(), nickname.as_str()), (a_id, "alice"));
+    a.call("unlink_device", json!({ "device": 0 }))
+        .await
+        .unwrap();
+
+    let other = Desktop::new(Arc::clone(tls));
+    other
+        .call("link_start", json!({ "addr": gateway, "name": "Tablet" }))
+        .await
+        .unwrap();
+    other.call("link_cancel", json!({})).await.unwrap();
+    let refused = other.call("link_finish", json!({ "passphrase": PASS }));
+    assert_eq!(refused.await.unwrap_err(), "not waiting to be linked");
 }
 
 /// A contact's name shows in the chat list; deleting the chat empties its

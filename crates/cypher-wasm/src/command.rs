@@ -70,6 +70,12 @@ pub(crate) enum JsCommand {
         auth: Vec<u8>,
     },
     DisablePush,
+    LinkDevice {
+        offer: String,
+    },
+    UnlinkDevice {
+        device: u32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,15 +181,15 @@ impl JsCommand {
             Self::AcceptContact { peer: p } => plain(Command::AcceptContact { peer: peer(&p)? }),
             Self::BlockPeer { peer: p } => plain(Command::BlockPeer { peer: peer(&p)? }),
             Self::UnblockPeer { peer: p } => plain(Command::UnblockPeer { peer: peer(&p)? }),
-            push @ (Self::EnablePush | Self::RegisterPush { .. } | Self::DisablePush) => {
-                plain(push.push_command()?)
-            }
+            // Push wake-ups and this identity's other devices.
+            other => plain(other.device_command()?),
         })
     }
 }
 
 impl JsCommand {
-    fn push_command(self) -> Result<Command, CommandError> {
+    /// Commands about this device: its push wake-ups and its siblings.
+    fn device_command(self) -> Result<Command, CommandError> {
         Ok(match self {
             Self::EnablePush => Command::EnablePush,
             Self::RegisterPush {
@@ -196,6 +202,8 @@ impl JsCommand {
                 auth: auth.try_into().map_err(|_| CommandError::Push)?,
             },
             Self::DisablePush => Command::DisablePush,
+            Self::LinkDevice { offer } => Command::LinkDevice { offer },
+            Self::UnlinkDevice { device } => Command::UnlinkDevice { device },
             _ => return Err(CommandError::Push),
         })
     }
@@ -367,6 +375,19 @@ mod tests {
         assert!(matches!(enable.command, Command::EnablePush));
         let disable = prepare(json!({ "type": "disable_push" })).unwrap();
         assert!(matches!(disable.command, Command::DisablePush));
+    }
+
+    #[test]
+    fn devices_are_linked_and_unlinked() {
+        let link = prepare(json!({ "type": "link_device", "offer": "cypher-device:00" })).unwrap();
+        assert!(
+            matches!(link.command, Command::LinkDevice { offer } if offer == "cypher-device:00")
+        );
+        let unlink = prepare(json!({ "type": "unlink_device", "device": 3 })).unwrap();
+        assert!(matches!(
+            unlink.command,
+            Command::UnlinkDevice { device: 3 }
+        ));
     }
 
     #[test]

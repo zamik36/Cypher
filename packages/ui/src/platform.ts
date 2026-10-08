@@ -94,6 +94,12 @@ export interface FileOffer {
   mime: string;
 }
 
+/** One device of this identity; `name` is empty when unknown. */
+export interface DeviceInfo {
+  id: number;
+  name: string;
+}
+
 export type Unsubscribe = () => void;
 
 /** Core event channels and their payloads (see `cypher_core::ui::event`). */
@@ -121,6 +127,14 @@ export interface Events {
   file_failed: { file_id: string; reason: string };
   error: string;
   anonymity_level: AnonymityLevelPayload;
+  /** This device was taken off its identity's list; it stopped. */
+  unlinked: null;
+  /** The identity's devices, and which one this is. */
+  devices: { this: number; devices: DeviceInfo[] };
+  /** A new device was linked to this identity. */
+  device_linked: DeviceInfo;
+  /** Linking a device did not work (the reason, as the core names it). */
+  link_failed: string;
   /** The server's push key (hex), to subscribe this device with. */
   push_key: string;
   /** Whether the server will wake this device while the app is closed. */
@@ -170,6 +184,23 @@ export interface Platform {
     subscribe(keyHex: string): Promise<boolean>;
     /** Unsubscribes and has the server forget the subscription. */
     disable(): Promise<void>;
+  };
+  /** Several devices on one identity. */
+  devices: {
+    /** A name to suggest for this device. */
+    defaultName(): Promise<string>;
+    /** Starts waiting to be linked as `name`; resolves to the offer to show. */
+    startLink(gatewayAddr: string, name: string): Promise<string>;
+    /**
+     * Waits until a device of the identity hands it over, keeps it under
+     * `passphrase` and unlocks it: our peer id and nickname.
+     */
+    finishLink(passphrase: string): Promise<[string, string]>;
+    cancelLink(): Promise<void>;
+    /** Links the new device whose offer the user scanned or pasted. */
+    link(offer: string): Promise<void>;
+    /** Takes another device off this identity's list. */
+    unlink(deviceId: number): Promise<void>;
   };
   /** Stops the client and drops the identity from memory until unlocked. */
   lock(): Promise<void>;

@@ -8,7 +8,7 @@ use cypher_core::ui::{self, UiMessage};
 use cypher_core::{Command, MessageStatus};
 
 /// Argon2id is deliberately slow; keep it off the async runtime.
-async fn with_store<T: Send + 'static>(
+pub(super) async fn with_store<T: Send + 'static>(
     state: &AppState,
     f: impl FnOnce(IdentityStore) -> Result<T, cypher_client::ClientError> + Send + 'static,
 ) -> CmdResult<T> {
@@ -19,7 +19,7 @@ async fn with_store<T: Send + 'static>(
         .map_err(err)
 }
 
-async fn activate(state: &AppState, unlocked: Unlocked) -> String {
+pub(super) async fn activate(state: &AppState, unlocked: Unlocked) -> String {
     let peer = unlocked.seed.derive_identity().peer_id().to_hex();
     state.set_identity(unlocked).await;
     peer

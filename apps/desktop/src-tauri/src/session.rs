@@ -88,6 +88,9 @@ pub(crate) struct AppState {
     pub voice: StdMutex<Option<Recorder>>,
     /// The last files dropped on the window.
     pub dropped: StdMutex<crate::commands::transfer::Dropped>,
+    /// This new device, waiting to be linked.
+    pub linking: Mutex<Option<cypher_client::Provisioning>>,
+    pub link_cancel: tokio::sync::Notify,
 }
 
 impl AppState {
@@ -101,7 +104,13 @@ impl AppState {
             offers: Offers::default(),
             voice: StdMutex::default(),
             dropped: StdMutex::default(),
+            linking: Mutex::default(),
+            link_cancel: tokio::sync::Notify::new(),
         }
+    }
+
+    pub(crate) fn tls(&self) -> Arc<rustls::ClientConfig> {
+        Arc::clone(&self.tls)
     }
 
     pub(crate) fn paths(&self) -> &Paths {
