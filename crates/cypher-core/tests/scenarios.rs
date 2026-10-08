@@ -1231,6 +1231,103 @@ fn an_invite_made_on_one_device_admits_on_another() {
     );
 }
 
+/// A new device shows an offer; a device of the identity scans it and hands
+/// the identity over. The new device starts as one of its devices, learns
+/// the contacts from its sibling, and the contacts write to it.
+#[test]
+fn linking_hands_over_the_identity_and_lists_the_new_device() {
+    let mut w = paired();
+    let laptop = w.provision("Laptop");
+    let offer = w.offer(laptop);
+    w.command(A, Command::LinkDevice { offer });
+    assert!(w.has_event(laptop, |e| matches!(e, Event::LinkedHere)));
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::DeviceLinked { name, .. } if name == "Laptop"
+    )));
+    assert!(w.finish_linking(laptop));
+    assert_eq!(w.peer(laptop), w.peer(A), "the same identity");
+
+    let b = w.peer(B);
+    assert!(!w.contact(laptop, b).request, "its sibling told it of B");
+    w.send_text(B, A, "hello, everyone");
+    assert_eq!(w.texts(laptop), ["hello, everyone"]);
+    let listed = w.clients[A].events.iter().rev().find_map(|e| match e {
+        Event::OwnDevices { devices, .. } => Some(devices.clone()),
+        _ => None,
+    });
+    let listed = listed.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|(_, name)| name == "Laptop"));
+}
+
+/// An offer for a device id the identity already has, or one nobody waits
+/// on, links nothing.
+#[test]
+fn a_link_that_cannot_work_fails() {
+    let mut w = paired();
+    let gone = w.provision("Tablet");
+    let offer = w.offer(gone);
+    w.disconnect(gone);
+    w.command(A, Command::LinkDevice { offer });
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::LinkFailed {
+            reason: FailReason::Offline
+        }
+    )));
+
+    let phone = w.provision("Phone");
+    let mut taken = cypher_core::link::LinkOffer::parse(&w.offer(phone)).unwrap();
+    taken.device = DeviceId::FIRST;
+    w.command(
+        A,
+        Command::LinkDevice {
+            offer: taken.to_text(),
+        },
+    );
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::LinkFailed {
+            reason: FailReason::Rejected
+        }
+    )));
+    w.command(
+        A,
+        Command::LinkDevice {
+            offer: "not an offer".into(),
+        },
+    );
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::LinkFailed {
+            reason: FailReason::InvalidLink
+        }
+    )));
+    assert!(!w.has_event(phone, |e| matches!(e, Event::LinkedHere)));
+}
+
+/// A device taken off the list by another stops at its next check.
+#[test]
+fn unlinking_a_device_stops_it() {
+    let mut w = paired();
+    let laptop = w.provision("Laptop");
+    let offer = w.offer(laptop);
+    w.command(A, Command::LinkDevice { offer });
+    w.finish_linking(laptop);
+    let id = w.clients[laptop].device.0;
+    w.command(A, Command::UnlinkDevice { device: id });
+    w.advance(60 * 60_000);
+    assert!(w.has_event(laptop, |e| matches!(e, Event::DeviceUnlinked)));
+    w.command(A, Command::UnlinkDevice { device: 1 });
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::LinkFailed {
+            reason: FailReason::Rejected
+        }
+    )));
+}
+
 mod devices {
     use cypher_core::{Table, session_key};
     use cypher_types::{Addr, DeviceId, PeerId};

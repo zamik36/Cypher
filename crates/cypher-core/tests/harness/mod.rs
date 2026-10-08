@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bytes::Bytes;
+use cypher_core::link::Provision;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault};
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
@@ -56,6 +57,8 @@ pub(crate) struct Client {
     /// Which of its identity's devices this client is.
     pub device: DeviceId,
     pub core: Option<Core<Rng>>,
+    /// A new device waiting to be linked, instead of a core.
+    pub provision: Option<Provision>,
     pub kv: BTreeMap<(u8, Vec<u8>), Vec<u8>>,
     pub sources: HashMap<FileId, Vec<u8>>,
     pub sinks: HashMap<FileId, Vec<u8>>,
@@ -100,6 +103,7 @@ impl World {
                 seed,
                 device: DeviceId::FIRST,
                 core: None,
+                provision: None,
                 kv: BTreeMap::new(),
                 sources: HashMap::new(),
                 sinks: HashMap::new(),
@@ -125,6 +129,7 @@ impl World {
             seed,
             device: DeviceId(device),
             core: None,
+            provision: None,
             kv: BTreeMap::new(),
             sources: HashMap::new(),
             sinks: HashMap::new(),
@@ -138,6 +143,60 @@ impl World {
         self.connect(i);
         self.run();
         i
+    }
+
+    /// A new device waiting to be linked, online: the index of the new
+    /// client.
+    pub(crate) fn provision(&mut self, name: &str) -> usize {
+        let provision = Provision::new(name, self.now, &mut self.rng);
+        self.clients.push(Client {
+            seed: [0; 32],
+            device: provision.offer().device,
+            core: None,
+            provision: Some(provision),
+            kv: BTreeMap::new(),
+            sources: HashMap::new(),
+            sinks: HashMap::new(),
+            closed: HashMap::new(),
+            events: Vec::new(),
+            connected: false,
+            inputs: VecDeque::new(),
+        });
+        let i = self.clients.len() - 1;
+        self.connect(i);
+        self.run();
+        i
+    }
+
+    /// The offer new device `i` shows.
+    pub(crate) fn offer(&self, i: usize) -> String {
+        self.clients[i]
+            .provision
+            .as_ref()
+            .expect("a device waiting to be linked")
+            .offer()
+            .to_text()
+    }
+
+    /// New device `i` took the identity handed to it and starts as a device
+    /// of it; false when nothing was handed over.
+    pub(crate) fn finish_linking(&mut self, i: usize) -> bool {
+        let Some(linked) = self.clients[i]
+            .provision
+            .as_mut()
+            .and_then(Provision::take_linked)
+        else {
+            return false;
+        };
+        let c = &mut self.clients[i];
+        c.seed = *linked.seed.as_bytes();
+        c.device = linked.device;
+        c.provision = None;
+        self.server.online.retain(|_, idx| *idx != i);
+        self.boot(i);
+        self.connect(i);
+        self.run();
+        true
     }
 
     pub(crate) fn peer(&self, i: usize) -> PeerId {
@@ -177,10 +236,7 @@ impl World {
     }
 
     pub(crate) fn disconnect(&mut self, i: usize) {
-        let peer = self.peer(i);
-        self.server
-            .online
-            .retain(|p, idx| !(p.peer == peer && *idx == i));
+        self.server.online.retain(|_, idx| *idx != i);
         self.clients[i].connected = false;
         self.clients[i].inputs.push_back(Input::Disconnected);
         self.run();
@@ -355,11 +411,12 @@ impl World {
             for i in 0..self.clients.len() {
                 while let Some(input) = self.clients[i].inputs.pop_front() {
                     progressed = true;
-                    let effects = self.clients[i]
-                        .core
-                        .as_mut()
-                        .unwrap()
-                        .handle(input, self.now);
+                    let c = &mut self.clients[i];
+                    let effects = match (c.core.as_mut(), c.provision.as_mut()) {
+                        (Some(core), _) => core.handle(input, self.now),
+                        (None, Some(provision)) => provision.handle(input, self.now),
+                        (None, None) => Vec::new(),
+                    };
                     self.apply(i, effects);
                 }
             }

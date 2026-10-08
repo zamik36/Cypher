@@ -113,6 +113,15 @@ pub enum Command {
     },
     /// The server forgets the subscription.
     DisablePush,
+    /// Hands this identity to the new device that shows `offer`, then
+    /// lists it among the identity's devices.
+    LinkDevice {
+        offer: String,
+    },
+    /// Takes one of this identity's other devices off its list.
+    UnlinkDevice {
+        device: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +185,25 @@ pub enum Event {
     /// This device was removed from its identity's list: it stopped, and
     /// stays stopped.
     DeviceUnlinked,
+    /// The identity's devices as this one knows them: `(id, name)`, the
+    /// name empty when unknown.
+    OwnDevices {
+        this: u32,
+        devices: Vec<(u32, String)>,
+    },
+    /// A new device was linked to this identity.
+    DeviceLinked {
+        device: u32,
+        name: String,
+    },
+    /// Linking a device did not work: on the device linking another, or on
+    /// a new device whose offer expired.
+    LinkFailed {
+        reason: FailReason,
+    },
+    /// The new device received its identity; the driver takes it from the
+    /// [`crate::link::Provision`].
+    LinkedHere,
     /// The anonymous relay channel went up or down.
     Onion {
         up: bool,

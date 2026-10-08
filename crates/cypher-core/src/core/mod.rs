@@ -19,6 +19,7 @@ use zeroize::Zeroizing;
 use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
 use crate::envelope::SyncBody;
+use crate::link::LinkOffer;
 use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
@@ -76,6 +77,12 @@ enum Pending {
     },
     PublishDevices {
         list: DeviceList,
+        /// A device this one just linked, listed by this publication.
+        linked: Option<(DeviceId, String)>,
+    },
+    /// The hand-over to a new device.
+    LinkSend {
+        offer: LinkOffer,
     },
     Publish {
         batch: bool,
@@ -466,7 +473,12 @@ impl<R: CryptoRngCore> Core<R> {
             (Pending::FetchDevices { peer, purpose }, ServerMsg::Devices { list }) => {
                 self.on_devices(peer, purpose, Some(&list));
             }
-            (Pending::PublishDevices { list }, ServerMsg::Done) => self.on_own_published(list),
+            (Pending::PublishDevices { list, linked }, ServerMsg::Done) => {
+                self.on_own_published(list, linked);
+            }
+            (Pending::LinkSend { offer }, ServerMsg::SendAck { status }) => {
+                self.on_link_sent(offer, status);
+            }
             (Pending::Publish { batch }, ServerMsg::KeysAck { opks_left }) => {
                 if !batch && opks_left < OPK_LOW_WATER {
                     self.publish_keys(true);
@@ -489,18 +501,21 @@ impl<R: CryptoRngCore> Core<R> {
                     onion_key,
                     ..
                 },
-            ) => {
-                let relay = (!relay_addr.is_empty()).then_some(onion_key);
-                self.anon.on_bootstrap(relay, self.now);
-                self.fetch_inbox();
-                self.push_step();
-                self.emit(Event::Bootstrap {
-                    relay_addr,
-                    onion_key,
-                });
-            }
+            ) => self.on_bootstrap(relay_addr, onion_key),
             (pending, _) => self.fail_request(pending, FailReason::ServerError),
         }
+    }
+
+    /// Where the relay is and what to seal onion requests to.
+    fn on_bootstrap(&mut self, relay_addr: String, onion_key: [u8; 32]) {
+        let relay = (!relay_addr.is_empty()).then_some(onion_key);
+        self.anon.on_bootstrap(relay, self.now);
+        self.fetch_inbox();
+        self.push_step();
+        self.emit(Event::Bootstrap {
+            relay_addr,
+            onion_key,
+        });
     }
 
     fn fail_request(&mut self, pending: Pending, reason: FailReason) {
@@ -517,11 +532,14 @@ impl<R: CryptoRngCore> Core<R> {
                 }
                 (DevicesFor::Own | DevicesFor::Refresh, _) => {}
             },
-            Pending::PublishDevices { .. } => {
-                if reason == FailReason::Rejected {
+            Pending::PublishDevices { linked, .. } => {
+                if linked.is_some() {
+                    self.emit(Event::LinkFailed { reason });
+                } else if reason == FailReason::Rejected {
                     self.on_own_conflict();
                 }
             }
+            Pending::LinkSend { .. } => self.emit(Event::LinkFailed { reason }),
             Pending::SessionKeys { addr } => {
                 // The device is gone: nothing more goes to it.
                 if reason == FailReason::NotFound {
@@ -603,6 +621,8 @@ impl<R: CryptoRngCore> Core<R> {
                 auth,
             }),
             Command::DisablePush => self.disable_push(),
+            Command::LinkDevice { offer } => self.link_device(&offer),
+            Command::UnlinkDevice { device } => self.unlink_device(DeviceId(device)),
         }
     }
 

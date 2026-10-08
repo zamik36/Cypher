@@ -3,16 +3,18 @@
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use cypher_crypto::DeviceList;
 use cypher_types::{Addr, DeviceId, MAX_DEVICES, PeerId};
-use cypher_wire::ClientMsg;
+use cypher_wire::{ClientMsg, DeliveryStatus};
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 
 use super::outbox::OutboxItem;
 use super::{Conn, Core, Pending};
-use crate::api::{Effect, Event};
+use crate::api::{Effect, Event, FailReason};
 use crate::envelope::Body;
+use crate::link::{LinkOffer, seal_handover};
 use crate::peer::Peer;
 use crate::store::{META_DEVICES, StoreOp, Table, session_key};
 
@@ -45,6 +47,8 @@ pub(crate) struct OwnDevices {
     announced: u64,
     /// This device asked its siblings for what they know.
     asked: bool,
+    /// Names of the identity's devices, as far as this one knows them.
+    names: Vec<(u32, String)>,
 }
 
 impl crate::Record for OwnDevices {
@@ -58,6 +62,7 @@ pub(super) struct Devices {
     joined: bool,
     announced: u64,
     pub(super) asked: bool,
+    names: Vec<(u32, String)>,
     last_check: Option<u64>,
     conflicts: u8,
     last_refresh: HashMap<PeerId, u64>,
@@ -71,6 +76,7 @@ impl Devices {
             joined: record.joined,
             announced: record.announced,
             asked: record.asked,
+            names: record.names,
             ..Self::default()
         }
     }
@@ -81,6 +87,7 @@ impl Devices {
             joined: self.joined,
             announced: self.announced,
             asked: self.asked,
+            names: self.names.clone(),
         }
     }
 }
@@ -188,7 +195,7 @@ impl<R: CryptoRngCore> Core<R> {
                 Ok(next) => self.publish_own(next),
                 // The list is full.
                 Err(_) => self.emit(Event::Warning {
-                    reason: crate::api::FailReason::Rejected,
+                    reason: FailReason::Rejected,
                 }),
             },
             None => {
@@ -206,18 +213,111 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn publish_own(&mut self, list: DeviceList) {
-        let encoded = bytes::Bytes::from(list.encode());
+        self.publish_listing(list, None);
+    }
+
+    fn publish_listing(&mut self, list: DeviceList, linked: Option<(DeviceId, String)>) {
+        let encoded = Bytes::from(list.encode());
         self.request(
             ClientMsg::PublishDevices { list: encoded },
-            Pending::PublishDevices { list },
+            Pending::PublishDevices { list, linked },
             false,
         );
     }
 
-    /// The server took our list.
-    pub(super) fn on_own_published(&mut self, list: DeviceList) {
+    /// The server took our list, with a device this one just linked.
+    pub(super) fn on_own_published(
+        &mut self,
+        list: DeviceList,
+        linked: Option<(DeviceId, String)>,
+    ) {
         self.devices.conflicts = 0;
+        if let Some((device, name)) = linked {
+            self.devices.names.retain(|(d, _)| *d != device.0);
+            self.devices.names.push((device.0, name.clone()));
+            self.emit(Event::DeviceLinked {
+                device: device.0,
+                name,
+            });
+        }
         self.adopt_own(list);
+    }
+
+    /// Hands this identity to the new device whose offer the user scanned:
+    /// sealed to the offer's key, straight to its throwaway session.
+    pub(super) fn link_device(&mut self, text: &str) {
+        let Some(offer) = LinkOffer::parse(text) else {
+            return self.emit(Event::LinkFailed {
+                reason: FailReason::InvalidLink,
+            });
+        };
+        let room = self
+            .devices
+            .own
+            .as_ref()
+            .filter(|_| self.devices.joined)
+            .map(|l| !l.contains(offer.device) && l.devices().len() < MAX_DEVICES);
+        let reason = match room {
+            _ if self.conn != Conn::Ready => Some(FailReason::Offline),
+            None => Some(FailReason::Offline),
+            Some(false) => Some(FailReason::Rejected),
+            Some(true) => None,
+        };
+        let nickname = self.profile_name.clone().unwrap_or_default();
+        let body = seal_handover(&offer, &self.seed, &nickname, &mut self.rng);
+        let (None, Some(body)) = (reason, body) else {
+            let reason = reason.unwrap_or(FailReason::ServerError);
+            return self.emit(Event::LinkFailed { reason });
+        };
+        let req_id = self.alloc_req();
+        let deadline = self.now + super::REQUEST_TIMEOUT_MS;
+        let send = ClientMsg::Send {
+            to: offer.temp,
+            device: DeviceId::FIRST,
+            want_ack: true,
+            body: Bytes::from(body),
+        };
+        self.pending
+            .insert(req_id, (Pending::LinkSend { offer }, deadline));
+        self.transmit(req_id, send);
+    }
+
+    /// The new device has the identity: list it.
+    pub(super) fn on_link_sent(&mut self, offer: LinkOffer, status: DeliveryStatus) {
+        let next = match status {
+            DeliveryStatus::Delivered => self
+                .devices
+                .own
+                .as_ref()
+                .and_then(|l| l.with(&self.identity, offer.device).ok()),
+            DeliveryStatus::Offline | DeliveryStatus::Busy => None,
+        };
+        match next {
+            Some(list) => self.publish_listing(list, Some((offer.device, offer.name))),
+            None => self.emit(Event::LinkFailed {
+                reason: FailReason::Offline,
+            }),
+        }
+    }
+
+    /// Takes another device of this identity off its list. It learns so
+    /// when it next checks, and contacts when this device tells them.
+    pub(super) fn unlink_device(&mut self, device: DeviceId) {
+        let next = self
+            .devices
+            .own
+            .as_ref()
+            .filter(|l| device != self.device && l.contains(device))
+            .and_then(|l| l.without(&self.identity, device).ok());
+        match next {
+            Some(list) => {
+                self.devices.names.retain(|(d, _)| *d != device.0);
+                self.publish_own(list);
+            }
+            None => self.emit(Event::LinkFailed {
+                reason: FailReason::Rejected,
+            }),
+        }
     }
 
     /// Someone published a newer list meanwhile: look again.
@@ -230,6 +330,18 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn adopt_own(&mut self, list: DeviceList) {
+        let devices = list
+            .devices()
+            .iter()
+            .map(|d| {
+                let name = self.devices.names.iter().find(|(n, _)| *n == d.0);
+                (d.0, name.map(|(_, name)| name.clone()).unwrap_or_default())
+            })
+            .collect();
+        self.emit(Event::OwnDevices {
+            this: self.device.0,
+            devices,
+        });
         self.devices.own = Some(list);
         self.devices.joined = true;
         self.persist_own_devices();

@@ -10,6 +10,7 @@ mod api;
 mod core;
 pub mod envelope;
 pub mod fs_name;
+pub mod link;
 mod media;
 mod peer;
 mod prekeys;

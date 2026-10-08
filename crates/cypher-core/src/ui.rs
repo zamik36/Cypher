@@ -66,6 +66,39 @@ pub enum UiPayload {
         peer: String,
         name: Option<String>,
     },
+    /// The identity's devices, and which one this is.
+    Devices {
+        this: u32,
+        devices: Vec<UiDevice>,
+    },
+    Device(UiDevice),
+}
+
+/// One device of this identity; `name` is empty when unknown.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiDevice {
+    pub id: u32,
+    pub name: String,
+}
+
+fn device_info(id: u32, name: &str) -> UiPayload {
+    UiPayload::Device(UiDevice {
+        id,
+        name: name.to_owned(),
+    })
+}
+
+fn own_devices(this: u32, devices: &[(u32, String)]) -> UiPayload {
+    UiPayload::Devices {
+        this,
+        devices: devices
+            .iter()
+            .map(|(id, name)| UiDevice {
+                id: *id,
+                name: name.clone(),
+            })
+            .collect(),
+    }
 }
 
 pub fn status(s: MessageStatus) -> &'static str {
@@ -141,6 +174,10 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         // channels rather than a passing error.
         Event::Superseded => ("superseded", UiPayload::None),
         Event::DeviceUnlinked => ("unlinked", UiPayload::None),
+        Event::OwnDevices { this, devices } => ("devices", own_devices(*this, devices)),
+        Event::DeviceLinked { device, name } => ("device_linked", device_info(*device, name)),
+        Event::LinkFailed { reason } => ("link_failed", UiPayload::Text(format!("{reason:?}"))),
+        Event::LinkedHere => ("linked_here", UiPayload::None),
         Event::Warning {
             reason: FailReason::UpdateRequired,
         } => ("update_required", UiPayload::None),
