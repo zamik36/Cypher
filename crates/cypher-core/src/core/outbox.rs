@@ -188,7 +188,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.enqueue_to(addr.peer, &[addr.device], id, body, false);
     }
 
-    fn random_id(&mut self) -> MsgId {
+    pub(super) fn random_id(&mut self) -> MsgId {
         let mut id = [0u8; 16];
         self.rng.fill_bytes(&mut id);
         MsgId(id)

@@ -653,8 +653,14 @@ impl<R: CryptoRngCore> Core<R> {
         } = env;
         // Our own devices only keep each other in step; only they may.
         if from == self.peer_id {
-            if let Body::Sync(sync) = body {
-                self.on_sync(sender, sync);
+            match body {
+                Body::Sync(sync) => self.on_sync(sender, sync),
+                Body::Devices { list, .. } => self.on_own_list_body(&list),
+                Body::Hello { .. }
+                | Body::Text { .. }
+                | Body::File { .. }
+                | Body::FileCtl(_)
+                | Body::Receipt { .. } => {}
             }
             return;
         }

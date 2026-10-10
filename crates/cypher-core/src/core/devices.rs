@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use super::outbox::OutboxItem;
 use super::{Conn, Core, Pending};
 use crate::api::{Effect, Event, FailReason};
-use crate::envelope::Body;
+use crate::envelope::{Body, Envelope};
 use crate::link::{LinkOffer, seal_handover};
 use crate::peer::Peer;
+use crate::relay;
 use crate::store::{META_DEVICES, StoreOp, Table, session_key};
 
 /// How often a device makes sure it is still on its identity's list.
@@ -350,7 +351,9 @@ impl<R: CryptoRngCore> Core<R> {
         self.ask_siblings();
     }
 
-    /// Ends the sessions with our own devices the list no longer has.
+    /// Ends the sessions with our own devices the list no longer has, telling
+    /// each over it first, so a removed device that is online stops now
+    /// rather than at its next check.
     fn forget_unlisted_own(&mut self) {
         let Some(list) = &self.devices.own else {
             return;
@@ -361,13 +364,67 @@ impl<R: CryptoRngCore> Core<R> {
             .filter(|a| a.peer == self.peer_id && !list.contains(a.device))
             .copied()
             .collect();
+        if gone.is_empty() {
+            return;
+        }
+        let list = list.encode();
+        let farewell = Envelope {
+            msg_id: self.random_id(),
+            sent_at_ms: self.now,
+            body: Body::Devices {
+                list,
+                inboxes: Vec::new(),
+            },
+        }
+        .encode();
         for addr in gone {
+            self.say_farewell(addr, &farewell);
             self.sessions.remove(&addr);
             self.persist(StoreOp::Delete {
                 table: Table::Sessions,
                 key: session_key(addr),
             });
             self.drop_targets(addr);
+        }
+    }
+
+    /// Hands a removed device the list without it, at most once and only if
+    /// it is online: one away learns when it next checks.
+    fn say_farewell(&mut self, addr: Addr, farewell: &[u8]) {
+        if !self.is_ready() {
+            return;
+        }
+        let Some(session) = self.sessions.get_mut(&addr) else {
+            return;
+        };
+        if !session.ratchet.can_send() {
+            return;
+        }
+        let Ok((header, ct)) = session.ratchet.encrypt(farewell, b"") else {
+            return;
+        };
+        let body = relay::message_body(session.pending_init.as_ref(), &header, &ct);
+        let req_id = self.alloc_req();
+        self.transmit(
+            req_id,
+            ClientMsg::Send {
+                to: addr.peer,
+                device: addr.device,
+                want_ack: false,
+                body: Bytes::from(body),
+            },
+        );
+    }
+
+    /// A sibling says the list changed. It is signed, so it counts as much
+    /// as the server's copy, as long as it is newer than the one known here.
+    pub(super) fn on_own_list_body(&mut self, list: &[u8]) {
+        let Ok(list) = DeviceList::decode(list) else {
+            return;
+        };
+        let known = self.devices.own.as_ref().map_or(0, DeviceList::version);
+        if self.devices.joined && list.identity() == self.peer_id && list.version() > known {
+            self.on_own_devices(Some(list));
         }
     }
 

@@ -511,7 +511,10 @@ mod tests {
                 reply_to: None,
             },
         ));
-        assert_eq!(event(&outgoing).map(|(channel, _)| channel), Some("message"));
+        assert_eq!(
+            event(&outgoing).map(|(channel, _)| channel),
+            Some("message")
+        );
         assert_eq!(
             event(&Event::ContactsChanged).map(|(channel, _)| channel),
             Some("contacts_changed")

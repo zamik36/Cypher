@@ -1307,7 +1307,8 @@ fn a_link_that_cannot_work_fails() {
     assert!(!w.has_event(phone, |e| matches!(e, Event::LinkedHere)));
 }
 
-/// A device taken off the list by another stops at its next check.
+/// A device taken off the list by another is told over its session and
+/// stops at once, without waiting for its next check.
 #[test]
 fn unlinking_a_device_stops_it() {
     let mut w = paired();
@@ -1317,7 +1318,7 @@ fn unlinking_a_device_stops_it() {
     w.finish_linking(laptop);
     let id = w.clients[laptop].device.0;
     w.command(A, Command::UnlinkDevice { device: id });
-    w.advance(60 * 60_000);
+    w.advance(1_000);
     assert!(w.has_event(laptop, |e| matches!(e, Event::DeviceUnlinked)));
     w.command(A, Command::UnlinkDevice { device: 1 });
     assert!(w.has_event(A, |e| matches!(
