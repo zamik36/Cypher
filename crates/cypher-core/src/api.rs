@@ -122,6 +122,11 @@ pub enum Command {
     UnlinkDevice {
         device: u32,
     },
+    /// The list had no room for this device ([`Event::NoRoom`]): it takes
+    /// the place of `device`, which the user no longer has.
+    ReplaceDevice {
+        device: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +190,12 @@ pub enum Event {
     /// This device was removed from its identity's list: it stopped, and
     /// stays stopped.
     DeviceUnlinked,
+    /// This device (`this`) is not on its identity's list, which is full:
+    /// it waits for the user to pick one of `devices` to replace.
+    NoRoom {
+        this: u32,
+        devices: Vec<u32>,
+    },
     /// The identity's devices as this one knows them: `(id, name)`, the
     /// name empty when unknown.
     OwnDevices {

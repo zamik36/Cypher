@@ -623,6 +623,7 @@ impl<R: CryptoRngCore> Core<R> {
             Command::DisablePush => self.disable_push(),
             Command::LinkDevice { offer } => self.link_device(&offer),
             Command::UnlinkDevice { device } => self.unlink_device(DeviceId(device)),
+            Command::ReplaceDevice { device } => self.replace_device(DeviceId(device)),
         }
     }
 

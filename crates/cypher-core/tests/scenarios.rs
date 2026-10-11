@@ -1329,6 +1329,96 @@ fn unlinking_a_device_stops_it() {
     )));
 }
 
+/// The server hands a device an older list of its own, one without it:
+/// the device does not take it as its removal, and puts back the list it
+/// knows as a newer version.
+#[test]
+fn an_older_own_list_is_ignored_and_the_known_one_restored() {
+    let mut w = paired();
+    let a2 = w.add_device(A, 2);
+    w.advance(60 * 60_000);
+    let a = w.peer(A);
+    let known = w.server.devices[&a].clone();
+    let identity = IdentitySeed(w.clients[A].seed).derive_identity();
+    let older = cypher_crypto::DeviceList::sign(&identity, 1, [DeviceId::FIRST]).unwrap();
+    assert!(known.version() > older.version());
+    w.server.devices.insert(a, older);
+
+    w.advance(60 * 60_000);
+    assert!(!w.has_event(a2, |e| matches!(e, Event::DeviceUnlinked)));
+    let restored = &w.server.devices[&a];
+    assert!(restored.version() > known.version());
+    assert_eq!(restored.devices(), known.devices());
+}
+
+/// A seventh device finds the list full and waits; the user picks a device
+/// they no longer have, and the new one takes its place.
+#[test]
+fn a_device_with_no_room_replaces_the_one_the_user_picks() {
+    let mut w = paired();
+    let siblings: Vec<usize> = (2..=6).map(|d| w.add_device(A, d)).collect();
+    w.advance(60 * 60_000);
+    let a = w.peer(A);
+    assert_eq!(w.server.devices[&a].devices().len(), 6);
+
+    let seventh = w.add_device(A, 7);
+    let no_room = |e: &Event| matches!(e, Event::NoRoom { this: 7, devices } if devices.len() == 6);
+    assert!(w.has_event(seventh, no_room));
+    assert!(!w.server.devices[&a].contains(DeviceId(7)));
+
+    w.command(seventh, Command::ReplaceDevice { device: 99 });
+    assert!(w.has_event(seventh, |e| matches!(
+        e,
+        Event::LinkFailed {
+            reason: FailReason::Rejected
+        }
+    )));
+
+    w.command(seventh, Command::ReplaceDevice { device: 3 });
+    w.advance(1_000);
+    let list = &w.server.devices[&a];
+    assert!(list.contains(DeviceId(7)) && !list.contains(DeviceId(3)));
+    w.advance(60 * 60_000);
+    let replaced = siblings[1];
+    assert!(w.has_event(replaced, |e| matches!(e, Event::DeviceUnlinked)));
+    assert!(!w.has_event(seventh, |e| matches!(e, Event::DeviceUnlinked)));
+
+    w.send_text(B, A, "to the newest");
+    assert_eq!(w.texts(seventh).last().unwrap(), "to the newest");
+}
+
+/// The list changes while the user picks: the replacement is refused, and
+/// the device looks again rather than overwrite the newer list.
+#[test]
+fn a_replacement_that_races_a_newer_list_looks_again() {
+    let mut w = paired();
+    for d in 2..=6 {
+        w.add_device(A, d);
+    }
+    w.advance(60 * 60_000);
+    let seventh = w.add_device(A, 7);
+    let a = w.peer(A);
+    let identity = IdentitySeed(w.clients[A].seed).derive_identity();
+    let current = w.server.devices[&a].clone();
+    let newer = cypher_crypto::DeviceList::sign(
+        &identity,
+        current.version() + 1,
+        current.devices().iter().copied(),
+    )
+    .unwrap();
+    w.server.devices.insert(a, newer.clone());
+
+    w.command(seventh, Command::ReplaceDevice { device: 3 });
+    w.advance(1_000);
+    assert_eq!(w.server.devices[&a], newer);
+    let rooms = w.clients[seventh]
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::NoRoom { .. }))
+        .count();
+    assert_eq!(rooms, 2, "it looked again and still found no room");
+}
+
 mod devices {
     use cypher_core::{Table, session_key};
     use cypher_types::{Addr, DeviceId, PeerId};

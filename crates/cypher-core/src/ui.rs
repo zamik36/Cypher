@@ -1,7 +1,7 @@
 //! Presentation shapes shared by every frontend (Tauri and WebAssembly):
 //! hex ids, millisecond timestamps, one channel name per event.
 
-use cypher_types::{MsgId, PeerId};
+use cypher_types::{FileId, MsgId, PeerId};
 use serde::Serialize;
 
 use crate::api::{Content, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
@@ -175,6 +175,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::Superseded => ("superseded", UiPayload::None),
         Event::DeviceUnlinked => ("unlinked", UiPayload::None),
         Event::OwnDevices { this, devices } => ("devices", own_devices(*this, devices)),
+        Event::NoRoom { this, devices } => ("no_room", no_room(*this, devices)),
         Event::DeviceLinked { device, name } => ("device_linked", device_info(*device, name)),
         Event::LinkFailed { reason } => ("link_failed", UiPayload::Text(format!("{reason:?}"))),
         Event::LinkedHere => ("linked_here", UiPayload::None),
@@ -189,33 +190,12 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         // Outgoing ones too: another device of this identity sent them.
         Event::Message(m) => ("message", UiPayload::Message(message(m))),
         Event::MessageStatus { msg_id, status } => ("message_status", status_of(msg_id, *status)),
-        Event::TransferOffered {
-            peer,
-            file_id,
-            name,
-            size,
-            mime,
-        } => (
-            "file_offered",
-            UiPayload::Offer {
-                from: peer.to_hex(),
-                file_id: file_id.to_hex(),
-                name: name.clone(),
-                size: *size,
-                mime: mime.clone(),
-            },
-        ),
+        Event::TransferOffered { .. } => ("file_offered", offer(e)),
         Event::TransferProgress {
             file_id,
             bytes,
             total,
-        } => (
-            "file_progress",
-            UiPayload::Progress {
-                file_id: file_id.to_hex(),
-                progress: ratio(*bytes, *total),
-            },
-        ),
+        } => ("file_progress", progress(file_id, *bytes, *total)),
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
         Event::TransferFailed { file_id, reason } => (
             "file_failed",
@@ -233,6 +213,39 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
 }
 
 /// Push setup: the server's key (hex) to subscribe with, then its answer.
+fn offer(e: &Event) -> UiPayload {
+    let Event::TransferOffered {
+        peer,
+        file_id,
+        name,
+        size,
+        mime,
+    } = e
+    else {
+        return UiPayload::None;
+    };
+    UiPayload::Offer {
+        from: peer.to_hex(),
+        file_id: file_id.to_hex(),
+        name: name.clone(),
+        size: *size,
+        mime: mime.clone(),
+    }
+}
+
+fn progress(file_id: &FileId, bytes: u64, total: u64) -> UiPayload {
+    UiPayload::Progress {
+        file_id: file_id.to_hex(),
+        progress: ratio(bytes, total),
+    }
+}
+
+/// The devices of a full list, whose names this device does not know.
+fn no_room(this: u32, devices: &[u32]) -> UiPayload {
+    let unnamed: Vec<(u32, String)> = devices.iter().map(|d| (*d, String::new())).collect();
+    own_devices(this, &unnamed)
+}
+
 fn push(e: &Event) -> (&'static str, UiPayload) {
     if let Event::PushKey { key } = e {
         return ("push_key", UiPayload::Text(hex(key)));
@@ -325,6 +338,19 @@ mod tests {
         assert_eq!(ui(&Event::Disconnected), ("disconnected", Value::Null));
         assert_eq!(ui(&Event::Superseded), ("superseded", Value::Null));
         assert_eq!(ui(&Event::DeviceUnlinked), ("unlinked", Value::Null));
+        assert_eq!(
+            ui(&Event::NoRoom {
+                this: 7,
+                devices: vec![1, 3]
+            }),
+            (
+                "no_room",
+                json!({
+                    "this": 7,
+                    "devices": [{ "id": 1, "name": "" }, { "id": 3, "name": "" }]
+                })
+            )
+        );
         assert_eq!(
             ui(&Event::Warning {
                 reason: FailReason::UpdateRequired

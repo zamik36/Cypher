@@ -66,6 +66,9 @@ pub(super) struct Devices {
     names: Vec<(u32, String)>,
     last_check: Option<u64>,
     conflicts: u8,
+    /// The list this device found full, while the user picks a device for
+    /// it to replace.
+    full: Option<DeviceList>,
     last_refresh: HashMap<PeerId, u64>,
 }
 
@@ -189,27 +192,69 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_own_devices(&mut self, list: Option<DeviceList>) {
+        let known = self.devices.own.as_ref().map(DeviceList::version);
         match list {
+            // Older than one this device already saw: the server rolled it
+            // back (or lost it) and could drop us from it that way.
+            Some(list) if known.is_some_and(|k| list.version() < k) => self.republish_known(),
             Some(list) if list.contains(self.device) => self.adopt_own(list),
             Some(_) if self.devices.joined => self.on_removed(),
+            Some(list) if list.devices().len() >= MAX_DEVICES => {
+                let devices = list.devices().iter().map(|d| d.0).collect();
+                self.devices.full = Some(list);
+                self.emit(Event::NoRoom {
+                    this: self.device.0,
+                    devices,
+                });
+            }
             Some(list) => match list.with(&self.identity, self.device) {
                 Ok(next) => self.publish_own(next),
-                // The list is full.
                 Err(_) => self.emit(Event::Warning {
                     reason: FailReason::Rejected,
                 }),
             },
-            None => {
-                // No list yet (or it expired): ours, with us on it.
-                let known = self.devices.own.as_ref();
-                let version = known.map_or(1, |l| l.version().saturating_add(1));
-                let mut ids: Vec<DeviceId> =
-                    known.map(|l| l.devices().to_vec()).unwrap_or_default();
-                ids.push(self.device);
-                if let Ok(list) = DeviceList::sign(&self.identity, version, ids) {
-                    self.publish_own(list);
-                }
-            }
+            // No list yet (or it expired).
+            None => self.republish_known(),
+        }
+    }
+
+    /// Publishes the list as this device knows it, with itself on it, as a
+    /// version newer than any the server could have.
+    fn republish_known(&mut self) {
+        let known = self.devices.own.as_ref();
+        let version = known.map_or(1, |l| l.version().saturating_add(1));
+        let ids = known
+            .map(|l| l.devices().to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .chain([self.device]);
+        if let Ok(list) = DeviceList::sign(&self.identity, version, ids) {
+            self.publish_own(list);
+        }
+    }
+
+    /// Takes the place of `device` on a list that had no room for this one.
+    pub(super) fn replace_device(&mut self, device: DeviceId) {
+        let next = self
+            .devices
+            .full
+            .as_ref()
+            .filter(|l| l.contains(device) && !self.devices.joined)
+            .and_then(|l| {
+                let version = l.version().checked_add(1)?;
+                let ids = l
+                    .devices()
+                    .iter()
+                    .copied()
+                    .filter(|d| *d != device)
+                    .chain([self.device]);
+                DeviceList::sign(&self.identity, version, ids).ok()
+            });
+        match next {
+            Some(list) => self.publish_own(list),
+            None => self.emit(Event::LinkFailed {
+                reason: FailReason::Rejected,
+            }),
         }
     }
 
@@ -344,6 +389,7 @@ impl<R: CryptoRngCore> Core<R> {
             devices,
         });
         self.devices.own = Some(list);
+        self.devices.full = None;
         self.devices.joined = true;
         self.persist_own_devices();
         self.forget_unlisted_own();
