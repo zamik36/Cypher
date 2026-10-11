@@ -34,7 +34,7 @@ import { hasTransfer, upsertTransfer } from "../stores/transfers";
 import { setMediaProgress, trackMedia } from "../stores/media";
 import { setInvitesReady } from "../stores/invite";
 import { onPushKey, onPushState, startPush } from "../stores/push";
-import { addOwnDevice, setOwnDevices } from "../stores/devices";
+import { addOwnDevice, setNoRoom, takeOwnDevices } from "../stores/devices";
 import { setSharesReady } from "../stores/share";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
@@ -91,7 +91,8 @@ export async function startApp(): Promise<() => void> {
       linkEvent("unlinked");
       setAllOffline();
     }),
-    api.on("devices", setOwnDevices),
+    api.on("devices", takeOwnDevices),
+    api.on("no_room", setNoRoom),
     api.on("contacts_changed", () => void refreshConversations()),
     api.on("device_linked", addOwnDevice),
     onPeerConnected((peerId) => {

@@ -140,9 +140,12 @@ test("two people pair, chat, send a file and come back later", async ({ browser,
   });
 });
 
-test("a recovery phrase restores the identity on a new device", async ({ browser, baseURL }) => {
+test("a recovery phrase restores the profile as another device", async ({ browser, baseURL }) => {
   const original = await newUser(browser, baseURL ?? "");
   const shown = await createIdentity(original, "carol");
+  const dave = await newUser(browser, baseURL ?? "");
+  await createIdentity(dave, "dave");
+  await pair(original, dave);
   const peerId = await ownPeerId(original);
 
   await original.getByPlaceholder("Passphrase", { exact: true }).fill(PASSPHRASE);
@@ -154,23 +157,31 @@ test("a recovery phrase restores the identity on a new device", async ({ browser
 
   const restored = await newUser(browser, baseURL ?? "");
   await restored.getByRole("button", { name: "Restore from phrase" }).click();
+  await expect(restored.getByText("This device joins your other devices")).toBeVisible();
   await restored.getByPlaceholder("Recovery phrase (24 words)").fill(phrase);
   await restored.getByPlaceholder("Nickname").fill("carol");
   await setPassphrase(restored, "a different passphrase");
   await restored.getByRole("button", { name: "Restore", exact: true }).click();
   await expectConnected(restored);
-  expect(await ownPeerId(restored)).toBe(peerId);
 
-  // Restored from the phrase, the new install is the same (first) device: it
-  // takes the session over, and the old one says so instead of silently going
-  // quiet, until it takes the session back.
-  const banner = original.getByRole("alert").filter({ hasText: "Cypher is open elsewhere" });
-  await expect(banner).toBeVisible();
-  await expect(linkStatus(original)).toHaveAttribute("data-state", "superseded");
-  await banner.getByRole("button", { name: "Use here" }).click();
+  // A new device of the profile: the first one keeps working, and the new
+  // one gets the contacts from it.
+  await expect(restored.getByTestId("restored-hint")).toBeVisible();
+  await expect(restored.getByTestId("chat-row")).toContainText("dave");
   await expectConnected(original);
-  await expect(banner).toBeHidden();
-  await expect(linkStatus(restored)).toHaveAttribute("data-state", "superseded");
+  await expect(linkStatus(original)).toHaveAttribute("data-state", "online");
+
+  // What the contact writes reaches both, once it hears of the new device.
+  await openFirstChat(restored);
+  await expect(async () => {
+    const text = `to both of you ${Date.now()}`;
+    await say(dave, text);
+    await expect(incoming(restored).getByText(text)).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
+
+  await restored.getByTestId("restored-hint").getByRole("button", { name: "Open devices" }).click();
+  await expect(restored.getByTestId("devices").locator(".list-row")).toHaveCount(2);
+  expect(await ownPeerId(restored)).toBe(peerId);
 
   // A forgotten passphrase: erase the device, then restore from the phrase.
   await original.reload();

@@ -93,6 +93,18 @@
   color: var(--c-muted);
 }
 
+/* News rather than trouble: the profile's devices. */
+.banner--info {
+  background: var(--c-accent-soft);
+}
+
+.banner__choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 /* ── Modal sheet ─────────────────────────────────────────────────── */
 
 .sheet {

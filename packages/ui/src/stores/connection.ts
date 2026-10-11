@@ -7,8 +7,8 @@ import { createStore } from "solid-js/store";
  * - `online`: signed in (`Ready`); only now are messages sent directly.
  * - `reconnecting`: was online, retrying with backoff.
  * - `failed`: could not start (bad address, locked identity).
- * - `superseded`: this device's session opened elsewhere (another window, or
- *   an install restored from the phrase); stays until the user takes it back.
+ * - `superseded`: this device's session opened again (another window or tab);
+ *   stays until the user takes it back.
  * - `update_required`: the server speaks another protocol; stays.
  * - `unlinked`: this device was taken off its profile; stays.
  */

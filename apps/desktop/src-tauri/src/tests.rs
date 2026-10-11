@@ -426,6 +426,9 @@ async fn link_a_new_desktop(
     a.call("unlink_device", json!({ "device": 0 }))
         .await
         .unwrap();
+    a.call("replace_device", json!({ "device": 0 }))
+        .await
+        .unwrap();
 
     let other = Desktop::new(Arc::clone(tls));
     other

@@ -76,6 +76,9 @@ pub(crate) enum JsCommand {
     UnlinkDevice {
         device: u32,
     },
+    ReplaceDevice {
+        device: u32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +207,7 @@ impl JsCommand {
             Self::DisablePush => Command::DisablePush,
             Self::LinkDevice { offer } => Command::LinkDevice { offer },
             Self::UnlinkDevice { device } => Command::UnlinkDevice { device },
+            Self::ReplaceDevice { device } => Command::ReplaceDevice { device },
             _ => return Err(CommandError::Push),
         })
     }
@@ -387,6 +391,11 @@ mod tests {
         assert!(matches!(
             unlink.command,
             Command::UnlinkDevice { device: 3 }
+        ));
+        let replace = prepare(json!({ "type": "replace_device", "device": 4 })).unwrap();
+        assert!(matches!(
+            replace.command,
+            Command::ReplaceDevice { device: 4 }
         ));
     }
 

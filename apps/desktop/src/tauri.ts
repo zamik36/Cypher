@@ -64,6 +64,7 @@ export const tauriPlatform: Platform = {
     cancelLink: () => command("link_cancel"),
     link: (offer) => command("link_device", { offer }),
     unlink: (deviceId) => command("unlink_device", { device: deviceId }),
+    replace: (deviceId) => command("replace_device", { device: deviceId }),
   },
   connectToGateway: (addr, anonymous, bridges) => invoke<string>("connect_to_gateway", { addr, anonymous, bridges }),
   applyAnonymousSettings: (anonymous, bridges) => command("apply_anonymous_settings", { anonymous, bridges }),

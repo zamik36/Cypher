@@ -131,6 +131,8 @@ export interface Events {
   unlinked: null;
   /** The identity's devices, and which one this is. */
   devices: { this: number; devices: DeviceInfo[] };
+  /** The identity's list is full: this device waits for one to replace. */
+  no_room: { this: number; devices: DeviceInfo[] };
   /** A new device was linked to this identity. */
   device_linked: DeviceInfo;
   /** Linking a device did not work (the reason, as the core names it). */
@@ -203,6 +205,8 @@ export interface Platform {
     link(offer: string): Promise<void>;
     /** Takes another device off this identity's list. */
     unlink(deviceId: number): Promise<void>;
+    /** Puts this device on a full list in place of one the user no longer has. */
+    replace(deviceId: number): Promise<void>;
   };
   /** Stops the client and drops the identity from memory until unlocked. */
   lock(): Promise<void>;

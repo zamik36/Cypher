@@ -4,6 +4,7 @@ import Icon from "./Icon";
 import { api } from "../platform";
 import { t } from "../i18n";
 import { connection } from "../stores/connection";
+import { markRestored } from "../stores/devices";
 import { copyText } from "../utils/clipboard";
 import { reasonText } from "../utils/reasons";
 import { answersMatch, phraseWords, pickPositions } from "../utils/recovery";
@@ -168,6 +169,7 @@ export default function IdentityView(props: IdentityViewProps) {
       setPassphrase("");
       setRepeat("");
       setMnemonic("");
+      markRestored();
       props.onUnlocked(peerId, nickname());
     } catch (e) {
       fail(e);

@@ -1,10 +1,14 @@
 import { createSignal, Match, Switch } from "solid-js";
 import "./Overlays.css";
+import DevicesNotice from "./DevicesNotice";
 import { api } from "../platform";
 import { connection, errorMessage, linkEvent } from "../stores/connection";
 import { t } from "../i18n";
 
-/** States the client stopped in, and what the user can do about them. */
+/**
+ * States the client stopped in, and what the user can do about them; while
+ * it runs, news about the profile's devices.
+ */
 export default function ConnectionBanner() {
   const [busy, setBusy] = createSignal(false);
 
@@ -32,7 +36,7 @@ export default function ConnectionBanner() {
   }
 
   return (
-    <Switch>
+    <Switch fallback={<DevicesNotice />}>
       <Match when={connection.link === "superseded"}>
         <div class="banner" role="alert">
           <div class="banner__text">

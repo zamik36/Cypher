@@ -127,6 +127,9 @@ export const webPlatform: Platform = {
     unlink: async (deviceId) => {
       await call("command", { type: "unlink_device", device: deviceId });
     },
+    replace: async (deviceId) => {
+      await call("command", { type: "replace_device", device: deviceId });
+    },
   },
   connectToGateway: (_addr, anonymous) => call("connect", ...endpoints(), anonymous),
   applyAnonymousSettings: (anonymous) => call("setAnonymity", anonymous),

@@ -93,3 +93,14 @@ pub(crate) async fn unlink_device(state: State<'_, AppState>, device: u32) -> Cm
         .await
         .map_err(err)
 }
+
+/// Puts this device on a full list in place of `device`.
+#[tauri::command]
+pub(crate) async fn replace_device(state: State<'_, AppState>, device: u32) -> CmdResult<()> {
+    state
+        .client()
+        .await?
+        .command(Command::ReplaceDevice { device })
+        .await
+        .map_err(err)
+}

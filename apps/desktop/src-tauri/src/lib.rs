@@ -115,6 +115,7 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             devices::link_cancel,
             devices::link_device,
             devices::unlink_device,
+            devices::replace_device,
             chat::send_message,
             chat::delete_message,
             chat::mark_read,
