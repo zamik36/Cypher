@@ -114,6 +114,64 @@ pub async fn linking(target: &Target) {
     }
 }
 
+/// The recovery phrase brings the profile to another install as a new
+/// device: the first keeps working, the restored one gets the contacts from
+/// it, and what a contact writes then reaches both.
+pub async fn restoring(target: &Target) {
+    let mut a = Peer::start(
+        target,
+        IdentitySeed::generate(),
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+    let mut b = Peer::start(
+        target,
+        IdentitySeed::generate(),
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+    pair_through_a_link(&mut a, &mut b).await;
+
+    let kept = tempfile::tempdir().unwrap();
+    let restored = cypher_client::IdentityStore::new(kept.path())
+        .import(&a.seed.to_mnemonic(), "alice", "correct horse battery")
+        .unwrap();
+    assert_ne!(restored.device, cypher_types::DeviceId::FIRST);
+    let mut phone = Peer::start_device(
+        target,
+        restored.seed,
+        restored.device,
+        tempfile::tempdir().unwrap(),
+    )
+    .await;
+
+    // The contact hears of the new device once the first one, asked by it
+    // for the contacts, learns of it and announces it.
+    let a_id = a.seed.derive_identity().peer_id();
+    let mut reached = false;
+    for n in 0..40u8 {
+        let hello = Command::SendText {
+            peer: a_id,
+            msg_id: cypher_types::MsgId([n; 16]),
+            text: format!("to both of you #{n}"),
+            reply_to: None,
+        };
+        b.client.command(hello).await.unwrap();
+        if tokio::time::timeout(Duration::from_millis(500), phone.text_from_peer())
+            .await
+            .is_ok()
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "the restored device never heard from the contact");
+    assert!(a.text_from_peer().await.starts_with("to both of you"));
+    for peer in [a, b, phone] {
+        peer.client.shutdown().await;
+    }
+}
+
 /// Links the device showing `offer` from `a`, trying again while the new
 /// device's throwaway session is still signing in.
 async fn link_from(a: &mut Peer, offer: &str) {

@@ -66,7 +66,12 @@ impl SealedIdentity {
 #[wasm_bindgen]
 impl Identity {
     pub fn create(nickname: &str, passphrase: &str) -> Result<SealedIdentity, JsError> {
-        Self::seal(IdentitySeed::generate(), nickname, passphrase)
+        Self::seal_device(
+            IdentitySeed::generate(),
+            DeviceId::FIRST,
+            nickname,
+            passphrase,
+        )
     }
 
     pub fn import(
@@ -76,7 +81,9 @@ impl Identity {
     ) -> Result<SealedIdentity, JsError> {
         let seed = IdentitySeed::from_mnemonic(mnemonic.trim())
             .map_err(|_| JsError::new("invalid recovery phrase"))?;
-        Self::seal(seed, nickname, passphrase)
+        // A new device of the profile: the ones it had may still be in use,
+        // and two installs as one device would push each other out.
+        Self::seal_device(seed, DeviceId::random(&mut OsRng), nickname, passphrase)
     }
 
     pub fn unlock(blob: &[u8], passphrase: &str) -> Result<Self, JsError> {
@@ -86,16 +93,6 @@ impl Identity {
             device: file.device,
             nickname: file.nickname,
         })
-    }
-
-    fn seal(
-        seed: IdentitySeed,
-        nickname: &str,
-        passphrase: &str,
-    ) -> Result<SealedIdentity, JsError> {
-        // Contacts reach only an identity's first device until they learn
-        // of others.
-        Self::seal_device(seed, DeviceId::FIRST, nickname, passphrase)
     }
 
     fn seal_device(

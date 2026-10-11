@@ -44,7 +44,12 @@ impl IdentityStore {
     /// Creates a new identity. Refuses to overwrite an existing one: losing
     /// the seed would make every stored conversation unreadable.
     pub fn create(&self, nickname: &str, passphrase: &str) -> Result<Unlocked, ClientError> {
-        self.save_new(IdentitySeed::generate(), nickname, passphrase)
+        self.save_new(
+            IdentitySeed::generate(),
+            DeviceId::FIRST,
+            nickname,
+            passphrase,
+        )
     }
 
     pub fn import(
@@ -55,9 +60,9 @@ impl IdentityStore {
     ) -> Result<Unlocked, ClientError> {
         let seed = IdentitySeed::from_mnemonic(mnemonic.trim())
             .map_err(|_| ClientError::InvalidMnemonic)?;
-        // Contacts reach only an identity's first device until they learn
-        // of others.
-        self.save_new(seed, nickname, passphrase)
+        // A new device of the profile: the ones it had may still be in use,
+        // and two installs as one device would push each other out.
+        self.save_new(seed, DeviceId::random(&mut OsRng), nickname, passphrase)
     }
 
     /// Keeps an identity another device handed over, as the device it was
@@ -121,13 +126,13 @@ impl IdentityStore {
     fn save_new(
         &self,
         seed: IdentitySeed,
+        device: DeviceId,
         nickname: &str,
         passphrase: &str,
     ) -> Result<Unlocked, ClientError> {
         if self.exists() {
             return Err(ClientError::IdentityExists);
         }
-        let device = DeviceId::FIRST;
         let blob = identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng)?;
         write_atomic(&self.path, &blob)?;
         Ok(Unlocked {
@@ -213,13 +218,18 @@ mod tests {
     }
 
     #[test]
-    fn mnemonic_import_restores_the_same_identity() {
+    fn mnemonic_import_is_the_same_identity_on_a_new_device() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let original = IdentityStore::new(a.path()).create("x", PASS).unwrap();
-        let restored = IdentityStore::new(b.path())
+        assert_eq!(original.device, DeviceId::FIRST);
+        let store = IdentityStore::new(b.path());
+        let restored = store
             .import(&original.seed.to_mnemonic(), "x", PASS)
             .unwrap();
         assert_eq!(original.seed.as_bytes(), restored.seed.as_bytes());
+        assert!(restored.device.is_valid());
+        assert_ne!(restored.device, original.device);
+        assert_eq!(store.unlock(PASS).unwrap().device, restored.device);
     }
 }

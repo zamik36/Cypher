@@ -23,3 +23,13 @@ async fn linking_a_device_against_in_process_stack() {
     e2e::linking(stack.target()).await;
     stack.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restoring_from_the_phrase_against_in_process_stack() {
+    let Some(stack) = Stack::from_env().await else {
+        eprintln!("CYPHER_TEST_REDIS / CYPHER_TEST_NATS not set; skipping");
+        return;
+    };
+    e2e::restoring(stack.target()).await;
+    stack.stop().await;
+}
