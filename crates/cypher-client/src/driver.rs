@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use cypher_core::{Core, Effect, Event, FailReason, Input, StoreOp};
+use cypher_core::{Core, Effect, Event, FailReason, Input, Sink, StoreOp};
 use cypher_types::FileId;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -366,6 +366,20 @@ impl Driver {
                         self.io.submit(job);
                     }
                 }
+                // This driver does not build or take in a history yet.
+                Effect::BuildHistory { file_id, .. } => {
+                    let built = Input::HistoryBuilt {
+                        file_id,
+                        size: None,
+                    };
+                    let effects = self.core.handle(built, now_ms());
+                    Box::pin(self.apply(effects)).await;
+                }
+                Effect::ImportHistory { file_id } => {
+                    let imported = Input::HistoryImported { file_id, ok: false };
+                    let effects = self.core.handle(imported, now_ms());
+                    Box::pin(self.apply(effects)).await;
+                }
             }
         }
         self.flush().await;
@@ -374,17 +388,13 @@ impl Driver {
     /// File IO for a sink effect; `None` when the transfer's target is unknown.
     fn sink_job(&self, effect: Effect) -> Option<IoJob> {
         Some(match effect {
-            Effect::OpenSink {
-                file_id,
-                len,
-                sealed,
-            } => {
+            Effect::OpenSink { file_id, len, sink } => {
                 // A sealed copy always lives at `media_path`; `files` keeps
                 // pointing at the transfer's plaintext source or target.
-                let path = if sealed {
-                    self.config.media_path(&file_id)
-                } else {
-                    self.files.get(&file_id)?.path.clone()
+                let path = match sink {
+                    Sink::Media => self.config.media_path(&file_id),
+                    Sink::Download => self.files.get(&file_id)?.path.clone(),
+                    Sink::History => return None,
                 };
                 IoJob::Open { file_id, path, len }
             }

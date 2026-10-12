@@ -72,6 +72,14 @@ pub enum UiPayload {
         devices: Vec<UiDevice>,
     },
     Device(UiDevice),
+    /// The message history on its way to (`outgoing`) or from another
+    /// device of this identity: how far along, from 0 to 1, and why it
+    /// stopped if it failed.
+    History {
+        outgoing: bool,
+        progress: f64,
+        failed: Option<String>,
+    },
 }
 
 /// One device of this identity; `name` is empty when unknown.
@@ -196,6 +204,18 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
             bytes,
             total,
         } => ("file_progress", progress(file_id, *bytes, *total)),
+        Event::HistoryProgress {
+            outgoing,
+            bytes,
+            total,
+        } => (
+            "history_progress",
+            history(*outgoing, ratio(*bytes, *total), None),
+        ),
+        Event::HistoryDone { outgoing, .. } => ("history_done", history(*outgoing, 1.0, None)),
+        Event::HistoryFailed {
+            outgoing, reason, ..
+        } => ("history_failed", history(*outgoing, 0.0, Some(*reason))),
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
         Event::TransferFailed { file_id, reason } => (
             "file_failed",
@@ -230,6 +250,14 @@ fn offer(e: &Event) -> UiPayload {
         name: name.clone(),
         size: *size,
         mime: mime.clone(),
+    }
+}
+
+fn history(outgoing: bool, progress: f64, failed: Option<FailReason>) -> UiPayload {
+    UiPayload::History {
+        outgoing,
+        progress,
+        failed: failed.map(|reason| format!("{reason:?}")),
     }
 }
 
@@ -330,6 +358,43 @@ mod tests {
             size: 42,
             kind,
         }
+    }
+
+    #[test]
+    fn history_events_map_to_channels() {
+        let file_id = FileId([1; 16]);
+        assert_eq!(
+            ui(&Event::HistoryProgress {
+                outgoing: true,
+                bytes: 1,
+                total: 4
+            }),
+            (
+                "history_progress",
+                json!({ "outgoing": true, "progress": 0.25, "failed": null })
+            )
+        );
+        assert_eq!(
+            ui(&Event::HistoryDone {
+                file_id,
+                outgoing: false
+            }),
+            (
+                "history_done",
+                json!({ "outgoing": false, "progress": 1.0, "failed": null })
+            )
+        );
+        assert_eq!(
+            ui(&Event::HistoryFailed {
+                file_id,
+                outgoing: true,
+                reason: FailReason::Cancelled
+            }),
+            (
+                "history_failed",
+                json!({ "outgoing": true, "progress": 0.0, "failed": "Cancelled" })
+            )
+        );
     }
 
     #[test]

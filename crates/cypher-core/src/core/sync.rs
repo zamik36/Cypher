@@ -82,6 +82,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.devices.asked = true;
         self.persist_own_devices();
+        self.open_history();
         self.sync(SyncBody::StateRequest);
     }
 
@@ -124,7 +125,11 @@ impl<R: CryptoRngCore> Core<R> {
                 self.adopt_profile_name(name.as_deref());
             }
             SyncBody::Link { code, at_ms } => self.adopt_link(&code, at_ms),
-            SyncBody::StateRequest => self.send_state(sender),
+            SyncBody::StateRequest => {
+                self.send_state(sender);
+                self.serve_history(sender.device);
+            }
+            SyncBody::History { desc } => self.on_history_offer(sender, desc),
             SyncBody::State {
                 profile,
                 contacts,

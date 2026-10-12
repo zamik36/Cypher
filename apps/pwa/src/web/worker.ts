@@ -13,7 +13,7 @@ import init, {
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
-import { applyEffects, type EffectSinks } from "./effects";
+import { applyEffects, type EffectSinks, type Sink } from "./effects";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -34,7 +34,7 @@ let queue: Promise<unknown> = Promise.resolve();
 
 const sources = new Map<string, File>();
 const offerNames = new Map<string, string>();
-const openSinks = new Map<string, { handle: FileSystemSyncAccessHandle; name: string; sealed: boolean }>();
+const openSinks = new Map<string, { handle: FileSystemSyncAccessHandle; name: string; sink: Sink }>();
 const waiters = new Set<(r: Reply) => boolean>();
 
 const post = (msg: WorkerMessage) => self.postMessage(msg);
@@ -74,6 +74,9 @@ const sinks: EffectSinks = {
   openSink,
   writeChunk: (fileId, offset, data) => openSinks.get(fileId)?.handle.write(data, { at: offset }),
   closeSink,
+  // This worker does not build or take in a history yet.
+  buildHistory: (fileId) => void feed((c, now) => c.historyBuilt(fileId, undefined, now)),
+  importHistory: (fileId) => void feed((c, now) => c.historyImported(fileId, false, now)),
   disconnect: (reconnect) => gateway.restart(reconnect),
 };
 
@@ -227,6 +230,8 @@ const linkSinks: EffectSinks = {
   openSink: () => Promise.resolve(),
   writeChunk: () => undefined,
   closeSink: () => Promise.resolve(),
+  buildHistory: () => undefined,
+  importHistory: () => undefined,
   disconnect: () => linkSocket.stop(),
 };
 
@@ -255,17 +260,20 @@ async function readChunk(e: ReadChunk) {
   return feed((c, now) => c.chunkRead(e.file_id, e.index, buf, now));
 }
 
-async function sinkDir(sealed: boolean) {
+/** The OPFS directory each kind of transfer is kept in. */
+const SINK_DIRS: Record<Sink, string> = { download: "downloads", media: "media", history: "history" };
+
+async function sinkDir(sink: Sink) {
   const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle(sealed ? "media" : "downloads", { create: true });
+  return root.getDirectoryHandle(SINK_DIRS[sink], { create: true });
 }
 
-async function openSink(fileId: string, len: number, sealed: boolean) {
+async function openSink(fileId: string, len: number, sink: Sink) {
   if (openSinks.has(fileId)) return;
-  const file = await (await sinkDir(sealed)).getFileHandle(fileId, { create: true });
+  const file = await (await sinkDir(sink)).getFileHandle(fileId, { create: true });
   const handle = await file.createSyncAccessHandle();
   if (handle.getSize() !== len) handle.truncate(len);
-  openSinks.set(fileId, { handle, name: offerNames.get(fileId) ?? fileId, sealed });
+  openSinks.set(fileId, { handle, name: offerNames.get(fileId) ?? fileId, sink });
 }
 
 async function closeSink(fileId: string, complete: boolean) {
@@ -275,10 +283,10 @@ async function closeSink(fileId: string, complete: boolean) {
   offerNames.delete(fileId);
   sink.handle.flush();
   sink.handle.close();
-  const dir = await sinkDir(sink.sealed);
+  const dir = await sinkDir(sink.sink);
   if (!complete) {
     await dir.removeEntry(fileId).catch(() => undefined);
-  } else if (!sink.sealed) {
+  } else if (sink.sink === "download") {
     const blob = await (await dir.getFileHandle(fileId)).getFile();
     post({ download: { fileId, name: sink.name, blob } });
   }
@@ -360,7 +368,7 @@ async function sendMedia(
 async function mediaBlob(fileId: string): Promise<Blob> {
   const record = await get<Uint8Array>(db, "media", unhex(fileId));
   if (!record) throw new Error("media not found");
-  const file = await (await (await sinkDir(true)).getFileHandle(fileId)).getFile();
+  const file = await (await (await sinkDir("media")).getFileHandle(fileId)).getFile();
   const sealed = new Uint8Array(await file.arrayBuffer());
   const { mime, bytes } = requireClient().openMedia(fileId, record, sealed);
   return new Blob([bytes], { type: mime });
@@ -408,7 +416,7 @@ async function deleteRows(rows: Awaited<ReturnType<typeof scan>>) {
   }
   for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
   await applyOps(db, ops);
-  const [sealed, plain] = await Promise.all([sinkDir(true), sinkDir(false)]);
+  const [sealed, plain] = await Promise.all([sinkDir("media"), sinkDir("download")]);
   await Promise.all([
     ...media.map((id) => sealed.removeEntry(id).catch(() => undefined)),
     ...received.map((id) => plain.removeEntry(id).catch(() => undefined)),
@@ -550,11 +558,11 @@ const handlers: Handlers = {
       return sent;
     }),
   fileSaved: async (fileId) =>
-    (await sinkDir(false))
+    (await sinkDir("download"))
       .getFileHandle(fileId)
       .then(() => true)
       .catch(() => false),
-  savedBlob: async (fileId) => (await (await sinkDir(false)).getFileHandle(fileId)).getFile(),
+  savedBlob: async (fileId) => (await (await sinkDir("download")).getFileHandle(fileId)).getFile(),
   qr: (text) => Promise.resolve(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg(text))}`),
   safetyNumber: (peer) => Promise.resolve(requireIdentity().safetyNumber(peer)),
   reconnect: () => {

@@ -656,10 +656,11 @@ impl<R: CryptoRngCore> Core<R> {
             match body {
                 Body::Sync(sync) => self.on_sync(sender, sync),
                 Body::Devices { list, .. } => self.on_own_list_body(&list),
+                // The history transfer between our own devices.
+                Body::FileCtl(ctl) => self.on_file_ctl(sender, ctl),
                 Body::Hello { .. }
                 | Body::Text { .. }
                 | Body::File { .. }
-                | Body::FileCtl(_)
                 | Body::Receipt { .. } => {}
             }
             return;

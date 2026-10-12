@@ -12,7 +12,7 @@ use js_sys::Array;
 use rand::rngs::OsRng;
 use wasm_bindgen::prelude::*;
 
-use command::{JsCommand, Prepared, file, peer};
+use command::{JsCommand, Prepared, file, file_size, peer};
 use convert::{effects_to_js, snapshot_from_js, to_js};
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
@@ -287,6 +287,31 @@ impl Client {
     pub fn chunk_unavailable(&mut self, file_id: &str, now_ms: f64) -> Result<Array, JsError> {
         let file_id = file(file_id)?;
         self.feed(Input::ChunkUnavailable { file_id }, now_ms)
+    }
+
+    /// The archive `build_history` asked for was written: its size, or
+    /// nothing when it could not be.
+    #[wasm_bindgen(js_name = historyBuilt, unchecked_return_type = "Effect[]")]
+    pub fn history_built(
+        &mut self,
+        file_id: &str,
+        size: Option<f64>,
+        now_ms: f64,
+    ) -> Result<Array, JsError> {
+        let file_id = file(file_id)?;
+        let size = size.map(file_size).transpose()?;
+        self.feed(Input::HistoryBuilt { file_id, size }, now_ms)
+    }
+
+    #[wasm_bindgen(js_name = historyImported, unchecked_return_type = "Effect[]")]
+    pub fn history_imported(
+        &mut self,
+        file_id: &str,
+        ok: bool,
+        now_ms: f64,
+    ) -> Result<Array, JsError> {
+        let file_id = file(file_id)?;
+        self.feed(Input::HistoryImported { file_id, ok }, now_ms)
     }
 
     /// Runs a UI command.

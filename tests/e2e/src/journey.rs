@@ -178,6 +178,7 @@ async fn link_from(a: &mut Peer, offer: &str) {
     for _ in 0..50 {
         let link = Command::LinkDevice {
             offer: offer.to_owned(),
+            history: false,
         };
         a.client.command(link).await.unwrap();
         let linked = a

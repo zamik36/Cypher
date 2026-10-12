@@ -101,6 +101,9 @@ pub enum SyncBody {
         contacts: Vec<ContactState>,
         links: Vec<(String, u64)>,
     },
+    /// The message history, for a device just linked: an archive
+    /// ([`crate::history`]) sent as a file.
+    History { desc: FileDesc },
 }
 
 /// A contact as one device keeps it.
@@ -161,6 +164,7 @@ impl SyncBody {
                     && links.len() <= MAX_STATE_LINKS
                     && links.iter().all(|(code, _)| code.len() <= MAX_LINK_LEN)
             }
+            Self::History { desc } => desc.inline.is_none() && desc.validate().is_ok(),
         }
     }
 }

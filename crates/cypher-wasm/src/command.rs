@@ -72,7 +72,11 @@ pub(crate) enum JsCommand {
     DisablePush,
     LinkDevice {
         offer: String,
+        /// Hand the new device the message history too.
+        #[serde(default)]
+        history: bool,
     },
+    CancelHistory,
     UnlinkDevice {
         device: u32,
     },
@@ -205,7 +209,8 @@ impl JsCommand {
                 auth: auth.try_into().map_err(|_| CommandError::Push)?,
             },
             Self::DisablePush => Command::DisablePush,
-            Self::LinkDevice { offer } => Command::LinkDevice { offer },
+            Self::LinkDevice { offer, history } => Command::LinkDevice { offer, history },
+            Self::CancelHistory => Command::CancelHistory,
             Self::UnlinkDevice { device } => Command::UnlinkDevice { device },
             Self::ReplaceDevice { device } => Command::ReplaceDevice { device },
             _ => return Err(CommandError::Push),
@@ -253,7 +258,7 @@ pub(crate) fn file(hex: &str) -> Result<FileId, CommandError> {
 }
 
 /// JS numbers are doubles: accept only whole, non-negative, exact values.
-fn file_size(size: f64) -> Result<u64, CommandError> {
+pub(crate) fn file_size(size: f64) -> Result<u64, CommandError> {
     if size.is_finite() && size >= 0.0 && size.fract() == 0.0 && size <= MAX_SAFE_INTEGER {
         #[expect(
             clippy::cast_possible_truncation,
@@ -384,9 +389,17 @@ mod tests {
     #[test]
     fn devices_are_linked_and_unlinked() {
         let link = prepare(json!({ "type": "link_device", "offer": "cypher-device:00" })).unwrap();
-        assert!(
-            matches!(link.command, Command::LinkDevice { offer } if offer == "cypher-device:00")
-        );
+        assert!(matches!(
+            link.command,
+            Command::LinkDevice { offer, history: false } if offer == "cypher-device:00"
+        ));
+        let with_history = json!({ "type": "link_device", "offer": "x", "history": true });
+        assert!(matches!(
+            prepare(with_history).unwrap().command,
+            Command::LinkDevice { history: true, .. }
+        ));
+        let cancel = prepare(json!({ "type": "cancel_history" })).unwrap();
+        assert!(matches!(cancel.command, Command::CancelHistory));
         let unlink = prepare(json!({ "type": "unlink_device", "device": 3 })).unwrap();
         assert!(matches!(
             unlink.command,

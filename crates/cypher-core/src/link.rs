@@ -181,7 +181,9 @@ impl Provision {
             | Input::AnonymousChannel { .. }
             | Input::Command(_)
             | Input::ChunkRead { .. }
-            | Input::ChunkUnavailable { .. } => {}
+            | Input::ChunkUnavailable { .. }
+            | Input::HistoryBuilt { .. }
+            | Input::HistoryImported { .. } => {}
         }
         effects
     }

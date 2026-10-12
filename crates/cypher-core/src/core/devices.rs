@@ -291,7 +291,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Hands this identity to the new device whose offer the user scanned:
     /// sealed to the offer's key, straight to its throwaway session.
-    pub(super) fn link_device(&mut self, text: &str) {
+    pub(super) fn link_device(&mut self, text: &str, history: bool) {
         let Some(offer) = LinkOffer::parse(text) else {
             return self.emit(Event::LinkFailed {
                 reason: FailReason::InvalidLink,
@@ -323,6 +323,9 @@ impl<R: CryptoRngCore> Core<R> {
             want_ack: true,
             body: Bytes::from(body),
         };
+        if history {
+            self.grant_history(offer.device);
+        }
         self.pending
             .insert(req_id, (Pending::LinkSend { offer }, deadline));
         self.transmit(req_id, send);
@@ -338,11 +341,13 @@ impl<R: CryptoRngCore> Core<R> {
                 .and_then(|l| l.with(&self.identity, offer.device).ok()),
             DeliveryStatus::Offline | DeliveryStatus::Busy => None,
         };
-        match next {
-            Some(list) => self.publish_listing(list, Some((offer.device, offer.name))),
-            None => self.emit(Event::LinkFailed {
+        if let Some(list) = next {
+            self.publish_listing(list, Some((offer.device, offer.name)));
+        } else {
+            self.revoke_history(offer.device);
+            self.emit(Event::LinkFailed {
                 reason: FailReason::Offline,
-            }),
+            });
         }
     }
 

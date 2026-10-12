@@ -67,12 +67,18 @@ pub(crate) async fn link_cancel(state: State<'_, AppState>) -> CmdResult<()> {
     Ok(())
 }
 
-/// Links the new device whose offer the user scanned or pasted.
+/// Links the new device whose offer the user scanned or pasted; with
+/// `history`, it also gets the message history.
 #[tauri::command]
-pub(crate) async fn link_device(state: State<'_, AppState>, offer: String) -> CmdResult<()> {
+pub(crate) async fn link_device(
+    state: State<'_, AppState>,
+    offer: String,
+    history: Option<bool>,
+) -> CmdResult<()> {
     let (client, mut events) = state.client_and_events().await?;
+    let history = history.unwrap_or(false);
     client
-        .command(Command::LinkDevice { offer })
+        .command(Command::LinkDevice { offer, history })
         .await
         .map_err(err)?;
     await_event(&mut events, |e| match e {

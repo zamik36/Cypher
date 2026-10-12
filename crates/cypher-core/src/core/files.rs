@@ -5,7 +5,9 @@ use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
 use super::Core;
-use crate::api::{Content, Effect, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
+use crate::api::{
+    Content, Effect, Event, FailReason, MediaKind, MessageStatus, Sink, StoredMessage,
+};
 use crate::envelope::{
     Body, FILE_CHUNK_SIZE, FileCtl, FileDesc, MAX_FILE_SIZE, MAX_INLINE_LEN, MAX_MIME_LEN,
     MEDIA_CHUNK_SIZE,
@@ -104,7 +106,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.effects.push(Effect::OpenSink {
                 file_id: desc.file_id,
                 len: stored_len(desc, true),
-                sealed: true,
+                sink: Sink::Media,
             });
         }
         let out = Outgoing::new(peer, desc.clone(), kind.clone());
@@ -124,7 +126,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.effects.push(Effect::OpenSink {
             file_id,
             len: sealed.len() as u64,
-            sealed: true,
+            sink: Sink::Media,
         });
         self.effects.push(Effect::WriteChunk {
             file_id,
@@ -224,14 +226,19 @@ impl<R: CryptoRngCore> Core<R> {
         }
         inc.state = InState::Receiving;
         let (from, len, sealed) = (inc.from(), inc.stored_len(), inc.sealed_at_rest());
-        if sealed {
+        let sink = if from.peer == self.peer_id {
+            Sink::History
+        } else if sealed {
             let key = MediaKey::from_desc(&inc.desc);
             self.persist_media(&key);
-        }
+            Sink::Media
+        } else {
+            Sink::Download
+        };
         self.effects.push(Effect::OpenSink {
             file_id: *file_id,
             len,
-            sealed,
+            sink,
         });
         self.persist_incoming(file_id);
         self.send_control_to(
@@ -255,7 +262,7 @@ impl<R: CryptoRngCore> Core<R> {
                 else {
                     // Finished, or taken by another device: the contact's
                     // device would wait for it forever.
-                    if self.peers.contains_key(&sender.peer) {
+                    if sender.peer == self.peer_id || self.peers.contains_key(&sender.peer) {
                         let cancel = Body::FileCtl(FileCtl::Cancel { file_id });
                         self.send_control_to(sender, cancel);
                     }
@@ -299,10 +306,12 @@ impl<R: CryptoRngCore> Core<R> {
         };
         out.receivers.remove(&sender.device);
         let idle = out.receivers.is_empty();
-        let others = self
-            .devices_of(sender.peer)
-            .into_iter()
-            .any(|d| d != sender.device);
+        // The history goes to one device of ours, never to the others.
+        let others = sender.peer != self.peer_id
+            && self
+                .devices_of(sender.peer)
+                .into_iter()
+                .any(|d| d != sender.device);
         if idle && !others {
             self.drop_transfer(&file_id, Some(FailReason::Cancelled), false);
         }
@@ -365,12 +374,23 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Forgets a transfer; `reason == None` means it completed.
     fn drop_transfer(&mut self, file_id: &FileId, reason: Option<FailReason>, complete: bool) {
-        let (had_sink, media) = match (self.outgoing.remove(file_id), self.incoming.remove(file_id))
-        {
-            (Some(out), _) => (out.kind.is_media(), out.kind.is_media()),
-            (None, Some(inc)) => (inc.state == InState::Receiving, inc.sealed_at_rest()),
-            (None, None) => return,
-        };
+        let own = self.peer_id;
+        // `history`: the transfer was the history, sent (`Some(true)`) or
+        // received (`Some(false)`).
+        let (had_sink, media, history) =
+            match (self.outgoing.remove(file_id), self.incoming.remove(file_id)) {
+                (Some(out), _) => (
+                    out.kind.is_media(),
+                    out.kind.is_media(),
+                    (out.peer == own).then_some(true),
+                ),
+                (None, Some(inc)) => (
+                    inc.state == InState::Receiving,
+                    inc.sealed_at_rest(),
+                    (inc.peer == own).then_some(false),
+                ),
+                (None, None) => return,
+            };
         if had_sink {
             self.effects.push(Effect::CloseSink {
                 file_id: *file_id,
@@ -388,6 +408,9 @@ impl<R: CryptoRngCore> Core<R> {
             table: Table::Transfers,
             key: file_id.to_vec(),
         });
+        if let Some(outgoing) = history {
+            return self.end_history_transfer(*file_id, outgoing, reason);
+        }
         self.emit(match reason {
             Some(reason) => Event::TransferFailed {
                 file_id: *file_id,
@@ -617,16 +640,47 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    /// The history transfer ended: sent, or here and to be taken in.
+    fn end_history_transfer(
+        &mut self,
+        file_id: FileId,
+        outgoing: bool,
+        reason: Option<FailReason>,
+    ) {
+        match reason {
+            Some(reason) => self.emit(Event::HistoryFailed {
+                file_id,
+                outgoing,
+                reason,
+            }),
+            None if outgoing => self.emit(Event::HistoryDone { file_id, outgoing }),
+            None => self.import_history(file_id),
+        }
+    }
+
     fn report_progress(&mut self, file_id: FileId, bytes: u64, total: u64) {
         let last = self.progress_at.get(&file_id).copied().unwrap_or(0);
         if self.now.saturating_sub(last) < PROGRESS_INTERVAL_MS {
             return;
         }
         self.progress_at.insert(file_id, self.now);
-        self.emit(Event::TransferProgress {
-            file_id,
-            bytes,
-            total,
+        let own = self.peer_id;
+        let history = match (self.outgoing.get(&file_id), self.incoming.get(&file_id)) {
+            (Some(out), _) => (out.peer == own).then_some(true),
+            (None, Some(inc)) => (inc.peer == own).then_some(false),
+            (None, None) => None,
+        };
+        self.emit(match history {
+            Some(outgoing) => Event::HistoryProgress {
+                outgoing,
+                bytes,
+                total,
+            },
+            None => Event::TransferProgress {
+                file_id,
+                bytes,
+                total,
+            },
         });
     }
 
@@ -648,7 +702,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist(op);
     }
 
-    fn persist_transfer_record(
+    pub(super) fn persist_transfer_record(
         &mut self,
         file_id: FileId,
         record: &crate::transfer::TransferRecord,

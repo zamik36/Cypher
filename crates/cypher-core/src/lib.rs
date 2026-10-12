@@ -22,7 +22,8 @@ mod transfer;
 pub mod ui;
 
 pub use api::{
-    Command, Content, Effect, Event, FailReason, Input, MediaKind, MessageStatus, StoredMessage,
+    Command, Content, Effect, Event, FailReason, Input, MediaKind, MessageStatus, Sink,
+    StoredMessage,
 };
 pub use core::{Core, Rows, Snapshot};
 pub use media::MediaKey;

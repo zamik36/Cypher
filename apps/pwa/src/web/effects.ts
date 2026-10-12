@@ -1,6 +1,9 @@
 /** Core effects as `cypher-wasm` emits them and the order they are applied in. */
 import type { Effect, Op, ReadChunk, Reply } from "../wasm/cypher_wasm.js";
 
+/** Where a transfer's bytes are kept. */
+export type Sink = Extract<Effect, { kind: "open_sink" }>["sink"];
+
 /** Where each kind of effect goes; the worker wires these to IndexedDB, sockets and OPFS. */
 export interface EffectSinks {
   /** Durably applies one batch of storage operations. */
@@ -11,9 +14,13 @@ export interface EffectSinks {
   reply(reply: Reply): void;
   /** Starts an asynchronous read; its result is fed back to the core later. */
   readChunk(request: ReadChunk): void;
-  openSink(fileId: string, len: number, sealed: boolean): Promise<void>;
+  openSink(fileId: string, len: number, sink: Sink): Promise<void>;
   writeChunk(fileId: string, offset: number, data: Uint8Array): void;
   closeSink(fileId: string, complete: boolean): Promise<void>;
+  /** Writes the message history archive for a newly linked device. */
+  buildHistory(fileId: string, partial: string[]): void;
+  /** Takes in the rows of a received history archive. */
+  importHistory(fileId: string): void;
   disconnect(reconnect: boolean): void;
 }
 
@@ -54,13 +61,21 @@ export async function applyEffects(effects: Effect[], sinks: EffectSinks): Promi
         sinks.readChunk(e);
         break;
       case "open_sink":
-        await sinks.openSink(e.file_id, e.len, e.sealed);
+        await sinks.openSink(e.file_id, e.len, e.sink);
         break;
       case "write_chunk":
         sinks.writeChunk(e.file_id, e.offset, e.data);
         break;
       case "close_sink":
         await sinks.closeSink(e.file_id, e.complete);
+        break;
+      case "build_history":
+        await flush();
+        sinks.buildHistory(e.file_id, e.partial);
+        break;
+      case "import_history":
+        await flush();
+        sinks.importHistory(e.file_id);
         break;
       case "disconnect":
         sinks.disconnect(e.reconnect);

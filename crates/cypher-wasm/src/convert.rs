@@ -1,4 +1,4 @@
-use cypher_core::{Effect, Event, Rows, Snapshot, StoreOp, Table, ui};
+use cypher_core::{Effect, Event, Rows, Sink, Snapshot, StoreOp, Table, ui};
 use js_sys::{Array, Uint8Array};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -35,9 +35,11 @@ export type Effect =
   | { kind: "event"; channel: string; payload: unknown }
   | Reply
   | ReadChunk
-  | { kind: "open_sink"; file_id: string; len: number; sealed: boolean }
+  | { kind: "open_sink"; file_id: string; len: number; sink: "download" | "media" | "history" }
   | { kind: "write_chunk"; file_id: string; offset: number; data: Uint8Array<ArrayBuffer> }
   | { kind: "close_sink"; file_id: string; complete: boolean }
+  | { kind: "build_history"; file_id: string; partial: string[] }
+  | { kind: "import_history"; file_id: string }
   | { kind: "disconnect"; reconnect: boolean };
 
 export interface CommandOutcome { effects: Effect[]; msgId?: string; fileId?: string }
@@ -88,7 +90,7 @@ enum JsEffect<'a> {
     OpenSink {
         file_id: String,
         len: f64,
-        sealed: bool,
+        sink: &'static str,
     },
     WriteChunk {
         file_id: String,
@@ -99,6 +101,13 @@ enum JsEffect<'a> {
     CloseSink {
         file_id: String,
         complete: bool,
+    },
+    BuildHistory {
+        file_id: String,
+        partial: Vec<String>,
+    },
+    ImportHistory {
+        file_id: String,
     },
     Disconnect {
         reconnect: bool,
@@ -179,14 +188,10 @@ fn js_effect(effect: &Effect) -> Option<JsEffect<'_>> {
             len: *len,
             headroom: u32::try_from(*headroom).unwrap_or(u32::MAX),
         },
-        Effect::OpenSink {
-            file_id,
-            len,
-            sealed,
-        } => JsEffect::OpenSink {
+        Effect::OpenSink { file_id, len, sink } => JsEffect::OpenSink {
             file_id: file_id.to_hex(),
             len: js_number(*len),
-            sealed: *sealed,
+            sink: sink_name(*sink),
         },
         Effect::WriteChunk {
             file_id,
@@ -201,10 +206,25 @@ fn js_effect(effect: &Effect) -> Option<JsEffect<'_>> {
             file_id: file_id.to_hex(),
             complete: *complete,
         },
+        Effect::BuildHistory { file_id, partial } => JsEffect::BuildHistory {
+            file_id: file_id.to_hex(),
+            partial: partial.iter().map(|id| id.to_hex()).collect(),
+        },
+        Effect::ImportHistory { file_id } => JsEffect::ImportHistory {
+            file_id: file_id.to_hex(),
+        },
         Effect::Disconnect { reconnect } => JsEffect::Disconnect {
             reconnect: *reconnect,
         },
     })
+}
+
+fn sink_name(sink: Sink) -> &'static str {
+    match sink {
+        Sink::Download => "download",
+        Sink::Media => "media",
+        Sink::History => "history",
+    }
 }
 
 /// File offsets and sizes as JS numbers.

@@ -1,6 +1,7 @@
 mod anon;
 mod devices;
 mod files;
+mod history;
 mod messaging;
 mod outbox;
 mod push;
@@ -24,13 +25,14 @@ use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRec
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
 use crate::store::{
-    META_DEVICES, META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table, Vault,
-    session_addr, session_key,
+    META_DEVICES, META_HISTORY, META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table,
+    Vault, session_addr, session_key,
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Readiness};
 use devices::{Devices, DevicesFor, OwnDevices};
+use history::History;
 use messaging::Joining;
 use outbox::OutboxItem;
 use push::{PushState, Subscription};
@@ -169,6 +171,7 @@ pub struct Core<R> {
     /// Invites being joined by, while the host's devices answer.
     joining: HashMap<PeerId, Joining>,
     devices: Devices,
+    history: History,
     recent: RecentIds,
     /// Our messages the contact has read, so a late receipt cannot undo it.
     read: RecentIds,
@@ -236,6 +239,7 @@ impl<R: CryptoRngCore> Core<R> {
             init_heard: HashMap::new(),
             joining: HashMap::new(),
             devices: own.devices,
+            history: own.history,
             recent: RecentIds::default(),
             read: RecentIds::default(),
             progress_at: HashMap::new(),
@@ -250,14 +254,21 @@ impl<R: CryptoRngCore> Core<R> {
         if fresh_prekeys {
             core.persist_prekeys();
         }
-        core.announce_pending_offers();
+        core.pick_up(&skipped);
+        let effects = std::mem::take(&mut core.effects);
+        Ok((core, effects))
+    }
+
+    /// What a restored core tells and asks for again: offers still waiting,
+    /// history work the driver did not finish, records it could not read.
+    fn pick_up(&mut self, skipped: &Skipped) {
+        self.announce_pending_offers();
+        self.resume_history();
         if skipped.0 > 0 {
-            core.emit(Event::Warning {
+            self.emit(Event::Warning {
                 reason: FailReason::Corrupted,
             });
         }
-        let effects = std::mem::take(&mut core.effects);
-        Ok((core, effects))
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -301,6 +312,8 @@ impl<R: CryptoRngCore> Core<R> {
                 index,
                 buf,
             } => self.on_chunk_read(file_id, index, buf),
+            Input::HistoryBuilt { file_id, size } => self.on_history_built(file_id, size),
+            Input::HistoryImported { file_id, ok } => self.on_history_imported(file_id, ok),
             Input::ChunkUnavailable { file_id } => {
                 self.fail_outgoing(&file_id, FailReason::SourceUnavailable);
             }
@@ -621,7 +634,8 @@ impl<R: CryptoRngCore> Core<R> {
                 auth,
             }),
             Command::DisablePush => self.disable_push(),
-            Command::LinkDevice { offer } => self.link_device(&offer),
+            Command::LinkDevice { offer, history } => self.link_device(&offer, history),
+            Command::CancelHistory => self.cancel_history(),
             Command::UnlinkDevice { device } => self.unlink_device(DeviceId(device)),
             Command::ReplaceDevice { device } => self.replace_device(DeviceId(device)),
         }
@@ -1110,6 +1124,7 @@ struct Own {
     profile_name: Option<String>,
     links: Vec<(String, u64)>,
     devices: Devices,
+    history: History,
 }
 
 fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, CoreError> {
@@ -1119,6 +1134,7 @@ fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, Co
             .map(|record| record.links)
             .unwrap_or_default(),
         devices: Devices::from_record(load_meta::<OwnDevices>(vault, meta, META_DEVICES, skipped)?),
+        history: load_meta::<History>(vault, meta, META_HISTORY, skipped)?.unwrap_or_default(),
     })
 }
 

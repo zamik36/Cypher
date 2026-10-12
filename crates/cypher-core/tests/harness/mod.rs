@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bytes::Bytes;
 use cypher_core::link::Provision;
-use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault};
+use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault, history};
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
 use cypher_crypto::{DeviceList, IdentitySeed, PrekeyBundle};
@@ -63,6 +63,11 @@ pub(crate) struct Client {
     pub sources: HashMap<FileId, Vec<u8>>,
     pub sinks: HashMap<FileId, Vec<u8>>,
     pub closed: HashMap<FileId, bool>,
+    /// The driver cannot build a history archive.
+    pub history_fails: bool,
+    /// The driver stops before it answers a history effect, as if the app
+    /// were closed meanwhile.
+    pub history_held: bool,
     pub events: Vec<Event>,
     pub connected: bool,
     inputs: VecDeque<Input>,
@@ -108,6 +113,8 @@ impl World {
                 sources: HashMap::new(),
                 sinks: HashMap::new(),
                 closed: HashMap::new(),
+                history_fails: false,
+                history_held: false,
                 events: Vec::new(),
                 connected: false,
                 inputs: VecDeque::new(),
@@ -134,6 +141,8 @@ impl World {
             sources: HashMap::new(),
             sinks: HashMap::new(),
             closed: HashMap::new(),
+            history_fails: false,
+            history_held: false,
             events: Vec::new(),
             connected: false,
             inputs: VecDeque::new(),
@@ -158,6 +167,8 @@ impl World {
             sources: HashMap::new(),
             sinks: HashMap::new(),
             closed: HashMap::new(),
+            history_fails: false,
+            history_held: false,
             events: Vec::new(),
             connected: false,
             inputs: VecDeque::new(),
@@ -494,6 +505,9 @@ impl World {
                 Effect::CloseSink { file_id, complete } => {
                     c.closed.insert(file_id, complete);
                 }
+                effect @ (Effect::BuildHistory { .. } | Effect::ImportHistory { .. }) => {
+                    history_effect(c, effect);
+                }
                 Effect::Disconnect { .. } => c.connected = false,
             }
         }
@@ -778,6 +792,123 @@ impl World {
                 self.respond(from, &reply(ServerMsg::Done));
             }
             _ => unreachable!(),
+        }
+    }
+}
+
+/// Builds or takes in a history as a driver does, unless the driver is
+/// meant to stop first.
+fn history_effect(c: &mut Client, effect: Effect) {
+    if c.history_held {
+        return;
+    }
+    match effect {
+        Effect::BuildHistory { file_id, partial } => {
+            let size = (!c.history_fails).then(|| {
+                let archive = build_history(c, &partial);
+                let size = archive.len() as u64;
+                c.sources.insert(file_id, archive);
+                size
+            });
+            c.inputs.push_back(Input::HistoryBuilt { file_id, size });
+        }
+        Effect::ImportHistory { file_id } => {
+            let archive = c.sinks.remove(&file_id).unwrap_or_default();
+            let ok = import_history(c, &archive);
+            c.inputs.push_back(Input::HistoryImported { file_id, ok });
+        }
+        _ => unreachable!("only history effects come here"),
+    }
+}
+
+/// A media row read from an archive, kept until its note is whole.
+struct PendingMedia {
+    key: Vec<u8>,
+    value: Vec<u8>,
+    file_id: FileId,
+    blob: Vec<u8>,
+}
+
+/// The rows a history archive carries, and the voice and video notes of
+/// the media rows, as a driver writes them.
+fn build_history(c: &Client, partial: &[FileId]) -> Vec<u8> {
+    let vault = Vault::new(IdentitySeed(c.seed).derive_storage_key());
+    let mut out = Vec::new();
+    let mut w = history::Writer::default();
+    history::Writer::header(&mut out);
+    let rows = |table: Table| {
+        c.kv.iter()
+            .filter(move |((t, _), _)| *t == table as u8)
+            .map(|((_, k), v)| (k, v))
+    };
+    for (key, value) in rows(Table::Media) {
+        let Ok(id) = <[u8; 16]>::try_from(key.as_slice()) else {
+            continue;
+        };
+        let file_id = FileId(id);
+        let whole = vault
+            .open_media(&file_id, value)
+            .ok()
+            .zip(c.sinks.get(&file_id))
+            .filter(|(m, blob)| m.sealed_len() == blob.len() as u64);
+        let Some((_, blob)) = whole.filter(|_| !partial.contains(&file_id)) else {
+            continue;
+        };
+        w.row(&mut out, Table::Media, key, value).unwrap();
+        w.blob(&mut out, &file_id, blob.len() as u64);
+        out.extend_from_slice(blob);
+    }
+    for table in [Table::Messages, Table::MessageStatus] {
+        for (key, value) in rows(table) {
+            w.row(&mut out, table, key, value).unwrap();
+        }
+    }
+    w.end(&mut out);
+    out
+}
+
+/// Takes in the rows of an archive the store does not have yet, each media
+/// row only once its note is written.
+fn import_history(c: &mut Client, archive: &[u8]) -> bool {
+    let vault = Vault::new(IdentitySeed(c.seed).derive_storage_key());
+    let mut reader = history::Reader::new();
+    reader.push(archive);
+    let mut media: Option<PendingMedia> = None;
+    loop {
+        match reader.next_item() {
+            Ok(Some(history::Item::Row { table, key, value })) => {
+                if !history::check_row(&vault, table, key, value) {
+                    continue;
+                }
+                if table == Table::Media {
+                    media = Some(PendingMedia {
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                        file_id: FileId(key.try_into().unwrap()),
+                        blob: Vec::new(),
+                    });
+                } else {
+                    c.kv.entry((table as u8, key.to_vec()))
+                        .or_insert_with(|| value.to_vec());
+                }
+            }
+            Ok(Some(history::Item::BlobStart { .. } | history::Item::End)) => {}
+            Ok(Some(history::Item::BlobData(data))) => {
+                if let Some(m) = media.as_mut() {
+                    m.blob.extend_from_slice(data);
+                }
+            }
+            Ok(None) => return reader.finish().is_ok(),
+            Err(_) => return false,
+        }
+        let done = media.as_ref().is_some_and(|m| {
+            vault
+                .open_media(&m.file_id, &m.value)
+                .is_ok_and(|k| k.sealed_len() == m.blob.len() as u64)
+        });
+        if done && let Some(m) = media.take() {
+            c.sinks.entry(m.file_id).or_insert(m.blob);
+            c.kv.entry((Table::Media as u8, m.key)).or_insert(m.value);
         }
     }
 }

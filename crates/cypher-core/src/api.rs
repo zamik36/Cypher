@@ -30,6 +30,17 @@ pub enum Input {
     ChunkUnavailable {
         file_id: FileId,
     },
+    /// Answer to [`Effect::BuildHistory`]: the archive's size, or `None`
+    /// when it could not be built.
+    HistoryBuilt {
+        file_id: FileId,
+        size: Option<u64>,
+    },
+    /// Answer to [`Effect::ImportHistory`].
+    HistoryImported {
+        file_id: FileId,
+        ok: bool,
+    },
     /// Periodic timer, at least once per second while running.
     Tick,
 }
@@ -114,10 +125,14 @@ pub enum Command {
     /// The server forgets the subscription.
     DisablePush,
     /// Hands this identity to the new device that shows `offer`, then
-    /// lists it among the identity's devices.
+    /// lists it among the identity's devices; with `history`, the new
+    /// device also gets the message history once it asks.
     LinkDevice {
         offer: String,
+        history: bool,
     },
+    /// Stops handing over, or receiving, the message history.
+    CancelHistory,
     /// Takes one of this identity's other devices off its list.
     UnlinkDevice {
         device: u32,
@@ -158,13 +173,11 @@ pub enum Effect {
         len: u32,
         headroom: usize,
     },
-    /// Allocate `len` bytes for a transfer. `sealed` media is kept as the
-    /// received ciphertext chunks (each `chunk_size + 16` bytes) and is only
-    /// decrypted on playback.
+    /// Allocate `len` bytes for a transfer, kept where `sink` says.
     OpenSink {
         file_id: FileId,
         len: u64,
-        sealed: bool,
+        sink: Sink,
     },
     WriteChunk {
         file_id: FileId,
@@ -174,6 +187,19 @@ pub enum Effect {
     CloseSink {
         file_id: FileId,
         complete: bool,
+    },
+    /// Write the message history archive ([`crate::history`]) for another
+    /// device of this identity, to be served as `file_id`; answered with
+    /// [`Input::HistoryBuilt`]. Media still being transferred (`partial`)
+    /// is left out.
+    BuildHistory {
+        file_id: FileId,
+        partial: Vec<FileId>,
+    },
+    /// Take the rows of the received archive `file_id` the local store does
+    /// not have yet, and its media; answered with [`Input::HistoryImported`].
+    ImportHistory {
+        file_id: FileId,
     },
     /// Drop the gateway connection (protocol violation, liveness timeout).
     Disconnect {
@@ -282,6 +308,35 @@ pub enum Event {
     PushRegistered,
     /// The server does not offer push, or refused the subscription.
     PushUnavailable,
+    /// The message history is on its way to (`outgoing`) or from another
+    /// device of this identity.
+    HistoryProgress {
+        outgoing: bool,
+        bytes: u64,
+        total: u64,
+    },
+    /// The message history was handed over, or taken in here.
+    HistoryDone {
+        file_id: FileId,
+        outgoing: bool,
+    },
+    HistoryFailed {
+        file_id: FileId,
+        outgoing: bool,
+        reason: FailReason,
+    },
+}
+
+/// Where a transfer's bytes are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sink {
+    /// A file the user takes: plaintext, where the user keeps files.
+    Download,
+    /// A voice or video note: the received ciphertext chunks (each
+    /// `chunk_size + 16` bytes), decrypted only on playback.
+    Media,
+    /// A message history archive from another device of this identity.
+    History,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

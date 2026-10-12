@@ -1239,7 +1239,13 @@ fn linking_hands_over_the_identity_and_lists_the_new_device() {
     let mut w = paired();
     let laptop = w.provision("Laptop");
     let offer = w.offer(laptop);
-    w.command(A, Command::LinkDevice { offer });
+    w.command(
+        A,
+        Command::LinkDevice {
+            offer,
+            history: false,
+        },
+    );
     assert!(w.has_event(laptop, |e| matches!(e, Event::LinkedHere)));
     assert!(w.has_event(A, |e| matches!(
         e,
@@ -1261,6 +1267,174 @@ fn linking_hands_over_the_identity_and_lists_the_new_device() {
     assert!(listed.iter().any(|(_, name)| name == "Laptop"));
 }
 
+/// The rows of `table` a client keeps.
+fn rows(w: &World, i: usize, table: Table) -> std::collections::BTreeSet<Vec<u8>> {
+    w.clients[i]
+        .kv
+        .keys()
+        .filter(|(t, _)| *t == table as u8)
+        .map(|(_, k)| k.clone())
+        .collect()
+}
+
+/// A profile whose contact wrote, was answered and sent a voice note, with a
+/// laptop waiting to be linked: the voice note's id and the laptop.
+fn history_to_hand_over() -> (World, FileId, usize) {
+    let mut w = paired();
+    w.send_text(B, A, "before the laptop");
+    w.send_text(A, B, "the answer");
+    let kind = MediaKind::Voice {
+        duration_ms: 3_000,
+        waveform: vec![5; 64],
+    };
+    let voice = offer_file(&mut w, B, A, pattern(150 * 1024), "voice.webm", kind);
+    let laptop = w.provision("Laptop");
+    (w, voice, laptop)
+}
+
+fn link(w: &mut World, laptop: usize, history: bool) {
+    let offer = w.offer(laptop);
+    w.command(A, Command::LinkDevice { offer, history });
+    assert!(w.finish_linking(laptop));
+}
+
+fn history_done(w: &World, i: usize, out: bool) -> bool {
+    w.has_event(
+        i,
+        |e| matches!(e, Event::HistoryDone { outgoing, .. } if *outgoing == out),
+    )
+}
+
+/// Linked with the history, the new device has what the first one had:
+/// the messages, their statuses and the voice note, which plays the same.
+#[test]
+fn a_device_linked_with_the_history_has_the_earlier_chats() {
+    let (mut w, voice, laptop) = history_to_hand_over();
+    link(&mut w, laptop, true);
+
+    assert!(history_done(&w, A, true));
+    assert!(history_done(&w, laptop, false));
+    for table in [Table::Messages, Table::MessageStatus, Table::Media] {
+        assert!(
+            rows(&w, laptop, table).is_superset(&rows(&w, A, table)),
+            "{table:?} rows moved"
+        );
+    }
+    assert_eq!(rows(&w, laptop, Table::Messages).len(), 3);
+    assert_eq!(w.clients[laptop].sinks[&voice], w.clients[A].sinks[&voice]);
+    assert!(
+        !w.clients[A].sources.is_empty(),
+        "the archive was served from the driver"
+    );
+
+    // Later messages arrive as usual on top of the history.
+    w.send_text(B, A, "after the laptop");
+    assert_eq!(rows(&w, laptop, Table::Messages).len(), 4);
+}
+
+/// Without the history, the new device starts from the moment it is linked.
+#[test]
+fn a_device_linked_without_the_history_starts_empty() {
+    let (mut w, _, laptop) = history_to_hand_over();
+    link(&mut w, laptop, false);
+    assert!(rows(&w, laptop, Table::Messages).is_empty());
+    assert!(!w.has_event(A, |e| matches!(e, Event::HistoryDone { .. })));
+    assert!(!w.has_event(laptop, |e| matches!(e, Event::HistoryDone { .. })));
+}
+
+/// The first device cannot build the archive: it says so, and the new
+/// device works without the history.
+#[test]
+fn a_history_that_cannot_be_built_is_reported() {
+    let (mut w, _, laptop) = history_to_hand_over();
+    w.clients[A].history_fails = true;
+    link(&mut w, laptop, true);
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::HistoryFailed {
+            outgoing: true,
+            reason: FailReason::SourceUnavailable,
+            ..
+        }
+    )));
+    assert!(rows(&w, laptop, Table::Messages).is_empty());
+    w.send_text(B, A, "still reachable");
+    assert_eq!(w.texts(laptop), ["still reachable"]);
+}
+
+/// Chunks of the archive lost on the way are sent again.
+#[test]
+fn a_history_gets_through_a_lossy_link() {
+    let (mut w, voice, laptop) = history_to_hand_over();
+    w.server.drop_chunks_every = Some(3);
+    link(&mut w, laptop, true);
+    for _ in 0..20 {
+        if history_done(&w, laptop, false) {
+            break;
+        }
+        w.advance(5_000);
+    }
+    assert!(history_done(&w, laptop, false));
+    assert_eq!(w.clients[laptop].sinks[&voice], w.clients[A].sinks[&voice]);
+}
+
+/// Either side can stop the handover; both hear of it.
+#[test]
+fn a_history_handover_can_be_cancelled() {
+    let (mut w, _, laptop) = history_to_hand_over();
+    w.clients[A].history_held = true;
+    link(&mut w, laptop, true);
+    w.command(A, Command::CancelHistory);
+    assert!(w.has_event(A, |e| matches!(
+        e,
+        Event::HistoryFailed {
+            outgoing: true,
+            reason: FailReason::Cancelled,
+            ..
+        }
+    )));
+
+    // Once on its way, the new device cancels.
+    let (mut w, _, laptop) = history_to_hand_over();
+    w.server.drop_chunks_every = Some(1);
+    link(&mut w, laptop, true);
+    w.command(laptop, Command::CancelHistory);
+    for i in [A, laptop] {
+        assert!(w.has_event(i, |e| matches!(
+            e,
+            Event::HistoryFailed {
+                reason: FailReason::Cancelled,
+                ..
+            }
+        )));
+    }
+    w.server.drop_chunks_every = None;
+    w.advance(60_000);
+    assert!(rows(&w, laptop, Table::Messages).is_empty());
+}
+
+/// Closed while the archive is being built, or taken in, the app picks the
+/// work up again when it starts.
+#[test]
+fn a_history_handover_survives_restarts() {
+    let (mut w, voice, laptop) = history_to_hand_over();
+    w.clients[A].history_held = true;
+    link(&mut w, laptop, true);
+    assert!(!history_done(&w, A, true));
+    w.clients[A].history_held = false;
+    w.clients[laptop].history_held = true;
+    w.restart(A);
+    assert!(history_done(&w, A, true), "sent once rebuilt");
+    assert!(!history_done(&w, laptop, false));
+    w.clients[laptop].history_held = false;
+    w.restart(laptop);
+    assert!(
+        history_done(&w, laptop, false),
+        "taken in after the restart"
+    );
+    assert_eq!(w.clients[laptop].sinks[&voice], w.clients[A].sinks[&voice]);
+}
+
 /// An offer for a device id the identity already has, or one nobody waits
 /// on, links nothing.
 #[test]
@@ -1269,7 +1443,13 @@ fn a_link_that_cannot_work_fails() {
     let gone = w.provision("Tablet");
     let offer = w.offer(gone);
     w.disconnect(gone);
-    w.command(A, Command::LinkDevice { offer });
+    w.command(
+        A,
+        Command::LinkDevice {
+            offer,
+            history: false,
+        },
+    );
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::LinkFailed {
@@ -1284,6 +1464,7 @@ fn a_link_that_cannot_work_fails() {
         A,
         Command::LinkDevice {
             offer: taken.to_text(),
+            history: false,
         },
     );
     assert!(w.has_event(A, |e| matches!(
@@ -1296,6 +1477,7 @@ fn a_link_that_cannot_work_fails() {
         A,
         Command::LinkDevice {
             offer: "not an offer".into(),
+            history: false,
         },
     );
     assert!(w.has_event(A, |e| matches!(
@@ -1314,7 +1496,13 @@ fn unlinking_a_device_stops_it() {
     let mut w = paired();
     let laptop = w.provision("Laptop");
     let offer = w.offer(laptop);
-    w.command(A, Command::LinkDevice { offer });
+    w.command(
+        A,
+        Command::LinkDevice {
+            offer,
+            history: false,
+        },
+    );
     w.finish_linking(laptop);
     let id = w.clients[laptop].device.0;
     w.command(A, Command::UnlinkDevice { device: id });
