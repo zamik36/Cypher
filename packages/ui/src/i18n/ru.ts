@@ -24,6 +24,15 @@ const ru: TranslationKeys = {
   devices_remove_confirm: "Удалить насовсем",
   devices_removed: "Устройство удалено",
   devices_name: "Имя устройства",
+  devices_history: "Перенести и историю сообщений",
+  devices_history_hint: "Сообщения, голосовые и кружки. Файлы останутся где были.",
+  history_sending: (percent: number) => `Передаём историю сообщений… ${percent}%`,
+  history_receiving: (percent: number) => `Получаем историю сообщений… ${percent}%`,
+  history_receiving_text: "Не закрывайте приложение на обоих устройствах, пока не закончится.",
+  history_sent: "История сообщений передана",
+  history_received: "Прежние переписки перенесены",
+  history_failed: "Не удалось перенести историю сообщений",
+  history_cancel: "Остановить",
   devices_no_room_title: "Нет места для этого устройства",
   devices_no_room_text:
     "У профиля уже 6 устройств. Выберите то, которого у вас больше нет: это устройство займёт его место.",
@@ -224,6 +233,7 @@ const ru: TranslationKeys = {
     "Этот файл может запускать программы, поэтому из чата он не открывается. Откройте его из папки, если доверяете отправителю.",
   file_no_app: "На этом устройстве нет приложения для файлов такого типа.",
   file_missing: "Файла больше нет на этом устройстве.",
+  file_elsewhere: "нет на этом устройстве",
 
   contact_title: "Контакт",
   contact_fallback: (id: string) => `Контакт ${id}`,

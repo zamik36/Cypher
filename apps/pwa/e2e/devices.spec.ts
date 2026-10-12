@@ -11,7 +11,7 @@ import {
   setPassphrase,
 } from "./users";
 
-test("a new device is linked by its code and gets the profile's chats", async ({ browser, baseURL }) => {
+test("a new device is linked by its code and gets the profile's chats and history", async ({ browser, baseURL }) => {
   const [alice, bob, laptop] = [
     await newUser(browser, baseURL ?? ""),
     await newUser(browser, baseURL ?? ""),
@@ -20,6 +20,8 @@ test("a new device is linked by its code and gets the profile's chats", async ({
   await createIdentity(alice, "alice");
   await createIdentity(bob, "bob");
   await pair(alice, bob);
+  await say(bob, "from before the laptop");
+  await expect(incoming(alice).getByText("from before the laptop")).toBeVisible();
 
   await test.step("the new device shows its code", async () => {
     await laptop.getByRole("button", { name: "I already use Cypher — link this device" }).click();
@@ -37,13 +39,20 @@ test("a new device is linked by its code and gets the profile's chats", async ({
     await alice.getByLabel("Code from the new device").fill(offer);
     await alice.getByRole("button", { name: "Link", exact: true }).click();
     await expect(alice.getByText("Link “Laptop”?", { exact: false })).toBeVisible();
+    await expect(alice.getByRole("switch", { name: "Also transfer the message history" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
     await alice.getByRole("button", { name: "Link", exact: true }).click();
     await expect(alice.getByTestId("devices")).toContainText("Laptop");
   });
 
-  await test.step("the new device opens with the profile's contacts", async () => {
+  await test.step("the new device opens with the profile's contacts and earlier chats", async () => {
     await expectConnected(laptop);
     await expect(laptop.getByTestId("chat-row")).toContainText("bob");
+    await expect(laptop.getByText("Your earlier chats are here")).toBeVisible();
+    await openFirstChat(laptop);
+    await expect(incoming(laptop).getByText("from before the laptop")).toBeVisible();
   });
 
   await test.step("what the contact writes reaches the new device too", async () => {

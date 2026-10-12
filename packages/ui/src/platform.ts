@@ -95,6 +95,14 @@ export interface FileOffer {
 }
 
 /** One device of this identity; `name` is empty when unknown. */
+/** How far the message history got: `progress` from 0 to 1, and why it stopped if it failed. */
+export interface HistoryState {
+  file_id: string;
+  outgoing: boolean;
+  progress: number;
+  failed: string | null;
+}
+
 export interface DeviceInfo {
   id: number;
   name: string;
@@ -133,6 +141,10 @@ export interface Events {
   devices: { this: number; devices: DeviceInfo[] };
   /** The identity's list is full: this device waits for one to replace. */
   no_room: { this: number; devices: DeviceInfo[] };
+  /** The message history on its way to (`outgoing`) or from another device. */
+  history_progress: HistoryState;
+  history_done: HistoryState;
+  history_failed: HistoryState;
   /** A new device was linked to this identity. */
   device_linked: DeviceInfo;
   /** Linking a device did not work (the reason, as the core names it). */
@@ -201,8 +213,13 @@ export interface Platform {
      */
     finishLink(passphrase: string): Promise<[string, string]>;
     cancelLink(): Promise<void>;
-    /** Links the new device whose offer the user scanned or pasted. */
-    link(offer: string): Promise<void>;
+    /**
+     * Links the new device whose offer the user scanned or pasted; with
+     * `history`, it also gets the messages so far.
+     */
+    link(offer: string, history: boolean): Promise<void>;
+    /** Stops handing over, or receiving, the message history. */
+    cancelHistory(): Promise<void>;
     /** Takes another device off this identity's list. */
     unlink(deviceId: number): Promise<void>;
     /** Puts this device on a full list in place of one the user no longer has. */

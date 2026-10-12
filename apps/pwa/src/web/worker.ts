@@ -520,7 +520,7 @@ const handlers: Handlers = {
     provision = null;
     return Promise.resolve();
   },
-  linkDevice: async (offer) => {
+  linkDevice: async (offer, history) => {
     const done = new Promise<void>((resolve, reject) => {
       linkWaiters.add((channel, payload) => {
         if (channel === "device_linked") resolve();
@@ -529,7 +529,7 @@ const handlers: Handlers = {
         return true;
       });
     });
-    await serial(() => run({ type: "link_device", offer }));
+    await serial(() => run({ type: "link_device", offer, history }));
     await done;
   },
   hasIdentity: async () => (await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined,

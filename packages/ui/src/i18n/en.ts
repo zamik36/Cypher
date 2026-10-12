@@ -24,6 +24,15 @@ const en = {
   devices_remove_confirm: "Remove for good",
   devices_removed: "Device removed",
   devices_name: "Device name",
+  devices_history: "Also transfer the message history",
+  devices_history_hint: "Messages, voice and video notes. Files stay where they are.",
+  history_sending: (percent: number) => `Sending the message history… ${percent}%`,
+  history_receiving: (percent: number) => `Receiving the message history… ${percent}%`,
+  history_receiving_text: "Keep both devices open until it is done.",
+  history_sent: "The message history was handed over",
+  history_received: "Your earlier chats are here",
+  history_failed: "The message history could not be transferred",
+  history_cancel: "Stop",
   devices_no_room_title: "No room for this device",
   devices_no_room_text: "Your profile already has 6 devices. Pick one you no longer have: this device takes its place.",
   devices_replace: "Replace",
@@ -220,6 +229,7 @@ const en = {
     "This file can run programs, so it does not open from the chat. Open it from its folder if you trust the sender.",
   file_no_app: "No app on this device opens this kind of file.",
   file_missing: "The file is no longer on this device.",
+  file_elsewhere: "not on this device",
 
   // -- Contact --
   contact_title: "Contact",

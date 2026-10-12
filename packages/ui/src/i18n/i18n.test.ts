@@ -46,6 +46,9 @@ describe("translations", () => {
       expect(table.devices_unnamed(4)).toContain("4");
       expect(table.devices_confirm("Laptop")).toContain("Laptop");
       expect(table.devices_linked("Laptop")).toContain("Laptop");
+      expect(table.devices_replace_confirm("Phone")).toContain("Phone");
+      expect(table.history_sending(42)).toContain("42%");
+      expect(table.history_receiving(7)).toContain("7%");
     }
   });
 

@@ -3,15 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DevicesNotice from "./DevicesNotice";
 import { registerPlatform, type Platform } from "../platform";
 import { dismissRestored, markRestored, setNoRoom, takeOwnDevices } from "../stores/devices";
+import { setHistoryTransfer } from "../stores/history";
 import { top } from "../stores/nav";
 
 const replace = vi.fn<(id: number) => Promise<void>>().mockResolvedValue(undefined);
+const cancelHistory = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
 describe("DevicesNotice", () => {
   beforeEach(() => {
     replace.mockClear();
-    registerPlatform({ devices: { replace } } as unknown as Platform);
+    registerPlatform({ devices: { replace, cancelHistory } } as unknown as Platform);
     setNoRoom(null);
+    setHistoryTransfer(null);
     takeOwnDevices({ this: 1, devices: [{ id: 1, name: "" }] });
     dismissRestored();
   });
@@ -57,6 +60,18 @@ describe("DevicesNotice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open devices" }));
     expect(top()).toEqual({ name: "settings-section", section: "devices" });
     expect(screen.queryByTestId("restored-hint")).toBeNull();
+  });
+
+  it("follows the history coming from another device, which the user can stop", () => {
+    render(() => <DevicesNotice />);
+    expect(screen.queryByTestId("history-receiving")).toBeNull();
+    setHistoryTransfer({ file_id: "h", outgoing: true, progress: 0.5, failed: null });
+    expect(screen.queryByTestId("history-receiving")).toBeNull();
+
+    setHistoryTransfer({ file_id: "h", outgoing: false, progress: 0.42, failed: null });
+    expect(screen.getByTestId("history-receiving").textContent).toContain("Receiving the message history… 42%");
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(cancelHistory).toHaveBeenCalled();
   });
 
   it("lets the user dismiss the hint", () => {

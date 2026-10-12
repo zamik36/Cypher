@@ -3,6 +3,7 @@ import Icon from "../components/Icon";
 import QrScanner from "../components/QrScanner";
 import { api } from "../platform";
 import { dropOwnDevice, ownDevices } from "../stores/devices";
+import { historyPercent, historyTransfer } from "../stores/history";
 import { addToast, toastError } from "../stores/toasts";
 import { findDeviceOffer, offerName } from "../utils/device";
 import { t } from "../i18n";
@@ -16,6 +17,9 @@ export default function Devices() {
   const [offer, setOffer] = createSignal<string | null>(null);
   const [removing, setRemoving] = createSignal<number | null>(null);
   const [busy, setBusy] = createSignal(false);
+  /** Whether the device being linked also gets the messages so far. */
+  const [withHistory, setWithHistory] = createSignal(true);
+  const sending = () => historyTransfer()?.outgoing === true;
 
   const name = (id: number, given: string) => given || t().devices_unnamed(id);
 
@@ -24,7 +28,7 @@ export default function Devices() {
     if (!code) return;
     setBusy(true);
     try {
-      await api.devices.link(code);
+      await api.devices.link(code, withHistory());
       addToast(t().devices_linked(offerName(code) || t().devices_unnamed(0)), "success");
       setOffer(null);
       setTyped("");
@@ -84,6 +88,17 @@ export default function Devices() {
         </For>
       </div>
 
+      <Show when={sending()}>
+        <div class="card settings__card" role="status" data-testid="history-sending">
+          <p>{t().history_sending(historyPercent())}</p>
+          <div class="settings__row">
+            <button class="btn btn--ghost" onClick={() => void api.devices.cancelHistory().catch(toastError)}>
+              {t().history_cancel}
+            </button>
+          </div>
+        </div>
+      </Show>
+
       <div class="card settings__card">
         <Show
           when={offer()}
@@ -126,6 +141,19 @@ export default function Devices() {
           {(code) => (
             <>
               <p>{t().devices_confirm(offerName(code()) || t().devices_unnamed(0))}</p>
+              <div class="list-row">
+                <span class="list-row__text">
+                  <span class="list-row__title">{t().devices_history}</span>
+                  <span class="list-row__subtitle">{t().devices_history_hint}</span>
+                </span>
+                <button
+                  class="switch"
+                  role="switch"
+                  aria-checked={withHistory()}
+                  aria-label={t().devices_history}
+                  onClick={() => setWithHistory(!withHistory())}
+                />
+              </div>
               <div class="settings__row">
                 <button class="btn btn--secondary" disabled={busy()} onClick={() => setOffer(null)}>
                   {t().common_cancel}

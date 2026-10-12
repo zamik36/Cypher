@@ -121,6 +121,7 @@ describe("FileCard", () => {
       </>
     ));
     await waitFor(() => expect(screen.getByRole("button", { name: "old.doc" })).toHaveProperty("disabled", true));
+    expect(screen.getByRole("button", { name: "old.doc" }).textContent).toContain("not on this device");
     const broken = screen.getByRole("button", { name: "broken.bin" });
     expect(broken.textContent).toContain("Peer went away");
     expect(broken).toHaveProperty("disabled", true);

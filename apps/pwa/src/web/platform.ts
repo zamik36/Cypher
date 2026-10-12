@@ -123,7 +123,10 @@ export const webPlatform: Platform = {
     startLink: (_addr, name) => call("startLink", endpoints()[0], name),
     finishLink: (passphrase) => call("finishLink", passphrase),
     cancelLink: () => call("cancelLink"),
-    link: (offer) => call("linkDevice", offer),
+    link: (offer, history) => call("linkDevice", offer, history),
+    cancelHistory: async () => {
+      await call("command", { type: "cancel_history" });
+    },
     unlink: async (deviceId) => {
       await call("command", { type: "unlink_device", device: deviceId });
     },

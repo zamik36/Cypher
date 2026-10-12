@@ -35,6 +35,7 @@ import { setMediaProgress, trackMedia } from "../stores/media";
 import { setInvitesReady } from "../stores/invite";
 import { onPushKey, onPushState, startPush } from "../stores/push";
 import { addOwnDevice, setNoRoom, takeOwnDevices } from "../stores/devices";
+import { setHistoryTransfer } from "../stores/history";
 import { setSharesReady } from "../stores/share";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
@@ -94,6 +95,17 @@ export async function startApp(): Promise<() => void> {
     api.on("devices", takeOwnDevices),
     api.on("no_room", setNoRoom),
     api.on("contacts_changed", () => void refreshConversations()),
+    api.on("history_progress", setHistoryTransfer),
+    api.on("history_done", ({ outgoing }) => {
+      setHistoryTransfer(null);
+      addToast(outgoing ? t().history_sent : t().history_received, "success");
+      // The earlier chats are here now.
+      if (!outgoing) void refreshConversations();
+    }),
+    api.on("history_failed", ({ failed }) => {
+      setHistoryTransfer(null);
+      if (failed !== "Cancelled") addToast(t().history_failed, "error");
+    }),
     api.on("device_linked", addOwnDevice),
     onPeerConnected((peerId) => {
       ensureContact(peerId, true);

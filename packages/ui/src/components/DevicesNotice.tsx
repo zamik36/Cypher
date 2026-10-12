@@ -1,13 +1,15 @@
 import { createSignal, For, Match, Show, Switch } from "solid-js";
 import { api } from "../platform";
 import { dismissRestored, noRoom, restoredHint } from "../stores/devices";
+import { historyPercent, historyTransfer } from "../stores/history";
 import { push } from "../stores/nav";
 import { toastError } from "../stores/toasts";
 import { t } from "../i18n";
 
 /**
  * What the user should know about this profile's devices: the list had no
- * room for this one, or the profile was restored here next to the others.
+ * room for this one, the history is coming from another, or the profile was
+ * restored here next to the others.
  */
 export default function DevicesNotice() {
   /** The device the user picked to replace, waiting for their yes. */
@@ -68,6 +70,17 @@ export default function DevicesNotice() {
             </Show>
           </div>
         )}
+      </Match>
+      <Match when={historyTransfer()?.outgoing === false}>
+        <div class="banner banner--info" role="status" data-testid="history-receiving">
+          <div class="banner__text">
+            <strong>{t().history_receiving(historyPercent())}</strong>
+            <p>{t().history_receiving_text}</p>
+          </div>
+          <button class="btn btn--ghost" onClick={() => void api.devices.cancelHistory().catch(toastError)}>
+            {t().history_cancel}
+          </button>
+        </div>
       </Match>
       <Match when={restoredHint()}>
         <div class="banner banner--info" role="status" data-testid="restored-hint">

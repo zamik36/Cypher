@@ -100,6 +100,17 @@ pub(crate) async fn unlink_device(state: State<'_, AppState>, device: u32) -> Cm
         .map_err(err)
 }
 
+/// Stops handing over, or receiving, the message history.
+#[tauri::command]
+pub(crate) async fn cancel_history(state: State<'_, AppState>) -> CmdResult<()> {
+    state
+        .client()
+        .await?
+        .command(Command::CancelHistory)
+        .await
+        .map_err(err)
+}
+
 /// Puts this device on a full list in place of `device`.
 #[tauri::command]
 pub(crate) async fn replace_device(state: State<'_, AppState>, device: u32) -> CmdResult<()> {

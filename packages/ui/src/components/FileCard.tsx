@@ -155,6 +155,9 @@ export default function FileCard(props: { file: UiFile; outgoing: boolean }) {
               <Match when={state() === "done"}>
                 {size()} · {props.outgoing ? t().file_sent : t().file_saved}
               </Match>
+              <Match when={!props.outgoing && !transfer() && stored() === false}>
+                {size()} · {t().file_elsewhere}
+              </Match>
             </Switch>
           </span>
           <Show when={state() === "active"}>

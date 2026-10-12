@@ -54,7 +54,7 @@ export interface Methods {
   finishLink(passphrase: string): [string, string];
   cancelLink(): void;
   /** Links the new device showing `offer`; resolves once it is listed. */
-  linkDevice(offer: string): void;
+  linkDevice(offer: string, history: boolean): void;
 }
 
 export type Method = keyof Methods;
