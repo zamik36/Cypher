@@ -8,7 +8,7 @@ use std::time::Duration;
 use cypher_client::{Client, ClientError, Config, Content};
 use cypher_core::{Command, Event, MediaKind, MessageStatus};
 use cypher_crypto::IdentitySeed;
-use cypher_types::FileId;
+use cypher_types::{FileId, PeerId};
 use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -64,7 +64,8 @@ pub async fn run(target: &Target) {
 }
 
 /// A second device joins an identity by the offer it shows, through the real
-/// gateway and signaling, and gets what a contact sends from then on.
+/// gateway and signaling, with the history so far, and gets what a contact
+/// sends from then on.
 pub async fn linking(target: &Target) {
     let mut a = Peer::start(
         target,
@@ -79,13 +80,22 @@ pub async fn linking(target: &Target) {
     )
     .await;
     pair_through_a_link(&mut a, &mut b).await;
+    let a_id = a.seed.derive_identity().peer_id();
+    let earlier = Command::SendText {
+        peer: a_id,
+        msg_id: cypher_types::MsgId([6; 16]),
+        text: "before the laptop".into(),
+        reply_to: None,
+    };
+    b.client.command(earlier).await.unwrap();
+    assert_eq!(a.text_from_peer().await, "before the laptop");
 
     let waiting = cypher_client::provision(
         target.gateway_addr.clone(),
         Arc::clone(&target.tls),
         "Laptop",
     );
-    link_from(&mut a, waiting.offer()).await;
+    link_from(&mut a, waiting.offer(), true).await;
     let linked = tokio::time::timeout(WAIT, waiting.linked())
         .await
         .unwrap()
@@ -98,8 +108,12 @@ pub async fn linking(target: &Target) {
         tempfile::tempdir().unwrap(),
     )
     .await;
+    let b_id = b.seed.derive_identity().peer_id();
+    assert!(
+        has_text(&laptop, b_id, "before the laptop").await,
+        "the laptop has the chat from before it was linked"
+    );
 
-    let a_id = a.seed.derive_identity().peer_id();
     let hello = Command::SendText {
         peer: a_id,
         msg_id: cypher_types::MsgId([7; 16]),
@@ -172,13 +186,29 @@ pub async fn restoring(target: &Target) {
     }
 }
 
+/// Whether `peer` keeps a message `text` from `from`, waiting a while: the
+/// history may be taken in while the device was still signing in.
+async fn has_text(peer: &Peer, from: PeerId, text: &str) -> bool {
+    for _ in 0..100 {
+        let history = peer.client.history(from, None, 10).await.unwrap();
+        let found = history
+            .iter()
+            .any(|m| matches!(&m.content, Content::Text { text: t, .. } if t == text));
+        if found {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
 /// Links the device showing `offer` from `a`, trying again while the new
 /// device's throwaway session is still signing in.
-async fn link_from(a: &mut Peer, offer: &str) {
+async fn link_from(a: &mut Peer, offer: &str, history: bool) {
     for _ in 0..50 {
         let link = Command::LinkDevice {
             offer: offer.to_owned(),
-            history: false,
+            history,
         };
         a.client.command(link).await.unwrap();
         let linked = a

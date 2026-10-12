@@ -130,6 +130,7 @@ pub fn message_key(peer: &PeerId, sent_at_ms: u64, msg_id: &MsgId) -> Vec<u8> {
 /// At-rest encryption for every record the core persists. Records are bound
 /// to their `(table, key)` through the AEAD associated data, so a storage
 /// attacker cannot swap values between keys.
+#[derive(Clone)]
 pub struct Vault {
     key: Zeroizing<[u8; 32]>,
 }

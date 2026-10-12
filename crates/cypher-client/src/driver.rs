@@ -58,6 +58,8 @@ pub(crate) struct Driver {
     core: Core<OsRng>,
     store: Store,
     io: FileIo,
+    /// Where history work on blocking threads reports back.
+    io_done: mpsc::UnboundedSender<IoDone>,
     config: Config,
     events: mpsc::UnboundedSender<Event>,
     files: HashMap<FileId, FileEntry>,
@@ -131,7 +133,8 @@ impl Driver {
         let driver = Self {
             core: parts.core,
             store: parts.store,
-            io: FileIo::spawn(io_tx)?,
+            io: FileIo::spawn(io_tx.clone())?,
+            io_done: io_tx,
             config: parts.config,
             events,
             files: parts.files,
@@ -263,8 +266,61 @@ impl Driver {
             IoDone::ReadFailed { file_id } | IoDone::WriteFailed { file_id } => {
                 Input::Command(cypher_core::Command::CancelTransfer { file_id })
             }
+            IoDone::HistoryArrived { file_id } => return self.import_history(file_id),
+            IoDone::HistoryBuilt { file_id, built } => {
+                if let Some(stamp) = built {
+                    let path = self.config.history_path(&file_id);
+                    let entry = FileEntry {
+                        path,
+                        source: Some(stamp),
+                    };
+                    self.remember_file(file_id, entry);
+                }
+                let size = built.map(|stamp| stamp.len());
+                Input::HistoryBuilt { file_id, size }
+            }
+            IoDone::HistoryImported { file_id, ok } => {
+                self.feed(Input::HistoryImported { file_id, ok }).await;
+                // Gone only once the core knows: a restart in between takes
+                // it in again rather than miss it.
+                let path = self.config.history_path(&file_id);
+                return self.io.submit(IoJob::Remove { file_id, path });
+            }
         };
         self.feed(input).await;
+    }
+
+    /// Writes the history archive on a blocking thread.
+    fn build_history(&self, file_id: FileId, partial: Vec<FileId>) {
+        let (store, vault, config) = (self.store.clone(), self.vault.clone(), self.config.clone());
+        let done = self.io_done.clone();
+        tokio::task::spawn_blocking(move || {
+            let path = config.history_path(&file_id);
+            let media = |id: &FileId| config.media_path(id);
+            let built = crate::history::build(&store, &vault, media, &path, &partial)
+                .and_then(|_| SourceStamp::of(&std::fs::metadata(&path)?));
+            if let Err(e) = &built {
+                tracing::warn!("building the message history failed: {e}");
+            }
+            let built = built.ok();
+            let _ = done.send(IoDone::HistoryBuilt { file_id, built });
+        });
+    }
+
+    /// Takes in a received history archive on a blocking thread.
+    fn import_history(&self, file_id: FileId) {
+        let (store, vault, config) = (self.store.clone(), self.vault.clone(), self.config.clone());
+        let done = self.io_done.clone();
+        tokio::task::spawn_blocking(move || {
+            let path = config.history_path(&file_id);
+            let media = |id: &FileId| config.media_path(id);
+            let imported = crate::history::import(&store, &vault, media, &path);
+            if let Err(e) = &imported {
+                tracing::warn!("taking in the message history failed: {e}");
+            }
+            let ok = imported.is_ok();
+            let _ = done.send(IoDone::HistoryImported { file_id, ok });
+        });
     }
 
     async fn on_tick(&mut self) {
@@ -366,19 +422,17 @@ impl Driver {
                         self.io.submit(job);
                     }
                 }
-                // This driver does not build or take in a history yet.
-                Effect::BuildHistory { file_id, .. } => {
-                    let built = Input::HistoryBuilt {
-                        file_id,
-                        size: None,
-                    };
-                    let effects = self.core.handle(built, now_ms());
-                    Box::pin(self.apply(effects)).await;
+                Effect::BuildHistory { file_id, partial } => {
+                    if self.flush().await {
+                        self.build_history(file_id, partial);
+                    }
                 }
+                // Once the archive's sink, closed just before, is on disk.
                 Effect::ImportHistory { file_id } => {
-                    let imported = Input::HistoryImported { file_id, ok: false };
-                    let effects = self.core.handle(imported, now_ms());
-                    Box::pin(self.apply(effects)).await;
+                    if self.flush().await {
+                        let arrived = IoDone::HistoryArrived { file_id };
+                        self.io.submit(IoJob::Barrier(arrived));
+                    }
                 }
             }
         }
@@ -394,7 +448,7 @@ impl Driver {
                 let path = match sink {
                     Sink::Media => self.config.media_path(&file_id),
                     Sink::Download => self.files.get(&file_id)?.path.clone(),
-                    Sink::History => return None,
+                    Sink::History => self.config.history_path(&file_id),
                 };
                 IoJob::Open { file_id, path, len }
             }
@@ -435,10 +489,20 @@ impl Driver {
             if received {
                 // Told only once the file is closed on disk: the IO thread
                 // runs jobs in order, and the sink's close is already queued.
-                self.io.submit(IoJob::Notify(event));
+                self.io.submit(IoJob::Barrier(IoDone::Notify(event)));
                 return;
             }
-        } else if let Event::TransferFailed { file_id, .. } = &event {
+        } else if let Event::TransferFailed { file_id, .. }
+        | Event::HistoryDone {
+            file_id,
+            outgoing: true,
+        }
+        | Event::HistoryFailed {
+            file_id,
+            outgoing: true,
+            ..
+        } = &event
+        {
             self.release_file(*file_id);
         }
         let _ = self.events.send(event);
@@ -542,13 +606,15 @@ impl Driver {
     }
 
     /// Drops the bookkeeping of a finished transfer and deletes the staged
-    /// plaintext of an outgoing recording.
+    /// plaintext of an outgoing recording, or a history archive sent.
     fn release_file(&mut self, file_id: FileId) {
         let Some(entry) = self.files.remove(&file_id) else {
             return;
         };
         self.ops.push(Op::Delete(FILES_TABLE, file_id.to_vec()));
-        if entry.path == self.config.outgoing_path(&file_id) {
+        if entry.path == self.config.outgoing_path(&file_id)
+            || entry.path == self.config.history_path(&file_id)
+        {
             self.io.submit(IoJob::Remove {
                 file_id,
                 path: entry.path,
@@ -595,7 +661,8 @@ mod tests {
         let driver = Driver {
             core,
             store,
-            io: FileIo::spawn(io_tx).unwrap(),
+            io: FileIo::spawn(io_tx.clone()).unwrap(),
+            io_done: io_tx,
             config: Config {
                 gateway_addr: "localhost:1".into(),
                 tls: cypher_tls::make_client_config(),

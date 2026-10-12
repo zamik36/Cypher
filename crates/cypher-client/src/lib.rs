@@ -3,6 +3,7 @@
 
 mod driver;
 mod files;
+mod history;
 pub mod identity;
 mod link;
 mod media;
@@ -99,6 +100,14 @@ impl Config {
     pub(crate) fn outgoing_path(&self, file_id: &FileId) -> PathBuf {
         self.data_dir
             .join("outgoing")
+            .join(format!("{}.bin", file_id.to_hex()))
+    }
+
+    /// A message history archive, built for another device or received from
+    /// one; deleted once handed over or taken in.
+    pub(crate) fn history_path(&self, file_id: &FileId) -> PathBuf {
+        self.data_dir
+            .join("history")
             .join(format!("{}.bin", file_id.to_hex()))
     }
 }

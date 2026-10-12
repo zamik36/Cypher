@@ -59,8 +59,8 @@ pub(crate) enum IoJob {
         file_id: FileId,
         path: PathBuf,
     },
-    /// Hands `Event` back once every job before it is done.
-    Notify(Event),
+    /// Hands `done` back once every job before it is done.
+    Barrier(IoDone),
 }
 
 /// A chunk to read from a file we send, into a buffer with `headroom`
@@ -88,6 +88,19 @@ pub(crate) enum IoDone {
         file_id: FileId,
     },
     Notify(Event),
+    /// A received history archive is closed on disk and can be taken in.
+    HistoryArrived {
+        file_id: FileId,
+    },
+    /// The history archive was written (with its stamp), or not.
+    HistoryBuilt {
+        file_id: FileId,
+        built: Option<SourceStamp>,
+    },
+    HistoryImported {
+        file_id: FileId,
+        ok: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -150,7 +163,7 @@ impl Worker {
                     let _ = std::fs::remove_file(path);
                     None
                 }
-                IoJob::Notify(event) => Some(IoDone::Notify(event)),
+                IoJob::Barrier(done) => Some(done),
             };
             if let Some(event) = event {
                 let _ = done.send(event);

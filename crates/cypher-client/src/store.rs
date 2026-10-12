@@ -28,6 +28,12 @@ enum Job {
         limit: usize,
         reply: oneshot::Sender<Result<Pairs, ClientError>>,
     },
+    After {
+        table: &'static str,
+        after: Vec<u8>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Pairs, ClientError>>,
+    },
     Get(
         &'static str,
         Vec<u8>,
@@ -37,6 +43,8 @@ enum Job {
 
 pub(crate) enum Op {
     Put(&'static str, Vec<u8>, Vec<u8>),
+    /// Kept only where the key is free: what is stored stays.
+    PutIfAbsent(&'static str, Vec<u8>, Vec<u8>),
     Delete(&'static str, Vec<u8>),
     Clear(&'static str),
 }
@@ -133,6 +141,30 @@ impl Store {
         self.call(|reply| Job::Get(table, key, reply)).await
     }
 
+    /// Up to `limit` rows with keys after `after`, in key order, for a
+    /// thread that may block (never one running async tasks).
+    pub(crate) fn blocking_after(
+        &self,
+        table: &'static str,
+        after: Vec<u8>,
+        limit: usize,
+    ) -> Result<Pairs, ClientError> {
+        self.call_blocking(|reply| Job::After {
+            table,
+            after,
+            limit,
+            reply,
+        })
+    }
+
+    /// [`Store::apply`] for a thread that may block.
+    pub(crate) fn blocking_apply(&self, ops: Vec<Op>) -> Result<(), ClientError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.call_blocking(|reply| Job::Apply(ops, reply))
+    }
+
     async fn call<T>(
         &self,
         job: impl FnOnce(oneshot::Sender<Result<T, ClientError>>) -> Job,
@@ -140,6 +172,15 @@ impl Store {
         let (reply, rx) = oneshot::channel();
         self.tx.send(job(reply)).map_err(|_| ClientError::Closed)?;
         rx.await.map_err(|_| ClientError::Closed)?
+    }
+
+    fn call_blocking<T>(
+        &self,
+        job: impl FnOnce(oneshot::Sender<Result<T, ClientError>>) -> Job,
+    ) -> Result<T, ClientError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(job(reply)).map_err(|_| ClientError::Closed)?;
+        rx.blocking_recv().map_err(|_| ClientError::Closed)?
     }
 }
 
@@ -169,6 +210,16 @@ fn serve(mut conn: Connection, rx: &std_mpsc::Receiver<Job>) {
                 let limit = i64::try_from(limit).unwrap_or(i64::MAX);
                 let _ = reply.send(query(&conn, &sql, params![from, to, limit]));
             }
+            Job::After {
+                table,
+                after,
+                limit,
+                reply,
+            } => {
+                let sql = format!("SELECT k, v FROM {table} WHERE k > ?1 ORDER BY k LIMIT ?2");
+                let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+                let _ = reply.send(query(&conn, &sql, params![after, limit]));
+            }
             Job::Get(table, key, reply) => {
                 let sql = format!("SELECT v FROM {table} WHERE k = ?1");
                 let res = conn
@@ -188,6 +239,12 @@ fn apply(conn: &mut Connection, ops: &[Op]) -> Result<(), ClientError> {
             Op::Put(table, k, v) => {
                 tx.prepare_cached(&format!(
                     "INSERT OR REPLACE INTO {table} (k, v) VALUES (?1, ?2)"
+                ))?
+                .execute(params![k, v])?;
+            }
+            Op::PutIfAbsent(table, k, v) => {
+                tx.prepare_cached(&format!(
+                    "INSERT OR IGNORE INTO {table} (k, v) VALUES (?1, ?2)"
                 ))?
                 .execute(params![k, v])?;
             }
@@ -233,6 +290,34 @@ mod tests {
         assert_eq!(range, vec![(vec![1, 2], b"b".to_vec())]);
         assert_eq!(store.get(t, vec![2, 1]).await.unwrap(), Some(b"c".to_vec()));
         assert_eq!(store.get(t, vec![9]).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn pages_in_key_order_and_keeps_what_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db")).unwrap();
+        let t = Table::Messages.name();
+        let worker = store.clone();
+        let pages = tokio::task::spawn_blocking(move || {
+            worker
+                .blocking_apply(vec![
+                    Op::Put(t, vec![2], b"live".to_vec()),
+                    Op::PutIfAbsent(t, vec![2], b"older".to_vec()),
+                    Op::PutIfAbsent(t, vec![1], b"a".to_vec()),
+                    Op::PutIfAbsent(t, vec![3], b"c".to_vec()),
+                ])
+                .unwrap();
+            let first = worker.blocking_after(t, Vec::new(), 2).unwrap();
+            let rest = worker.blocking_after(t, first[1].0.clone(), 2).unwrap();
+            (first, rest)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            pages.0,
+            vec![(vec![1], b"a".to_vec()), (vec![2], b"live".to_vec())]
+        );
+        assert_eq!(pages.1, vec![(vec![3], b"c".to_vec())]);
     }
 
     #[test]

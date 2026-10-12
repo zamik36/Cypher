@@ -108,7 +108,7 @@ impl Writer {
 }
 
 /// What the reader found next.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item<'a> {
     Row {
         table: Table,

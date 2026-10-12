@@ -41,7 +41,8 @@ impl std::fmt::Debug for MediaKey {
 }
 
 impl MediaKey {
-    pub(crate) fn from_desc(desc: &FileDesc) -> Self {
+    /// The playback key of the note `desc` offers.
+    pub fn from_desc(desc: &FileDesc) -> Self {
         Self {
             file_id: desc.file_id,
             mime: desc.mime.clone(),
