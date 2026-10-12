@@ -4,6 +4,7 @@
 
 mod command;
 mod convert;
+mod history;
 
 use cypher_core::{Core, Effect, Input, Table, Vault, message_key, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
@@ -14,6 +15,7 @@ use wasm_bindgen::prelude::*;
 
 use command::{JsCommand, Prepared, file, file_size, peer};
 use convert::{effects_to_js, snapshot_from_js, to_js};
+pub use history::{HistoryReader, HistoryWriter};
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
@@ -404,6 +406,21 @@ impl Client {
         js_sys::Reflect::set(&out, &"bytes".into(), &js_sys::Uint8Array::from(&bytes[..]))
             .map_err(|_| JsError::new("reflect"))?;
         Ok(out.into())
+    }
+
+    /// A reader for a received history archive, checking its rows against
+    /// this profile's vault.
+    #[wasm_bindgen(js_name = historyReader)]
+    pub fn history_reader(&self) -> HistoryReader {
+        HistoryReader::new(self.vault.clone())
+    }
+
+    /// How long the sealed copy of a note is, by its row from `media`; or
+    /// nothing when the row is not one this profile sealed.
+    #[wasm_bindgen(js_name = noteLen)]
+    pub fn note_len(&self, file_id: &str, record: &[u8]) -> Option<f64> {
+        let key = self.vault.open_media(&file(file_id).ok()?, record).ok()?;
+        Some(convert::js_number(key.sealed_len()))
     }
 
     fn feed(&mut self, input: Input, now_ms: f64) -> Result<Array, JsError> {

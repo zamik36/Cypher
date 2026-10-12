@@ -14,6 +14,7 @@ import init, {
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
 import { applyEffects, type EffectSinks, type Sink } from "./effects";
+import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -74,9 +75,8 @@ const sinks: EffectSinks = {
   openSink,
   writeChunk: (fileId, offset, data) => openSinks.get(fileId)?.handle.write(data, { at: offset }),
   closeSink,
-  // This worker does not build or take in a history yet.
-  buildHistory: (fileId) => void feed((c, now) => c.historyBuilt(fileId, undefined, now)),
-  importHistory: (fileId) => void feed((c, now) => c.historyImported(fileId, false, now)),
+  buildHistory: (fileId, partial) => void runBuild(fileId, partial),
+  importHistory: (fileId) => void runImport(fileId),
   disconnect: (reconnect) => gateway.restart(reconnect),
 };
 
@@ -94,6 +94,14 @@ function onEvent(channel: string, payload: unknown) {
     case "file_failed": {
       const fileId = typeof payload === "string" ? payload : (payload as { file_id: string }).file_id;
       if (sources.delete(fileId)) void remove(db, "files", fileId);
+      break;
+    }
+    case "history_done":
+    case "history_failed": {
+      // The archive handed over (or given up) is no longer needed; one
+      // received is deleted once taken in.
+      const { file_id, outgoing } = payload as { file_id: string; outgoing: boolean };
+      if (outgoing) void dropArchive(file_id);
       break;
     }
   }
@@ -251,13 +259,56 @@ const relay = new Link(
 );
 
 async function readChunk(e: ReadChunk) {
-  const file = sources.get(e.file_id) ?? (await get<File>(db, "files", e.file_id));
+  const file = sources.get(e.file_id) ?? (await get<File>(db, "files", e.file_id)) ?? (await archive(e.file_id));
   if (!file) return feed((c, now) => c.chunkUnavailable(e.file_id, now));
   sources.set(e.file_id, file);
   const data = new Uint8Array(await file.slice(e.offset, e.offset + e.len).arrayBuffer());
   const buf = new Uint8Array(e.headroom + data.length);
   buf.set(data, e.headroom);
   return feed((c, now) => c.chunkRead(e.file_id, e.index, buf, now));
+}
+
+/** A history archive built here, to send. */
+async function archive(fileId: string): Promise<File | undefined> {
+  return (await sinkDir("history"))
+    .getFileHandle(fileId)
+    .then((h) => h.getFile())
+    .catch(() => undefined);
+}
+
+async function dropArchive(fileId: string) {
+  sources.delete(fileId);
+  await (await sinkDir("history")).removeEntry(fileId).catch(() => undefined);
+}
+
+async function historyDirs(): Promise<HistoryDirs> {
+  return { history: await sinkDir("history"), media: await sinkDir("media") };
+}
+
+/** Builds the history archive the core asked for, then tells it. */
+async function runBuild(fileId: string, partial: string[]) {
+  let size: number | undefined;
+  try {
+    size = await buildHistory(db, requireClient(), await historyDirs(), fileId, partial);
+  } catch (e) {
+    console.warn("building the message history failed", e);
+    await dropArchive(fileId);
+  }
+  await feed((c, now) => c.historyBuilt(fileId, size, now));
+}
+
+/** Takes in a received history archive, tells the core, then deletes it. */
+async function runImport(fileId: string) {
+  let ok = false;
+  try {
+    await importHistory(db, requireClient(), await historyDirs(), fileId);
+    ok = true;
+  } catch (e) {
+    console.warn("taking in the message history failed", e);
+  }
+  // Deleted only once the core knows: closed in between, it is taken in again.
+  await feed((c, now) => c.historyImported(fileId, ok, now));
+  await dropArchive(fileId);
 }
 
 /** The OPFS directory each kind of transfer is kept in. */

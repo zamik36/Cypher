@@ -1,6 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyOps, clear, get, openDb, put, remove, scan } from "./idb";
+import type { Row } from "../wasm/cypher_wasm.js";
+import { applyOps, clear, get, insertMissing, openDb, put, remove, scan } from "./idb";
 
 const key = (...b: number[]) => new Uint8Array(b);
 const rows = (list: [Uint8Array, Uint8Array][]) => list.map(([k, v]) => [[...k], [...v]]);
@@ -13,6 +14,33 @@ describe("idb", () => {
   afterEach(() => {
     db.close();
     indexedDB.deleteDatabase("test");
+  });
+
+  it("adds only the rows whose keys are free, keeping what is stored", async () => {
+    await applyOps(db, [{ kind: "put", table: "messages", key: key(2), value: key(20) }]);
+    await insertMissing(db, "messages", [
+      [key(1), key(1)],
+      [key(2), key(99)],
+      [key(3), key(3)],
+    ]);
+    await insertMissing(db, "messages", []);
+    expect(rows(await scan(db, "messages"))).toEqual([
+      [[1], [1]],
+      [[2], [20]],
+      [[3], [3]],
+    ]);
+  });
+
+  it("pages through a table after a given key", async () => {
+    await insertMissing(
+      db,
+      "media",
+      [1, 2, 3, 4].map((n): Row => [key(n), key(n)]),
+    );
+    expect(rows(await scan(db, "media", IDBKeyRange.lowerBound(key(2), true), 2))).toEqual([
+      [[3], [3]],
+      [[4], [4]],
+    ]);
   });
 
   it("creates every store", () => {

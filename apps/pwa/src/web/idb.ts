@@ -82,6 +82,24 @@ export async function scan(
   return rows;
 }
 
+/**
+ * Adds the rows whose keys are free, in one durable transaction; a row whose
+ * key is taken leaves what is stored there as it is.
+ */
+export async function insertMissing(db: IDBDatabase, table: string, rows: Row[]): Promise<void> {
+  if (rows.length === 0) return;
+  const tx = db.transaction(table, "readwrite", { durability: "strict" });
+  const store = tx.objectStore(table);
+  for (const [key, value] of rows) {
+    // A taken key fails only this request, not the whole transaction.
+    store.add(value, key).onerror = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+  }
+  await done(tx);
+}
+
 export async function get<T>(db: IDBDatabase, table: string, key: IDBValidKey): Promise<T | undefined> {
   return result(db.transaction(table, "readonly").objectStore(table).get(key)) as Promise<T | undefined>;
 }

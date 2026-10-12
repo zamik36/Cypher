@@ -672,6 +672,7 @@ impl<R: CryptoRngCore> Core<R> {
         };
         self.emit(match history {
             Some(outgoing) => Event::HistoryProgress {
+                file_id,
                 outgoing,
                 bytes,
                 total,

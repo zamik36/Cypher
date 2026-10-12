@@ -311,6 +311,7 @@ pub enum Event {
     /// The message history is on its way to (`outgoing`) or from another
     /// device of this identity.
     HistoryProgress {
+        file_id: FileId,
         outgoing: bool,
         bytes: u64,
         total: u64,

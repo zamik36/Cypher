@@ -232,7 +232,7 @@ fn sink_name(sink: Sink) -> &'static str {
     clippy::cast_precision_loss,
     reason = "files are capped at 64 GiB, far inside the 2^53 exact range of JS numbers"
 )]
-fn js_number(v: u64) -> f64 {
+pub(crate) fn js_number(v: u64) -> f64 {
     v as f64
 }
 
