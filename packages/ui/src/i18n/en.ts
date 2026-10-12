@@ -27,7 +27,7 @@ const en = {
   devices_no_room_title: "No room for this device",
   devices_no_room_text: "Your profile already has 6 devices. Pick one you no longer have: this device takes its place.",
   devices_replace: "Replace",
-  devices_replace_confirm: (name: string) => `Replace “${name}”? It will stop receiving messages.`,
+  devices_replace_confirm: (name: string) => `Replace \u201c${name}\u201d? It will stop receiving messages.`,
   devices_restored_title: "Profile restored on this device",
   devices_restored_text: "Your other devices keep working. If you no longer have one of them, remove it.",
   devices_restored_open: "Open devices",
