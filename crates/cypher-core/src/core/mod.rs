@@ -292,10 +292,10 @@ impl<R: CryptoRngCore> Core<R> {
         match input {
             Input::Connected => self.on_connected(),
             Input::Disconnected => self.on_disconnected(),
-            Input::Frame(bytes) => self.on_frame(bytes, true),
+            Input::Frame(bytes) => self.on_frame(bytes, None),
             Input::AnonymousFrame(bytes) => {
-                if let Some(frame) = self.anon.open(&bytes) {
-                    self.on_frame(frame, false);
+                if let Some((req_id, frame)) = self.anon.open(&bytes) {
+                    self.on_frame(frame, Some(req_id));
                 }
             }
             Input::AnonymousChannel { up } => {
@@ -360,13 +360,19 @@ impl<R: CryptoRngCore> Core<R> {
         self.resume_transfers();
     }
 
-    fn on_frame(&mut self, bytes: Bytes, session: bool) {
+    /// A frame from the gateway session, or (`onion`) the reply through the
+    /// relay to that request, which may answer no other.
+    fn on_frame(&mut self, bytes: Bytes, onion: Option<u32>) {
+        let session = onion.is_none();
         let Ok(Frame { req_id, msg }) = Frame::<ServerMsg>::decode(bytes) else {
             if session {
                 self.effects.push(Effect::Disconnect { reconnect: true });
             }
             return;
         };
+        if onion.is_some_and(|expected| expected != req_id) {
+            return;
+        }
         if !session
             && !matches!(
                 msg,
@@ -892,7 +898,10 @@ impl<R: CryptoRngCore> Core<R> {
         let effect = match (anonymous, self.anon.readiness(self.now)) {
             (false, _) | (true, Readiness::Session) => Effect::Transmit(frame),
             (true, Readiness::Onion) => {
-                if let Some(blob) = self.anon.seal(&frame, self.now, deadline, &mut self.rng) {
+                let sealed = self
+                    .anon
+                    .seal(req_id, &frame, self.now, deadline, &mut self.rng);
+                if let Some(blob) = sealed {
                     Effect::Anonymous(blob)
                 } else {
                     self.fail_request(pending, FailReason::Offline);
