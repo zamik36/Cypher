@@ -64,6 +64,13 @@ const en = {
   banner_superseded_text:
     "Cypher was opened again on this device, in another window or tab, so this one stopped receiving messages.",
   banner_use_here: "Use here",
+  server_key_title: "The server's key changed",
+  server_key_text:
+    "The server shows another key than the first time you connected, so Cypher does not use its anonymous channel. Someone may be impersonating it.",
+  server_key_trust: "Trust the new key",
+  server_key_confirm:
+    "Trust it only if you know the server was reinstalled. Otherwise someone could recognise your anonymous requests.",
+  server_key_trust_confirm: "Trust anyway",
   banner_update_title: "Update required",
 
   // -- Onboarding --

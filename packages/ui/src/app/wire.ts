@@ -36,6 +36,7 @@ import { setInvitesReady } from "../stores/invite";
 import { onPushKey, onPushState, startPush } from "../stores/push";
 import { addOwnDevice, setNoRoom, takeOwnDevices } from "../stores/devices";
 import { setHistoryTransfer } from "../stores/history";
+import { setChangedServer } from "../stores/serverKey";
 import { setSharesReady } from "../stores/share";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
@@ -96,6 +97,7 @@ export async function startApp(): Promise<() => void> {
     api.on("no_room", setNoRoom),
     api.on("contacts_changed", () => void refreshConversations()),
     api.on("history_progress", setHistoryTransfer),
+    api.on("server_key_changed", setChangedServer),
     api.on("history_done", ({ outgoing }) => {
       setHistoryTransfer(null);
       addToast(outgoing ? t().history_sent : t().history_received, "success");

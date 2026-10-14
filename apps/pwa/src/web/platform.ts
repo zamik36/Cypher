@@ -163,6 +163,9 @@ export const webPlatform: Platform = {
   generateQr: (linkId) => call("qr", linkId),
   safetyNumber: (peerId) => call("safetyNumber", peerId),
   reconnect: () => call("reconnect"),
+  trustServerKey: async () => {
+    await call("command", { type: "trust_server_key" });
+  },
   startVoice: async (onLevel) => {
     if (voice) throw new Error("already recording");
     voice = await WebVoiceRecorder.start(onLevel);

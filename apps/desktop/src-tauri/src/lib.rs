@@ -107,6 +107,7 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             settings::apply_anonymous_settings,
             settings::get_nickname,
             settings::reconnect,
+            settings::trust_server_key,
             link::create_link,
             link::join_link,
             devices::device_name,

@@ -118,6 +118,7 @@ export const tauriPlatform: Platform = {
   }),
   safetyNumber: (peerId) => invoke<string>("safety_number", { peerId }),
   reconnect: () => command("reconnect"),
+  trustServerKey: () => command("trust_server_key"),
   startVoice: async (onLevel) => {
     await ensureMicPermission();
     releaseLevels();

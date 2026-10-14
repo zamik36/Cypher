@@ -430,6 +430,7 @@ async fn link_a_new_desktop(
         .await
         .unwrap();
     a.call("cancel_history", json!({})).await.unwrap();
+    a.call("trust_server_key", json!({})).await.unwrap();
 
     let other = Desktop::new(Arc::clone(tls));
     other

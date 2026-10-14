@@ -46,6 +46,17 @@ pub(crate) async fn apply_anonymous_settings<R: Runtime>(
     state.connect(endpoint, dto::emitter(app)).await.map(|_| ())
 }
 
+/// Trusts the signing key the server showed in place of the one remembered.
+#[tauri::command]
+pub(crate) async fn trust_server_key(state: State<'_, AppState>) -> CmdResult<()> {
+    state
+        .client()
+        .await?
+        .command(cypher_core::Command::TrustServerKey)
+        .await
+        .map_err(err)
+}
+
 /// Takes the session back after another device took it over.
 #[tauri::command]
 pub(crate) async fn reconnect(state: State<'_, AppState>) -> CmdResult<()> {

@@ -151,6 +151,8 @@ export interface Events {
   link_failed: string;
   /** Another device of this profile changed the contacts. */
   contacts_changed: null;
+  /** The server showed another signing key than the one remembered (its address). */
+  server_key_changed: string;
   /** The server's push key (hex), to subscribe this device with. */
   push_key: string;
   /** Whether the server will wake this device while the app is closed. */
@@ -231,6 +233,8 @@ export interface Platform {
   eraseDevice(): Promise<void>;
   connectToGateway(addr: string, anonymous: boolean, bridges: string[]): Promise<string>;
   applyAnonymousSettings(anonymous: boolean, bridges: string[]): Promise<void>;
+  /** Trusts the signing key the server showed in place of the one remembered. */
+  trustServerKey(): Promise<void>;
   createLink(): Promise<LinkInfo>;
   joinLink(linkId: string): Promise<string>;
   sendMessage(peerId: string, text: string, replyTo?: string): Promise<string>;
