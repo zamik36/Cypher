@@ -630,7 +630,6 @@ mod tests {
             Event::LinkCreated { link: "l".into() },
             Event::Bootstrap {
                 relay_addr: String::new(),
-                onion_key: [0; 32],
             },
         ] {
             assert!(event(&e).is_none(), "{e:?}");

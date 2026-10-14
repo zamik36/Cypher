@@ -6174,6 +6174,7 @@ dependencies = [
  "cypher-server-kit",
  "cypher-tls",
  "cypher-transport",
+ "cypher-wire",
  "futures",
  "prometheus",
  "serde",

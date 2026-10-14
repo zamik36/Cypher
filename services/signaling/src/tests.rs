@@ -18,7 +18,7 @@ async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
     let url = std::env::var("CYPHER_TEST_REDIS").ok()?;
     Some(Handler {
         store: Store::connect(&url).await.unwrap(),
-        onion_public: [7; 32],
+        signing_key: [7; 32],
         relay_addr: relay_addr.map(str::to_owned),
         push: None,
     })
@@ -429,14 +429,14 @@ async fn bootstrap_advertises_the_onion_relay_when_configured() {
     let peer = Some(PeerId([4; 32]));
     let ServerMsg::BootstrapInfo {
         relay_addr,
-        onion_key,
+        signing_key,
         capabilities,
     } = ask(&with_relay, peer, ClientMsg::Bootstrap).await
     else {
         panic!("no bootstrap");
     };
     assert_eq!(
-        (relay_addr.as_str(), onion_key, capabilities),
+        (relay_addr.as_str(), signing_key, capabilities),
         ("relay.example:9300", [7; 32], CAPABILITY_ONION)
     );
 
@@ -464,21 +464,16 @@ async fn undecodable_frames_get_bad_request() {
 
 #[tokio::test]
 async fn onion_requests_are_answered_once_and_only_while_fresh() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use x25519_dalek::{PublicKey, StaticSecret};
-
     let Some(h) = handler(None).await else { return };
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&secret).to_bytes();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let (keys, key, now) = onion_keys(&h).await;
+    let seal_at = |frame: &[u8], at| {
+        cypher_crypto::onion::seal_request(key.epoch, &key.public, frame, at, &mut OsRng).unwrap()
+    };
     let fetch = Frame::new(1, ClientMsg::InboxFetch { secret: random32() }).encode();
-    let seal = |at| cypher_crypto::onion::seal_request(&public, &fetch, at, &mut OsRng).unwrap();
+    let seal = |at| seal_at(&fetch, at);
 
     let (fresh, reply) = seal(now);
-    let answer = crate::onion::handle(&h, &secret, &fresh)
+    let answer = crate::onion::handle(&h, &keys, &fresh)
         .await
         .expect("answered");
     let opened = cypher_crypto::onion::open_response(&reply, &answer).unwrap();
@@ -487,17 +482,56 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
         ServerMsg::InboxBatch { .. }
     ));
     assert!(
-        crate::onion::handle(&h, &secret, &fresh).await.is_none(),
+        crate::onion::handle(&h, &keys, &fresh).await.is_none(),
         "a replay gets no second answer"
     );
 
     let (stale, _) = seal(now - crate::onion::MAX_SKEW_SECS - 1);
-    assert!(crate::onion::handle(&h, &secret, &stale).await.is_none());
+    assert!(crate::onion::handle(&h, &keys, &stale).await.is_none());
 
-    // What needs an identity is not taken through the onion at all.
+    // A key this server never had, or an epoch it holds no key for.
+    let (other, _) =
+        cypher_crypto::onion::seal_request(key.epoch, &random32(), &fetch, now, &mut OsRng)
+            .unwrap();
+    assert!(crate::onion::handle(&h, &keys, &other).await.is_none());
+    let (gone, _) =
+        cypher_crypto::onion::seal_request(key.epoch + 9, &key.public, &fetch, now, &mut OsRng)
+            .unwrap();
+    assert!(crate::onion::handle(&h, &keys, &gone).await.is_none());
+}
+
+/// This server's onion keys, as a client sees them: the key to seal to now.
+async fn onion_keys(
+    h: &Handler,
+) -> (
+    crate::keys::OnionKeys,
+    cypher_crypto::onion_keys::EpochKey,
+    u64,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let keys = crate::keys::OnionKeys::new(&random32());
+    keys.refresh(&h.store, now).await.unwrap();
+    let set = keys.key_set(now).unwrap();
+    let set = cypher_crypto::onion_keys::KeySet::verify(&set, &keys.signing_key()).unwrap();
+    let key = *set.pick(now).unwrap();
+    (keys, key, now)
+}
+
+/// What needs an identity is not taken through the onion at all; what
+/// does not is answered there.
+#[tokio::test]
+async fn onion_requests_needing_an_identity_are_dropped() {
+    let Some(h) = handler(None).await else { return };
+    let (keys, key, now) = onion_keys(&h).await;
+    let seal_at = |frame: &[u8], at| {
+        cypher_crypto::onion::seal_request(key.epoch, &key.public, frame, at, &mut OsRng).unwrap()
+    };
     let create = Frame::new(2, ClientMsg::CreateLink).encode();
-    let (blob, _) = cypher_crypto::onion::seal_request(&public, &create, now, &mut OsRng).unwrap();
-    assert!(crate::onion::handle(&h, &secret, &blob).await.is_none());
+    let (blob, _) = seal_at(&create, now);
+    assert!(crate::onion::handle(&h, &keys, &blob).await.is_none());
     let resolve = Frame::new(
         3,
         ClientMsg::ResolveLink {
@@ -505,9 +539,8 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
         },
     )
     .encode();
-    let (blob, reply) =
-        cypher_crypto::onion::seal_request(&public, &resolve, now, &mut OsRng).unwrap();
-    let answer = crate::onion::handle(&h, &secret, &blob)
+    let (blob, reply) = seal_at(&resolve, now);
+    let answer = crate::onion::handle(&h, &keys, &blob)
         .await
         .expect("answered");
     let opened = cypher_crypto::onion::open_response(&reply, &answer).unwrap();

@@ -25,7 +25,6 @@ use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use x25519_dalek::{PublicKey, StaticSecret};
 
 use handler::Handler;
 use keys::OnionKeys;
@@ -53,8 +52,6 @@ pub struct Config {
     pub nats: cypher_server_kit::NatsConfig,
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: SocketAddr,
-    #[serde(default = "default_onion_key_path")]
-    pub onion_key_path: PathBuf,
     /// The long-term key clients remember this server by; it signs the onion
     /// keys. Back it up: clients refuse a server whose key changed.
     #[serde(default = "default_signing_key_path")]
@@ -77,9 +74,6 @@ fn default_redis_url() -> String {
 }
 fn default_metrics_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 9091))
-}
-fn default_onion_key_path() -> PathBuf {
-    PathBuf::from("data/onion_key.bin")
 }
 fn default_signing_key_path() -> PathBuf {
     PathBuf::from("data/signing_key.bin")
@@ -109,7 +103,6 @@ fn web_push(config: &Config) -> anyhow::Result<Option<handler::Pusher>> {
 
 struct Service {
     handler: Handler,
-    onion_secret: StaticSecret,
     keys: OnionKeys,
     nats: async_nats::Client,
     requests: IntCounter,
@@ -150,7 +143,7 @@ impl Service {
             self.keys.key_set(now_secs()).map(bytes::Bytes::from)
         } else if subject == SIG_ONION_SUBJECT {
             self.onion_requests.inc();
-            onion::handle(&self.handler, &self.onion_secret, &msg.payload).await
+            onion::handle(&self.handler, &self.keys, &msg.payload).await
         } else {
             self.requests.inc();
             let peer = msg
@@ -206,7 +199,6 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         "signaling starting"
     );
 
-    let onion_secret = StaticSecret::from(secrets::load_or_create_secret(&config.onion_key_path)?);
     let keys = OnionKeys::new(&secrets::load_or_create_secret(&config.signing_key_path)?);
     let push = web_push(&config)?;
     let relay_addr = config.relay_public_addr.filter(|addr| {
@@ -219,11 +211,10 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     let service = Arc::new(Service {
         handler: Handler {
             store: Store::connect(&config.redis_url).await?,
-            onion_public: PublicKey::from(&onion_secret).to_bytes(),
+            signing_key: keys.signing_key(),
             relay_addr,
             push,
         },
-        onion_secret,
         keys,
         nats: cypher_server_kit::connect_nats(&config.nats).await?,
         requests: registry.counter("signaling_requests_total", "Session requests handled")?,

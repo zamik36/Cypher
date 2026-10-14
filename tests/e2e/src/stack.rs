@@ -23,7 +23,6 @@ fn signaling_config(
         redis_url,
         nats: nats(nats_url, "signaling"),
         metrics_addr,
-        onion_key_path: dir.join("onion.bin"),
         signing_key_path: dir.join("signing.bin"),
         relay_public_addr: Some(format!("localhost:{}", relay_addr.port())),
         vapid_key_path: Some(dir.join("vapid.bin")),

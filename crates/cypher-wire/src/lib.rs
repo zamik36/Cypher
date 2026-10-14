@@ -13,6 +13,7 @@
 
 mod codec;
 mod message;
+pub mod relay;
 
 pub use message::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, SEND_HEADER_LEN, SendView, ServerMsg, encode_recv,
@@ -20,7 +21,7 @@ pub use message::{
 };
 
 /// Bumped on any incompatible change; the gateway rejects other versions.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Size of the fixed frame prefix (`kind` + `req_id`).
 pub const FRAME_HEADER_LEN: usize = 5;

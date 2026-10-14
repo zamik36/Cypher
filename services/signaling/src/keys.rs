@@ -70,10 +70,6 @@ impl OnionKeys {
     }
 
     /// The long-term key clients remember this server by.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "handed out once Bootstrap carries it")
-    )]
     pub(crate) fn signing_key(&self) -> [u8; 32] {
         *self.signer.peer_id().as_bytes()
     }
@@ -109,7 +105,8 @@ impl OnionKeys {
         ttl: u64,
         create: bool,
     ) -> redis::RedisResult<Option<StaticSecret>> {
-        if let Some(wrapped) = store.onion_key(epoch).await? {
+        let name = self.stored_name(epoch);
+        if let Some(wrapped) = store.onion_key(&name).await? {
             return Ok(self.unwrap_key(epoch, &wrapped));
         }
         if !create || ttl == 0 {
@@ -117,11 +114,21 @@ impl OnionKeys {
         }
         let secret = StaticSecret::random_from_rng(OsRng);
         store
-            .put_onion_key(epoch, &self.wrap_key(epoch, &secret), ttl)
+            .put_onion_key(&name, &self.wrap_key(epoch, &secret), ttl)
             .await?;
         // Another instance may have been first: take what is stored.
-        let stored = store.onion_key(epoch).await?;
+        let stored = store.onion_key(&name).await?;
         Ok(stored.and_then(|wrapped| self.unwrap_key(epoch, &wrapped)))
+    }
+
+    /// Where an epoch's key is kept: under this server's signing key too, so
+    /// a new signing key (or another server on the same Redis) starts afresh
+    /// rather than find keys it cannot unwrap.
+    fn stored_name(&self, epoch: u32) -> Vec<u8> {
+        let signer = self.signing_key();
+        let mut name = signer.get(..8).unwrap_or_default().to_vec();
+        name.extend_from_slice(&epoch.to_le_bytes());
+        name
     }
 
     fn wrap_key(&self, epoch: u32, secret: &StaticSecret) -> Vec<u8> {
@@ -141,10 +148,6 @@ impl OnionKeys {
 
     /// The secret to open a request sealed to `epoch`'s key, if this
     /// instance still holds it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once requests name their key epoch")
-    )]
     pub(crate) fn secret(&self, epoch: u32) -> Option<StaticSecret> {
         self.known.read().ok()?.get(&epoch).cloned()
     }

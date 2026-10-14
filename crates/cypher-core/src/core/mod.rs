@@ -30,7 +30,7 @@ use crate::store::{
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
-use anon::{Anon, Readiness};
+use anon::{Anon, Opened, Readiness};
 use devices::{Devices, DevicesFor, OwnDevices};
 use history::History;
 use messaging::Joining;
@@ -299,14 +299,15 @@ impl<R: CryptoRngCore> Core<R> {
             Input::Connected => self.on_connected(),
             Input::Disconnected => self.on_disconnected(),
             Input::Frame(bytes) => self.on_frame(bytes, None),
-            Input::AnonymousFrame(bytes) => {
-                if let Some((req_id, frame)) = self.anon.open(&bytes) {
-                    self.on_frame(frame, Some(req_id));
-                }
-            }
+            Input::AnonymousFrame(bytes) => match self.anon.open(&bytes) {
+                Some(Opened::Reply(req_id, frame)) => self.on_frame(frame, Some(req_id)),
+                Some(Opened::KeySet) => self.on_onion_ready(),
+                None => {}
+            },
             Input::AnonymousChannel { up } => {
                 self.anon.set_relay_up(up);
                 self.emit(Event::Onion { up });
+                self.ask_key_set();
                 self.send_deferred();
                 if up {
                     self.fetch_inbox();
@@ -528,25 +529,38 @@ impl<R: CryptoRngCore> Core<R> {
                 Pending::Bootstrap,
                 ServerMsg::BootstrapInfo {
                     relay_addr,
-                    onion_key,
+                    signing_key,
                     ..
                 },
-            ) => self.on_bootstrap(relay_addr, onion_key),
+            ) => self.on_bootstrap(relay_addr, signing_key),
             (pending, _) => self.fail_request(pending, FailReason::ServerError),
         }
     }
 
     /// Where the relay is and what to seal onion requests to.
-    fn on_bootstrap(&mut self, relay_addr: String, onion_key: [u8; 32]) {
-        let relay = (!relay_addr.is_empty()).then_some(onion_key);
+    fn on_bootstrap(&mut self, relay_addr: String, signing_key: [u8; 32]) {
+        let relay = (!relay_addr.is_empty()).then_some(signing_key);
         self.anon.on_bootstrap(relay, self.now);
+        self.ask_key_set();
         self.send_deferred();
         self.fetch_inbox();
         self.push_step();
-        self.emit(Event::Bootstrap {
-            relay_addr,
-            onion_key,
-        });
+        self.emit(Event::Bootstrap { relay_addr });
+    }
+
+    /// Asks the relay for the server's onion keys, if they are needed.
+    fn ask_key_set(&mut self) {
+        let deadline = self.now + REQUEST_TIMEOUT_MS;
+        if let Some(frame) = self.anon.key_set_request(self.now, deadline) {
+            self.effects.push(Effect::Anonymous(frame));
+        }
+    }
+
+    /// The server's onion keys arrived: what waited for them goes now.
+    fn on_onion_ready(&mut self) {
+        self.send_deferred();
+        self.fetch_inbox();
+        self.renew_push();
     }
 
     fn fail_request(&mut self, pending: Pending, reason: FailReason) {
@@ -685,6 +699,7 @@ impl<R: CryptoRngCore> Core<R> {
         if self.conn != Conn::Ready {
             return;
         }
+        self.ask_key_set();
         self.send_deferred();
         if self.now.saturating_sub(self.last_ping) >= PING_INTERVAL_MS {
             self.last_ping = self.now;

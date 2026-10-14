@@ -1,19 +1,21 @@
-//! Onion relay: forwards sealed anonymous requests to signaling. It learns
-//! client addresses but can neither read nor forge requests or replies, and
-//! keeps no state beyond open connections.
+//! Onion relay: forwards sealed anonymous requests to signaling, and hands
+//! out signaling's signed onion key set. It learns client addresses but can
+//! neither read nor forge requests or replies, and keeps no state beyond
+//! open connections and that key set for a minute.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::ensure;
 use bytes::{BufMut, Bytes, BytesMut};
-use cypher_server_kit::SIG_ONION_SUBJECT;
 use cypher_server_kit::metrics::Metrics;
 use cypher_server_kit::ratelimit::ConnLimiter;
+use cypher_server_kit::{SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT};
 use cypher_transport::server::{self, Handler, Listener, Upgrade};
 use cypher_transport::{FrameSink, FrameStream};
+use cypher_wire::relay::{CORR_LEN, HEADER_LEN, TAG_KEYS, TAG_ONION};
 use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use prometheus::{IntCounter, IntGauge};
@@ -23,15 +25,16 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-/// Client-chosen correlation id echoed in front of each reply.
-const CORR_LEN: usize = 8;
 const MAX_REQUEST: usize = 128 * 1024;
+/// How long the key set is answered from memory: it changes weekly, and
+/// clients ask for it on every connection.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Requests one connection may have in flight at once.
 const PIPELINE: usize = 8;
 const FRAMES_PER_SEC: u64 = 20;
 const BYTES_PER_SEC: u64 = 1 << 20;
+const KEY_SET_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -77,15 +80,20 @@ fn default_max_connections() -> usize {
     20_000
 }
 
-/// Where sealed onion requests are answered: signaling over NATS in
-/// production. `None` means the request was lost and is dropped silently.
+/// Where the relay's requests are answered: signaling over NATS in
+/// production, on `subject`. `None` means the request was lost and is
+/// dropped silently.
 pub trait OnionUpstream: Send + Sync + 'static {
-    fn forward(&self, request: Bytes) -> impl Future<Output = Option<Bytes>> + Send;
+    fn forward(
+        &self,
+        subject: &'static str,
+        request: Bytes,
+    ) -> impl Future<Output = Option<Bytes>> + Send;
 }
 
 impl OnionUpstream for async_nats::Client {
-    async fn forward(&self, request: Bytes) -> Option<Bytes> {
-        let reply = tokio::time::timeout(REQUEST_TIMEOUT, self.request(SIG_ONION_SUBJECT, request));
+    async fn forward(&self, subject: &'static str, request: Bytes) -> Option<Bytes> {
+        let reply = tokio::time::timeout(REQUEST_TIMEOUT, self.request(subject, request));
         Some(reply.await.ok()?.ok()?.payload)
     }
 }
@@ -111,11 +119,17 @@ impl RelayMetrics {
 pub struct Relay<U> {
     upstream: U,
     metrics: RelayMetrics,
+    /// Signaling's key set and when it was fetched.
+    key_set: Mutex<Option<(Instant, Bytes)>>,
 }
 
 impl<U: OnionUpstream> Relay<U> {
     pub fn new(upstream: U, metrics: RelayMetrics) -> Self {
-        Self { upstream, metrics }
+        Self {
+            upstream,
+            metrics,
+            key_set: Mutex::new(None),
+        }
     }
 
     async fn relay(&self, mut stream: FrameStream, mut sink: FrameSink) {
@@ -137,7 +151,7 @@ impl<U: OnionUpstream> Relay<U> {
                 frame = stream.next(), if in_flight.len() < PIPELINE => {
                     let Some(Ok(frame)) = frame else { break };
                     last_frame = Instant::now();
-                    if frame.len() <= CORR_LEN || frame.len() > MAX_REQUEST || !limiter.admit(frame.len()) {
+                    if frame.len() < HEADER_LEN || frame.len() > MAX_REQUEST || !limiter.admit(frame.len()) {
                         self.metrics.dropped.inc();
                         continue;
                     }
@@ -154,11 +168,19 @@ impl<U: OnionUpstream> Relay<U> {
         }
     }
 
-    /// `frame` is `[corr u64][sealed request]`; the reply keeps the same
+    /// `frame` is `[corr u64][tag u8][payload]`; the reply keeps the same
     /// correlation prefix so the client can match pipelined answers.
     async fn forward(&self, frame: Bytes) -> Option<Bytes> {
-        let (corr, request) = (frame.slice(..CORR_LEN), frame.slice(CORR_LEN..));
-        let Some(reply) = self.upstream.forward(request).await else {
+        let corr = frame.slice(..CORR_LEN);
+        let reply = match frame.get(CORR_LEN) {
+            Some(&TAG_ONION) => {
+                let request = frame.slice(HEADER_LEN..);
+                self.upstream.forward(SIG_ONION_SUBJECT, request).await
+            }
+            Some(&TAG_KEYS) if frame.len() == HEADER_LEN => self.key_set().await,
+            _ => None,
+        };
+        let Some(reply) = reply else {
             self.metrics.dropped.inc();
             return None;
         };
@@ -167,6 +189,24 @@ impl<U: OnionUpstream> Relay<U> {
         out.put_slice(&corr);
         out.put_slice(&reply);
         Some(out.freeze())
+    }
+}
+
+impl<U: OnionUpstream> Relay<U> {
+    /// Signaling's key set, from memory while it is fresh.
+    async fn key_set(&self) -> Option<Bytes> {
+        let cached = self.key_set.lock().ok()?.clone();
+        if let Some((_, set)) = cached.filter(|(at, _)| at.elapsed() < KEY_SET_TTL) {
+            return Some(set);
+        }
+        let set = self
+            .upstream
+            .forward(SIG_KEYS_SUBJECT, Bytes::new())
+            .await?;
+        if let Ok(mut cached) = self.key_set.lock() {
+            *cached = Some((Instant::now(), set.clone()));
+        }
+        Some(set)
     }
 }
 

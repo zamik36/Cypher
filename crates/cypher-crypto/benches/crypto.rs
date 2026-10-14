@@ -124,8 +124,9 @@ fn onion_requests(c: &mut Criterion) {
     let mut group = c.benchmark_group("onion");
     group.bench_function("seal_open_request_1k", |bench| {
         bench.iter(|| {
-            let (blob, _) = onion::seal_request(&public, MESSAGE, 0, &mut OsRng).unwrap();
-            onion::open_request(&secret, &blob).unwrap()
+            let (blob, _) = onion::seal_request(0, &public, MESSAGE, 0, &mut OsRng).unwrap();
+            let (_, sealed) = onion::split_epoch(&blob).unwrap();
+            onion::open_request(&secret, sealed).unwrap()
         });
     });
     group.finish();

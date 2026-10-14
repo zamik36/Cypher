@@ -13,6 +13,7 @@ console = ["cypher-server-kit/console"]
 cypher-tls.workspace = true
 cypher-transport = { workspace = true, features = ["ws"] }
 cypher-server-kit.workspace = true
+cypher-wire.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true

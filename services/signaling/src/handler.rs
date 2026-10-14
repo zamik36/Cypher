@@ -38,7 +38,8 @@ const HOUR_SECS: u64 = 3600;
 
 pub(crate) struct Handler {
     pub store: Store,
-    pub onion_public: [u8; 32],
+    /// The long-term key clients remember this server by.
+    pub signing_key: [u8; 32],
     pub relay_addr: Option<String>,
     pub push: Option<Pusher>,
 }
@@ -128,7 +129,7 @@ impl Handler {
             ClientMsg::ResolveLink { link } => self.resolve_link(Some(peer), &link).await,
             ClientMsg::Bootstrap => Ok(ServerMsg::BootstrapInfo {
                 relay_addr: self.relay_addr.clone().unwrap_or_default(),
-                onion_key: self.onion_public,
+                signing_key: self.signing_key,
                 capabilities: self.capabilities(),
             }),
             msg @ (ClientMsg::InboxPut { .. }

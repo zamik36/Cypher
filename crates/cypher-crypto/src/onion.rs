@@ -33,7 +33,10 @@ pub struct OpenedRequest {
     pub replay_id: [u8; 32],
 }
 
+/// `epoch u32 ‖ sealed(onion_key, reply key ‖ time ‖ frame ‖ padding)`:
+/// the epoch tells signaling which of its keys `onion_key` is.
 pub fn seal_request(
+    epoch: u32,
     onion_key: &[u8; 32],
     frame: &[u8],
     now_secs: u64,
@@ -58,9 +61,19 @@ pub fn seal_request(
     plain.resize(bucket(plain.len()), 0);
     let sealed = sealed::seal(onion_key, &plain, rng);
     plain.zeroize();
-    Ok((sealed?, reply))
+    Ok(([epoch.to_le_bytes().as_slice(), &sealed?].concat(), reply))
 }
 
+/// The epoch a request names, and the sealed request to open with that
+/// epoch's key.
+pub fn split_epoch(blob: &[u8]) -> Result<(u32, &[u8]), CryptoError> {
+    let (epoch, sealed) = blob
+        .split_first_chunk::<4>()
+        .ok_or(CryptoError::Malformed)?;
+    Ok((u32::from_le_bytes(*epoch), sealed))
+}
+
+/// Opens the sealed part of a request (see [`split_epoch`]).
 pub fn open_request(
     onion_secret: &StaticSecret,
     blob: &[u8],
@@ -126,6 +139,10 @@ fn bucket(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sealed(blob: &[u8]) -> &[u8] {
+        split_epoch(blob).unwrap().1
+    }
     use rand::rngs::OsRng;
     use x25519_dalek::PublicKey;
 
@@ -138,15 +155,16 @@ mod tests {
     #[test]
     fn request_response_roundtrip_with_uniform_sizes() {
         let (sk, pk) = keys();
-        let (blob_small, reply) = seal_request(&pk, b"fetch", 1_700_000_000, &mut OsRng).unwrap();
-        let (blob_other, _) = seal_request(&pk, &[7u8; 900], 1, &mut OsRng).unwrap();
+        let (blob_small, reply) =
+            seal_request(0, &pk, b"fetch", 1_700_000_000, &mut OsRng).unwrap();
+        let (blob_other, _) = seal_request(0, &pk, &[7u8; 900], 1, &mut OsRng).unwrap();
         assert_eq!(blob_small.len(), blob_other.len(), "requests are bucketed");
 
-        let opened = open_request(&sk, &blob_small).unwrap();
+        let opened = open_request(&sk, sealed(&blob_small)).unwrap();
         assert_eq!(opened.frame, b"fetch");
         assert_eq!(opened.timestamp_secs, 1_700_000_000);
-        let again = open_request(&sk, &blob_small).unwrap();
-        let other = open_request(&sk, &blob_other).unwrap();
+        let again = open_request(&sk, sealed(&blob_small)).unwrap();
+        let other = open_request(&sk, sealed(&blob_other)).unwrap();
         assert_eq!(opened.replay_id, again.replay_id, "a replay keeps its id");
         assert_ne!(opened.replay_id, other.replay_id);
 
@@ -159,8 +177,8 @@ mod tests {
     #[test]
     fn responses_under_one_reply_key_never_share_a_nonce() {
         let (sk, pk) = keys();
-        let (blob, reply) = seal_request(&pk, b"fetch", 0, &mut OsRng).unwrap();
-        let opened = open_request(&sk, &blob).unwrap();
+        let (blob, reply) = seal_request(0, &pk, b"fetch", 0, &mut OsRng).unwrap();
+        let opened = open_request(&sk, sealed(&blob)).unwrap();
         let first = seal_response(&opened.reply, b"batch", &mut OsRng);
         let second = seal_response(&opened.reply, b"", &mut OsRng);
         assert_eq!(first.len(), second.len(), "responses are bucketed");
@@ -174,13 +192,13 @@ mod tests {
     fn wrong_keys_and_tampering_fail() {
         let (sk, pk) = keys();
         let (other_sk, _) = keys();
-        let (mut blob, reply) = seal_request(&pk, b"x", 0, &mut OsRng).unwrap();
-        assert!(open_request(&other_sk, &blob).is_err());
+        let (mut blob, reply) = seal_request(0, &pk, b"x", 0, &mut OsRng).unwrap();
+        assert!(open_request(&other_sk, sealed(&blob)).is_err());
         blob[40] ^= 1;
-        assert!(open_request(&sk, &blob).is_err());
+        assert!(open_request(&sk, sealed(&blob)).is_err());
 
         let resp = seal_response(&reply, b"y", &mut OsRng);
-        let (_, other_reply) = seal_request(&pk, b"z", 0, &mut OsRng).unwrap();
+        let (_, other_reply) = seal_request(0, &pk, b"z", 0, &mut OsRng).unwrap();
         open_response(&other_reply, &resp).unwrap_err();
     }
 
@@ -188,7 +206,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "seals a maximum-size frame; minutes under Miri")]
     fn oversized_frames_are_rejected() {
         let (_, pk) = keys();
-        assert!(seal_request(&pk, &vec![0u8; MAX_ONION_FRAME + 1], 0, &mut OsRng).is_err());
-        seal_request(&pk, &vec![0u8; MAX_ONION_FRAME], 0, &mut OsRng).unwrap();
+        assert!(seal_request(0, &pk, &vec![0u8; MAX_ONION_FRAME + 1], 0, &mut OsRng).is_err());
+        seal_request(0, &pk, &vec![0u8; MAX_ONION_FRAME], 0, &mut OsRng).unwrap();
     }
 }

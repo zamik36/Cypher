@@ -128,7 +128,7 @@ fn server_samples() -> Vec<ServerMsg> {
         ServerMsg::Done,
         ServerMsg::BootstrapInfo {
             relay_addr: "relay.example:9443".into(),
-            onion_key: [7; 32],
+            signing_key: [7; 32],
             capabilities: 3,
         },
         ServerMsg::PushKey { key: [4; 65] },

@@ -11,10 +11,20 @@ use futures::{SinkExt, StreamExt};
 use super::*;
 
 /// Replies `ok:<request>`; `slow…` answers after a delay, `lost…` never.
-struct FakeSignaling;
+/// Key sets are numbered by how often they were asked for.
+#[derive(Default)]
+struct FakeSignaling {
+    key_sets: std::sync::atomic::AtomicU8,
+}
 
 impl OnionUpstream for FakeSignaling {
-    async fn forward(&self, request: Bytes) -> Option<Bytes> {
+    async fn forward(&self, subject: &'static str, request: Bytes) -> Option<Bytes> {
+        if subject == SIG_KEYS_SUBJECT {
+            let n = self
+                .key_sets
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some(Bytes::from(vec![b'k', n]));
+        }
         if request.starts_with(b"lost") {
             return None;
         }
@@ -32,7 +42,7 @@ struct Conn {
 
 impl Conn {
     async fn send(&mut self, corr: u64, body: &[u8]) {
-        let frame = [corr.to_le_bytes().as_slice(), body].concat();
+        let frame = [corr.to_le_bytes().as_slice(), &[TAG_ONION], body].concat();
         self.tx.send(Ok(frame.into())).await.unwrap();
     }
 
@@ -52,7 +62,7 @@ impl Conn {
 
 fn relay() -> Arc<Relay<FakeSignaling>> {
     let metrics = RelayMetrics::register(&Metrics::new().unwrap()).unwrap();
-    Arc::new(Relay::new(FakeSignaling, metrics))
+    Arc::new(Relay::new(FakeSignaling::default(), metrics))
 }
 
 fn connect(relay: &Arc<Relay<FakeSignaling>>) -> Conn {
@@ -82,6 +92,30 @@ async fn malformed_frames_are_dropped_and_the_connection_survives() {
     conn.send_raw(vec![0; MAX_REQUEST + 1]).await;
     conn.send(1, b"after").await;
     assert_eq!(conn.reply().await, (1, Bytes::from_static(b"ok:after")));
+    assert_eq!(relay.metrics.dropped.get(), 2);
+}
+
+/// The key set is answered from memory for a minute, then asked for again;
+/// a tag the relay does not know is dropped.
+#[tokio::test(start_paused = true)]
+async fn the_key_set_is_cached_and_unknown_tags_are_dropped() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    let ask = |corr: u64| [corr.to_le_bytes().as_slice(), &[TAG_KEYS]].concat();
+    conn.send_raw(ask(1)).await;
+    assert_eq!(conn.reply().await, (1, Bytes::from_static(&[b'k', 0])));
+    conn.send_raw(ask(2)).await;
+    assert_eq!(conn.reply().await, (2, Bytes::from_static(&[b'k', 0])));
+    tokio::time::sleep(KEY_SET_TTL).await;
+    conn.send_raw(ask(3)).await;
+    assert_eq!(conn.reply().await, (3, Bytes::from_static(&[b'k', 1])));
+
+    conn.send_raw([9u64.to_le_bytes().as_slice(), &[TAG_KEYS, 0]].concat())
+        .await;
+    conn.send_raw([9u64.to_le_bytes().as_slice(), &[7, 0]].concat())
+        .await;
+    conn.send(4, b"after").await;
+    assert_eq!(conn.reply().await, (4, Bytes::from_static(b"ok:after")));
     assert_eq!(relay.metrics.dropped.get(), 2);
 }
 
@@ -147,7 +181,9 @@ async fn a_client_that_stops_reading_is_disconnected() {
     let relay = relay();
     let Conn { mut tx, rx } = connect(&relay);
     drop(rx);
-    tx.send(Ok([1u64.to_le_bytes().as_slice(), b"x"].concat().into()))
+    tx.send(Ok([1u64.to_le_bytes().as_slice(), &[TAG_ONION], b"x"]
+        .concat()
+        .into()))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;

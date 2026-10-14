@@ -8,14 +8,18 @@ use cypher_core::link::Provision;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault, history};
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::onion::{self, ReplyKey};
-use cypher_crypto::{DeviceList, IdentitySeed, PrekeyBundle};
+use cypher_crypto::onion_keys::{EpochKey, KeySet};
+use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed, PrekeyBundle};
 use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
-use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg};
+use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg, relay};
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 pub(crate) type Rng = ChaCha20Rng;
+
+/// The one epoch the test server's onion key is published for.
+const ONION_EPOCH: u32 = 1;
 
 #[derive(Default)]
 struct Keys {
@@ -85,6 +89,8 @@ pub(crate) struct World {
     wire: VecDeque<(usize, Bytes)>,
     onion_wire: VecDeque<(usize, Bytes)>,
     onion_secret: StaticSecret,
+    /// The server's long-term key: it signs the onion keys.
+    pub server_key: IdentityKeyPair,
     onion_ctx: Option<(usize, u64, ReplyKey)>,
     rng: Rng,
 }
@@ -103,6 +109,7 @@ impl World {
             wire: VecDeque::new(),
             onion_wire: VecDeque::new(),
             onion_secret: StaticSecret::from([3u8; 32]),
+            server_key: IdentitySeed([5; 32]).derive_identity(),
             onion_ctx: None,
             rng: Rng::seed_from_u64(1),
         };
@@ -449,7 +456,31 @@ impl World {
             }
             while let Some((i, blob)) = self.onion_wire.pop_front() {
                 progressed = true;
-                let (corr, sealed) = blob.split_at(8);
+                self.relay(i, &blob);
+            }
+            if !progressed {
+                return;
+            }
+        }
+        panic!("world did not quiesce");
+    }
+
+    /// The relay: hands out the server's key set, or forwards a request
+    /// sealed to its onion key.
+    fn relay(&mut self, i: usize, frame: &[u8]) {
+        let (corr, rest) = frame.split_at(relay::CORR_LEN);
+        let (tag, payload) = rest.split_first().expect("relay frames carry a tag");
+        match *tag {
+            relay::TAG_KEYS => {
+                let set = self.key_set();
+                let reply = Bytes::from([corr, &set].concat());
+                self.clients[i]
+                    .inputs
+                    .push_back(Input::AnonymousFrame(reply));
+            }
+            relay::TAG_ONION => {
+                let (epoch, sealed) = onion::split_epoch(payload).unwrap();
+                assert_eq!(epoch, ONION_EPOCH, "sealed to the published key");
                 let opened = onion::open_request(&self.onion_secret, sealed)
                     .expect("relay forwards sealed requests");
                 let corr = u64::from_le_bytes(corr.try_into().unwrap());
@@ -457,11 +488,21 @@ impl World {
                 self.serve(i, Bytes::from(opened.frame));
                 self.onion_ctx = None;
             }
-            if !progressed {
-                return;
-            }
+            other => panic!("unknown relay tag {other}"),
         }
-        panic!("world did not quiesce");
+    }
+
+    /// The server's onion key set, signed with its long-term key.
+    fn key_set(&self) -> Vec<u8> {
+        let key = EpochKey {
+            epoch: ONION_EPOCH,
+            public: PublicKey::from(&self.onion_secret).to_bytes(),
+            not_before: 0,
+            not_after: u64::MAX,
+        };
+        KeySet::sign(&self.server_key, 0, vec![key])
+            .unwrap()
+            .encode()
     }
 
     fn apply(&mut self, i: usize, effects: Vec<Effect>) {
@@ -735,7 +776,7 @@ impl World {
                 from,
                 &reply(ServerMsg::BootstrapInfo {
                     relay_addr: "relay.test:9443".into(),
-                    onion_key: PublicKey::from(&self.onion_secret).to_bytes(),
+                    signing_key: *self.server_key.peer_id().as_bytes(),
                     capabilities: 1,
                 }),
             ),

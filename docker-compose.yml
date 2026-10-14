@@ -97,7 +97,6 @@ services:
       - signaling-data:/data/signaling
     environment:
       LOG_FORMAT: json
-      P2P_ONION_KEY_PATH: /data/signaling/onion_key.bin
       P2P_SIGNING_KEY_PATH: /data/signaling/signing_key.bin
       P2P_VAPID_KEY_PATH: /data/signaling/vapid_key.bin
       P2P_RELAY_PUBLIC_ADDR: "${RELAY_PUBLIC_ADDR:-localhost:9300}"

@@ -133,9 +133,11 @@ pub enum ServerMsg {
         items: Vec<Bytes>,
     },
     Done,
+    /// Where the onion relay is, and the long-term key the server signs its
+    /// onion keys with.
     BootstrapInfo {
         relay_addr: String,
-        onion_key: [u8; 32],
+        signing_key: [u8; 32],
         capabilities: u32,
     },
     /// Uncompressed P-256 VAPID public key.
@@ -530,7 +532,7 @@ impl Frame<ServerMsg> {
             M::Done => header(kind::DONE, id, 0),
             M::BootstrapInfo {
                 relay_addr,
-                onion_key,
+                signing_key,
                 capabilities,
             } => {
                 let mut b = header(
@@ -539,7 +541,7 @@ impl Frame<ServerMsg> {
                     relay_addr.len().saturating_add(37),
                 );
                 b.put_short_str(relay_addr);
-                b.put_slice(onion_key);
+                b.put_slice(signing_key);
                 b.put_u32_le(*capabilities);
                 b
             }
@@ -614,7 +616,7 @@ impl Frame<ServerMsg> {
             kind::DONE => M::Done,
             kind::BOOTSTRAP_INFO => M::BootstrapInfo {
                 relay_addr: r.short_str()?,
-                onion_key: r.array()?,
+                signing_key: r.array()?,
                 capabilities: r.u32()?,
             },
             kind::PUSH_KEY => M::PushKey { key: r.array()? },

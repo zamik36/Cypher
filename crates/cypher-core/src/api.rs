@@ -248,9 +248,9 @@ pub enum Event {
     Onion {
         up: bool,
     },
+    /// Where the server's onion relay is (empty: it has none).
     Bootstrap {
         relay_addr: String,
-        onion_key: [u8; 32],
     },
     LinkCreated {
         link: String,
