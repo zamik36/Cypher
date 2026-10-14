@@ -41,6 +41,10 @@ pub(crate) enum JsCommand {
     SetAnonymity {
         require_onion: bool,
     },
+    SetServer {
+        addr: String,
+    },
+    TrustServerKey,
     RemovePeer {
         peer: String,
     },
@@ -179,6 +183,8 @@ impl JsCommand {
                 msg_id: MsgId::from_hex(&msg_id).ok_or(CommandError::Message)?,
             }),
             Self::SetAnonymity { require_onion } => plain(Command::SetAnonymity { require_onion }),
+            Self::SetServer { addr } => plain(Command::SetServer { addr }),
+            Self::TrustServerKey => plain(Command::TrustServerKey),
             Self::RemovePeer { peer: p } => plain(Command::RemovePeer { peer: peer(&p)? }),
             Self::RenamePeer { peer: p, alias } => plain(Command::RenamePeer {
                 peer: peer(&p)?,

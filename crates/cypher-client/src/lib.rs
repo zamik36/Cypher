@@ -236,6 +236,10 @@ impl Client {
             peer_id,
             config,
         };
+        let server = Command::SetServer {
+            addr: client.config.gateway_addr.clone(),
+        };
+        client.command(server).await?;
         if client.config.require_onion {
             client
                 .command(Command::SetAnonymity {

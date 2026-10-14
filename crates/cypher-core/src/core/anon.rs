@@ -309,7 +309,11 @@ mod tests {
             anon.key_set_request(late_ms, late_ms + 5_000).is_some(),
             "running out"
         );
-        assert_ne!(anon.readiness(1_000_000 * 1000), Readiness::Onion, "expired");
+        assert_ne!(
+            anon.readiness(1_000_000 * 1000),
+            Readiness::Onion,
+            "expired"
+        );
 
         // Another signing key: the set it did not sign is dropped.
         anon.on_bootstrap(Some(forger.signing_key()), 0);

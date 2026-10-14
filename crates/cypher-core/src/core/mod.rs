@@ -5,6 +5,7 @@ mod history;
 mod messaging;
 mod outbox;
 mod push;
+mod servers;
 mod sync;
 
 use std::collections::hash_map::Entry;
@@ -25,8 +26,8 @@ use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRec
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
 use crate::store::{
-    META_DEVICES, META_HISTORY, META_LINKS, META_PREKEYS, META_PROFILE, Record, StoreOp, Table,
-    Vault, session_addr, session_key,
+    META_DEVICES, META_HISTORY, META_LINKS, META_PREKEYS, META_PROFILE, META_SERVERS, Record,
+    StoreOp, Table, Vault, session_addr, session_key,
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
@@ -36,6 +37,7 @@ use history::History;
 use messaging::Joining;
 use outbox::OutboxItem;
 use push::{PushState, Subscription};
+use servers::ServerKeys;
 
 /// Anonymous requests that wait for the relay at most; more fail at once.
 const MAX_DEFERRED: usize = 64;
@@ -184,6 +186,11 @@ pub struct Core<R> {
     /// Chunks read from disk for the devices waiting for them.
     reads: HashMap<(FileId, u32), Vec<DeviceId>>,
     anon: Anon,
+    /// The address of the server this device connects to.
+    server: String,
+    server_keys: ServerKeys,
+    /// A signing key the server showed that is not the one remembered.
+    offered_key: Option<[u8; 32]>,
     push: PushState,
     /// The name this user goes by, sent to contacts with `Hello`.
     profile_name: Option<String>,
@@ -251,6 +258,9 @@ impl<R: CryptoRngCore> Core<R> {
             progress_at: HashMap::new(),
             reads: HashMap::new(),
             anon: Anon::default(),
+            server: String::new(),
+            server_keys: own.servers,
+            offered_key: None,
             push: PushState::default(),
             profile_name: own.profile_name,
             own_links: own.links,
@@ -539,7 +549,11 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Where the relay is and what to seal onion requests to.
     fn on_bootstrap(&mut self, relay_addr: String, signing_key: [u8; 32]) {
-        let relay = (!relay_addr.is_empty()).then_some(signing_key);
+        let relay = if relay_addr.is_empty() {
+            None
+        } else {
+            self.checked_server_key(signing_key)
+        };
         self.anon.on_bootstrap(relay, self.now);
         self.ask_key_set();
         self.send_deferred();
@@ -656,6 +670,8 @@ impl<R: CryptoRngCore> Core<R> {
             Command::UnblockPeer { peer } => self.block_contact(peer, false),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
+            Command::SetServer { addr } => self.server = addr,
+            Command::TrustServerKey => self.trust_server_key(),
             Command::EnablePush => self.enable_push(),
             Command::RegisterPush {
                 endpoint,
@@ -1183,6 +1199,7 @@ struct Own {
     links: Vec<(String, u64)>,
     devices: Devices,
     history: History,
+    servers: ServerKeys,
 }
 
 fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, CoreError> {
@@ -1193,6 +1210,7 @@ fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, Co
             .unwrap_or_default(),
         devices: Devices::from_record(load_meta::<OwnDevices>(vault, meta, META_DEVICES, skipped)?),
         history: load_meta::<History>(vault, meta, META_HISTORY, skipped)?.unwrap_or_default(),
+        servers: load_meta::<ServerKeys>(vault, meta, META_SERVERS, skipped)?.unwrap_or_default(),
     })
 }
 

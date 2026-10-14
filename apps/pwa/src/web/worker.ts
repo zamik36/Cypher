@@ -564,6 +564,7 @@ const handlers: Handlers = {
       gateway.stop();
       relay.stop();
       const c = await startClient();
+      await run({ type: "set_server", addr: gatewayUrl });
       await run({ type: "set_anonymity", require_onion: anonymous });
       await run({ type: "set_profile_name", name: requireIdentity().nickname });
       gateway.start(gatewayUrl);

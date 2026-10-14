@@ -113,6 +113,14 @@ pub enum Command {
     SetAnonymity {
         require_onion: bool,
     },
+    /// The server this device connects to (its gateway address): the
+    /// signing key it shows is remembered for it.
+    SetServer {
+        addr: String,
+    },
+    /// Trusts the signing key the server showed in place of the one
+    /// remembered for it ([`Event::ServerKeyChanged`]).
+    TrustServerKey,
     /// Wants a wake-up when the inbox gets something while away: asks the
     /// server for its key ([`Event::PushKey`]) to subscribe with.
     EnablePush,
@@ -251,6 +259,11 @@ pub enum Event {
     /// Where the server's onion relay is (empty: it has none).
     Bootstrap {
         relay_addr: String,
+    },
+    /// The server showed another signing key than the one remembered for
+    /// it: its onion relay is not used until the user trusts the new key.
+    ServerKeyChanged {
+        server: String,
     },
     LinkCreated {
         link: String,

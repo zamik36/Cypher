@@ -963,6 +963,58 @@ fn a_join_waiting_for_the_relay_fails_with_the_connection() {
     )));
 }
 
+fn key_changes(w: &World, i: usize) -> usize {
+    w.clients[i]
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::ServerKeyChanged { .. }))
+        .count()
+}
+
+/// A server that shows another signing key than the one remembered for it
+/// is not used anonymously, also after a restart, until the user trusts it.
+#[test]
+fn a_server_showing_another_signing_key_is_not_trusted_until_the_user_says() {
+    let mut w = paired();
+    w.clients[A].on_start = vec![Command::SetAnonymity {
+        require_onion: true,
+    }];
+    w.server_key = IdentitySeed([6; 32]).derive_identity();
+    w.restart(A);
+    assert_eq!(key_changes(&w, A), 1);
+
+    let onion = w.server.onion_inbox_ops;
+    w.command(A, Command::FetchInbox);
+    w.advance(60_000);
+    assert_eq!(w.server.onion_inbox_ops, onion, "not through the relay");
+    assert_eq!(w.server.session_inbox_ops, 0, "nor over the session");
+
+    w.restart(A);
+    assert_eq!(key_changes(&w, A), 2, "still not the remembered key");
+
+    w.command(A, Command::TrustServerKey);
+    w.command(A, Command::FetchInbox);
+    assert!(w.server.onion_inbox_ops > onion, "trusted: the relay again");
+    w.restart(A);
+    assert_eq!(key_changes(&w, A), 2, "the trusted key is remembered");
+}
+
+/// Each server is remembered by its address: another server shows its own
+/// key without a warning.
+#[test]
+fn server_keys_are_remembered_per_server() {
+    let mut w = paired();
+    w.clients[A].on_start = vec![Command::SetServer {
+        addr: "other.example:9100".into(),
+    }];
+    w.server_key = IdentitySeed([6; 32]).derive_identity();
+    w.restart(A);
+    assert_eq!(key_changes(&w, A), 0);
+    let onion = w.server.onion_inbox_ops;
+    w.command(A, Command::FetchInbox);
+    assert!(w.server.onion_inbox_ops > onion);
+}
+
 /// A server that answers a share link with another identity (its own, or
 /// someone it wants in the middle) is caught by the link's fingerprint.
 #[test]

@@ -76,6 +76,9 @@ pub(crate) struct Client {
     /// The driver stops before it answers a history effect, as if the app
     /// were closed meanwhile.
     pub history_held: bool,
+    /// What the driver tells the core each time it starts it, before it
+    /// connects (the server's address, the anonymity setting).
+    pub on_start: Vec<Command>,
     pub events: Vec<Event>,
     pub connected: bool,
     inputs: VecDeque<Input>,
@@ -126,6 +129,7 @@ impl World {
                 closed: HashMap::new(),
                 history_fails: false,
                 history_held: false,
+                on_start: Vec::new(),
                 events: Vec::new(),
                 connected: false,
                 inputs: VecDeque::new(),
@@ -154,6 +158,7 @@ impl World {
             closed: HashMap::new(),
             history_fails: false,
             history_held: false,
+            on_start: Vec::new(),
             events: Vec::new(),
             connected: false,
             inputs: VecDeque::new(),
@@ -180,6 +185,7 @@ impl World {
             closed: HashMap::new(),
             history_fails: false,
             history_held: false,
+            on_start: Vec::new(),
             events: Vec::new(),
             connected: false,
             inputs: VecDeque::new(),
@@ -246,6 +252,8 @@ impl World {
             Core::restore(&IdentitySeed(c.seed), c.device, &snapshot, self.now, rng).unwrap();
         c.core = Some(core);
         c.connected = false;
+        let start = c.on_start.iter().cloned().map(Input::Command);
+        c.inputs.extend(start);
         self.apply(i, effects);
     }
 

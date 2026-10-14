@@ -189,6 +189,9 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::LinkFailed { reason } => ("link_failed", UiPayload::Text(format!("{reason:?}"))),
         Event::LinkedHere => ("linked_here", UiPayload::None),
         Event::ContactsChanged => ("contacts_changed", UiPayload::None),
+        Event::ServerKeyChanged { server } => {
+            ("server_key_changed", UiPayload::Text(server.clone()))
+        }
         Event::Warning {
             reason: FailReason::UpdateRequired,
         } => ("update_required", UiPayload::None),
@@ -205,34 +208,11 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
             bytes,
             total,
         } => ("file_progress", progress(file_id, *bytes, *total)),
-        Event::HistoryProgress {
-            file_id,
-            outgoing,
-            bytes,
-            total,
-        } => (
-            "history_progress",
-            history(file_id, *outgoing, ratio(*bytes, *total), None),
-        ),
-        Event::HistoryDone { file_id, outgoing } => {
-            ("history_done", history(file_id, *outgoing, 1.0, None))
+        Event::HistoryProgress { .. } | Event::HistoryDone { .. } | Event::HistoryFailed { .. } => {
+            history_event(e)
         }
-        Event::HistoryFailed {
-            file_id,
-            outgoing,
-            reason,
-        } => (
-            "history_failed",
-            history(file_id, *outgoing, 0.0, Some(*reason)),
-        ),
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
-        Event::TransferFailed { file_id, reason } => (
-            "file_failed",
-            UiPayload::Failed {
-                file_id: file_id.to_hex(),
-                reason: format!("{reason:?}"),
-            },
-        ),
+        Event::TransferFailed { file_id, reason } => ("file_failed", failed(file_id, *reason)),
         Event::JoinFailed { reason, .. } | Event::Warning { reason } => {
             ("error", UiPayload::Text(format!("{reason:?}")))
         }
@@ -259,6 +239,45 @@ fn offer(e: &Event) -> UiPayload {
         name: name.clone(),
         size: *size,
         mime: mime.clone(),
+    }
+}
+
+/// The history's events: how far along it is, done, or why it stopped.
+fn history_event(e: &Event) -> (&'static str, UiPayload) {
+    if let Event::HistoryProgress {
+        file_id,
+        outgoing,
+        bytes,
+        total,
+    } = e
+    {
+        let progress = ratio(*bytes, *total);
+        return (
+            "history_progress",
+            history(file_id, *outgoing, progress, None),
+        );
+    }
+    if let Event::HistoryDone { file_id, outgoing } = e {
+        return ("history_done", history(file_id, *outgoing, 1.0, None));
+    }
+    let Event::HistoryFailed {
+        file_id,
+        outgoing,
+        reason,
+    } = e
+    else {
+        return ("history_failed", UiPayload::None);
+    };
+    (
+        "history_failed",
+        history(file_id, *outgoing, 0.0, Some(*reason)),
+    )
+}
+
+fn failed(file_id: &FileId, reason: FailReason) -> UiPayload {
+    UiPayload::Failed {
+        file_id: file_id.to_hex(),
+        reason: format!("{reason:?}"),
     }
 }
 
