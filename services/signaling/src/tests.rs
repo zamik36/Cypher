@@ -323,16 +323,17 @@ async fn fetching_device_lists_is_rate_limited() {
 #[tokio::test]
 async fn identity_requests_need_an_authenticated_peer() {
     let Some(h) = handler(None).await else { return };
+    let someone = IdentityKeyPair::generate();
     let anonymous = [
         ClientMsg::CreateLink,
         ClientMsg::Bootstrap,
-        ClientMsg::FetchKeys {
-            peer: PeerId([2; 32]),
-            device: DeviceId::FIRST,
+        ClientMsg::PublishKeys {
+            base: base_bundle(&someone),
+            opks: Vec::new(),
+            replace_opks: false,
         },
-        fetch_devices(PeerId([2; 32])),
-        ClientMsg::ResolveLink {
-            link: LinkId::random(&mut OsRng),
+        ClientMsg::PublishDevices {
+            list: Bytes::from_static(b"list"),
         },
     ];
     for msg in anonymous {
@@ -340,6 +341,48 @@ async fn identity_requests_need_an_authenticated_peer() {
     }
     let not_a_request = ask(&h, Some(PeerId([3; 32])), ClientMsg::Ping).await;
     assert!(is_error(&not_a_request, ErrorCode::BadRequest));
+}
+
+/// Introductions are answered without knowing who asks: the requester's
+/// own limits do not apply, the one-time prekey ration per target does.
+#[tokio::test]
+async fn introductions_are_answered_anonymously() {
+    let Some(h) = handler(None).await else { return };
+    let host = IdentityKeyPair::generate();
+    let me = Some(host.peer_id());
+    let opks = (0..30).map(|i| (i, random32())).collect::<Vec<_>>();
+    let publish = ClientMsg::PublishKeys {
+        base: base_bundle(&host),
+        opks,
+        replace_opks: true,
+    };
+    assert!(matches!(
+        ask(&h, me, publish).await,
+        ServerMsg::KeysAck { .. }
+    ));
+    let ServerMsg::LinkCreated { link } = ask(&h, me, ClientMsg::CreateLink).await else {
+        panic!("link not created");
+    };
+
+    let resolved = ask(&h, None, ClientMsg::ResolveLink { link }).await;
+    assert!(matches!(resolved, ServerMsg::LinkResolved { peer } if Some(peer) == me));
+    assert!(is_error(
+        &ask(&h, None, fetch_devices(host.peer_id())).await,
+        ErrorCode::NotFound
+    ));
+    let fetch = || ClientMsg::FetchKeys {
+        peer: host.peer_id(),
+        device: DeviceId::FIRST,
+    };
+    // Past the per-identity limit of a session: nothing to count here.
+    let mut with_opk = 0;
+    for _ in 0..61 {
+        match ask(&h, None, fetch()).await {
+            ServerMsg::Keys { opk, .. } => with_opk += usize::from(opk.is_some()),
+            other => panic!("not answered: {other:?}"),
+        }
+    }
+    assert_eq!(with_opk, 20, "one-time prekeys stay rationed per target");
 }
 
 #[tokio::test]
@@ -414,6 +457,30 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
 
     let (stale, _) = seal(now - crate::onion::MAX_SKEW_SECS - 1);
     assert!(crate::onion::handle(&h, &secret, &stale).await.is_none());
+
+    // What needs an identity is not taken through the onion at all.
+    let create = Frame::new(2, ClientMsg::CreateLink).encode();
+    let (blob, _) = cypher_crypto::onion::seal_request(&public, &create, now, &mut OsRng).unwrap();
+    assert!(crate::onion::handle(&h, &secret, &blob).await.is_none());
+    let resolve = Frame::new(
+        3,
+        ClientMsg::ResolveLink {
+            link: LinkId::random(&mut OsRng),
+        },
+    )
+    .encode();
+    let (blob, reply) =
+        cypher_crypto::onion::seal_request(&public, &resolve, now, &mut OsRng).unwrap();
+    let answer = crate::onion::handle(&h, &secret, &blob)
+        .await
+        .expect("answered");
+    let opened = cypher_crypto::onion::open_response(&reply, &answer).unwrap();
+    assert!(matches!(
+        Frame::<ServerMsg>::decode(Bytes::from(opened)).unwrap().msg,
+        ServerMsg::Error {
+            code: ErrorCode::NotFound
+        }
+    ));
 }
 
 #[tokio::test]

@@ -98,57 +98,96 @@ impl Handler {
     }
 
     async fn answer(&self, peer: Option<PeerId>, msg: ClientMsg) -> ServerMsg {
-        let result = match (msg, peer) {
-            (
-                ClientMsg::PublishKeys {
-                    base,
-                    opks,
-                    replace_opks,
-                },
-                Some(peer),
-            ) => self.publish_keys(&peer, &base, &opks, replace_opks).await,
-            (
-                ClientMsg::FetchKeys {
-                    peer: target,
-                    device,
-                },
-                Some(peer),
-            ) => self.fetch_keys(&peer, Addr::new(target, device)).await,
-            (ClientMsg::PublishDevices { list }, Some(peer)) => {
-                self.publish_devices(&peer, &list).await
-            }
-            (ClientMsg::FetchDevices { peer: target }, Some(peer)) => {
-                self.fetch_devices(&peer, &target).await
-            }
-            (ClientMsg::CreateLink, Some(peer)) => self.create_link(&peer).await,
-            (ClientMsg::ResolveLink { link }, Some(peer)) => {
-                self.resolve_link(Some(&peer), &link).await
-            }
-            (ClientMsg::InboxPut { inbox, item }, _) => self.inbox_put(&inbox, &item).await,
-            (ClientMsg::InboxFetch { secret }, _) => self.inbox_fetch(&secret).await,
-            (ClientMsg::InboxAck { secret, claim }, _) => self
-                .store
-                .inbox_ack(&inbox_id(&secret), &claim)
-                .await
-                .map(|()| ServerMsg::Done),
-            (ClientMsg::Bootstrap, Some(_)) => Ok(ServerMsg::BootstrapInfo {
-                relay_addr: self.relay_addr.clone().unwrap_or_default(),
-                onion_key: self.onion_public,
-                capabilities: self.capabilities(),
-            }),
-            (
-                msg @ (ClientMsg::PushKey
-                | ClientMsg::PushRegister { .. }
-                | ClientMsg::PushUnregister { .. }),
-                peer,
-            ) => self.push_request(peer, msg).await,
-            (_, None) => Ok(error(ErrorCode::Unauthorized)),
-            _ => Ok(error(ErrorCode::BadRequest)),
+        let result = match peer {
+            Some(peer) => self.answer_session(&peer, msg).await,
+            None => self.answer_anonymous(msg).await,
         };
         result.unwrap_or_else(|e| {
             warn!("redis error: {e}");
             error(ErrorCode::Unavailable)
         })
+    }
+
+    /// A request from an identity signed in at a gateway.
+    async fn answer_session(&self, peer: &PeerId, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
+        match msg {
+            ClientMsg::PublishKeys {
+                base,
+                opks,
+                replace_opks,
+            } => self.publish_keys(peer, &base, &opks, replace_opks).await,
+            ClientMsg::FetchKeys {
+                peer: target,
+                device,
+            } => self.fetch_keys(Some(peer), Addr::new(target, device)).await,
+            ClientMsg::PublishDevices { list } => self.publish_devices(peer, &list).await,
+            ClientMsg::FetchDevices { peer: target } => {
+                self.fetch_devices(Some(peer), &target).await
+            }
+            ClientMsg::CreateLink => self.create_link(peer).await,
+            ClientMsg::ResolveLink { link } => self.resolve_link(Some(peer), &link).await,
+            ClientMsg::Bootstrap => Ok(ServerMsg::BootstrapInfo {
+                relay_addr: self.relay_addr.clone().unwrap_or_default(),
+                onion_key: self.onion_public,
+                capabilities: self.capabilities(),
+            }),
+            msg @ (ClientMsg::InboxPut { .. }
+            | ClientMsg::InboxFetch { .. }
+            | ClientMsg::InboxAck { .. }
+            | ClientMsg::PushKey
+            | ClientMsg::PushRegister { .. }
+            | ClientMsg::PushUnregister { .. }) => self.answer_either(Some(*peer), msg).await,
+            ClientMsg::Hello { .. }
+            | ClientMsg::Auth { .. }
+            | ClientMsg::Ping
+            | ClientMsg::Send { .. } => Ok(error(ErrorCode::BadRequest)),
+        }
+    }
+
+    /// A request through the onion relay, from no one in particular: inbox
+    /// and push requests, and introductions, which are limited by what they
+    /// ask for rather than by who asks.
+    async fn answer_anonymous(&self, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
+        match msg {
+            ClientMsg::FetchKeys { peer, device } => {
+                self.fetch_keys(None, Addr::new(peer, device)).await
+            }
+            ClientMsg::FetchDevices { peer } => self.fetch_devices(None, &peer).await,
+            ClientMsg::ResolveLink { link } => self.resolve_link(None, &link).await,
+            msg @ (ClientMsg::InboxPut { .. }
+            | ClientMsg::InboxFetch { .. }
+            | ClientMsg::InboxAck { .. }
+            | ClientMsg::PushKey
+            | ClientMsg::PushRegister { .. }
+            | ClientMsg::PushUnregister { .. }) => self.answer_either(None, msg).await,
+            ClientMsg::PublishKeys { .. }
+            | ClientMsg::PublishDevices { .. }
+            | ClientMsg::CreateLink
+            | ClientMsg::Bootstrap => Ok(error(ErrorCode::Unauthorized)),
+            ClientMsg::Hello { .. }
+            | ClientMsg::Auth { .. }
+            | ClientMsg::Ping
+            | ClientMsg::Send { .. } => Ok(error(ErrorCode::BadRequest)),
+        }
+    }
+
+    /// Inbox and push requests, which name a blind inbox rather than an
+    /// identity and are answered the same on either path.
+    async fn answer_either(
+        &self,
+        peer: Option<PeerId>,
+        msg: ClientMsg,
+    ) -> redis::RedisResult<ServerMsg> {
+        match msg {
+            ClientMsg::InboxPut { inbox, item } => self.inbox_put(&inbox, &item).await,
+            ClientMsg::InboxFetch { secret } => self.inbox_fetch(&secret).await,
+            ClientMsg::InboxAck { secret, claim } => self
+                .store
+                .inbox_ack(&inbox_id(&secret), &claim)
+                .await
+                .map(|()| ServerMsg::Done),
+            msg => self.push_request(peer, msg).await,
+        }
     }
 
     async fn push_request(
@@ -279,8 +318,17 @@ impl Handler {
         Ok(ServerMsg::KeysAck { opks_left })
     }
 
-    async fn fetch_keys(&self, requester: &PeerId, target: Addr) -> redis::RedisResult<ServerMsg> {
-        if !self.admit(b"fk:", requester, KEY_FETCHES_PER_HOUR).await? {
+    /// A device's keys. One identity asking is limited per hour; through the
+    /// onion only the one-time prekeys are rationed, per target, since a
+    /// hard limit per target would let anyone stop a victim's new contacts.
+    async fn fetch_keys(
+        &self,
+        requester: Option<&PeerId>,
+        target: Addr,
+    ) -> redis::RedisResult<ServerMsg> {
+        if let Some(requester) = requester
+            && !self.admit(b"fk:", requester, KEY_FETCHES_PER_HOUR).await?
+        {
             return Ok(error(ErrorCode::RateLimited));
         }
         // One-time prekeys are spent per device, so they are rationed per
@@ -329,14 +377,17 @@ impl Handler {
         Ok(ServerMsg::Done)
     }
 
+    /// An identity's device list, limited per identity asking; through the
+    /// onion only the relay's limits apply.
     async fn fetch_devices(
         &self,
-        requester: &PeerId,
+        requester: Option<&PeerId>,
         target: &PeerId,
     ) -> redis::RedisResult<ServerMsg> {
-        if !self
-            .admit(b"fd:", requester, DEVICE_FETCHES_PER_HOUR)
-            .await?
+        if let Some(requester) = requester
+            && !self
+                .admit(b"fd:", requester, DEVICE_FETCHES_PER_HOUR)
+                .await?
         {
             return Ok(error(ErrorCode::RateLimited));
         }

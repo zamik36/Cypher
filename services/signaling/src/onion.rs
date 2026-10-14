@@ -32,6 +32,9 @@ pub(crate) async fn handle(handler: &Handler, secret: &StaticSecret, blob: &[u8]
             | ClientMsg::PushKey
             | ClientMsg::PushRegister { .. }
             | ClientMsg::PushUnregister { .. }
+            | ClientMsg::FetchKeys { .. }
+            | ClientMsg::FetchDevices { .. }
+            | ClientMsg::ResolveLink { .. }
     );
     if !allowed {
         return None;
