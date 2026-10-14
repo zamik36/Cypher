@@ -84,12 +84,17 @@ impl Store {
                 redis.call('EXPIRE', KEYS[2], ARGV[4], 'NX')
                 return 1",
             ),
-            // KEYS: items, claim, activation. ARGV: claim hex, max items,
-            // max bytes, claim ttl, inbox ttl. Reading (with the secret)
-            // is what keeps an inbox open for writers.
+            // KEYS: items, claim, activation, push. ARGV: claim hex, max
+            // items, max bytes, claim ttl, inbox ttl, close. Reading (as
+            // the owner) is what keeps an inbox open for writers; closing
+            // shuts it to them and drops its push subscription at once.
             fetch_script: Script::new(
                 r"
-                redis.call('SET', KEYS[3], 1, 'EX', ARGV[5])
+                if ARGV[6] == '1' then
+                  redis.call('DEL', KEYS[3], KEYS[4])
+                else
+                  redis.call('SET', KEYS[3], 1, 'EX', ARGV[5])
+                end
                 if redis.call('EXISTS', KEYS[2]) == 1 then return {} end
                 local items = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[2]) - 1)
                 local out, total = {}, 0
@@ -371,22 +376,27 @@ impl Store {
     }
 
     /// Claims the oldest items exclusively until acked or the claim expires.
+    /// With `close`, writers find the inbox gone from now on; what it still
+    /// holds stays readable until it expires.
     pub(crate) async fn inbox_fetch(
         &self,
         inbox: &[u8; 32],
         claim: &[u8; 16],
         max_items: usize,
+        close: bool,
     ) -> redis::RedisResult<Vec<Bytes>> {
         let items: Vec<Vec<u8>> = self
             .fetch_script
             .key(key(b"i:", inbox))
             .key(key(b"c:", inbox))
             .key(key(b"a:", inbox))
+            .key(key(b"p:", inbox))
             .arg(hex::encode(claim))
             .arg(max_items)
             .arg(MAX_BATCH_BYTES)
             .arg(CLAIM_TTL_SECS)
             .arg(INBOX_TTL_SECS)
+            .arg(u8::from(close))
             .invoke_async(&mut self.redis.clone())
             .await?;
         Ok(items.into_iter().map(Bytes::from).collect())

@@ -7,11 +7,12 @@ use bytes::Bytes;
 use cypher_core::link::Provision;
 use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault, history};
 use cypher_crypto::identity::verify_signature;
+use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::onion::{self, ReplyKey};
 use cypher_crypto::onion_keys::{EpochKey, KeySet};
 use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed, PrekeyBundle};
 use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
-use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, ServerMsg, relay};
+use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, ServerMsg, relay};
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -666,14 +667,19 @@ impl World {
                 }
                 let answer = match msg {
                     ClientMsg::PushRegister {
-                        secret, endpoint, ..
+                        proof,
+                        endpoint,
+                        p256dh,
+                        auth,
                     } => {
-                        let inbox = cypher_wire::inbox_id(&secret);
-                        self.server.pushes.insert(inbox, endpoint);
+                        let extra = push_extra(&endpoint, &p256dh, &auth);
+                        self.check_proof(&proof, InboxOp::PushRegister, &extra);
+                        self.server.pushes.insert(proof.inbox, endpoint);
                         ServerMsg::Done
                     }
-                    ClientMsg::PushUnregister { secret } => {
-                        self.server.pushes.remove(&cypher_wire::inbox_id(&secret));
+                    ClientMsg::PushUnregister { proof } => {
+                        self.check_proof(&proof, InboxOp::PushUnregister, &[]);
+                        self.server.pushes.remove(&proof.inbox);
                         ServerMsg::Done
                     }
                     _ => ServerMsg::PushKey { key: [4; 65] },
@@ -830,6 +836,16 @@ impl World {
         }
     }
 
+    /// As the server does: the inbox's owner signed `op`, at about now.
+    fn check_proof(&self, proof: &InboxProof, op: InboxOp, extra: &[u8]) {
+        verify_op(&proof.inbox, op, proof.timestamp, extra, &proof.signature)
+            .expect("signed by the inbox's owner");
+        assert!(
+            (self.now / 1000).abs_diff(proof.timestamp) <= 120,
+            "signed just now"
+        );
+    }
+
     fn serve_inbox(&mut self, from: usize, req_id: u32, msg: ClientMsg) {
         let reply = |msg| Frame::new(req_id, msg);
         match msg {
@@ -840,8 +856,10 @@ impl World {
                 }
                 self.respond(from, &reply(ServerMsg::Done));
             }
-            ClientMsg::InboxFetch { secret } => {
-                let id = cypher_wire::inbox_id(&secret);
+            ClientMsg::InboxFetch { proof, close } => {
+                assert!(!close, "no inbox is closed yet");
+                self.check_proof(&proof, InboxOp::Fetch, &[]);
+                let id = proof.inbox;
                 let items: Vec<Bytes> = self
                     .server
                     .inboxes
@@ -857,9 +875,10 @@ impl World {
                 self.server.claims.insert(claim, (id, items.len()));
                 self.respond(from, &reply(ServerMsg::InboxBatch { claim, items }));
             }
-            ClientMsg::InboxAck { secret, claim } => {
+            ClientMsg::InboxAck { proof, claim } => {
+                self.check_proof(&proof, InboxOp::Ack, &claim);
                 if let Some((id, n)) = self.server.claims.remove(&claim) {
-                    assert_eq!(id, cypher_wire::inbox_id(&secret));
+                    assert_eq!(id, proof.inbox, "acked by the inbox it was claimed from");
                     if let Some(v) = self.server.inboxes.get_mut(&id) {
                         v.drain(..n.min(v.len()));
                     }

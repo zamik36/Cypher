@@ -16,8 +16,8 @@ mod message;
 pub mod relay;
 
 pub use message::{
-    ClientMsg, DeliveryStatus, ErrorCode, Frame, SEND_HEADER_LEN, SendView, ServerMsg, encode_recv,
-    peek_send, relay_addr_is_valid,
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, SEND_HEADER_LEN, SendView, ServerMsg,
+    encode_recv, peek_send, relay_addr_is_valid,
 };
 
 /// Bumped on any incompatible change; the gateway rejects other versions.

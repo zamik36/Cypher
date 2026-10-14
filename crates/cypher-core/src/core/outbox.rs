@@ -359,9 +359,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// or, for our own devices, the one this identity derives for it.
     fn inbox_of(&self, addr: Addr) -> Option<([u8; 32], [u8; 32])> {
         if addr.peer == self.peer_id {
-            let secret = self.seed.derive_inbox_secret(addr.device);
             let own_dh = self.identity.dh_public_key().to_bytes();
-            return Some((cypher_wire::inbox_id(&secret), own_dh));
+            return Some((self.own_inbox_of(addr.device), own_dh));
         }
         let peer = self.peers.get(&addr.peer)?;
         let inbox = self

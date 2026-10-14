@@ -143,7 +143,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn hello(&self, peer: &PeerId) -> Body {
         Body::Hello {
-            inbox: self.inbox_id,
+            inbox: self.inbox_id(),
             name: self.profile_name.clone(),
             via: self.peers.get(peer).and_then(|p| p.via.clone()),
         }

@@ -82,6 +82,12 @@ fn op_message(op: InboxOp, inbox: &[u8; 32], timestamp_secs: u64, extra: &[u8]) 
     .concat()
 }
 
+/// What a push registration signs besides: the subscription itself, so a
+/// signature cannot be replayed to point the inbox elsewhere.
+pub fn push_extra(endpoint: &str, p256dh: &[u8; 65], auth: &[u8; 16]) -> Vec<u8> {
+    [endpoint.as_bytes(), p256dh, auth].concat()
+}
+
 /// Checks that the owner of `inbox` signed request `op` at `timestamp_secs`.
 pub fn verify_op(
     inbox: &[u8; 32],

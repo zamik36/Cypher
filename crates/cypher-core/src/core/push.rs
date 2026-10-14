@@ -1,7 +1,8 @@
 //! Push registration: the server learns "inbox X has news → wake this push
-//! address", proven by the inbox secret. It only ever goes through the
+//! address", proven by the inbox key's signature. It only ever goes through the
 //! onion relay, never the session, so the address is not tied to `PeerId`.
 
+use cypher_crypto::inbox::{InboxOp, push_extra};
 use cypher_wire::{ClientMsg, ServerMsg};
 use rand_core::CryptoRngCore;
 
@@ -83,11 +84,12 @@ impl<R: CryptoRngCore> Core<R> {
         if self.conn != Conn::Ready || self.anon.readiness(self.now) != Readiness::Onion {
             return;
         }
-        let secret = *self.inbox_secret;
+        let epoch = self.inbox_epoch();
         if self.push.unregister {
             self.push.unregister = false;
+            let proof = self.inbox_proof(epoch, InboxOp::PushUnregister, &[]);
             self.request(
-                ClientMsg::PushUnregister { secret },
+                ClientMsg::PushUnregister { proof },
                 Pending::PushUnregister,
                 true,
             );
@@ -104,8 +106,9 @@ impl<R: CryptoRngCore> Core<R> {
             .filter(|_| self.push.progress == Progress::Idle)
         {
             self.push.progress = Progress::Registered;
+            let extra = push_extra(&sub.endpoint, &sub.p256dh, &sub.auth);
             let msg = ClientMsg::PushRegister {
-                secret,
+                proof: self.inbox_proof(epoch, InboxOp::PushRegister, &extra),
                 endpoint: sub.endpoint,
                 p256dh: sub.p256dh,
                 auth: sub.auth,

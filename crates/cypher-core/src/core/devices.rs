@@ -500,12 +500,7 @@ impl<R: CryptoRngCore> Core<R> {
         let inboxes: Vec<(u32, [u8; 32])> = list
             .devices()
             .iter()
-            .map(|d| {
-                (
-                    d.0,
-                    cypher_wire::inbox_id(&self.seed.derive_inbox_secret(*d)),
-                )
-            })
+            .map(|&d| (d.0, self.own_inbox_of(d)))
             .collect();
         let body = Body::Devices {
             list: list.encode(),

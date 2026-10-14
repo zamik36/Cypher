@@ -2,6 +2,7 @@ mod anon;
 mod devices;
 mod files;
 mod history;
+mod inbox;
 mod messaging;
 mod outbox;
 mod push;
@@ -16,7 +17,6 @@ use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed};
 use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
-use zeroize::Zeroizing;
 
 use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
@@ -102,7 +102,9 @@ enum Pending {
         msg_id: MsgId,
         addr: Addr,
     },
-    InboxFetch,
+    InboxFetch {
+        epoch: u32,
+    },
     InboxAck,
     Bootstrap,
     PushKey,
@@ -149,8 +151,6 @@ pub struct Core<R> {
     peer_id: PeerId,
     /// Which of the identity's devices this one is.
     device: DeviceId,
-    inbox_secret: Zeroizing<[u8; 32]>,
-    inbox_id: [u8; 32],
     vault: Vault,
     prekeys: Prekeys,
     peers: HashMap<PeerId, Peer>,
@@ -168,6 +168,8 @@ pub struct Core<R> {
     last_rx: u64,
     last_ping: u64,
     last_inbox_fetch: u64,
+    /// When the inboxes beyond the last epoch were last read.
+    last_inbox_sweep: u64,
     /// When keys were last republished because the server's were not ours.
     last_resync: Option<u64>,
     /// When a fresh session was last started with a device of a contact.
@@ -212,7 +214,6 @@ impl<R: CryptoRngCore> Core<R> {
     ) -> Result<(Self, Vec<Effect>), CoreError> {
         let identity = seed.derive_identity();
         let vault = Vault::new(seed.derive_storage_key());
-        let inbox_secret = seed.derive_inbox_secret(device);
 
         let mut skipped = Skipped::default();
         let (prekeys, fresh_prekeys) =
@@ -231,8 +232,6 @@ impl<R: CryptoRngCore> Core<R> {
             device,
             seed: IdentitySeed(*seed.as_bytes()),
             identity,
-            inbox_id: cypher_wire::inbox_id(&inbox_secret),
-            inbox_secret,
             vault,
             prekeys,
             peers,
@@ -247,6 +246,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_rx: now_ms,
             last_ping: now_ms,
             last_inbox_fetch: 0,
+            last_inbox_sweep: 0,
             last_resync: None,
             last_repair: HashMap::new(),
             init_heard: HashMap::new(),
@@ -289,10 +289,6 @@ impl<R: CryptoRngCore> Core<R> {
 
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
-    }
-
-    pub fn inbox_id(&self) -> [u8; 32] {
-        self.inbox_id
     }
 
     pub fn is_ready(&self) -> bool {
@@ -531,8 +527,8 @@ impl<R: CryptoRngCore> Core<R> {
             (Pending::InboxPut { msg_id, addr }, ServerMsg::Done) => {
                 self.on_inbox_queued(msg_id, addr.device);
             }
-            (Pending::InboxFetch, ServerMsg::InboxBatch { claim, items }) => {
-                self.on_inbox_batch(claim, items);
+            (Pending::InboxFetch { epoch }, ServerMsg::InboxBatch { claim, items }) => {
+                self.on_inbox_batch(epoch, claim, items);
             }
             (Pending::InboxAck, ServerMsg::Done) => {}
             (
@@ -610,7 +606,7 @@ impl<R: CryptoRngCore> Core<R> {
                 self.send_deferred();
                 self.fetch_inbox();
             }
-            Pending::CreateLink | Pending::InboxFetch => {
+            Pending::CreateLink | Pending::InboxFetch { .. } => {
                 self.emit(Event::Warning { reason });
             }
             // An inbox nobody reads any more: that device is gone.
@@ -832,61 +828,6 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::Publish { batch },
             false,
         );
-    }
-
-    fn fetch_inbox(&mut self) {
-        if self.conn != Conn::Ready
-            || self
-                .pending
-                .values()
-                .any(|(p, _)| matches!(p, Pending::InboxFetch))
-            || !matches!(
-                self.anon.readiness(self.now),
-                Readiness::Onion | Readiness::Session
-            )
-        {
-            return;
-        }
-        self.last_inbox_fetch = self.now;
-        self.request(
-            ClientMsg::InboxFetch {
-                secret: *self.inbox_secret,
-            },
-            Pending::InboxFetch,
-            true,
-        );
-    }
-
-    fn on_inbox_batch(&mut self, claim: [u8; 16], items: Vec<Bytes>) {
-        let full = items.len() >= cypher_wire::MAX_INBOX_BATCH;
-        for item in items {
-            let Ok(plain) = cypher_crypto::sealed::open(&self.identity.dh_secret, &item) else {
-                continue;
-            };
-            let Some((from, rest)) = plain.split_first_chunk::<32>() else {
-                continue;
-            };
-            let Some((device, body)) = rest.split_first_chunk::<4>() else {
-                continue;
-            };
-            let device = DeviceId(u32::from_le_bytes(*device));
-            if !device.is_valid() {
-                continue;
-            }
-            let from = Addr::new(PeerId(*from), device);
-            self.on_relay(from, &Bytes::copy_from_slice(body), true);
-        }
-        self.request(
-            ClientMsg::InboxAck {
-                secret: *self.inbox_secret,
-                claim,
-            },
-            Pending::InboxAck,
-            true,
-        );
-        if full {
-            self.last_inbox_fetch = 0;
-        }
     }
 
     fn join_link(&mut self, link: String) {

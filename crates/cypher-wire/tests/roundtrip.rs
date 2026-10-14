@@ -6,9 +6,17 @@
 use bytes::Bytes;
 use cypher_types::{DeviceId, LinkId, PeerId};
 use cypher_wire::{
-    BUNDLE_BASE_LEN, ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_INBOX_ITEM_LEN,
+    BUNDLE_BASE_LEN, ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, MAX_INBOX_ITEM_LEN,
     SEND_HEADER_LEN, SendView, ServerMsg, WireError, encode_recv, peek_send,
 };
+
+fn proof(n: u8) -> InboxProof {
+    InboxProof {
+        inbox: [n; 32],
+        timestamp: u64::from(n) << 40 | 7,
+        signature: [n.wrapping_add(1); 64],
+    }
+}
 use proptest::prelude::*;
 
 /// Proptest settings; under Miri a handful of cases and no failure files,
@@ -30,7 +38,7 @@ fn link() -> LinkId {
 }
 
 fn client_samples() -> Vec<ClientMsg> {
-    vec![
+    let mut samples = vec![
         ClientMsg::Hello {
             version: 3,
             peer: PeerId([1; 32]),
@@ -67,24 +75,39 @@ fn client_samples() -> Vec<ClientMsg> {
         },
         ClientMsg::CreateLink,
         ClientMsg::ResolveLink { link: link() },
+        ClientMsg::Bootstrap,
+        ClientMsg::PushKey,
+    ];
+    samples.extend(inbox_samples());
+    samples
+}
+
+/// Requests on blind inboxes and their push subscriptions.
+fn inbox_samples() -> [ClientMsg; 6] {
+    [
         ClientMsg::InboxPut {
             inbox: [8; 32],
             item: Bytes::from_static(b"sealed"),
         },
-        ClientMsg::InboxFetch { secret: [9; 32] },
+        ClientMsg::InboxFetch {
+            proof: proof(9),
+            close: false,
+        },
+        ClientMsg::InboxFetch {
+            proof: proof(15),
+            close: true,
+        },
         ClientMsg::InboxAck {
-            secret: [10; 32],
+            proof: proof(10),
             claim: [11; 16],
         },
-        ClientMsg::Bootstrap,
-        ClientMsg::PushKey,
         ClientMsg::PushRegister {
-            secret: [12; 32],
+            proof: proof(12),
             endpoint: "https://ntfy.sh/upAbC?up=1".into(),
             p256dh: [4; 65],
             auth: [13; 16],
         },
-        ClientMsg::PushUnregister { secret: [14; 32] },
+        ClientMsg::PushUnregister { proof: proof(14) },
     ]
 }
 
@@ -344,12 +367,32 @@ fn device_lists_are_bounded() {
 }
 
 #[test]
+fn inbox_fetch_close_flag_is_strict() {
+    let mut frame = Frame::new(
+        1,
+        ClientMsg::InboxFetch {
+            proof: proof(3),
+            close: true,
+        },
+    )
+    .encode()
+    .to_vec();
+    if let Some(flag) = frame.last_mut() {
+        *flag = 2;
+    }
+    assert_eq!(
+        Frame::<ClientMsg>::decode(Bytes::from(frame)),
+        Err(WireError::Malformed)
+    );
+}
+
+#[test]
 fn push_endpoints_are_bounded() {
     let frame = |endpoint: String| {
         Frame::new(
             1,
             ClientMsg::PushRegister {
-                secret: [1; 32],
+                proof: proof(1),
                 endpoint,
                 p256dh: [4; 65],
                 auth: [2; 16],

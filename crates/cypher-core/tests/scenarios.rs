@@ -435,6 +435,23 @@ fn offline_messages_go_through_sealed_inbox() {
 }
 
 #[test]
+fn an_inbox_is_still_read_after_its_epoch_ends() {
+    let mut w = paired();
+    w.disconnect(B);
+    let first = w.send_text(A, B, "left two weeks ago");
+    let epoch_ms = cypher_crypto::inbox::INBOX_EPOCH_SECS * 1000;
+    let before = w.clients[B].core.as_ref().unwrap().inbox_id();
+
+    // B comes back two epochs on: it reads the inbox it announced then.
+    w.now += 2 * epoch_ms;
+    w.connect(B);
+    w.run();
+    assert_ne!(w.clients[B].core.as_ref().unwrap().inbox_id(), before);
+    assert_eq!(w.texts(B), ["left two weeks ago"]);
+    assert_eq!(w.status_of(A, first), Some(MessageStatus::Delivered));
+}
+
+#[test]
 fn messages_survive_restarts_without_key_reuse() {
     let mut w = paired();
     for i in 0..3 {

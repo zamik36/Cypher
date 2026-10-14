@@ -1,7 +1,8 @@
 use bytes::Bytes;
+use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::{DeviceList, PrekeyBundle};
 use cypher_types::{Addr, LinkId, PeerId};
-use cypher_wire::{ClientMsg, ErrorCode, Frame, MAX_INBOX_BATCH, ServerMsg, inbox_id};
+use cypher_wire::{ClientMsg, ErrorCode, Frame, InboxProof, MAX_INBOX_BATCH, ServerMsg};
 use rand::RngCore;
 use tracing::warn;
 
@@ -35,6 +36,8 @@ const RESOLVES_PER_LINK_PER_HOUR: u32 = 20;
 /// Invites one identity may look up per hour.
 const RESOLVES_PER_HOUR: u32 = 60;
 const HOUR_SECS: u64 = 3600;
+/// How far the time a signed inbox request names may be from the server's.
+const INBOX_CLOCK_SKEW_SECS: u64 = 120;
 
 pub(crate) struct Handler {
     pub store: Store,
@@ -181,12 +184,26 @@ impl Handler {
     ) -> redis::RedisResult<ServerMsg> {
         match msg {
             ClientMsg::InboxPut { inbox, item } => self.inbox_put(&inbox, &item).await,
-            ClientMsg::InboxFetch { secret } => self.inbox_fetch(&secret).await,
-            ClientMsg::InboxAck { secret, claim } => self
-                .store
-                .inbox_ack(&inbox_id(&secret), &claim)
-                .await
-                .map(|()| ServerMsg::Done),
+            ClientMsg::InboxFetch { proof, close } => {
+                let op = if close {
+                    InboxOp::Close
+                } else {
+                    InboxOp::Fetch
+                };
+                if !proven(&proof, op, &[]) {
+                    return Ok(error(ErrorCode::Unauthorized));
+                }
+                self.inbox_fetch(&proof.inbox, close).await
+            }
+            ClientMsg::InboxAck { proof, claim } => {
+                if !proven(&proof, InboxOp::Ack, &claim) {
+                    return Ok(error(ErrorCode::Unauthorized));
+                }
+                self.store
+                    .inbox_ack(&proof.inbox, &claim)
+                    .await
+                    .map(|()| ServerMsg::Done)
+            }
             msg => self.push_request(peer, msg).await,
         }
     }
@@ -210,25 +227,33 @@ impl Handler {
             }
             (
                 ClientMsg::PushRegister {
-                    secret,
+                    proof,
                     endpoint,
                     p256dh,
                     auth,
                 },
                 None,
             ) => {
+                let extra = push_extra(&endpoint, &p256dh, &auth);
+                if !proven(&proof, InboxOp::PushRegister, &extra) {
+                    return Ok(error(ErrorCode::Unauthorized));
+                }
                 let sub = Subscription {
                     endpoint,
                     p256dh,
                     auth,
                 };
-                self.push_register(&secret, &sub).await
+                self.push_register(&proof.inbox, &sub).await
             }
-            (ClientMsg::PushUnregister { secret }, None) => self
-                .store
-                .push_unregister(&inbox_id(&secret))
-                .await
-                .map(|()| ServerMsg::Done),
+            (ClientMsg::PushUnregister { proof }, None) => {
+                if !proven(&proof, InboxOp::PushUnregister, &[]) {
+                    return Ok(error(ErrorCode::Unauthorized));
+                }
+                self.store
+                    .push_unregister(&proof.inbox)
+                    .await
+                    .map(|()| ServerMsg::Done)
+            }
             _ => Ok(error(ErrorCode::BadRequest)),
         }
     }
@@ -249,7 +274,7 @@ impl Handler {
 
     async fn push_register(
         &self,
-        secret: &[u8; 32],
+        inbox: &[u8; 32],
         sub: &Subscription,
     ) -> redis::RedisResult<ServerMsg> {
         let Some(push) = &self.push else {
@@ -258,9 +283,7 @@ impl Handler {
         if !push.accepts(&sub.endpoint) || p256::PublicKey::from_sec1_bytes(&sub.p256dh).is_err() {
             return Ok(error(ErrorCode::BadRequest));
         }
-        self.store
-            .push_register(&inbox_id(secret), &sub.to_bytes())
-            .await?;
+        self.store.push_register(inbox, &sub.to_bytes()).await?;
         Ok(ServerMsg::Done)
     }
 
@@ -452,15 +475,22 @@ impl Handler {
         })
     }
 
-    async fn inbox_fetch(&self, secret: &[u8; 32]) -> redis::RedisResult<ServerMsg> {
+    async fn inbox_fetch(&self, inbox: &[u8; 32], close: bool) -> redis::RedisResult<ServerMsg> {
         let mut claim = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut claim);
         let items = self
             .store
-            .inbox_fetch(&inbox_id(secret), &claim, MAX_INBOX_BATCH)
+            .inbox_fetch(inbox, &claim, MAX_INBOX_BATCH, close)
             .await?;
         Ok(ServerMsg::InboxBatch { claim, items })
     }
+}
+
+/// Whether the inbox's owner signed request `op` recently enough that it is
+/// not an old one played back.
+fn proven(proof: &InboxProof, op: InboxOp, extra: &[u8]) -> bool {
+    crate::now_secs().abs_diff(proof.timestamp) <= INBOX_CLOCK_SKEW_SECS
+        && verify_op(&proof.inbox, op, proof.timestamp, extra, &proof.signature).is_ok()
 }
 
 fn error(code: ErrorCode) -> ServerMsg {

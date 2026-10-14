@@ -3,10 +3,11 @@
 //! independent of each other and of leftover state.
 
 use bytes::Bytes;
+use cypher_crypto::inbox::{InboxKey, InboxOp, push_extra};
 use cypher_crypto::prekey::SignedPreKey;
-use cypher_crypto::{DeviceList, IdentityKeyPair, PrekeyBundle};
+use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed, PrekeyBundle};
 use cypher_types::{DeviceId, LinkId, PeerId};
-use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg, inbox_id};
+use cypher_wire::{ClientMsg, ErrorCode, Frame, InboxProof, ServerMsg};
 use rand::RngCore as _;
 use rand::rngs::OsRng;
 
@@ -49,10 +50,71 @@ fn device_bundle(id: &IdentityKeyPair, device: DeviceId) -> Bytes {
     Bytes::from(out)
 }
 
+/// A device's inbox in one epoch, which signs its owner's requests.
+struct Inbox(InboxKey);
+
+impl Inbox {
+    fn random() -> Self {
+        Self(IdentitySeed(random32()).derive_inbox_key(DeviceId::FIRST, 1))
+    }
+
+    fn id(&self) -> [u8; 32] {
+        self.0.id()
+    }
+
+    fn proof_at(&self, op: InboxOp, extra: &[u8], timestamp: u64) -> InboxProof {
+        InboxProof {
+            inbox: self.id(),
+            timestamp,
+            signature: self.0.sign_op(op, timestamp, extra),
+        }
+    }
+
+    fn proof(&self, op: InboxOp, extra: &[u8]) -> InboxProof {
+        self.proof_at(op, extra, crate::now_secs())
+    }
+
+    fn fetch(&self) -> ClientMsg {
+        ClientMsg::InboxFetch {
+            proof: self.proof(InboxOp::Fetch, &[]),
+            close: false,
+        }
+    }
+
+    fn close(&self) -> ClientMsg {
+        ClientMsg::InboxFetch {
+            proof: self.proof(InboxOp::Close, &[]),
+            close: true,
+        }
+    }
+
+    fn ack(&self, claim: [u8; 16]) -> ClientMsg {
+        ClientMsg::InboxAck {
+            proof: self.proof(InboxOp::Ack, &claim),
+            claim,
+        }
+    }
+
+    fn register(&self, endpoint: &str, p256dh: [u8; 65]) -> ClientMsg {
+        let auth = [1; 16];
+        ClientMsg::PushRegister {
+            proof: self.proof(InboxOp::PushRegister, &push_extra(endpoint, &p256dh, &auth)),
+            endpoint: endpoint.into(),
+            p256dh,
+            auth,
+        }
+    }
+
+    fn unregister(&self) -> ClientMsg {
+        ClientMsg::PushUnregister {
+            proof: self.proof(InboxOp::PushUnregister, &[]),
+        }
+    }
+}
+
 /// The owner reads its (empty) inbox, which opens it for writers.
-async fn open_inbox(h: &Handler, secret: [u8; 32]) {
-    let ServerMsg::InboxBatch { items, .. } = ask(h, None, ClientMsg::InboxFetch { secret }).await
-    else {
+async fn open_inbox(h: &Handler, owner: &Inbox) {
+    let ServerMsg::InboxBatch { items, .. } = ask(h, None, owner.fetch()).await else {
         panic!("no batch");
     };
     assert!(items.is_empty());
@@ -181,35 +243,105 @@ async fn links_resolve_to_their_creator() {
 #[tokio::test]
 async fn anonymous_inbox_put_fetch_and_ack() {
     let Some(h) = handler(None).await else { return };
-    let secret = random32();
+    let owner = Inbox::random();
     let item = Bytes::from_static(b"sealed item");
     let put = ClientMsg::InboxPut {
-        inbox: inbox_id(&secret),
+        inbox: owner.id(),
         item: item.clone(),
     };
     assert!(
         is_error(&ask(&h, None, put.clone()).await, ErrorCode::NotFound),
         "an inbox its owner never read takes no writes"
     );
-    open_inbox(&h, secret).await;
+    open_inbox(&h, &owner).await;
     assert!(matches!(ask(&h, None, put).await, ServerMsg::Done));
 
-    let ServerMsg::InboxBatch { claim, items } =
-        ask(&h, None, ClientMsg::InboxFetch { secret }).await
-    else {
+    let ServerMsg::InboxBatch { claim, items } = ask(&h, None, owner.fetch()).await else {
         panic!("no batch");
     };
     assert_eq!(items, [item]);
     assert!(matches!(
-        ask(&h, None, ClientMsg::InboxAck { secret, claim }).await,
+        ask(&h, None, owner.ack(claim)).await,
         ServerMsg::Done
     ));
 
-    let ServerMsg::InboxBatch { items, .. } = ask(&h, None, ClientMsg::InboxFetch { secret }).await
-    else {
+    let ServerMsg::InboxBatch { items, .. } = ask(&h, None, owner.fetch()).await else {
         panic!("no batch");
     };
     assert!(items.is_empty(), "acknowledged items are gone");
+}
+
+#[tokio::test]
+async fn only_the_owner_reads_an_inbox_and_only_now() {
+    let Some(h) = handler(None).await else { return };
+    let owner = Inbox::random();
+    let now = crate::now_secs();
+    let fetch = |proof| ClientMsg::InboxFetch {
+        proof,
+        close: false,
+    };
+    let mut forged = owner.proof(InboxOp::Fetch, &[]);
+    forged.signature[0] ^= 1;
+    let mut elsewhere = Inbox::random().proof(InboxOp::Fetch, &[]);
+    elsewhere.inbox = owner.id();
+    for refused in [
+        fetch(forged),
+        fetch(elsewhere),
+        fetch(owner.proof_at(InboxOp::Fetch, &[], now - 300)),
+        fetch(owner.proof_at(InboxOp::Fetch, &[], now + 300)),
+        // A signature for one request does not stand for another.
+        fetch(owner.proof(InboxOp::Ack, &[])),
+        ClientMsg::InboxFetch {
+            proof: owner.proof(InboxOp::Fetch, &[]),
+            close: true,
+        },
+        ClientMsg::InboxAck {
+            proof: owner.proof(InboxOp::Ack, &[1; 16]),
+            claim: [2; 16],
+        },
+        ClientMsg::PushUnregister {
+            proof: owner.proof(InboxOp::PushRegister, &[]),
+        },
+    ] {
+        assert!(
+            is_error(&ask(&h, None, refused).await, ErrorCode::Unauthorized),
+            "an unproven request is refused"
+        );
+    }
+    assert!(
+        is_error(&ask(&h, None, put(owner.id())).await, ErrorCode::NotFound),
+        "no refused fetch opened the inbox"
+    );
+    open_inbox(&h, &owner).await;
+}
+
+#[tokio::test]
+async fn a_closed_inbox_takes_no_more_items_but_gives_up_what_it_holds() {
+    let Some((h, _)) = push_handler(Outcome::Sent).await else {
+        return;
+    };
+    let owner = Inbox::random();
+    open_inbox(&h, &owner).await;
+    assert_eq!(
+        ask(&h, None, subscribe(&owner, "https://ntfy.sh/up4")).await,
+        ServerMsg::Done
+    );
+    assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
+
+    let ServerMsg::InboxBatch { claim, items } = ask(&h, None, owner.close()).await else {
+        panic!("no batch");
+    };
+    assert_eq!(items.len(), 1);
+    assert!(is_error(
+        &ask(&h, None, put(owner.id())).await,
+        ErrorCode::NotFound
+    ));
+    assert_eq!(h.store.push_subscription(&owner.id()).await.unwrap(), None);
+    assert_eq!(ask(&h, None, owner.ack(claim)).await, ServerMsg::Done);
+    let ServerMsg::InboxBatch { items, .. } = ask(&h, None, owner.close()).await else {
+        panic!("no batch");
+    };
+    assert!(items.is_empty());
 }
 
 fn publish_devices(list: &DeviceList) -> ClientMsg {
@@ -469,7 +601,7 @@ async fn onion_requests_are_answered_once_and_only_while_fresh() {
     let seal_at = |frame: &[u8], at| {
         cypher_crypto::onion::seal_request(key.epoch, &key.public, frame, at, &mut OsRng).unwrap()
     };
-    let fetch = Frame::new(1, ClientMsg::InboxFetch { secret: random32() }).encode();
+    let fetch = Frame::new(1, Inbox::random().fetch()).encode();
     let seal = |at| seal_at(&fetch, at);
 
     let (fresh, reply) = seal(now);
@@ -555,11 +687,11 @@ async fn onion_requests_needing_an_identity_are_dropped() {
 #[tokio::test]
 async fn an_inbox_holds_a_bounded_number_of_bytes_until_read() {
     let Some(h) = handler(None).await else { return };
-    let secret = random32();
-    open_inbox(&h, secret).await;
+    let owner = Inbox::random();
+    open_inbox(&h, &owner).await;
     let item = Bytes::from(vec![7u8; cypher_wire::MAX_INBOX_ITEM_LEN]);
     let put = || ClientMsg::InboxPut {
-        inbox: inbox_id(&secret),
+        inbox: owner.id(),
         item: item.clone(),
     };
     let fit = crate::store::MAX_INBOX_BYTES / item.len();
@@ -569,30 +701,28 @@ async fn an_inbox_holds_a_bounded_number_of_bytes_until_read() {
     assert!(is_error(&ask(&h, None, put()).await, ErrorCode::TooLarge));
 
     // Reading and acknowledging frees the quota again.
-    let ServerMsg::InboxBatch { claim, items } =
-        ask(&h, None, ClientMsg::InboxFetch { secret }).await
-    else {
+    let ServerMsg::InboxBatch { claim, items } = ask(&h, None, owner.fetch()).await else {
         panic!("no batch");
     };
     assert!(!items.is_empty());
-    ask(&h, None, ClientMsg::InboxAck { secret, claim }).await;
+    ask(&h, None, owner.ack(claim)).await;
     assert!(matches!(ask(&h, None, put()).await, ServerMsg::Done));
 }
 
 #[tokio::test]
 async fn writes_do_not_extend_an_inbox() {
     let Some(h) = handler(None).await else { return };
-    let secret = random32();
-    open_inbox(&h, secret).await;
+    let owner = Inbox::random();
+    open_inbox(&h, &owner).await;
     let put = ClientMsg::InboxPut {
-        inbox: inbox_id(&secret),
+        inbox: owner.id(),
         item: Bytes::from_static(b"x"),
     };
     ask(&h, None, put.clone()).await;
-    let first = h.store.ttl(b"i:", &inbox_id(&secret)).await;
+    let first = h.store.ttl(b"i:", &owner.id()).await;
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     ask(&h, None, put).await;
-    assert!(h.store.ttl(b"i:", &inbox_id(&secret)).await < first);
+    assert!(h.store.ttl(b"i:", &owner.id()).await < first);
 }
 
 #[tokio::test]
@@ -696,18 +826,13 @@ async fn push_handler(outcome: Outcome) -> Option<(Handler, Sent)> {
     Some((h, sent))
 }
 
-/// A device's push subscription for `secret`'s inbox.
-fn subscribe(secret: [u8; 32], endpoint: &str) -> ClientMsg {
+/// A device's push subscription for `owner`'s inbox.
+fn subscribe(owner: &Inbox, endpoint: &str) -> ClientMsg {
     use p256::elliptic_curve::sec1::ToEncodedPoint as _;
     let point = p256::SecretKey::random(&mut OsRng)
         .public_key()
         .to_encoded_point(false);
-    ClientMsg::PushRegister {
-        secret,
-        endpoint: endpoint.into(),
-        p256dh: point.as_bytes().try_into().unwrap(),
-        auth: [1; 16],
-    }
+    owner.register(endpoint, point.as_bytes().try_into().unwrap())
 }
 
 fn put(inbox: [u8; 32]) -> ClientMsg {
@@ -733,21 +858,16 @@ async fn push_is_registered_anonymously_and_signals_once_per_burst() {
     };
     assert_eq!(capabilities & CAPABILITY_PUSH, CAPABILITY_PUSH);
 
-    let secret = random32();
-    let inbox = inbox_id(&secret);
-    open_inbox(&h, secret).await;
-    let register = subscribe(secret, "https://ntfy.sh/up1");
+    let owner = Inbox::random();
+    let inbox = owner.id();
+    open_inbox(&h, &owner).await;
+    let register = subscribe(&owner, "https://ntfy.sh/up1");
     // Over the session it would tie the push address to an identity.
     let signed_in = ask(&h, Some(PeerId(random32())), register.clone()).await;
     assert!(is_error(&signed_in, ErrorCode::BadRequest));
     for bad in [
-        subscribe(secret, "http://ntfy.sh/up1"),
-        ClientMsg::PushRegister {
-            secret,
-            endpoint: "https://ntfy.sh/up1".into(),
-            p256dh: [0; 65],
-            auth: [1; 16],
-        },
+        subscribe(&owner, "http://ntfy.sh/up1"),
+        owner.register("https://ntfy.sh/up1", [0; 65]),
     ] {
         assert!(is_error(&ask(&h, None, bad).await, ErrorCode::BadRequest));
     }
@@ -763,10 +883,7 @@ async fn push_is_registered_anonymously_and_signals_once_per_burst() {
     // The store keeps the subscription by inbox, nothing else.
     let kept = h.store.push_subscription(&inbox).await.unwrap().unwrap();
     assert_eq!(kept, got[0].to_bytes());
-    assert_eq!(
-        ask(&h, None, ClientMsg::PushUnregister { secret }).await,
-        ServerMsg::Done
-    );
+    assert_eq!(ask(&h, None, owner.unregister()).await, ServerMsg::Done);
     assert_eq!(h.store.push_subscription(&inbox).await.unwrap(), None);
 }
 
@@ -775,11 +892,11 @@ async fn a_subscription_the_push_service_dropped_is_forgotten() {
     let Some((h, sent)) = push_handler(Outcome::Gone).await else {
         return;
     };
-    let secret = random32();
-    let inbox = inbox_id(&secret);
-    open_inbox(&h, secret).await;
+    let owner = Inbox::random();
+    let inbox = owner.id();
+    open_inbox(&h, &owner).await;
     assert_eq!(
-        ask(&h, None, subscribe(secret, "https://ntfy.sh/up2")).await,
+        ask(&h, None, subscribe(&owner, "https://ntfy.sh/up2")).await,
         ServerMsg::Done
     );
     assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
@@ -794,7 +911,7 @@ async fn without_a_vapid_key_push_is_unavailable() {
         &ask(&h, None, ClientMsg::PushKey).await,
         ErrorCode::Unavailable
     ));
-    let register = subscribe(random32(), "https://ntfy.sh/up3");
+    let register = subscribe(&Inbox::random(), "https://ntfy.sh/up3");
     assert!(is_error(
         &ask(&h, None, register).await,
         ErrorCode::Unavailable

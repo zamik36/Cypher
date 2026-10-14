@@ -68,29 +68,59 @@ pub enum ClientMsg {
         inbox: [u8; 32],
         item: Bytes,
     },
-    /// The inbox is addressed by `H(secret)`; knowing only the id is not
-    /// enough to read or delete its contents.
+    /// The items waiting in the inbox; with `close`, the last fetch of an
+    /// inbox no longer announced, which then stops taking items.
     InboxFetch {
-        secret: [u8; 32],
+        proof: InboxProof,
+        close: bool,
     },
     InboxAck {
-        secret: [u8; 32],
+        proof: InboxProof,
         claim: [u8; 16],
     },
     Bootstrap,
     /// The server's VAPID public key, for subscribing to Web Push.
     PushKey,
-    /// Signal `endpoint` whenever the inbox `H(secret)` receives an item.
-    /// Anonymous only: tying it to the session would link push and identity.
+    /// Signal `endpoint` whenever the inbox receives an item. Anonymous
+    /// only: tying it to the session would link push and identity.
     PushRegister {
-        secret: [u8; 32],
+        proof: InboxProof,
         endpoint: String,
         p256dh: [u8; 65],
         auth: [u8; 16],
     },
     PushUnregister {
-        secret: [u8; 32],
+        proof: InboxProof,
     },
+}
+
+/// That the owner of `inbox` (an Ed25519 public key) made a request at
+/// `timestamp` (unix seconds): its signature over what the request does
+/// (`cypher_crypto::inbox`). Reading an inbox never hands the server a
+/// secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InboxProof {
+    pub inbox: [u8; 32],
+    pub timestamp: u64,
+    pub signature: [u8; 64],
+}
+
+impl InboxProof {
+    const LEN: usize = 32 + 8 + 64;
+
+    fn put(&self, b: &mut BytesMut) {
+        b.put_slice(&self.inbox);
+        b.put_u64_le(self.timestamp);
+        b.put_slice(&self.signature);
+    }
+
+    fn read(r: &mut Reader) -> Result<Self, WireError> {
+        Ok(Self {
+            inbox: r.array()?,
+            timestamp: u64::from_le_bytes(r.array()?),
+            signature: r.array()?,
+        })
+    }
 }
 
 /// Server → client messages.
@@ -336,35 +366,37 @@ impl Frame<ClientMsg> {
                 b.put_slice(item);
                 b
             }
-            M::InboxFetch { secret } => {
-                let mut b = header(kind::INBOX_FETCH, id, 32);
-                b.put_slice(secret);
+            M::InboxFetch { proof, close } => {
+                let mut b = header(kind::INBOX_FETCH, id, InboxProof::LEN + 1);
+                proof.put(&mut b);
+                b.put_u8(u8::from(*close));
                 b
             }
-            M::InboxAck { secret, claim } => {
-                let mut b = header(kind::INBOX_ACK, id, 48);
-                b.put_slice(secret);
+            M::InboxAck { proof, claim } => {
+                let mut b = header(kind::INBOX_ACK, id, InboxProof::LEN + 16);
+                proof.put(&mut b);
                 b.put_slice(claim);
                 b
             }
             M::Bootstrap => header(kind::BOOTSTRAP, id, 0),
             M::PushKey => header(kind::PUSH_KEY, id, 0),
             M::PushRegister {
-                secret,
+                proof,
                 endpoint,
                 p256dh,
                 auth,
             } => {
-                let mut b = header(kind::PUSH_REGISTER, id, endpoint.len().saturating_add(117));
-                b.put_slice(secret);
+                let len = endpoint.len().saturating_add(InboxProof::LEN + 85);
+                let mut b = header(kind::PUSH_REGISTER, id, len);
+                proof.put(&mut b);
                 b.put_slice(p256dh);
                 b.put_slice(auth);
                 b.put_bytes_prefixed(endpoint.as_bytes());
                 b
             }
-            M::PushUnregister { secret } => {
-                let mut b = header(kind::PUSH_UNREGISTER, id, 32);
-                b.put_slice(secret);
+            M::PushUnregister { proof } => {
+                let mut b = header(kind::PUSH_UNREGISTER, id, InboxProof::LEN);
+                proof.put(&mut b);
                 b
             }
         };
@@ -443,21 +475,30 @@ impl Frame<ClientMsg> {
                 }
                 return Ok(Self::new(req_id, M::InboxPut { inbox, item }));
             }
-            kind::INBOX_FETCH => M::InboxFetch { secret: r.array()? },
+            kind::INBOX_FETCH => M::InboxFetch {
+                proof: InboxProof::read(&mut r)?,
+                close: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(WireError::Malformed),
+                },
+            },
             kind::INBOX_ACK => M::InboxAck {
-                secret: r.array()?,
+                proof: InboxProof::read(&mut r)?,
                 claim: r.array()?,
             },
             kind::BOOTSTRAP => M::Bootstrap,
             kind::PUSH_KEY => M::PushKey,
             kind::PUSH_REGISTER => M::PushRegister {
-                secret: r.array()?,
+                proof: InboxProof::read(&mut r)?,
                 p256dh: r.array()?,
                 auth: r.array()?,
                 endpoint: String::from_utf8(r.bytes(MAX_PUSH_ENDPOINT_LEN)?.to_vec())
                     .map_err(|_| WireError::Malformed)?,
             },
-            kind::PUSH_UNREGISTER => M::PushUnregister { secret: r.array()? },
+            kind::PUSH_UNREGISTER => M::PushUnregister {
+                proof: InboxProof::read(&mut r)?,
+            },
             other => return Err(WireError::UnknownKind(other)),
         };
         r.finish()?;
