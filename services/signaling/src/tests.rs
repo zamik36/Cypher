@@ -385,6 +385,42 @@ async fn introductions_are_answered_anonymously() {
     assert_eq!(with_opk, 20, "one-time prekeys stay rationed per target");
 }
 
+/// Instances agree on each epoch's onion key through Redis, publish the
+/// current and the next signed with the long-term key, and forget them.
+#[tokio::test]
+async fn onion_keys_are_shared_signed_and_rotate() {
+    use crate::keys::{EPOCH_SECS, OnionKeys, epoch_at};
+    use cypher_crypto::onion_keys::KeySet;
+
+    let Some(h) = handler(None).await else { return };
+    // Far in the future, so no other test's keys are in the way.
+    let now = (10_000 + u64::from(OsRng.next_u32() % 1_000_000)) * EPOCH_SECS + 3600;
+    let seed = random32();
+    let (one, two) = (OnionKeys::new(&seed), OnionKeys::new(&seed));
+    one.refresh(&h.store, now).await.unwrap();
+    two.refresh(&h.store, now).await.unwrap();
+    let epoch = epoch_at(now);
+    for e in [epoch, epoch + 1] {
+        let (a, b) = (one.secret(e).unwrap(), two.secret(e).unwrap());
+        assert_eq!(a.as_bytes(), b.as_bytes(), "epoch {e} agreed");
+    }
+    assert!(one.secret(epoch - 1).is_none(), "nothing made for the past");
+
+    let set = KeySet::verify(&one.key_set(now).unwrap(), &one.signing_key()).unwrap();
+    let epochs: Vec<u32> = set.keys().iter().map(|k| k.epoch).collect();
+    assert_eq!(epochs, [epoch, epoch + 1]);
+    assert_eq!(set.pick(now).unwrap().epoch, epoch);
+
+    // A week on, the old current is the previous, kept a while.
+    let later = now + EPOCH_SECS;
+    one.refresh(&h.store, later).await.unwrap();
+    assert!(one.secret(epoch).is_some());
+    assert!(one.secret(epoch + 2).is_some());
+    let set = KeySet::verify(&one.key_set(later).unwrap(), &one.signing_key()).unwrap();
+    assert_eq!(set.pick(later).unwrap().epoch, epoch + 1);
+    KeySet::verify(&one.key_set(later).unwrap(), &random32()).unwrap_err();
+}
+
 #[tokio::test]
 async fn bootstrap_advertises_the_onion_relay_when_configured() {
     let Some(with_relay) = handler(Some("relay.example:9300")).await else {

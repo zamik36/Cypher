@@ -6973,6 +6973,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

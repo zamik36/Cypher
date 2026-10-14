@@ -2,6 +2,7 @@
 //! request/reply. Stateless; all state lives in Redis.
 
 mod handler;
+mod keys;
 mod onion;
 mod push;
 mod store;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use async_nats::{Message, Subscriber};
 use cypher_server_kit::metrics::Metrics;
 use cypher_server_kit::{
-    PEER_HEADER, SIG_ONION_SUBJECT, SIG_QUEUE_GROUP, SIG_REQUEST_SUBJECT, secrets,
+    PEER_HEADER, SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT, SIG_QUEUE_GROUP, SIG_REQUEST_SUBJECT, secrets,
 };
 use cypher_types::PeerId;
 use futures::StreamExt;
@@ -27,6 +28,7 @@ use tracing::{info, warn};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use handler::Handler;
+use keys::OnionKeys;
 use store::Store;
 
 /// Requests handled at once, per source. Session requests (keys, links)
@@ -37,6 +39,11 @@ use store::Store;
 /// after its timeout and the client retries with backoff.
 const SESSION_PERMITS: usize = 1024;
 const ONION_PERMITS: usize = 64;
+/// Key sets are small and the relay caches them.
+const KEY_SET_PERMITS: usize = 16;
+/// How often the onion keys are looked at again: a new epoch's key is in
+/// place long before clients seal to it.
+const KEY_REFRESH: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -48,6 +55,10 @@ pub struct Config {
     pub metrics_addr: SocketAddr,
     #[serde(default = "default_onion_key_path")]
     pub onion_key_path: PathBuf,
+    /// The long-term key clients remember this server by; it signs the onion
+    /// keys. Back it up: clients refuse a server whose key changed.
+    #[serde(default = "default_signing_key_path")]
+    pub signing_key_path: PathBuf,
     /// Public `host:port` of the onion relay advertised to clients.
     pub relay_public_addr: Option<String>,
     /// Where the VAPID key for Web Push lives; push is off without it.
@@ -69,6 +80,9 @@ fn default_metrics_addr() -> SocketAddr {
 }
 fn default_onion_key_path() -> PathBuf {
     PathBuf::from("data/onion_key.bin")
+}
+fn default_signing_key_path() -> PathBuf {
+    PathBuf::from("data/signing_key.bin")
 }
 fn default_push_contact() -> String {
     "https://cyphermessanger.tech".into()
@@ -96,6 +110,7 @@ fn web_push(config: &Config) -> anyhow::Result<Option<handler::Pusher>> {
 struct Service {
     handler: Handler,
     onion_secret: StaticSecret,
+    keys: OnionKeys,
     nats: async_nats::Client,
     requests: IntCounter,
     onion_requests: IntCounter,
@@ -131,7 +146,9 @@ impl Service {
         let Some(reply_to) = msg.reply.clone() else {
             return;
         };
-        let reply = if subject == SIG_ONION_SUBJECT {
+        let reply = if subject == SIG_KEYS_SUBJECT {
+            self.keys.key_set(now_secs()).map(bytes::Bytes::from)
+        } else if subject == SIG_ONION_SUBJECT {
             self.onion_requests.inc();
             onion::handle(&self.handler, &self.onion_secret, &msg.payload).await
         } else {
@@ -151,6 +168,31 @@ impl Service {
     }
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Keeps the onion keys for the current and the next epoch in place until
+/// `shutdown`.
+async fn refresh_keys(service: Arc<Service>, shutdown: CancellationToken) {
+    let mut every = tokio::time::interval(KEY_REFRESH);
+    every.tick().await;
+    while tokio::select! {
+        _ = every.tick() => true,
+        () = shutdown.cancelled() => false,
+    } {
+        if let Err(e) = service
+            .keys
+            .refresh(&service.handler.store, now_secs())
+            .await
+        {
+            warn!("refreshing the onion keys failed: {e}");
+        }
+    }
+}
+
 /// Serves signaling requests from NATS until `shutdown` is cancelled.
 pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<()> {
     let registry = Metrics::new()?;
@@ -165,6 +207,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     );
 
     let onion_secret = StaticSecret::from(secrets::load_or_create_secret(&config.onion_key_path)?);
+    let keys = OnionKeys::new(&secrets::load_or_create_secret(&config.signing_key_path)?);
     let push = web_push(&config)?;
     let relay_addr = config.relay_public_addr.filter(|addr| {
         let valid = cypher_wire::relay_addr_is_valid(addr);
@@ -181,6 +224,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
             push,
         },
         onion_secret,
+        keys,
         nats: cypher_server_kit::connect_nats(&config.nats).await?,
         requests: registry.counter("signaling_requests_total", "Session requests handled")?,
         onion_requests: registry
@@ -191,13 +235,20 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         )?,
     });
 
+    service
+        .keys
+        .refresh(&service.handler.store, now_secs())
+        .await?;
     let sessions = service.subscribe(SIG_REQUEST_SUBJECT).await?;
     let onion = service.subscribe(SIG_ONION_SUBJECT).await?;
+    let key_sets = service.subscribe(SIG_KEYS_SUBJECT).await?;
     registry.set_ready(service.nats.clone());
     info!("signaling ready");
     tokio::select! {
         () = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, sessions, SESSION_PERMITS) => {}
         () = Arc::clone(&service).serve(SIG_ONION_SUBJECT, onion, ONION_PERMITS) => {}
+        () = Arc::clone(&service).serve(SIG_KEYS_SUBJECT, key_sets, KEY_SET_PERMITS) => {}
+        () = refresh_keys(Arc::clone(&service), shutdown.clone()) => {}
         () = shutdown.cancelled() => {}
     }
     let _ = service.nats.flush().await;

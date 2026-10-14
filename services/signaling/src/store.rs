@@ -246,6 +246,32 @@ impl Store {
             .map(|r| r.is_some())
     }
 
+    /// An epoch's onion key as stored, wrapped.
+    pub(crate) async fn onion_key(&self, epoch: u32) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut redis = self.redis.clone();
+        redis.get(key(b"x:", &epoch.to_le_bytes())).await
+    }
+
+    /// Stores an epoch's wrapped onion key for `ttl_secs`, unless another
+    /// instance stored one first.
+    pub(crate) async fn put_onion_key(
+        &self,
+        epoch: u32,
+        wrapped: &[u8],
+        ttl_secs: u64,
+    ) -> redis::RedisResult<()> {
+        let mut redis = self.redis.clone();
+        redis::cmd("SET")
+            .arg(key(b"x:", &epoch.to_le_bytes()))
+            .arg(wrapped)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl_secs)
+            .query_async::<Option<String>>(&mut redis)
+            .await
+            .map(drop)
+    }
+
     /// Remembers an onion request; `false` when it was already seen.
     pub(crate) async fn first_seen(&self, replay_id: &[u8; 32]) -> redis::RedisResult<bool> {
         let mut redis = self.redis.clone();

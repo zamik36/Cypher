@@ -13,6 +13,8 @@ pub const PEER_HEADER: &str = "cy-peer";
 
 pub const SIG_REQUEST_SUBJECT: &str = "sig.req";
 pub const SIG_ONION_SUBJECT: &str = "sig.onion";
+/// Signaling's signed onion key set, asked for through the relay.
+pub const SIG_KEYS_SUBJECT: &str = "sig.keys";
 pub const SIG_QUEUE_GROUP: &str = "signaling";
 
 /// Subject on which the gateway of one connected device of a peer accepts
