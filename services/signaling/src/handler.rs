@@ -29,6 +29,11 @@ const DEVICE_FETCHES_PER_HOUR: u32 = 120;
 /// Device lists one identity may publish per hour: linking and unlinking
 /// are rare.
 const DEVICE_PUBLISHES_PER_HOUR: u32 = 10;
+/// Lookups of one invite per hour, whoever asks: only those it was given to
+/// know the code, so this cannot be used to make a stranger's invite fail.
+const RESOLVES_PER_LINK_PER_HOUR: u32 = 20;
+/// Invites one identity may look up per hour.
+const RESOLVES_PER_HOUR: u32 = 60;
 const HOUR_SECS: u64 = 3600;
 
 pub(crate) struct Handler {
@@ -116,7 +121,9 @@ impl Handler {
                 self.fetch_devices(&peer, &target).await
             }
             (ClientMsg::CreateLink, Some(peer)) => self.create_link(&peer).await,
-            (ClientMsg::ResolveLink { link }, Some(_)) => self.resolve_link(&link).await,
+            (ClientMsg::ResolveLink { link }, Some(peer)) => {
+                self.resolve_link(Some(&peer), &link).await
+            }
             (ClientMsg::InboxPut { inbox, item }, _) => self.inbox_put(&inbox, &item).await,
             (ClientMsg::InboxFetch { secret }, _) => self.inbox_fetch(&secret).await,
             (ClientMsg::InboxAck { secret, claim }, _) => self
@@ -351,7 +358,26 @@ impl Handler {
         })
     }
 
-    async fn resolve_link(&self, link: &LinkId) -> redis::RedisResult<ServerMsg> {
+    /// Who made the invite `link`. Bounded per invite, and per identity when
+    /// one asks.
+    async fn resolve_link(
+        &self,
+        requester: Option<&PeerId>,
+        link: &LinkId,
+    ) -> redis::RedisResult<ServerMsg> {
+        if let Some(peer) = requester
+            && !self.admit(b"rq:", peer, RESOLVES_PER_HOUR).await?
+        {
+            return Ok(error(ErrorCode::RateLimited));
+        }
+        let bucket = [b"rl:".as_slice(), link.as_str().as_bytes()].concat();
+        if !self
+            .store
+            .admit(&bucket, RESOLVES_PER_LINK_PER_HOUR, HOUR_SECS)
+            .await?
+        {
+            return Ok(error(ErrorCode::RateLimited));
+        }
         Ok(match self.store.resolve_link(link).await? {
             Some(peer) => ServerMsg::LinkResolved { peer },
             None => error(ErrorCode::NotFound),

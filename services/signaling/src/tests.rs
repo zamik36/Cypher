@@ -475,6 +475,44 @@ async fn links_are_rate_limited_per_identity() {
     ));
 }
 
+/// One invite is looked up a bounded number of times, and one identity looks
+/// up a bounded number of invites.
+#[tokio::test]
+async fn invite_lookups_are_rate_limited_per_invite_and_per_identity() {
+    let Some(h) = handler(None).await else { return };
+    let host = Some(IdentityKeyPair::generate().peer_id());
+    let ServerMsg::LinkCreated { link } = ask(&h, host, ClientMsg::CreateLink).await else {
+        panic!("link not created");
+    };
+    let resolve = |link: &LinkId| ClientMsg::ResolveLink { link: link.clone() };
+    for _ in 0..20 {
+        let asker = Some(IdentityKeyPair::generate().peer_id());
+        assert!(matches!(
+            ask(&h, asker, resolve(&link)).await,
+            ServerMsg::LinkResolved { .. }
+        ));
+    }
+    let late = Some(IdentityKeyPair::generate().peer_id());
+    assert!(is_error(
+        &ask(&h, late, resolve(&link)).await,
+        ErrorCode::RateLimited
+    ));
+
+    let busy = Some(IdentityKeyPair::generate().peer_id());
+    for _ in 0..60 {
+        let unknown = LinkId::random(&mut OsRng);
+        assert!(is_error(
+            &ask(&h, busy, resolve(&unknown)).await,
+            ErrorCode::NotFound
+        ));
+    }
+    let one_more = LinkId::random(&mut OsRng);
+    assert!(is_error(
+        &ask(&h, busy, resolve(&one_more)).await,
+        ErrorCode::RateLimited
+    ));
+}
+
 #[tokio::test]
 async fn one_time_prekeys_cannot_be_drained_or_hoarded() {
     let Some(h) = handler(None).await else { return };
