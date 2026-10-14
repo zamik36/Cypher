@@ -2,6 +2,7 @@
 // prefixes) and the auth signature against Ed25519 verification.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import * as ed from "@noble/ed25519";
@@ -10,9 +11,16 @@ import * as p from "./protocol.js";
 
 const peer = new Uint8Array(32).fill(7);
 
-test("hello carries version 3, the peer id and the device", () => {
+test("the load client speaks the gateway's protocol version", () => {
+  const wire = readFileSync(new URL("../../../crates/cypher-wire/src/lib.rs", import.meta.url), "utf8");
+  const version = /pub const PROTOCOL_VERSION: u16 = (\d+);/.exec(wire);
+  assert.ok(version, "PROTOCOL_VERSION not found in cypher-wire");
+  assert.equal(p.PROTOCOL_VERSION, Number(version[1]));
+});
+
+test("hello carries the version, the peer id and the device", () => {
   const bytes = new Uint8Array(p.hello(0x01020304, peer));
-  assert.deepEqual(Array.from(bytes.subarray(0, 7)), [0x01, 4, 3, 2, 1, 3, 0]);
+  assert.deepEqual(Array.from(bytes.subarray(0, 7)), [0x01, 4, 3, 2, 1, p.PROTOCOL_VERSION, 0]);
   assert.deepEqual(bytes.subarray(7, 39), peer);
   assert.deepEqual(Array.from(bytes.subarray(39)), [1, 0, 0, 0]);
   assert.equal(bytes.length, 43);

@@ -7,7 +7,7 @@ import { sha512 } from "@noble/hashes/sha2.js";
 
 ed.hashes.sha512 = sha512;
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export const Kind = Object.freeze({
   Hello: 0x01,
