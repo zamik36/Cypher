@@ -14,6 +14,7 @@ pub mod fingerprint;
 pub mod handshake;
 pub mod identity;
 pub mod identity_file;
+pub mod inbox;
 mod kdf;
 pub mod onion;
 pub mod onion_keys;
