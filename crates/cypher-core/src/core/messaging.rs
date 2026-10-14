@@ -292,7 +292,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.request(
                 ClientMsg::FetchKeys { peer, device },
                 Pending::FetchKeys { link, addr },
-                false,
+                true,
             );
         }
     }

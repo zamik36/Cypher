@@ -43,6 +43,10 @@ pub(crate) struct Server {
     rng: Option<Rng>,
     pub session_inbox_ops: usize,
     pub onion_inbox_ops: usize,
+    /// Invite lookups, device lists and keys asked for over the session and
+    /// through the onion.
+    pub session_intro_ops: usize,
+    pub onion_intro_ops: usize,
     /// Push requests that came over the session instead of the relay.
     pub session_push_ops: usize,
     /// Push endpoint per inbox, and the inboxes signalled so far.
@@ -244,6 +248,14 @@ impl World {
         self.clients[i]
             .inputs
             .push_back(Input::AnonymousChannel { up: self.relay_up });
+    }
+
+    /// Client `i`'s relay channel goes up or down.
+    pub(crate) fn set_relay(&mut self, i: usize, up: bool) {
+        self.clients[i]
+            .inputs
+            .push_back(Input::AnonymousChannel { up });
+        self.run();
     }
 
     pub(crate) fn disconnect(&mut self, i: usize) {
@@ -584,6 +596,19 @@ impl World {
                 }
                 self.serve_inbox(from, req_id, msg);
             }
+            ClientMsg::FetchKeys { .. }
+            | ClientMsg::FetchDevices { .. }
+            | ClientMsg::ResolveLink { .. }
+                if self.onion_ctx.is_some() || authed.is_some() =>
+            {
+                if self.onion_ctx.is_some() {
+                    self.server.onion_intro_ops += 1;
+                } else {
+                    self.server.session_intro_ops += 1;
+                }
+                let answer = self.introduce(msg);
+                self.respond(from, &reply(answer));
+            }
             ClientMsg::PushKey
             | ClientMsg::PushRegister { .. }
             | ClientMsg::PushUnregister { .. } => {
@@ -672,19 +697,6 @@ impl World {
                 let opks_left = entry.opks.len() as u16;
                 self.respond(from, &reply(ServerMsg::KeysAck { opks_left }));
             }
-            ClientMsg::FetchKeys { peer, device } => {
-                self.server.key_fetches += 1;
-                let msg = match self.server.keys.get_mut(&Addr::new(peer, device)) {
-                    Some(k) => ServerMsg::Keys {
-                        base: k.base.clone(),
-                        opk: k.opks.pop(),
-                    },
-                    None => ServerMsg::Error {
-                        code: ErrorCode::NotFound,
-                    },
-                };
-                self.respond(from, &reply(msg));
-            }
             ClientMsg::PublishDevices { list } => {
                 let me = authed.unwrap().peer;
                 let msg = match DeviceList::decode(&list) {
@@ -712,32 +724,12 @@ impl World {
                 };
                 self.respond(from, &reply(msg));
             }
-            ClientMsg::FetchDevices { peer } => {
-                let msg = match self.server.devices.get(&peer) {
-                    Some(list) => ServerMsg::Devices {
-                        list: Bytes::from(list.encode()),
-                    },
-                    None => ServerMsg::Error {
-                        code: ErrorCode::NotFound,
-                    },
-                };
-                self.respond(from, &reply(msg));
-            }
             ClientMsg::CreateLink => {
                 let link = LinkId::random(self.server.rng.as_mut().unwrap());
                 self.server
                     .links
                     .insert(link.to_string(), authed.unwrap().peer);
                 self.respond(from, &reply(ServerMsg::LinkCreated { link }));
-            }
-            ClientMsg::ResolveLink { link } => {
-                let msg = match self.server.links.get(link.as_str()) {
-                    Some(peer) => ServerMsg::LinkResolved { peer: *peer },
-                    None => ServerMsg::Error {
-                        code: ErrorCode::NotFound,
-                    },
-                };
-                self.respond(from, &reply(msg));
             }
             ClientMsg::Bootstrap => self.respond(
                 from,
@@ -749,9 +741,43 @@ impl World {
             ),
             ClientMsg::InboxPut { .. }
             | ClientMsg::InboxFetch { .. }
-            | ClientMsg::InboxAck { .. } => {
-                panic!("unauthenticated inbox request")
+            | ClientMsg::InboxAck { .. }
+            | ClientMsg::FetchKeys { .. }
+            | ClientMsg::FetchDevices { .. }
+            | ClientMsg::ResolveLink { .. } => {
+                panic!("unauthenticated request")
             }
+        }
+    }
+
+    /// An invite looked up, or a device list or keys fetched: answered alike
+    /// whoever asks.
+    fn introduce(&mut self, msg: ClientMsg) -> ServerMsg {
+        let not_found = ServerMsg::Error {
+            code: ErrorCode::NotFound,
+        };
+        match msg {
+            ClientMsg::FetchKeys { peer, device } => {
+                self.server.key_fetches += 1;
+                match self.server.keys.get_mut(&Addr::new(peer, device)) {
+                    Some(k) => ServerMsg::Keys {
+                        base: k.base.clone(),
+                        opk: k.opks.pop(),
+                    },
+                    None => not_found,
+                }
+            }
+            ClientMsg::FetchDevices { peer } => match self.server.devices.get(&peer) {
+                Some(list) => ServerMsg::Devices {
+                    list: Bytes::from(list.encode()),
+                },
+                None => not_found,
+            },
+            ClientMsg::ResolveLink { link } => match self.server.links.get(link.as_str()) {
+                Some(peer) => ServerMsg::LinkResolved { peer: *peer },
+                None => not_found,
+            },
+            _ => unreachable!("only introductions come here"),
         }
     }
 

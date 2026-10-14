@@ -882,6 +882,87 @@ fn inbox_falls_back_to_session_only_when_allowed() {
     );
 }
 
+/// Looking up an invite, a contact's devices and their keys goes through
+/// the onion relay: signaling answers without learning who asks.
+#[test]
+fn introductions_go_through_the_onion() {
+    let mut w = paired();
+    w.add_device(B, 2);
+    w.advance(60 * 60_000);
+    w.send_text(A, B, "to both of you");
+    assert_eq!(w.server.session_intro_ops, 0);
+    assert!(
+        w.server.onion_intro_ops >= 4,
+        "invite, devices, keys, refresh"
+    );
+}
+
+/// A client that has B with the relay not up yet: a fresh connection whose
+/// relay channel is down.
+fn waiting_for_the_relay(require_onion: bool) -> (World, String) {
+    let mut w = World::new(2);
+    let link = w.create_link(A);
+    if require_onion {
+        w.command(B, Command::SetAnonymity { require_onion });
+    }
+    w.relay_up = false;
+    w.disconnect(B);
+    w.connect(B);
+    w.run();
+    (w, link)
+}
+
+/// An invite used before the relay is up waits for it, then goes through it.
+#[test]
+fn a_join_made_while_waiting_for_the_relay_goes_through_it() {
+    let (mut w, link) = waiting_for_the_relay(false);
+    w.command(B, Command::JoinLink { link });
+    assert!(!w.has_event(B, |e| matches!(e, Event::JoinFailed { .. })));
+    assert!(!w.has_event(B, |e| matches!(e, Event::PeerAdded { .. })));
+
+    w.set_relay(B, true);
+    assert!(w.has_event(B, |e| matches!(e, Event::PeerAdded { .. })));
+    assert_eq!(w.server.session_intro_ops, 0);
+}
+
+/// Without the relay, an invite goes over the session once the wait is
+/// over; unless the user requires the onion, when it fails instead.
+#[test]
+fn without_the_relay_a_join_falls_back_only_when_allowed() {
+    let (mut w, link) = waiting_for_the_relay(false);
+    w.command(B, Command::JoinLink { link });
+    w.advance(11_000);
+    assert!(w.has_event(B, |e| matches!(e, Event::PeerAdded { .. })));
+    assert!(w.server.session_intro_ops > 0);
+
+    let (mut w, link) = waiting_for_the_relay(true);
+    w.command(B, Command::JoinLink { link });
+    w.advance(11_000);
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::JoinFailed {
+            reason: FailReason::Offline,
+            ..
+        }
+    )));
+    assert_eq!(w.server.session_intro_ops, 0);
+}
+
+/// Requests waiting for the relay fail when the connection goes.
+#[test]
+fn a_join_waiting_for_the_relay_fails_with_the_connection() {
+    let (mut w, link) = waiting_for_the_relay(false);
+    w.command(B, Command::JoinLink { link });
+    w.disconnect(B);
+    assert!(w.has_event(B, |e| matches!(
+        e,
+        Event::JoinFailed {
+            reason: FailReason::Offline,
+            ..
+        }
+    )));
+}
+
 /// A server that answers a share link with another identity (its own, or
 /// someone it wants in the middle) is caught by the link's fingerprint.
 #[test]

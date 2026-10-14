@@ -133,7 +133,7 @@ impl<R: CryptoRngCore> Core<R> {
                 peer,
                 purpose: DevicesFor::Own,
             },
-            false,
+            true,
         );
     }
 
@@ -168,7 +168,7 @@ impl<R: CryptoRngCore> Core<R> {
                 peer,
                 purpose: DevicesFor::Refresh,
             },
-            false,
+            true,
         );
     }
 
