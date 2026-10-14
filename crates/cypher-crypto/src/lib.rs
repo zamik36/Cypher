@@ -16,6 +16,7 @@ pub mod identity;
 pub mod identity_file;
 mod kdf;
 pub mod onion;
+pub mod onion_keys;
 pub mod prekey;
 mod reader;
 pub mod sealed;
