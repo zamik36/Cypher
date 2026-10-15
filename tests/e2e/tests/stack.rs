@@ -11,6 +11,10 @@ async fn user_journey_against_in_process_stack() {
         return;
     };
     e2e::journey(stack.target()).await;
+    // Once contacts have told each other their tokens, messages go sealed:
+    // the gateway hands them over without knowing who sends.
+    assert!(stack.counter("gateway_sealed_delivered_total").await > 0);
+    assert_eq!(stack.counter("gateway_sealed_refused_total").await, 0);
     stack.stop().await;
 }
 

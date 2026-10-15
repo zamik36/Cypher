@@ -113,6 +113,20 @@ impl Stack {
         &self.metrics
     }
 
+    /// A counter's value across the services now, 0 if none exports it.
+    pub async fn counter(&self, name: &str) -> u64 {
+        let mut total = 0;
+        for &addr in &self.metrics {
+            let exposition = scrape(addr).await.unwrap();
+            total += exposition
+                .lines()
+                .filter_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+                .filter_map(|value| value.trim().parse::<u64>().ok())
+                .sum::<u64>();
+        }
+        total
+    }
+
     pub fn target(&self) -> &Target {
         &self.target
     }
@@ -124,6 +138,22 @@ impl Stack {
             service.await.unwrap().unwrap();
         }
     }
+}
+
+/// A service's metrics exposition.
+pub async fn scrape(addr: SocketAddr) -> std::io::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut conn = tokio::net::TcpStream::connect(addr).await?;
+    conn.write_all(
+        b"GET /metrics HTTP/1.1
+Connection: close
+
+",
+    )
+    .await?;
+    let mut response = String::new();
+    conn.read_to_string(&mut response).await?;
+    Ok(response)
 }
 
 fn nats(url: &str, user: &str) -> NatsConfig {

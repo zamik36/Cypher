@@ -12,4 +12,4 @@ mod journey;
 mod stack;
 
 pub use journey::{Target, linking, restoring, run as journey};
-pub use stack::Stack;
+pub use stack::{Stack, scrape};

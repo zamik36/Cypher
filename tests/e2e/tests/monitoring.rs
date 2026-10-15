@@ -4,12 +4,9 @@
 //! `CYPHER_TEST_NATS`; skipped otherwise.
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
 use std::path::Path;
 
-use e2e::Stack;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use e2e::{Stack, scrape};
 
 /// Prefixes of the metrics the services export themselves. Exporters
 /// (redis_, gnatsd_, node_, probe_) are not checked here.
@@ -47,15 +44,6 @@ async fn dashboards_and_alerts_name_only_exported_metrics() {
             source.display()
         );
     }
-}
-
-async fn scrape(addr: SocketAddr) -> std::io::Result<String> {
-    let mut conn = TcpStream::connect(addr).await?;
-    conn.write_all(b"GET /metrics HTTP/1.1\r\nConnection: close\r\n\r\n")
-        .await?;
-    let mut response = String::new();
-    conn.read_to_string(&mut response).await?;
-    Ok(response)
 }
 
 /// Metric names in a Prometheus text exposition.
