@@ -363,12 +363,12 @@ impl<R: CryptoRngCore> Core<R> {
             return Some((self.own_inbox_of(addr.device), own_dh));
         }
         let peer = self.peers.get(&addr.peer)?;
-        let inbox = self
+        let ad = self
             .sessions
             .get(&addr)
             .and_then(|s| s.inbox)
             .or_else(|| peer.inbox_of(addr.device))?;
-        Some((inbox, peer.identity_dh))
+        Some((ad.at(self.inbox_epoch()), peer.identity_dh))
     }
 
     pub(super) fn on_send_failed(&mut self, msg_id: MsgId, device: DeviceId) {
@@ -447,6 +447,16 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist_outbox(&msg_id);
         self.report(msg_id, status);
         self.trim_awaiting(&peer);
+    }
+
+    /// The inbox was closed or never opened. Most likely what we know of it
+    /// is old and the device tells its new one soon: try again later, and
+    /// check that the device is still listed.
+    pub(super) fn on_inbox_gone(&mut self, msg_id: MsgId, addr: Addr) {
+        self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS);
+        if addr.peer != self.peer_id {
+            self.refresh_devices(addr.peer);
+        }
     }
 
     /// A device answered for a message (a receipt), or will never need to:

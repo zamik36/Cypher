@@ -37,9 +37,27 @@ pub struct Envelope {
     pub body: Body,
 }
 
+/// The inboxes one device reads, as it tells its contacts: the one of
+/// `epoch` and the next, so a contact writes to the right one across the
+/// turn of the week without waiting to hear again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxAd {
+    pub epoch: u32,
+    pub ids: [[u8; 32]; 2],
+}
+
+impl InboxAd {
+    /// The inbox to write to in `epoch`.
+    pub fn at(&self, epoch: u32) -> [u8; 32] {
+        let [this, next] = self.ids;
+        if epoch > self.epoch { next } else { this }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Body {
     Hello {
+        /// The inbox an older peer writes to: the first of `ad`.
         inbox: [u8; 32],
         /// The name the sender goes by. Appended last: an older peer reads
         /// `inbox` and takes the rest for padding, and from an older peer
@@ -48,6 +66,9 @@ pub enum Body {
         /// The invite the sender joined by, so the host knows it asked for
         /// this contact. Appended after `name`, the same way.
         via: Option<String>,
+        /// The inboxes the sender's device reads. Appended after `via`; a
+        /// `Hello` without it names an inbox no one reads any more.
+        ad: Option<InboxAd>,
     },
     Text {
         text: String,
@@ -63,10 +84,13 @@ pub enum Body {
         ids: Vec<MsgId>,
     },
     /// The sender's identity lists these devices now: its signed list, and
-    /// the inbox of each device (`device id`, inbox id).
+    /// the inboxes of each device (`device id`, announcement).
     Devices {
         list: Vec<u8>,
+        /// Inboxes no one reads any more; left empty.
         inboxes: Vec<(u32, [u8; 32])>,
+        /// Appended last, like the fields of `Hello`.
+        ads: Option<Vec<(u32, InboxAd)>>,
     },
     /// Between devices of one identity only.
     Sync(SyncBody),
@@ -287,9 +311,12 @@ impl Envelope {
                 have.len() <= (u32::MAX as usize).div_ceil(8)
             }
             Body::Receipt { ids, .. } => ids.len() <= MAX_RECEIPT_IDS,
-            Body::Devices { list, inboxes } => {
+            Body::Devices { list, inboxes, ads } => {
                 list.len() <= cypher_wire::MAX_DEVICE_LIST_LEN
                     && inboxes.len() <= cypher_types::MAX_DEVICES
+                    && ads
+                        .as_ref()
+                        .is_none_or(|ads| ads.len() <= cypher_types::MAX_DEVICES)
             }
             Body::Sync(sync) => sync.valid(),
         };
@@ -353,9 +380,14 @@ mod tests {
                 inbox: [7; 32],
                 name: None,
                 via: None,
+                ad: None,
             }
         );
 
+        let ad = InboxAd {
+            epoch: 9,
+            ids: [[7; 32], [8; 32]],
+        };
         let new = Envelope {
             msg_id: MsgId([1; 16]),
             sent_at_ms: 5,
@@ -363,6 +395,7 @@ mod tests {
                 inbox: [7; 32],
                 name: Some("Анна".into()),
                 via: Some("abc".into()),
+                ad: Some(ad),
             },
         }
         .encode();
@@ -370,7 +403,7 @@ mod tests {
         assert!(matches!(read.body, OldBody::Hello { inbox } if inbox == [7; 32]));
         assert!(matches!(
             Envelope::decode(&new).unwrap().body,
-            Body::Hello { name: Some(n), .. } if n == "Анна"
+            Body::Hello { name: Some(n), ad: Some(a), .. } if n == "Анна" && a == ad
         ));
 
         let long = Envelope {
@@ -380,9 +413,67 @@ mod tests {
                 inbox: [7; 32],
                 name: Some("x".repeat(MAX_PROFILE_NAME_LEN + 1)),
                 via: None,
+                ad: None,
             },
         };
         Envelope::decode(&long.encode()).unwrap_err();
+    }
+
+    #[test]
+    fn an_announcement_names_the_inbox_of_each_epoch() {
+        let ad = InboxAd {
+            epoch: 10,
+            ids: [[1; 32], [2; 32]],
+        };
+        assert_eq!(ad.at(9), [1; 32], "a clock behind writes to the first");
+        assert_eq!(ad.at(10), [1; 32]);
+        assert_eq!(ad.at(11), [2; 32]);
+        assert_eq!(
+            ad.at(40),
+            [2; 32],
+            "an old announcement, the latest it names"
+        );
+    }
+
+    /// `Devices` as it was before announcements, read by today's code.
+    #[test]
+    fn devices_from_older_peers_carry_no_announcements() {
+        #[derive(Serialize)]
+        enum OldBody {
+            _Hello,
+            _Text,
+            _File,
+            _FileCtl,
+            _Receipt,
+            Devices {
+                list: Vec<u8>,
+                inboxes: Vec<(u32, [u8; 32])>,
+            },
+        }
+        #[derive(Serialize)]
+        struct OldEnvelope {
+            msg_id: MsgId,
+            sent_at_ms: u64,
+            body: OldBody,
+        }
+        let mut old = postcard::to_allocvec(&OldEnvelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: OldBody::Devices {
+                list: vec![1, 2],
+                inboxes: vec![(1, [3; 32])],
+            },
+        })
+        .unwrap();
+        old.resize(padded_len(old.len()), 0);
+        assert_eq!(
+            Envelope::decode(&old).unwrap().body,
+            Body::Devices {
+                list: vec![1, 2],
+                inboxes: vec![(1, [3; 32])],
+                ads: None,
+            }
+        );
     }
 
     #[test]

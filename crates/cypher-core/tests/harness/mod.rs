@@ -1,7 +1,7 @@
 //! Deterministic in-memory world: a mock server with the gateway/signaling
 //! semantics of wire v2 and client drivers around real `Core` instances.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use cypher_core::link::Provision;
@@ -37,6 +37,9 @@ pub(crate) struct Server {
     pub devices: HashMap<PeerId, DeviceList>,
     links: HashMap<String, PeerId>,
     inboxes: HashMap<[u8; 32], Vec<Bytes>>,
+    /// Inboxes their owner has read, which take items, and those it closed.
+    open_inboxes: HashSet<[u8; 32]>,
+    pub closed_inboxes: HashSet<[u8; 32]>,
     claims: HashMap<[u8; 16], ([u8; 32], usize)>,
     /// Every `Recv` delivered, for replay/tamper attacks.
     pub delivered: Vec<(usize, Bytes)>,
@@ -417,6 +420,17 @@ impl World {
             },
         );
         msg_id
+    }
+
+    /// Client `i`'s inbox in `epoch`.
+    pub(crate) fn inbox_of(&self, i: usize, epoch: u32) -> [u8; 32] {
+        let c = &self.clients[i];
+        IdentitySeed(c.seed).derive_inbox_key(c.device, epoch).id()
+    }
+
+    /// The items waiting in `inbox`.
+    pub(crate) fn inbox_items(&self, inbox: &[u8; 32]) -> usize {
+        self.server.inboxes.get(inbox).map_or(0, Vec::len)
     }
 
     pub(crate) fn texts(&self, i: usize) -> Vec<String> {
@@ -850,6 +864,13 @@ impl World {
         let reply = |msg| Frame::new(req_id, msg);
         match msg {
             ClientMsg::InboxPut { inbox, item } => {
+                if !self.server.open_inboxes.contains(&inbox) {
+                    let gone = ServerMsg::Error {
+                        code: ErrorCode::NotFound,
+                    };
+                    self.respond(from, &reply(gone));
+                    return;
+                }
                 self.server.inboxes.entry(inbox).or_default().push(item);
                 if self.server.pushes.contains_key(&inbox) {
                     self.server.signals.push(inbox);
@@ -857,9 +878,21 @@ impl World {
                 self.respond(from, &reply(ServerMsg::Done));
             }
             ClientMsg::InboxFetch { proof, close } => {
-                assert!(!close, "no inbox is closed yet");
-                self.check_proof(&proof, InboxOp::Fetch, &[]);
+                let op = if close {
+                    InboxOp::Close
+                } else {
+                    InboxOp::Fetch
+                };
+                self.check_proof(&proof, op, &[]);
                 let id = proof.inbox;
+                if close {
+                    self.server.open_inboxes.remove(&id);
+                    self.server.closed_inboxes.insert(id);
+                    self.server.pushes.remove(&id);
+                } else {
+                    self.server.open_inboxes.insert(id);
+                    self.server.closed_inboxes.remove(&id);
+                }
                 let items: Vec<Bytes> = self
                     .server
                     .inboxes

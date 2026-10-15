@@ -451,6 +451,84 @@ fn an_inbox_is_still_read_after_its_epoch_ends() {
     assert_eq!(w.status_of(A, first), Some(MessageStatus::Delivered));
 }
 
+const EPOCH_MS: u64 = cypher_crypto::inbox::INBOX_EPOCH_SECS * 1000;
+
+/// `epochs` pass with `away` offline and the others coming back after;
+/// then a second for everyone to catch up.
+fn weeks_pass(w: &mut World, epochs: u64, away: &[usize]) {
+    let online: Vec<usize> = (0..w.clients.len()).filter(|i| !away.contains(i)).collect();
+    for &i in &online {
+        w.disconnect(i);
+    }
+    w.now += epochs * EPOCH_MS;
+    for &i in &online {
+        w.connect(i);
+    }
+    w.advance(1000);
+}
+
+#[test]
+fn contacts_hear_of_the_new_inbox_when_the_epoch_turns() {
+    let mut w = paired();
+    weeks_pass(&mut w, 2, &[]);
+    w.disconnect(B);
+    let id = w.send_text(A, B, "two weeks on");
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Queued));
+    // Not the second inbox the first greeting named: the one B told of
+    // when the epoch turned.
+    assert_eq!(w.inbox_items(&w.inbox_of(B, 2)), 1);
+    assert_eq!(w.inbox_items(&w.inbox_of(B, 1)), 0);
+
+    w.connect(B);
+    w.run();
+    assert_eq!(w.texts(B), ["two weeks on"]);
+}
+
+#[test]
+fn inboxes_no_longer_read_are_emptied_and_closed() {
+    let mut w = paired();
+    w.disconnect(B);
+    w.send_text(A, B, "left in the old inbox");
+    assert_eq!(w.inbox_items(&w.inbox_of(B, 0)), 1);
+
+    w.now += 3 * EPOCH_MS;
+    w.connect(B);
+    w.advance(1000);
+    assert_eq!(w.texts(B), ["left in the old inbox"]);
+    assert!(w.server.closed_inboxes.contains(&w.inbox_of(B, 0)));
+    assert!(!w.server.closed_inboxes.contains(&w.inbox_of(B, 1)));
+    assert_eq!(w.inbox_items(&w.inbox_of(B, 0)), 0);
+
+    // A week on, the next one is closed too.
+    weeks_pass(&mut w, 1, &[]);
+    assert!(w.server.closed_inboxes.contains(&w.inbox_of(B, 1)));
+    assert!(!w.server.closed_inboxes.contains(&w.inbox_of(B, 2)));
+}
+
+#[test]
+fn a_contact_with_an_old_announcement_retries_until_it_hears_the_new_one() {
+    let mut w = paired();
+    // Both read their inboxes once, which opens them for writers.
+    w.advance(1000);
+    w.disconnect(A);
+    // A month later B has told A (into A's inbox) of its new inboxes and
+    // closed the ones A still knows of.
+    weeks_pass(&mut w, 4, &[A]);
+    assert!(w.server.closed_inboxes.contains(&w.inbox_of(B, 1)));
+    w.disconnect(B);
+
+    w.connect(A);
+    let id = w.send_text(A, B, "after a month away");
+    w.advance(120_000);
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Queued));
+    // The message, and A's own greeting with its new inboxes.
+    assert_eq!(w.inbox_items(&w.inbox_of(B, 4)), 2);
+
+    w.connect(B);
+    w.run();
+    assert_eq!(w.texts(B), ["after a month away"]);
+}
+
 #[test]
 fn messages_survive_restarts_without_key_reuse() {
     let mut w = paired();
@@ -1776,17 +1854,21 @@ mod legacy {
 
     use crate::harness::World;
 
+    /// An inbox announcement: epoch, this epoch's and the next inbox.
+    type Ad = (u32, [[u8; 32]; 2]);
+
+    /// A session as stored now.
     #[derive(Serialize, Deserialize)]
-    struct SessionV1 {
+    struct Session {
         ratchet: Vec<u8>,
         pending_init: Vec<u8>,
         accepted_ephemerals: Vec<[u8; 32]>,
-        inbox: Option<[u8; 32]>,
+        inbox: Option<Ad>,
         hello_sent: bool,
     }
 
-    impl Record for SessionV1 {
-        const VERSION: u8 = 1;
+    impl Record for Session {
+        const VERSION: u8 = 2;
     }
 
     /// A contact as stored now.
@@ -1799,11 +1881,11 @@ mod legacy {
         blocked: bool,
         via: Option<String>,
         devices: Option<Vec<u8>>,
-        inboxes: Vec<(u32, [u8; 32])>,
+        inboxes: Vec<(u32, Ad)>,
     }
 
     impl Record for Contact {
-        const VERSION: u8 = 6;
+        const VERSION: u8 = 7;
     }
 
     #[derive(Serialize, Deserialize)]
@@ -1837,7 +1919,7 @@ mod legacy {
         let (session_row, peer_row) = (session_row(peer), (Table::Peers as u8, peer.to_vec()));
         let kv = &mut w.clients[i].kv;
         let sealed_session = kv.remove(&session_row).unwrap();
-        let session: SessionV1 = vault
+        let session: Session = vault
             .open(Table::Sessions, &session_row.1, &sealed_session)
             .unwrap();
         let contact: Contact = vault
@@ -1848,7 +1930,7 @@ mod legacy {
             pending_init: session.pending_init,
             accepted_ephemerals: session.accepted_ephemerals,
             identity_dh: contact.identity_dh,
-            inbox: session.inbox,
+            inbox: session.inbox.map(|(_, ids)| ids[0]),
             hello_sent: session.hello_sent,
             alias: Some(alias.to_owned()),
             name: contact.name,

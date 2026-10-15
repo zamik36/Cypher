@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::outbox::OutboxItem;
 use super::{Conn, Core, Pending};
 use crate::api::{Effect, Event, FailReason};
-use crate::envelope::{Body, Envelope};
+use crate::envelope::{Body, Envelope, InboxAd};
 use crate::link::{LinkOffer, seal_handover};
 use crate::peer::Peer;
 use crate::relay;
@@ -425,6 +425,7 @@ impl<R: CryptoRngCore> Core<R> {
             body: Body::Devices {
                 list,
                 inboxes: Vec::new(),
+                ads: None,
             },
         }
         .encode();
@@ -497,14 +498,15 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         let version = list.version();
-        let inboxes: Vec<(u32, [u8; 32])> = list
+        let ads = list
             .devices()
             .iter()
-            .map(|&d| (d.0, self.own_inbox_of(d)))
+            .map(|&d| (d.0, self.own_ad(d)))
             .collect();
         let body = Body::Devices {
             list: list.encode(),
-            inboxes,
+            inboxes: Vec::new(),
+            ads: Some(ads),
         };
         let mut contacts: Vec<PeerId> = self
             .peers
@@ -528,12 +530,13 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist(op);
     }
 
-    /// A contact announced its devices.
+    /// A contact announced its devices, and their inboxes unless it is from
+    /// before they turned with the epochs.
     pub(super) fn on_devices_body(
         &mut self,
         from: PeerId,
         list: &[u8],
-        inboxes: Vec<(u32, [u8; 32])>,
+        ads: Option<Vec<(u32, InboxAd)>>,
     ) {
         let Ok(list) = DeviceList::decode(list) else {
             return;
@@ -545,15 +548,16 @@ impl<R: CryptoRngCore> Core<R> {
         if known.is_some_and(|k| k.version() > list.version()) {
             return;
         }
-        let inboxes: Vec<(DeviceId, [u8; 32])> = inboxes
-            .into_iter()
-            .map(|(d, i)| (DeviceId(d), i))
-            .filter(|(d, _)| list.contains(*d))
-            .take(MAX_DEVICES)
-            .collect();
+        let ads: Option<Vec<(DeviceId, InboxAd)>> = ads.map(|ads| {
+            ads.into_iter()
+                .map(|(d, ad)| (DeviceId(d), ad))
+                .filter(|(d, _)| list.contains(*d))
+                .take(MAX_DEVICES)
+                .collect()
+        });
         self.learn_devices(from, list);
-        if let Some(p) = self.peers.get_mut(&from) {
-            p.inboxes = inboxes;
+        if let (Some(p), Some(ads)) = (self.peers.get_mut(&from), ads) {
+            p.inboxes = ads;
             self.persist_peer(&from);
         }
     }

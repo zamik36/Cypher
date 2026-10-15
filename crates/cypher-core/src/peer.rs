@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::CoreError;
+use crate::envelope::InboxAd;
 
 const MAX_REMEMBERED_INITS: usize = 16;
 /// Longest name kept for anyone (a contact, or this user), in characters.
@@ -30,7 +31,7 @@ pub(crate) struct Peer {
     pub devices: Option<DeviceList>,
     /// Inboxes of their devices, as they announced them: a device can be
     /// written to offline before its own `Hello` reached us.
-    pub inboxes: Vec<(DeviceId, [u8; 32])>,
+    pub inboxes: Vec<(DeviceId, InboxAd)>,
 }
 
 /// One Double Ratchet session with one device of a contact.
@@ -42,8 +43,8 @@ pub(crate) struct Session {
     /// Responder side: ephemeral keys of inits already accepted, so repeated
     /// or replayed copies reuse the live session instead of resetting it.
     pub accepted_ephemerals: Vec<[u8; 32]>,
-    /// That device's inbox, as its `Hello` told.
-    pub inbox: Option<[u8; 32]>,
+    /// That device's inboxes, as its `Hello` told.
+    pub inbox: Option<InboxAd>,
     /// Whether our `Hello` went out on this session.
     pub hello_sent: bool,
 }
@@ -93,8 +94,8 @@ impl Peer {
             .map_or(device == DeviceId::FIRST, |list| list.contains(device))
     }
 
-    /// The inbox their `device` announced.
-    pub(crate) fn inbox_of(&self, device: DeviceId) -> Option<[u8; 32]> {
+    /// The inboxes their `device` announced.
+    pub(crate) fn inbox_of(&self, device: DeviceId) -> Option<InboxAd> {
         self.inboxes
             .iter()
             .find(|(d, _)| *d == device)
@@ -214,7 +215,7 @@ pub(crate) struct PeerRecord {
     pub(crate) blocked: bool,
     via: Option<String>,
     devices: Option<Vec<u8>>,
-    inboxes: Vec<(u32, [u8; 32])>,
+    inboxes: Vec<(u32, InboxAd)>,
     /// The one session a record from before devices held, to be moved to
     /// its own row (as the contact's first device) on load.
     #[serde(skip)]
@@ -222,12 +223,27 @@ pub(crate) struct PeerRecord {
 }
 
 impl crate::Record for PeerRecord {
-    const VERSION: u8 = 6;
+    const VERSION: u8 = 7;
 
-    /// Version 5 knew nothing of the contact's devices. Up to version 4 a
-    /// contact and its one session were stored together: the session comes
-    /// out as `legacy`.
+    /// Version 6 kept inboxes no one reads any more: the contact's devices
+    /// announce their inboxes again. Version 5 knew nothing of the
+    /// contact's devices. Up to version 4 a contact and its one session were
+    /// stored together: the session comes out as `legacy`.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        if version == 6 {
+            let v6: PeerRecordV6 = parse(body)?;
+            return Ok(Self {
+                identity_dh: v6.identity_dh,
+                alias: v6.alias,
+                name: v6.name,
+                request: v6.request,
+                blocked: v6.blocked,
+                via: v6.via,
+                devices: v6.devices,
+                inboxes: Vec::new(),
+                legacy: None,
+            });
+        }
         if version == 5 {
             let v5: PeerRecordV5 = parse(body)?;
             return Ok(Self {
@@ -256,11 +272,23 @@ impl crate::Record for PeerRecord {
                 ratchet: v4.ratchet,
                 pending_init: v4.pending_init,
                 accepted_ephemerals: v4.accepted_ephemerals,
-                inbox: v4.inbox,
+                inbox: None,
                 hello_sent: v4.hello_sent,
             }),
         })
     }
+}
+
+/// [`PeerRecord`] as version 6 stored it.
+#[derive(Deserialize)]
+struct PeerRecordV6 {
+    identity_dh: [u8; 32],
+    alias: Option<String>,
+    name: Option<String>,
+    request: bool,
+    blocked: bool,
+    via: Option<String>,
+    devices: Option<Vec<u8>>,
 }
 
 /// One session with one device of a contact, as stored.
@@ -270,12 +298,40 @@ pub(crate) struct SessionRecord {
     ratchet: Zeroizing<Vec<u8>>,
     pending_init: Vec<u8>,
     accepted_ephemerals: Vec<[u8; 32]>,
-    inbox: Option<[u8; 32]>,
+    inbox: Option<InboxAd>,
     hello_sent: bool,
 }
 
 impl crate::Record for SessionRecord {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
+
+    /// Version 1 kept an inbox no one reads any more: the device announces
+    /// its inboxes again.
+    fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
+        if version != 1 {
+            return Err(CoreError::Storage);
+        }
+        let v1: SessionRecordV1 = parse(body)?;
+        Ok(Self {
+            ratchet: v1.ratchet,
+            pending_init: v1.pending_init,
+            accepted_ephemerals: v1.accepted_ephemerals,
+            inbox: None,
+            hello_sent: v1.hello_sent,
+        })
+    }
+}
+
+/// [`SessionRecord`] as version 1 stored it.
+#[derive(Deserialize)]
+struct SessionRecordV1 {
+    #[serde(with = "zeroizing_bytes")]
+    ratchet: Zeroizing<Vec<u8>>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    #[expect(dead_code, reason = "an inbox no one reads any more")]
+    inbox: Option<[u8; 32]>,
+    hello_sent: bool,
 }
 
 /// [`PeerRecord`] as version 5 stored it.
@@ -297,6 +353,7 @@ struct PeerRecordV4 {
     pending_init: Vec<u8>,
     accepted_ephemerals: Vec<[u8; 32]>,
     identity_dh: [u8; 32],
+    #[expect(dead_code, reason = "an inbox no one reads any more")]
     inbox: Option<[u8; 32]>,
     hello_sent: bool,
     alias: Option<String>,
@@ -492,10 +549,71 @@ mod tests {
         let record: PeerRecord = vault.open(Table::Peers, b"peer", &sealed).unwrap();
         assert_eq!(record.alias, None);
         let session = record.legacy.unwrap();
-        assert_eq!(session.inbox, Some([4; 32]));
+        assert_eq!(session.inbox, None, "that inbox is read no more");
         assert!(session.hello_sent);
         let names = vault.open_contact(b"peer", &sealed).unwrap();
         assert_eq!((names.alias, names.name), (None, None));
+    }
+
+    /// Sessions and contacts saved before inboxes turned with the epochs
+    /// load without them, keeping the rest.
+    #[test]
+    fn records_from_before_inbox_epochs_drop_the_inboxes() {
+        #[derive(Serialize, Deserialize)]
+        struct SessionV1 {
+            ratchet: Vec<u8>,
+            pending_init: Vec<u8>,
+            accepted_ephemerals: Vec<[u8; 32]>,
+            inbox: Option<[u8; 32]>,
+            hello_sent: bool,
+        }
+        impl crate::Record for SessionV1 {
+            const VERSION: u8 = 1;
+        }
+        #[derive(Serialize, Deserialize)]
+        struct PeerV6 {
+            identity_dh: [u8; 32],
+            alias: Option<String>,
+            name: Option<String>,
+            request: bool,
+            blocked: bool,
+            via: Option<String>,
+            devices: Option<Vec<u8>>,
+            inboxes: Vec<(u32, [u8; 32])>,
+        }
+        impl crate::Record for PeerV6 {
+            const VERSION: u8 = 6;
+        }
+
+        let vault = Vault::new([3; 32]);
+        let session = SessionV1 {
+            ratchet: vec![1, 2, 3],
+            pending_init: Vec::new(),
+            accepted_ephemerals: vec![[7; 32]],
+            inbox: Some([4; 32]),
+            hello_sent: true,
+        };
+        let sealed = vault.seal(Table::Sessions, b"s", &session, &mut OsRng);
+        let record: SessionRecord = vault.open(Table::Sessions, b"s", &sealed).unwrap();
+        assert_eq!(record.inbox, None);
+        assert_eq!(record.accepted_ephemerals, [[7; 32]]);
+        assert!(record.hello_sent);
+
+        let peer = PeerV6 {
+            identity_dh: [9; 32],
+            alias: Some("Bob".into()),
+            name: None,
+            request: false,
+            blocked: true,
+            via: None,
+            devices: Some(vec![5]),
+            inboxes: vec![(2, [4; 32])],
+        };
+        let sealed = vault.seal(Table::Peers, b"p", &peer, &mut OsRng);
+        let record: PeerRecord = vault.open(Table::Peers, b"p", &sealed).unwrap();
+        assert!(record.inboxes.is_empty());
+        assert_eq!(record.devices, Some(vec![5]));
+        assert!(record.blocked);
     }
 
     /// Sessions saved before contacts sent their own names keep the alias.

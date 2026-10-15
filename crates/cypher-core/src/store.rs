@@ -79,6 +79,7 @@ pub(crate) const META_LINKS: &[u8] = b"links";
 pub(crate) const META_DEVICES: &[u8] = b"devices";
 pub(crate) const META_HISTORY: &[u8] = b"history";
 pub(crate) const META_SERVERS: &[u8] = b"servers";
+pub(crate) const META_INBOX: &[u8] = b"inbox";
 
 /// What the UI shows of a contact: the name the user gave them, the one
 /// they go by, and whether they are a request or blocked.

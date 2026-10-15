@@ -1,18 +1,45 @@
 //! This device's blind inboxes: one per epoch, read with requests signed by
 //! that epoch's key, so the server never holds anything that reads them.
+//!
+//! Contacts hear of the inboxes in each `Hello` ([`InboxAd`]: this epoch's
+//! and the next). When the epoch turns, every contact is greeted again with
+//! the new ones; an inbox is read for three epochs and then closed, so a
+//! contact still writing to it hears `NotFound` instead of losing the item.
 
 use bytes::Bytes;
 use cypher_crypto::inbox::{InboxKey, InboxOp, inbox_epoch};
 use cypher_types::{Addr, DeviceId, PeerId};
 use cypher_wire::{ClientMsg, InboxProof};
 use rand_core::CryptoRngCore;
+use serde::{Deserialize, Serialize};
 
 use super::anon::Readiness;
 use super::{Conn, Core, Pending};
+use crate::envelope::InboxAd;
+use crate::store::{META_INBOX, Table};
 
 /// How often the inboxes of the epoch before last and of the next one are
 /// read too: only clocks well off from ours leave items there.
 const INBOX_SWEEP_MS: u64 = 60 * 60_000;
+/// Epochs after which an inbox surely holds nothing: it takes items for two
+/// weeks after it was last read (two epochs after its own) and keeps them
+/// two weeks more.
+const CLOSE_HORIZON: u32 = 7;
+
+/// How far this device's inboxes have turned, kept in `meta`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct InboxEpochs {
+    /// The epoch whose inboxes contacts were last told of; none before
+    /// this device ever told any.
+    announced: Option<u32>,
+    /// The inboxes of every epoch before this one are closed, or were never
+    /// announced.
+    open_from: u32,
+}
+
+impl crate::Record for InboxEpochs {
+    const VERSION: u8 = 1;
+}
 
 impl<R: CryptoRngCore> Core<R> {
     /// The inbox epoch now.
@@ -32,6 +59,16 @@ impl<R: CryptoRngCore> Core<R> {
     /// The inbox of the identity's `device` for the current epoch.
     pub(super) fn own_inbox_of(&self, device: DeviceId) -> [u8; 32] {
         self.seed.derive_inbox_key(device, self.inbox_epoch()).id()
+    }
+
+    /// The inboxes the identity's `device` reads, as contacts are told.
+    pub(super) fn own_ad(&self, device: DeviceId) -> InboxAd {
+        let epoch = self.inbox_epoch();
+        let id = |epoch| self.seed.derive_inbox_key(device, epoch).id();
+        InboxAd {
+            epoch,
+            ids: [id(epoch), id(epoch.saturating_add(1))],
+        }
     }
 
     /// Proof that this device asks `op` of the inbox of `epoch` now.
@@ -58,9 +95,12 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.last_inbox_fetch = self.now;
-        let sweep = self.now.saturating_sub(self.last_inbox_sweep) >= INBOX_SWEEP_MS;
+        let now = self.now;
+        let sweep = self
+            .last_inbox_sweep
+            .is_none_or(|at| now.saturating_sub(at) >= INBOX_SWEEP_MS);
         if sweep {
-            self.last_inbox_sweep = self.now;
+            self.last_inbox_sweep = Some(now);
         }
         let current = self.inbox_epoch();
         let window = [
@@ -70,27 +110,44 @@ impl<R: CryptoRngCore> Core<R> {
             current.checked_add(1).filter(|_| sweep),
         ];
         for epoch in window.into_iter().flatten() {
-            let in_flight = self
-                .pending
-                .values()
-                .any(|(p, _)| matches!(p, Pending::InboxFetch { epoch: e } if *e == epoch));
-            if !in_flight {
+            if !self.inbox_busy(epoch) {
                 let proof = self.inbox_proof(epoch, InboxOp::Fetch, &[]);
                 self.request(
                     ClientMsg::InboxFetch {
                         proof,
                         close: false,
                     },
-                    Pending::InboxFetch { epoch },
+                    Pending::InboxFetch {
+                        epoch,
+                        close: false,
+                    },
                     true,
                 );
             }
         }
     }
 
-    pub(super) fn on_inbox_batch(&mut self, epoch: u32, claim: [u8; 16], items: Vec<Bytes>) {
+    /// Whether a request on the inbox of `epoch` is on its way.
+    fn inbox_busy(&self, epoch: u32) -> bool {
+        self.pending.values().any(|(p, _)| {
+            matches!(p, Pending::InboxFetch { epoch: e, .. } | Pending::InboxAck { epoch: e, .. }
+                if *e == epoch)
+        })
+    }
+
+    /// A batch from the inbox of `epoch`, from its last fetch if `close`.
+    pub(super) fn on_inbox_batch(
+        &mut self,
+        epoch: u32,
+        close: bool,
+        claim: [u8; 16],
+        items: Vec<Bytes>,
+    ) {
         // The server claims nothing for an empty batch: no ack to send.
         if items.is_empty() {
+            if close {
+                self.on_inbox_closed(epoch);
+            }
             return;
         }
         let full = items.len() >= cypher_wire::MAX_INBOX_BATCH;
@@ -100,12 +157,81 @@ impl<R: CryptoRngCore> Core<R> {
         let proof = self.inbox_proof(epoch, InboxOp::Ack, &claim);
         self.request(
             ClientMsg::InboxAck { proof, claim },
-            Pending::InboxAck,
+            Pending::InboxAck { epoch, close },
             true,
         );
         if full {
             self.last_inbox_fetch = 0;
         }
+    }
+
+    /// A device that never told of an inbox before: none older than now
+    /// needs closing.
+    pub(super) fn start_inbox_epochs(&mut self) {
+        self.inbox_epochs.open_from = self.inbox_epoch();
+        self.persist_inbox_epochs();
+    }
+
+    /// Once per epoch: tells every contact of the inboxes read from now
+    /// on, then closes those no longer read, oldest first.
+    pub(super) fn turn_inbox_epoch(&mut self) {
+        if self.conn != Conn::Ready {
+            return;
+        }
+        let current = self.inbox_epoch();
+        if self.inbox_epochs.announced != Some(current) {
+            self.inbox_epochs.announced = Some(current);
+            self.persist_inbox_epochs();
+            self.greet_again();
+        }
+        self.close_old_inbox();
+    }
+
+    /// Takes the last items from the oldest inbox still open beyond the
+    /// three epochs read, and closes it: one request at a time, the next
+    /// after it comes back empty.
+    pub(super) fn close_old_inbox(&mut self) {
+        let current = self.inbox_epoch();
+        let floor = current.saturating_sub(CLOSE_HORIZON);
+        if self.inbox_epochs.open_from < floor {
+            self.inbox_epochs.open_from = floor;
+            self.persist_inbox_epochs();
+        }
+        let epoch = self.inbox_epochs.open_from;
+        if epoch.saturating_add(3) > current
+            || self.conn != Conn::Ready
+            || !matches!(
+                self.anon.readiness(self.now),
+                Readiness::Onion | Readiness::Session
+            )
+            || self.inbox_busy(epoch)
+        {
+            return;
+        }
+        let proof = self.inbox_proof(epoch, InboxOp::Close, &[]);
+        self.request(
+            ClientMsg::InboxFetch { proof, close: true },
+            Pending::InboxFetch { epoch, close: true },
+            true,
+        );
+    }
+
+    fn on_inbox_closed(&mut self, epoch: u32) {
+        if self.inbox_epochs.open_from == epoch {
+            self.inbox_epochs.open_from = epoch.saturating_add(1);
+            self.persist_inbox_epochs();
+        }
+        self.close_old_inbox();
+    }
+
+    fn persist_inbox_epochs(&mut self) {
+        let op = self.vault.put(
+            Table::Meta,
+            META_INBOX.to_vec(),
+            &self.inbox_epochs,
+            &mut self.rng,
+        );
+        self.persist(op);
     }
 
     fn on_inbox_item(&mut self, item: &[u8]) {

@@ -8,7 +8,9 @@ use zeroize::Zeroizing;
 use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
-use crate::envelope::{Body, Envelope, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody};
+use crate::envelope::{
+    Body, Envelope, InboxAd, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody,
+};
 use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
 use crate::relay::RelayBody;
 use crate::share::ShareLink;
@@ -102,6 +104,12 @@ impl<R: CryptoRngCore> Core<R> {
         self.sync(SyncBody::Profile {
             name: self.profile_name.clone(),
         });
+        self.greet_again();
+    }
+
+    /// Sends a fresh `Hello` (name, inboxes) to every contact's device
+    /// already greeted; the others get theirs when their session starts.
+    pub(super) fn greet_again(&mut self) {
         let mut greeted: Vec<Addr> = self
             .sessions
             .iter()
@@ -142,10 +150,12 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn hello(&self, peer: &PeerId) -> Body {
+        let ad = self.own_ad(self.device);
         Body::Hello {
-            inbox: self.inbox_id(),
+            inbox: ad.ids[0],
             name: self.profile_name.clone(),
             via: self.peers.get(peer).and_then(|p| p.via.clone()),
+            ad: Some(ad),
         }
     }
 
@@ -611,15 +621,23 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist_peer(&from);
     }
 
-    /// One device of a contact greets us: its inbox, the name they go by,
-    /// and the invite they joined by, which makes a stranger a contact.
-    fn on_hello(&mut self, sender: Addr, inbox: [u8; 32], name: Option<&str>, via: Option<&str>) {
+    /// One device of a contact greets us: its inboxes, the name they go
+    /// by, and the invite they joined by, which makes a stranger a contact.
+    /// A `Hello` without inboxes names one no one reads: the last ones
+    /// heard of stay.
+    fn on_hello(
+        &mut self,
+        sender: Addr,
+        ad: Option<InboxAd>,
+        name: Option<&str>,
+        via: Option<&str>,
+    ) {
         let from = sender.peer;
         let invited = via.is_some_and(|code| self.take_own_link(code));
         let name = name.and_then(clean_name);
         let mut renamed = false;
-        if let Some(s) = self.sessions.get_mut(&sender) {
-            s.inbox = Some(inbox);
+        if let (Some(s), Some(ad)) = (self.sessions.get_mut(&sender), ad) {
+            s.inbox = Some(ad);
         }
         if let Some(p) = self.peers.get_mut(&from) {
             renamed = p.name != name;
@@ -666,8 +684,8 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         match body {
-            Body::Hello { inbox, name, via } => {
-                self.on_hello(sender, inbox, name.as_deref(), via.as_deref());
+            Body::Hello { name, via, ad, .. } => {
+                self.on_hello(sender, ad, name.as_deref(), via.as_deref());
             }
             Body::Text { text, reply_to } => {
                 self.store_message(StoredMessage {
@@ -686,7 +704,7 @@ impl<R: CryptoRngCore> Core<R> {
             }
             Body::FileCtl(ctl) => self.on_file_ctl(sender, ctl),
             Body::Receipt { kind, ids } => self.on_receipt(sender, kind, ids),
-            Body::Devices { list, inboxes } => self.on_devices_body(from, &list, inboxes),
+            Body::Devices { list, ads, .. } => self.on_devices_body(from, &list, ads),
             Body::Sync(_) => {}
         }
     }

@@ -26,14 +26,15 @@ use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRec
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
 use crate::store::{
-    META_DEVICES, META_HISTORY, META_LINKS, META_PREKEYS, META_PROFILE, META_SERVERS, Record,
-    StoreOp, Table, Vault, session_addr, session_key,
+    META_DEVICES, META_HISTORY, META_INBOX, META_LINKS, META_PREKEYS, META_PROFILE, META_SERVERS,
+    Record, StoreOp, Table, Vault, session_addr, session_key,
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Opened, Readiness};
 use devices::{Devices, DevicesFor, OwnDevices};
 use history::History;
+use inbox::InboxEpochs;
 use messaging::Joining;
 use outbox::OutboxItem;
 use push::{PushState, Subscription};
@@ -102,10 +103,16 @@ enum Pending {
         msg_id: MsgId,
         addr: Addr,
     },
+    /// A read of the inbox of `epoch`; its last one, which closes it, if
+    /// `close`.
     InboxFetch {
         epoch: u32,
+        close: bool,
     },
-    InboxAck,
+    InboxAck {
+        epoch: u32,
+        close: bool,
+    },
     Bootstrap,
     PushKey,
     PushRegister,
@@ -169,7 +176,7 @@ pub struct Core<R> {
     last_ping: u64,
     last_inbox_fetch: u64,
     /// When the inboxes beyond the last epoch were last read.
-    last_inbox_sweep: u64,
+    last_inbox_sweep: Option<u64>,
     /// When keys were last republished because the server's were not ours.
     last_resync: Option<u64>,
     /// When a fresh session was last started with a device of a contact.
@@ -191,6 +198,7 @@ pub struct Core<R> {
     /// The address of the server this device connects to.
     server: String,
     server_keys: ServerKeys,
+    inbox_epochs: InboxEpochs,
     /// A signing key the server showed that is not the one remembered.
     offered_key: Option<[u8; 32]>,
     push: PushState,
@@ -224,6 +232,7 @@ impl<R: CryptoRngCore> Core<R> {
             load_contacts(&vault, snapshot, identity.peer_id(), &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
         let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
+        let inboxes_new = own.inbox.is_none();
 
         let mut core = Self {
             rng,
@@ -246,7 +255,7 @@ impl<R: CryptoRngCore> Core<R> {
             last_rx: now_ms,
             last_ping: now_ms,
             last_inbox_fetch: 0,
-            last_inbox_sweep: 0,
+            last_inbox_sweep: None,
             last_resync: None,
             last_repair: HashMap::new(),
             init_heard: HashMap::new(),
@@ -260,6 +269,7 @@ impl<R: CryptoRngCore> Core<R> {
             anon: Anon::default(),
             server: String::new(),
             server_keys: own.servers,
+            inbox_epochs: own.inbox.unwrap_or_default(),
             offered_key: None,
             push: PushState::default(),
             profile_name: own.profile_name,
@@ -267,17 +277,21 @@ impl<R: CryptoRngCore> Core<R> {
             effects: Vec::new(),
         };
         core.adopt_legacy_sessions(legacy, &mut skipped);
-        if fresh_prekeys {
-            core.persist_prekeys();
-        }
-        core.pick_up(&skipped);
+        core.pick_up(&skipped, fresh_prekeys, inboxes_new);
         let effects = std::mem::take(&mut core.effects);
         Ok((core, effects))
     }
 
-    /// What a restored core tells and asks for again: offers still waiting,
-    /// history work the driver did not finish, records it could not read.
-    fn pick_up(&mut self, skipped: &Skipped) {
+    /// What a restored core stores, tells and asks for again: state it
+    /// just made up, offers still waiting, history work the driver did not
+    /// finish, records it could not read.
+    fn pick_up(&mut self, skipped: &Skipped, fresh_prekeys: bool, fresh_inboxes: bool) {
+        if fresh_prekeys {
+            self.persist_prekeys();
+        }
+        if fresh_inboxes {
+            self.start_inbox_epochs();
+        }
         self.announce_pending_offers();
         self.resume_history();
         if skipped.0 > 0 {
@@ -527,10 +541,14 @@ impl<R: CryptoRngCore> Core<R> {
             (Pending::InboxPut { msg_id, addr }, ServerMsg::Done) => {
                 self.on_inbox_queued(msg_id, addr.device);
             }
-            (Pending::InboxFetch { epoch }, ServerMsg::InboxBatch { claim, items }) => {
-                self.on_inbox_batch(epoch, claim, items);
+            (Pending::InboxFetch { epoch, close }, ServerMsg::InboxBatch { claim, items }) => {
+                self.on_inbox_batch(epoch, close, claim, items);
             }
-            (Pending::InboxAck, ServerMsg::Done) => {}
+            (Pending::InboxAck { close, .. }, ServerMsg::Done) => {
+                if close {
+                    self.close_old_inbox();
+                }
+            }
             (
                 Pending::Bootstrap,
                 ServerMsg::BootstrapInfo {
@@ -606,17 +624,19 @@ impl<R: CryptoRngCore> Core<R> {
                 self.send_deferred();
                 self.fetch_inbox();
             }
-            Pending::CreateLink | Pending::InboxFetch { .. } => {
+            Pending::CreateLink | Pending::InboxFetch { close: false, .. } => {
                 self.emit(Event::Warning { reason });
             }
-            // An inbox nobody reads any more: that device is gone.
             Pending::InboxPut { msg_id, addr } if reason == FailReason::NotFound => {
-                self.drop_target(msg_id, addr.device);
+                self.on_inbox_gone(msg_id, addr);
             }
             Pending::Send { msg_id, addr, .. } | Pending::InboxPut { msg_id, addr } => {
                 self.on_send_failed(msg_id, addr.device);
             }
-            Pending::Publish { .. } | Pending::InboxAck => {}
+            // Closing is tried again on the next tick.
+            Pending::Publish { .. }
+            | Pending::InboxAck { .. }
+            | Pending::InboxFetch { close: true, .. } => {}
             Pending::PushKey | Pending::PushRegister | Pending::PushUnregister => {
                 self.on_push_failed(&pending, reason);
             }
@@ -720,6 +740,7 @@ impl<R: CryptoRngCore> Core<R> {
         if self.now.saturating_sub(self.last_inbox_fetch) >= INBOX_POLL_MS {
             self.fetch_inbox();
         }
+        self.turn_inbox_epoch();
         if self.prekeys.rotate_if_due(self.now, &mut self.rng) {
             self.persist_prekeys();
             self.publish_keys(false);
@@ -1141,6 +1162,7 @@ struct Own {
     devices: Devices,
     history: History,
     servers: ServerKeys,
+    inbox: Option<InboxEpochs>,
 }
 
 fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, CoreError> {
@@ -1152,6 +1174,7 @@ fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, Co
         devices: Devices::from_record(load_meta::<OwnDevices>(vault, meta, META_DEVICES, skipped)?),
         history: load_meta::<History>(vault, meta, META_HISTORY, skipped)?.unwrap_or_default(),
         servers: load_meta::<ServerKeys>(vault, meta, META_SERVERS, skipped)?.unwrap_or_default(),
+        inbox: load_meta::<InboxEpochs>(vault, meta, META_INBOX, skipped)?,
     })
 }
 
