@@ -393,6 +393,7 @@ async fn acknowledged_sends_to_a_stalled_node_are_bounded() {
         .subscribe(cypher_server_kit::peer_subject(
             &stalled.to_hex(),
             DeviceId::FIRST,
+            cypher_server_kit::Origin::Gateway,
         ))
         .await
         .unwrap();
@@ -500,4 +501,80 @@ fn settings_that_would_serve_no_one_are_refused() {
     ] {
         assert!(broken.validate().is_err());
     }
+}
+
+/// What signaling hands a device's gateway for a sealed delivery, and the
+/// status it answers.
+async fn deliver_sealed(bus: &MemBus, to: Addr, payload: Vec<u8>) -> Option<u8> {
+    let subject = cypher_server_kit::peer_subject(
+        &to.peer.to_hex(),
+        to.device,
+        cypher_server_kit::Origin::Sealed,
+    );
+    let reply = bus
+        .request(subject, None, Bytes::from(payload), Duration::from_secs(2))
+        .await
+        .ok()?;
+    reply.first().copied()
+}
+
+fn sealed(token: [u8; 32], item: &[u8]) -> Vec<u8> {
+    [token.as_slice(), item].concat()
+}
+
+#[tokio::test]
+async fn a_sealed_delivery_needs_a_token_the_device_told() {
+    use cypher_server_kit::SEALED_REFUSED;
+    use cypher_wire::access_hash;
+
+    let bus = MemBus::default();
+    let gw = gateway(&bus);
+    let mut b = Client::connect(&gw);
+    b.authenticate().await;
+    let token = [7; 32];
+    let delivered = Some(DeliveryStatus::Delivered as u8);
+    assert_eq!(
+        deliver_sealed(&bus, b.addr(), sealed(token, b"early")).await,
+        Some(SEALED_REFUSED),
+        "no token told yet"
+    );
+
+    let hashes = vec![access_hash(&[1; 32]), access_hash(&token)];
+    b.send(5, ClientMsg::SetAccess { hashes }).await;
+    assert_eq!(b.recv().await.unwrap(), Frame::new(5, ServerMsg::Done));
+    assert_eq!(
+        deliver_sealed(&bus, b.addr(), sealed(token, b"sealed item")).await,
+        delivered
+    );
+    assert_eq!(
+        b.recv().await.unwrap().msg,
+        ServerMsg::RecvSealed {
+            item: Bytes::from_static(b"sealed item")
+        }
+    );
+
+    // A wrong token, an empty message (an eviction on the gateway's own
+    // subject) or a short one deliver nothing, and the session stays.
+    for refused in [sealed([8; 32], b"forged"), Vec::new(), vec![7; 31]] {
+        assert_eq!(
+            deliver_sealed(&bus, b.addr(), refused).await,
+            Some(SEALED_REFUSED)
+        );
+    }
+    assert_eq!(
+        deliver_sealed(&bus, b.addr(), sealed(token, b"still here")).await,
+        delivered
+    );
+    assert!(matches!(
+        b.recv().await.unwrap().msg,
+        ServerMsg::RecvSealed { .. }
+    ));
+
+    // Telling no tokens takes the old ones back.
+    b.send(6, ClientMsg::SetAccess { hashes: Vec::new() }).await;
+    assert_eq!(b.recv().await.unwrap(), Frame::new(6, ServerMsg::Done));
+    assert_eq!(
+        deliver_sealed(&bus, b.addr(), sealed(token, b"late")).await,
+        Some(SEALED_REFUSED)
+    );
 }

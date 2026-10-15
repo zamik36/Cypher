@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cypher_server_kit::ratelimit::ConnLimiter;
-use cypher_server_kit::{SIG_REQUEST_SUBJECT, peer_subject};
+use cypher_server_kit::{
+    Origin, SEALED_REFUSED, SIG_REQUEST_SUBJECT, peer_subject, peer_subscription,
+};
 use cypher_types::{Addr, SESSION_AUTH_CONTEXT};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, SendView, ServerMsg,
-    encode_recv, peek_send,
+    access_hash, encode_recv, encode_recv_sealed, peek_send,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -83,6 +85,7 @@ impl<B: Bus> Gateway<B> {
             limiter: ConnLimiter::new(self.limits.frames_per_sec, self.limits.bytes_per_sec),
             sig_permits: Arc::new(Semaphore::new(MAX_SIG_IN_FLIGHT)),
             ack_permits: Arc::new(Semaphore::new(MAX_ACKS_IN_FLIGHT)),
+            access: Vec::new(),
         };
         if let Some(me) = session.run(stream).await {
             self.registry.remove(&me, session.conn_id);
@@ -101,6 +104,8 @@ struct Session<B> {
     limiter: ConnLimiter,
     sig_permits: Arc<Semaphore>,
     ack_permits: Arc<Semaphore>,
+    /// Hashes of the tokens the device takes sealed deliveries with.
+    access: Vec<[u8; 32]>,
 }
 
 enum Next {
@@ -147,9 +152,15 @@ impl<B: Bus> Session<B> {
         }
         // An empty message evicts an older session on another node; it goes
         // out before this session subscribes, so it never reaches itself.
-        let subject = peer_subject(&me.peer.to_hex(), me.device);
-        self.gw.bus.publish(subject.clone(), Bytes::new()).await;
-        let relayed = self.gw.bus.subscribe(subject).await.ok()?;
+        let hex = me.peer.to_hex();
+        let evict = peer_subject(&hex, me.device, Origin::Gateway);
+        self.gw.bus.publish(evict, Bytes::new()).await;
+        let relayed = self
+            .gw
+            .bus
+            .subscribe(peer_subscription(&hex, me.device))
+            .await
+            .ok()?;
         Some((relayed, kick))
     }
 
@@ -175,7 +186,7 @@ impl<B: Bus> Session<B> {
                 () = self.cancel.cancelled() => Next::Closed,
                 () = kick.cancelled() => Next::Kicked,
                 msg = relayed.next() => match msg {
-                    Some(msg) if msg.payload.is_empty() => {
+                    Some(msg) if msg.origin == Some(Origin::Gateway) && msg.payload.is_empty() => {
                         self.out.try_push(frame(0, ServerMsg::Superseded));
                         Next::Kicked
                     }
@@ -195,7 +206,11 @@ impl<B: Bus> Session<B> {
                         break;
                     }
                 }
-                Next::Relayed(msg) => self.on_relayed(msg).await,
+                Next::Relayed(msg) => match msg.origin {
+                    Some(Origin::Gateway) => self.on_relayed(msg).await,
+                    Some(Origin::Sealed) => self.on_sealed(msg).await,
+                    None => {}
+                },
                 Next::Idle => {
                     let deadline = last_frame + IDLE_TIMEOUT;
                     if deadline <= Instant::now() {
@@ -275,6 +290,11 @@ impl<B: Bus> Session<B> {
                 self.out.try_push(frame(req_id, ServerMsg::Pong));
                 true
             }
+            ClientMsg::SetAccess { hashes } => {
+                self.access = hashes;
+                self.out.try_push(frame(req_id, ServerMsg::Done));
+                true
+            }
             ClientMsg::Hello { .. } | ClientMsg::Auth { .. } | ClientMsg::Send { .. } => false,
             _ => {
                 self.forward_to_signaling(me, req_id, bytes);
@@ -311,7 +331,7 @@ impl<B: Bus> Session<B> {
             }
             return;
         }
-        let subject = peer_subject(&to.peer.to_hex(), to.device);
+        let subject = peer_subject(&to.peer.to_hex(), to.device, Origin::Gateway);
         if !want_ack {
             self.gw.bus.publish(subject, relayed).await;
             return;
@@ -354,6 +374,33 @@ impl<B: Bus> Session<B> {
         }
         if let Some(reply) = msg.reply {
             let status = if ok { STATUS_DELIVERED } else { STATUS_BUSY };
+            self.gw
+                .bus
+                .publish(reply, Bytes::copy_from_slice(&[status]))
+                .await;
+        }
+    }
+
+    /// A delivery signaling relays without a sender (`token ‖ item`): the
+    /// device gets it only with a token it told this gateway, so signaling
+    /// cannot write to devices that did not hand their contacts one.
+    async fn on_sealed(&self, msg: BusMsg) {
+        let status = match msg.payload.split_first_chunk::<32>() {
+            Some((token, item)) if knows(&self.access, &access_hash(token)) => {
+                if self.out.try_push(encode_recv_sealed(item)) {
+                    self.gw.metrics.sealed_delivered.inc();
+                    STATUS_DELIVERED
+                } else {
+                    self.gw.metrics.busy.inc();
+                    STATUS_BUSY
+                }
+            }
+            _ => {
+                self.gw.metrics.sealed_refused.inc();
+                SEALED_REFUSED
+            }
+        };
+        if let Some(reply) = msg.reply {
             self.gw
                 .bus
                 .publish(reply, Bytes::copy_from_slice(&[status]))
@@ -420,6 +467,15 @@ where
     let _ = sink.close().await;
     cancel.cancel();
     debug!("writer closed");
+}
+
+/// Whether `hash` is one of `known`, comparing every byte of each.
+fn knows(known: &[[u8; 32]], hash: &[u8; 32]) -> bool {
+    let matched = known.iter().fold(0u8, |matched, k| {
+        let diff = k.iter().zip(hash).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        matched | u8::from(diff == 0)
+    });
+    matched != 0
 }
 
 fn frame(req_id: u32, msg: ServerMsg) -> Bytes {

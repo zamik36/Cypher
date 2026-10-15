@@ -17,13 +17,54 @@ pub const SIG_ONION_SUBJECT: &str = "sig.onion";
 pub const SIG_KEYS_SUBJECT: &str = "sig.keys";
 pub const SIG_QUEUE_GROUP: &str = "signaling";
 
-/// Subject on which the gateway of one connected device of a peer accepts
-/// relayed frames. An empty message on it evicts the session holding it:
-/// relayed frames are never empty, and one subscription per connection
-/// halves NATS state.
-pub fn peer_subject(peer_hex: &str, device: cypher_types::DeviceId) -> String {
-    format!("peer.{peer_hex}.{device}")
+/// Who hands a connected device a frame, which its subject names last.
+/// NATS lets each service publish only its own, so neither can pass for
+/// the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Another gateway node: a `Recv` it stamped with the sender, or an
+    /// empty message that evicts the session (relayed frames are never
+    /// empty).
+    Gateway,
+    /// Signaling: `token ‖ item`, a sealed delivery, which the device's
+    /// gateway hands over only if the token is one the device told it.
+    Sealed,
 }
+
+impl Origin {
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Gateway => "gw",
+            Self::Sealed => "sealed",
+        }
+    }
+
+    /// Which origin a relayed frame's `subject` names; `None` for one no
+    /// service publishes on.
+    pub fn of(subject: &str) -> Option<Self> {
+        match subject.rsplit_once('.')?.1 {
+            "gw" => Some(Self::Gateway),
+            "sealed" => Some(Self::Sealed),
+            _ => None,
+        }
+    }
+}
+
+/// Subject on which the gateway of one connected device of a peer accepts
+/// frames from `origin`.
+pub fn peer_subject(peer_hex: &str, device: cypher_types::DeviceId, origin: Origin) -> String {
+    format!("peer.{peer_hex}.{device}.{}", origin.suffix())
+}
+
+/// What the gateway of one connected device subscribes to: frames from
+/// every origin, on one subscription per connection.
+pub fn peer_subscription(peer_hex: &str, device: cypher_types::DeviceId) -> String {
+    format!("peer.{peer_hex}.{device}.*")
+}
+
+/// The reply to a sealed delivery whose token the device did not tell its
+/// gateway; the others are `DeliveryStatus` values.
+pub const SEALED_REFUSED: u8 = 0xFF;
 
 /// Everything a service's `main` does: `<service> health` asks a running
 /// instance on `metrics_addr` whether it is ready (the container
@@ -282,6 +323,16 @@ mod tests {
 
     #[test]
     fn subjects() {
-        assert_eq!(peer_subject("ab", cypher_types::DeviceId(7)), "peer.ab.7");
+        let device = cypher_types::DeviceId(7);
+        assert_eq!(peer_subject("ab", device, Origin::Gateway), "peer.ab.7.gw");
+        assert_eq!(
+            peer_subject("ab", device, Origin::Sealed),
+            "peer.ab.7.sealed"
+        );
+        assert_eq!(peer_subscription("ab", device), "peer.ab.7.*");
+        assert_eq!(Origin::of("peer.ab.7.gw"), Some(Origin::Gateway));
+        assert_eq!(Origin::of("peer.ab.7.sealed"), Some(Origin::Sealed));
+        assert_eq!(Origin::of("peer.ab.7.other"), None);
+        assert_eq!(Origin::of("peer"), None);
     }
 }

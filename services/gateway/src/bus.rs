@@ -4,13 +4,15 @@ use std::future::Future;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cypher_server_kit::PEER_HEADER;
+use cypher_server_kit::{Origin, PEER_HEADER};
 use cypher_types::PeerId;
 use futures::{Stream, StreamExt};
 
 pub struct BusMsg {
     pub payload: Bytes,
     pub reply: Option<String>,
+    /// Who sent it, by the subject it came on.
+    pub origin: Option<Origin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,7 @@ impl Bus for async_nats::Client {
     async fn subscribe(&self, subject: String) -> Result<Self::Sub, BusError> {
         fn to_bus_msg(m: async_nats::Message) -> BusMsg {
             BusMsg {
+                origin: Origin::of(&m.subject),
                 payload: m.payload,
                 reply: m.reply.map(|r| r.to_string()),
             }
@@ -90,7 +93,8 @@ impl Bus for async_nats::Client {
 
 #[cfg(test)]
 pub(crate) mod mem {
-    //! In-memory bus: exact-subject pub/sub plus a pluggable signaling stub.
+    //! In-memory bus: pub/sub on exact subjects and on `prefix.*`, plus a
+    //! pluggable signaling stub.
 
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -129,15 +133,25 @@ pub(crate) mod mem {
         }
 
         fn deliver(&self, subject: &str, msg: impl Fn() -> BusMsg) -> bool {
+            let wildcard = subject
+                .rsplit_once('.')
+                .map(|(parent, _)| format!("{parent}.*"));
             let mut inner = self.inner.lock().unwrap();
-            let Some(list) = inner.subs.get_mut(subject) else {
-                return false;
-            };
-            list.retain(|tx| !tx.is_closed());
-            for tx in list.iter() {
-                let _ = tx.send(msg());
+            let mut delivered = false;
+            for pattern in std::iter::once(subject).chain(wildcard.as_deref()) {
+                let Some(list) = inner.subs.get_mut(pattern) else {
+                    continue;
+                };
+                list.retain(|tx| !tx.is_closed());
+                for tx in list.iter() {
+                    let _ = tx.send(BusMsg {
+                        origin: Origin::of(subject),
+                        ..msg()
+                    });
+                    delivered = true;
+                }
             }
-            !list.is_empty()
+            delivered
         }
     }
 
@@ -166,6 +180,7 @@ pub(crate) mod mem {
             if !self.deliver(&subject, || BusMsg {
                 payload: payload.clone(),
                 reply: Some(inbox.clone()),
+                origin: None,
             }) {
                 return Err(BusError::NoResponders);
             }
@@ -185,6 +200,7 @@ pub(crate) mod mem {
                     self.deliver(&subject, || BusMsg {
                         payload: payload.clone(),
                         reply: None,
+                        origin: None,
                     });
                 }
             }

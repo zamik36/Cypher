@@ -8,6 +8,8 @@ pub struct Metrics {
     pub delivered_local: IntCounter,
     pub delivered_remote: IntCounter,
     pub busy: IntCounter,
+    pub sealed_delivered: IntCounter,
+    pub sealed_refused: IntCounter,
     pub rate_limited: IntCounter,
     pub auth_failures: IntCounter,
     pub rejected: IntCounter,
@@ -30,6 +32,14 @@ impl Metrics {
             busy: r.counter(
                 "gateway_busy_total",
                 "Deliveries refused by a full client queue",
+            )?,
+            sealed_delivered: r.counter(
+                "gateway_sealed_delivered_total",
+                "Sealed deliveries handed to a device",
+            )?,
+            sealed_refused: r.counter(
+                "gateway_sealed_refused_total",
+                "Sealed deliveries with a token the device did not tell",
             )?,
             rate_limited: r.counter(
                 "gateway_rate_limited_total",
