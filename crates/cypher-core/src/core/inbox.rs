@@ -183,6 +183,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.inbox_epochs.announced = Some(current);
             self.persist_inbox_epochs();
             self.greet_again();
+            self.push_step();
         }
         self.close_old_inbox();
     }

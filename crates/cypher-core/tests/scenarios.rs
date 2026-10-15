@@ -1197,6 +1197,36 @@ fn push_is_set_up_through_the_relay_and_signals_an_absent_device() {
     assert_eq!(w.server.session_push_ops, 0);
 }
 
+/// The push subscription follows the inboxes contacts are told of: this
+/// epoch's and the next, the next one added when the epoch turns.
+#[test]
+fn push_follows_the_inboxes_from_epoch_to_epoch() {
+    let mut w = paired();
+    w.command(B, Command::EnablePush);
+    w.command(
+        B,
+        Command::RegisterPush {
+            endpoint: "https://ntfy.sh/up-b".into(),
+            p256dh: [4; 65],
+            auth: [1; 16],
+        },
+    );
+    let registered = |w: &World, epoch| w.server.pushes.contains_key(&w.inbox_of(B, epoch));
+    assert!(registered(&w, 0) && registered(&w, 1) && !registered(&w, 2));
+
+    weeks_pass(&mut w, 1, &[]);
+    assert!(registered(&w, 2));
+    w.disconnect(B);
+    w.send_text(A, B, "a week on");
+    assert_eq!(w.server.signals.last(), Some(&w.inbox_of(B, 1)));
+
+    w.connect(B);
+    w.run();
+    w.command(B, Command::DisablePush);
+    assert!((0..=2).all(|epoch| !registered(&w, epoch)));
+    assert_eq!(w.server.session_push_ops, 0);
+}
+
 /// Without the relay nothing about push is said, not even over the session
 /// it would otherwise fall back to; it goes once the relay is up.
 #[test]

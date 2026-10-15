@@ -1,6 +1,10 @@
 //! Push registration: the server learns "inbox X has news → wake this push
 //! address", proven by the inbox key's signature. It only ever goes through the
 //! onion relay, never the session, so the address is not tied to `PeerId`.
+//!
+//! The subscription follows the inboxes contacts are told of: this epoch's
+//! and the next, registered again when the epoch turns. An inbox's
+//! registration ends when it is closed.
 
 use cypher_crypto::inbox::{InboxOp, push_extra};
 use cypher_wire::{ClientMsg, ServerMsg};
@@ -35,8 +39,11 @@ enum Progress {
     #[default]
     Idle,
     AskingKey,
-    /// Sent or confirmed; registered again when the channel comes back.
-    Registered,
+    /// Sent or confirmed for the inboxes of `epoch` and the next;
+    /// registered again when the channel comes back or the epoch turns.
+    Registered {
+        epoch: u32,
+    },
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -72,7 +79,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// The relay channel came (back) up: register again, which also keeps
     /// the server's copy from expiring.
     pub(super) fn renew_push(&mut self) {
-        if self.push.progress == Progress::Registered {
+        if matches!(self.push.progress, Progress::Registered { .. }) {
             self.push.progress = Progress::Idle;
         }
         self.push_step();
@@ -87,33 +94,37 @@ impl<R: CryptoRngCore> Core<R> {
         let epoch = self.inbox_epoch();
         if self.push.unregister {
             self.push.unregister = false;
-            let proof = self.inbox_proof(epoch, InboxOp::PushUnregister, &[]);
-            self.request(
-                ClientMsg::PushUnregister { proof },
-                Pending::PushUnregister,
-                true,
-            );
+            // Every inbox still open may hold a registration.
+            for registered in epoch.saturating_sub(2)..=epoch.saturating_add(1) {
+                let proof = self.inbox_proof(registered, InboxOp::PushUnregister, &[]);
+                self.request(
+                    ClientMsg::PushUnregister { proof },
+                    Pending::PushUnregister,
+                    true,
+                );
+            }
         } else if self.push.wanted
             && self.push.key.is_none()
             && self.push.progress == Progress::Idle
         {
             self.push.progress = Progress::AskingKey;
             self.request(ClientMsg::PushKey, Pending::PushKey, true);
-        } else if let Some(sub) = self
-            .push
-            .sub
-            .clone()
-            .filter(|_| self.push.progress == Progress::Idle)
-        {
-            self.push.progress = Progress::Registered;
+        } else if let Some(sub) = self.push.sub.clone().filter(|_| {
+            matches!(self.push.progress, Progress::Idle)
+                || matches!(self.push.progress, Progress::Registered { epoch: e } if e != epoch)
+        }) {
+            self.push.progress = Progress::Registered { epoch };
             let extra = push_extra(&sub.endpoint, &sub.p256dh, &sub.auth);
-            let msg = ClientMsg::PushRegister {
-                proof: self.inbox_proof(epoch, InboxOp::PushRegister, &extra),
-                endpoint: sub.endpoint,
-                p256dh: sub.p256dh,
-                auth: sub.auth,
-            };
-            self.request(msg, Pending::PushRegister, true);
+            for inbox_epoch in [epoch, epoch.saturating_add(1)] {
+                let msg = ClientMsg::PushRegister {
+                    proof: self.inbox_proof(inbox_epoch, InboxOp::PushRegister, &extra),
+                    endpoint: sub.endpoint.clone(),
+                    p256dh: sub.p256dh,
+                    auth: sub.auth,
+                };
+                let pending = Pending::PushRegister { epoch: inbox_epoch };
+                self.request(msg, pending, true);
+            }
         }
     }
 
@@ -127,7 +138,12 @@ impl<R: CryptoRngCore> Core<R> {
                 }
                 self.push_step();
             }
-            (Pending::PushRegister, ServerMsg::Done) => self.emit(Event::PushRegistered),
+            // Told once per turn: for the current epoch's inbox.
+            (Pending::PushRegister { epoch }, ServerMsg::Done)
+                if self.push.progress == (Progress::Registered { epoch: *epoch }) =>
+            {
+                self.emit(Event::PushRegistered);
+            }
             _ => {}
         }
     }

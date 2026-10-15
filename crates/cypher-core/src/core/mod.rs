@@ -115,7 +115,9 @@ enum Pending {
     },
     Bootstrap,
     PushKey,
-    PushRegister,
+    PushRegister {
+        epoch: u32,
+    },
     PushUnregister,
 }
 
@@ -492,7 +494,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.fail_request(pending, failure(code));
         } else if matches!(
             pending,
-            Pending::PushKey | Pending::PushRegister | Pending::PushUnregister
+            Pending::PushKey | Pending::PushRegister { .. } | Pending::PushUnregister
         ) {
             self.on_push_response(&pending, &msg);
         } else {
@@ -637,7 +639,7 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::Publish { .. }
             | Pending::InboxAck { .. }
             | Pending::InboxFetch { close: true, .. } => {}
-            Pending::PushKey | Pending::PushRegister | Pending::PushUnregister => {
+            Pending::PushKey | Pending::PushRegister { .. } | Pending::PushUnregister => {
                 self.on_push_failed(&pending, reason);
             }
         }
