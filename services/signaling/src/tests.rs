@@ -967,7 +967,7 @@ async fn sealed_sends_reach_the_device_or_its_inbox() {
         (
             Delivery::Unavailable,
             Some(owner.id()),
-            ack(DeliveryStatus::Busy),
+            refused(ErrorCode::Unavailable),
         ),
         (Delivery::Away, None, ack(DeliveryStatus::Offline)),
         (

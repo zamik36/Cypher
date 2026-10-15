@@ -67,6 +67,8 @@ pub(crate) struct Server {
     /// Sealed sends asked for, and handed to a device online.
     pub sealed_sends: usize,
     pub sealed_delivered: usize,
+    /// Signaling cannot reach any gateway for sealed deliveries.
+    pub sealed_broken: bool,
     /// End-to-end messages (not file chunks) sent over a session, where the
     /// gateway sees who sends.
     pub named_messages: usize,
@@ -898,6 +900,11 @@ impl World {
         item: Bytes,
     ) -> ServerMsg {
         self.server.sealed_sends += 1;
+        if self.server.sealed_broken {
+            return ServerMsg::Error {
+                code: ErrorCode::Unavailable,
+            };
+        }
         let ack = |status| ServerMsg::SendAck { status };
         let online = self.server.online.get(&to).copied();
         if let Some(idx) = online.filter(|&idx| self.clients[idx].connected) {

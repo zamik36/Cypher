@@ -552,6 +552,30 @@ fn a_refused_token_falls_back_to_sending_as_oneself() {
     assert_eq!(w.server.named_messages, named);
 }
 
+/// A broken way from signaling to the gateways must not hold messages
+/// back: they go as their sender for a while, then sealed again.
+#[test]
+fn a_broken_sealed_path_falls_back_for_a_while() {
+    let mut w = paired();
+    w.server.sealed_broken = true;
+    let named = w.server.named_messages;
+    w.send_text(A, B, "the long way is down");
+    assert_eq!(w.texts(B), ["the long way is down"]);
+    assert_eq!(
+        w.server.named_messages,
+        named + 2,
+        "the text and its receipt"
+    );
+
+    w.server.sealed_broken = false;
+    w.advance(5 * 60_000);
+    let (named, sealed) = (w.server.named_messages, w.server.sealed_delivered);
+    w.send_text(A, B, "back to sealed");
+    assert_eq!(w.texts(B).last().unwrap(), "back to sealed");
+    assert_eq!(w.server.named_messages, named);
+    assert!(w.server.sealed_delivered > sealed);
+}
+
 #[test]
 fn inboxes_no_longer_read_are_emptied_and_closed() {
     let mut w = paired();

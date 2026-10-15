@@ -577,7 +577,10 @@ impl Handler {
             Delivery::Answered(status) if status == DeliveryStatus::Delivered as u8 => {
                 DeliveryStatus::Delivered
             }
-            Delivery::Answered(_) | Delivery::Unavailable => DeliveryStatus::Busy,
+            Delivery::Answered(_) => DeliveryStatus::Busy,
+            // The way to the gateway is broken, not the device busy: the
+            // client sends as itself for a while instead of waiting.
+            Delivery::Unavailable => return Ok(error(ErrorCode::Unavailable)),
             Delivery::Away => match inbox {
                 Some(inbox) => {
                     return Ok(match self.inbox_put(&inbox, item).await? {

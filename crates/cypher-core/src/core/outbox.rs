@@ -32,6 +32,9 @@ const MAX_AWAITING_PER_PEER: usize = 500;
 /// How long messages to a device go as ourselves after its token was
 /// used up for the hour.
 const SEALED_PAUSE_MS: u64 = 60 * 60_000;
+/// How long they do after the server could not hand a sealed message to
+/// the device's gateway at all.
+const SEALED_BROKEN_MS: u64 = 5 * 60_000;
 
 /// An end-to-end message on its way. Stored as padded plaintext and
 /// encrypted at send time for each device, so a session reset never
@@ -379,15 +382,16 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// The server would not deliver a sealed message: with a refused or
-    /// used-up token it goes as ourselves at once, otherwise later.
+    /// used-up token, or no way to the device's gateway, it goes as
+    /// ourselves at once; otherwise later.
     pub(super) fn on_sealed_refused(&mut self, msg_id: MsgId, addr: Addr, code: ErrorCode) {
         let off_until = match code {
             ErrorCode::Unauthorized => u64::MAX,
             ErrorCode::RateLimited => self.now.saturating_add(SEALED_PAUSE_MS),
+            ErrorCode::Unavailable => self.now.saturating_add(SEALED_BROKEN_MS),
             ErrorCode::NotFound => return self.on_inbox_gone(msg_id, addr),
             ErrorCode::BadRequest
             | ErrorCode::TooLarge
-            | ErrorCode::Unavailable
             | ErrorCode::Internal
             | ErrorCode::UnsupportedVersion
             | ErrorCode::Conflict => return self.on_send_failed(msg_id, addr.device),
