@@ -37,19 +37,30 @@ pub struct Envelope {
     pub body: Body,
 }
 
-/// The inboxes one device reads, as it tells its contacts: the one of
-/// `epoch` and the next, so a contact writes to the right one across the
-/// turn of the week without waiting to hear again.
+/// How one device can be reached, as it tells its contacts, for `epoch`
+/// and the next, so a contact keeps reaching it across the turn of the week
+/// without waiting to hear again: the inbox it reads, and the access token
+/// that lets a message be delivered to it sealed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxAd {
     pub epoch: u32,
     pub ids: [[u8; 32]; 2],
+    pub access: [[u8; 32]; 2],
 }
 
 impl InboxAd {
     /// The inbox to write to in `epoch`.
     pub fn at(&self, epoch: u32) -> [u8; 32] {
-        let [this, next] = self.ids;
+        self.pick(epoch, self.ids)
+    }
+
+    /// The access token to deliver with in `epoch`.
+    pub fn token_at(&self, epoch: u32) -> [u8; 32] {
+        self.pick(epoch, self.access)
+    }
+
+    /// The first of `pair` up to the announced epoch, the second after.
+    fn pick(&self, epoch: u32, [this, next]: [[u8; 32]; 2]) -> [u8; 32] {
         if epoch > self.epoch { next } else { this }
     }
 }
@@ -387,6 +398,7 @@ mod tests {
         let ad = InboxAd {
             epoch: 9,
             ids: [[7; 32], [8; 32]],
+            access: [[5; 32], [6; 32]],
         };
         let new = Envelope {
             msg_id: MsgId([1; 16]),
@@ -424,6 +436,7 @@ mod tests {
         let ad = InboxAd {
             epoch: 10,
             ids: [[1; 32], [2; 32]],
+            access: [[3; 32], [4; 32]],
         };
         assert_eq!(ad.at(9), [1; 32], "a clock behind writes to the first");
         assert_eq!(ad.at(10), [1; 32]);
@@ -433,6 +446,7 @@ mod tests {
             [2; 32],
             "an old announcement, the latest it names"
         );
+        assert_eq!((ad.token_at(10), ad.token_at(11)), ([3; 32], [4; 32]));
     }
 
     /// `Devices` as it was before announcements, read by today's code.

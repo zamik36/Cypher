@@ -485,6 +485,25 @@ fn contacts_hear_of_the_new_inbox_when_the_epoch_turns() {
 }
 
 #[test]
+fn a_device_tells_its_gateway_the_access_tokens_of_three_epochs() {
+    let mut w = paired();
+    let b = cypher_types::Addr::new(w.peer(B), w.clients[B].device);
+    let told = |w: &World, epoch| {
+        let token = IdentitySeed(w.clients[B].seed).derive_access_token(b.device, epoch);
+        let hash = cypher_wire::access_hash(&token);
+        w.server
+            .access
+            .get(&b)
+            .is_some_and(|told| told.contains(&hash))
+    };
+    assert!(told(&w, 0) && told(&w, 1) && !told(&w, 2));
+
+    weeks_pass(&mut w, 2, &[]);
+    assert!(told(&w, 1) && told(&w, 2) && told(&w, 3));
+    assert!(!told(&w, 0));
+}
+
+#[test]
 fn inboxes_no_longer_read_are_emptied_and_closed() {
     let mut w = paired();
     w.disconnect(B);
@@ -1884,8 +1903,9 @@ mod legacy {
 
     use crate::harness::World;
 
-    /// An inbox announcement: epoch, this epoch's and the next inbox.
-    type Ad = (u32, [[u8; 32]; 2]);
+    /// An inbox announcement: epoch, this epoch's and the next inbox, and
+    /// their access tokens.
+    type Ad = (u32, [[u8; 32]; 2], [[u8; 32]; 2]);
 
     /// A session as stored now.
     #[derive(Serialize, Deserialize)]
@@ -1960,7 +1980,7 @@ mod legacy {
             pending_init: session.pending_init,
             accepted_ephemerals: session.accepted_ephemerals,
             identity_dh: contact.identity_dh,
-            inbox: session.inbox.map(|(_, ids)| ids[0]),
+            inbox: session.inbox.map(|(_, ids, _)| ids[0]),
             hello_sent: session.hello_sent,
             alias: Some(alias.to_owned()),
             name: contact.name,

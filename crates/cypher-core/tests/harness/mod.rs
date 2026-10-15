@@ -62,6 +62,11 @@ pub(crate) struct Server {
     pub signals: Vec<[u8; 32]>,
     /// `FetchKeys` requests served.
     pub key_fetches: usize,
+    /// Access-token hashes each connected device told.
+    pub access: HashMap<Addr, Vec<[u8; 32]>>,
+    /// Sealed sends asked for, and handed to a device online.
+    pub sealed_sends: usize,
+    pub sealed_delivered: usize,
 }
 
 pub(crate) struct Client {
@@ -646,6 +651,7 @@ impl World {
                 signed.extend_from_slice(&addr.device.0.to_le_bytes());
                 verify_signature(&addr.peer, &signed, &signature).expect("valid auth signature");
                 self.server.online.insert(addr, from);
+                self.server.access.remove(&addr);
                 self.respond(from, &reply(ServerMsg::Ready));
             }
             ClientMsg::InboxPut { .. }
@@ -700,7 +706,21 @@ impl World {
                 };
                 self.respond(from, &reply(answer));
             }
+            ClientMsg::SendSealed {
+                to,
+                device,
+                token,
+                inbox,
+                item,
+            } if self.onion_ctx.is_some() => {
+                let answer = self.send_sealed(Addr::new(to, device), &token, inbox, item);
+                self.respond(from, &reply(answer));
+            }
             _ if authed.is_none() || self.onion_ctx.is_some() => panic!("unauthenticated request"),
+            ClientMsg::SetAccess { hashes } => {
+                self.server.access.insert(authed.unwrap(), hashes);
+                self.respond(from, &reply(ServerMsg::Done));
+            }
             ClientMsg::Ping => self.respond(from, &reply(ServerMsg::Pong)),
             ClientMsg::Send {
                 to,
@@ -816,9 +836,7 @@ impl World {
             | ClientMsg::ResolveLink { .. } => {
                 panic!("unauthenticated request")
             }
-            ClientMsg::SendSealed { .. } | ClientMsg::SetAccess { .. } => {
-                panic!("no sealed delivery yet")
-            }
+            ClientMsg::SendSealed { .. } => panic!("a sealed send over the session"),
         }
     }
 
@@ -861,6 +879,50 @@ impl World {
             (self.now / 1000).abs_diff(proof.timestamp) <= 120,
             "signed just now"
         );
+    }
+
+    /// As signaling and the recipient's gateway do together: hands `item`
+    /// to the device if it is online and told the token, else leaves it in
+    /// `inbox`.
+    fn send_sealed(
+        &mut self,
+        to: Addr,
+        token: &[u8; 32],
+        inbox: Option<[u8; 32]>,
+        item: Bytes,
+    ) -> ServerMsg {
+        self.server.sealed_sends += 1;
+        let ack = |status| ServerMsg::SendAck { status };
+        let online = self.server.online.get(&to).copied();
+        if let Some(idx) = online.filter(|&idx| self.clients[idx].connected) {
+            let hash = cypher_wire::access_hash(token);
+            if !self
+                .server
+                .access
+                .get(&to)
+                .is_some_and(|h| h.contains(&hash))
+            {
+                return ServerMsg::Error {
+                    code: ErrorCode::Unauthorized,
+                };
+            }
+            self.server.sealed_delivered += 1;
+            self.deliver(idx, &Frame::new(0, ServerMsg::RecvSealed { item }));
+            return ack(DeliveryStatus::Delivered);
+        }
+        match inbox {
+            Some(inbox) if self.server.open_inboxes.contains(&inbox) => {
+                self.server.inboxes.entry(inbox).or_default().push(item);
+                if self.server.pushes.contains_key(&inbox) {
+                    self.server.signals.push(inbox);
+                }
+                ack(DeliveryStatus::Queued)
+            }
+            Some(_) => ServerMsg::Error {
+                code: ErrorCode::NotFound,
+            },
+            None => ack(DeliveryStatus::Offline),
+        }
     }
 
     fn serve_inbox(&mut self, from: usize, req_id: u32, msg: ClientMsg) {

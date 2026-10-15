@@ -115,6 +115,8 @@ enum Pending {
     },
     Bootstrap,
     PushKey,
+    /// The gateway took this device's access tokens.
+    Access,
     PushRegister {
         epoch: u32,
     },
@@ -385,6 +387,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.emit(Event::Connected);
         self.publish_keys(false);
         self.request(ClientMsg::Bootstrap, Pending::Bootstrap, false);
+        self.tell_access();
         self.last_inbox_fetch = 0;
         self.check_own_devices();
         self.flush_outbox();
@@ -639,6 +642,7 @@ impl<R: CryptoRngCore> Core<R> {
             }
             // Closing is tried again on the next tick.
             Pending::Publish { .. }
+            | Pending::Access
             | Pending::InboxAck { .. }
             | Pending::InboxFetch { close: true, .. } => {}
             Pending::PushKey | Pending::PushRegister { .. } | Pending::PushUnregister => {

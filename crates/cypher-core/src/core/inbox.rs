@@ -61,14 +61,30 @@ impl<R: CryptoRngCore> Core<R> {
         self.seed.derive_inbox_key(device, self.inbox_epoch()).id()
     }
 
-    /// The inboxes the identity's `device` reads, as contacts are told.
+    /// How the identity's `device` is reached now and next epoch, as
+    /// contacts are told.
     pub(super) fn own_ad(&self, device: DeviceId) -> InboxAd {
-        let epoch = self.inbox_epoch();
+        let (epoch, next) = (self.inbox_epoch(), self.inbox_epoch().saturating_add(1));
         let id = |epoch| self.seed.derive_inbox_key(device, epoch).id();
+        let token = |epoch| self.seed.derive_access_token(device, epoch);
         InboxAd {
             epoch,
-            ids: [id(epoch), id(epoch.saturating_add(1))],
+            ids: [id(epoch), id(next)],
+            access: [token(epoch), token(next)],
         }
+    }
+
+    /// Tells the gateway which access tokens this device takes sealed
+    /// deliveries with: the last epoch's (for contacts not yet told of the
+    /// turn), this one's and the next.
+    pub(super) fn tell_access(&mut self) {
+        let epoch = self.inbox_epoch();
+        let hashes = [epoch.checked_sub(1), Some(epoch), epoch.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .map(|e| cypher_wire::access_hash(&self.seed.derive_access_token(self.device, e)))
+            .collect();
+        self.request(ClientMsg::SetAccess { hashes }, Pending::Access, false);
     }
 
     /// Proof that this device asks `op` of the inbox of `epoch` now.
@@ -182,6 +198,7 @@ impl<R: CryptoRngCore> Core<R> {
         if self.inbox_epochs.announced != Some(current) {
             self.inbox_epochs.announced = Some(current);
             self.persist_inbox_epochs();
+            self.tell_access();
             self.greet_again();
             self.push_step();
         }

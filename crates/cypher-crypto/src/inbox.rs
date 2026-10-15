@@ -18,6 +18,7 @@ use crate::kdf::hkdf;
 /// How long one inbox is the one a device announces.
 pub const INBOX_EPOCH_SECS: u64 = 7 * 24 * 3600;
 const INBOX_KEY_LABEL: &[u8] = b"cypher/v4/inbox/";
+const ACCESS_TOKEN_LABEL: &[u8] = b"cypher/v4/access/";
 const INBOX_OP_CONTEXT: &[u8] = b"cypher/v4/inbox-op";
 
 /// The inbox epoch at `now_secs`.
@@ -57,18 +58,26 @@ impl InboxKey {
 impl IdentitySeed {
     /// The key of `device`'s inbox in `epoch`.
     pub fn derive_inbox_key(&self, device: DeviceId, epoch: u32) -> InboxKey {
-        let info = [
-            INBOX_KEY_LABEL,
-            &device.0.to_le_bytes(),
-            &epoch.to_le_bytes(),
-        ]
-        .concat();
         InboxKey(SigningKey::from_bytes(&hkdf::<32>(
             None,
             self.as_bytes(),
-            &info,
+            &epoch_info(INBOX_KEY_LABEL, device, epoch),
         )))
     }
+
+    /// What lets `device`'s contacts deliver to it sealed in `epoch`: the
+    /// device tells its gateway the token's hash, and contacts the token.
+    pub fn derive_access_token(&self, device: DeviceId, epoch: u32) -> [u8; 32] {
+        *hkdf::<32>(
+            None,
+            self.as_bytes(),
+            &epoch_info(ACCESS_TOKEN_LABEL, device, epoch),
+        )
+    }
+}
+
+fn epoch_info(label: &[u8], device: DeviceId, epoch: u32) -> Vec<u8> {
+    [label, &device.0.to_le_bytes(), &epoch.to_le_bytes()].concat()
 }
 
 fn op_message(op: InboxOp, inbox: &[u8; 32], timestamp_secs: u64, extra: &[u8]) -> Vec<u8> {
@@ -116,6 +125,16 @@ mod tests {
             IdentitySeed([8; 32]).derive_inbox_key(DeviceId(1), 10).id()
         );
         assert_eq!(inbox_epoch(INBOX_EPOCH_SECS * 3 + 5), 3);
+    }
+
+    #[test]
+    fn access_tokens_differ_by_device_and_epoch_and_from_the_inbox() {
+        let seed = IdentitySeed([7; 32]);
+        let token = seed.derive_access_token(DeviceId(1), 10);
+        assert_eq!(token, seed.derive_access_token(DeviceId(1), 10));
+        assert_ne!(token, seed.derive_access_token(DeviceId(1), 11));
+        assert_ne!(token, seed.derive_access_token(DeviceId(2), 10));
+        assert_ne!(token, seed.derive_inbox_key(DeviceId(1), 10).id());
     }
 
     #[test]
