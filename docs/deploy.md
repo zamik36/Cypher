@@ -129,6 +129,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
 
 Последний здоровый деплой записан в `.deployed-sha`.
 
+**Права NATS меняются вместе с сервисами.** `deploy/nats.conf` монтируется в контейнер NATS, и права пользователей входят в протокол: с sealed-доставкой gateway публикует только `peer.*.*.gw`, а signaling — `peer.*.*.sealed`. Если версия меняет `nats.conf`, перезапустите NATS вместе с сервисами (`docker compose … up -d --force-recreate nats`), иначе sealed-сообщения не дойдут, а клиенты будут писать с именем отправителя.
+
 **Подлинность образов.** CI подписывает каждый опубликованный образ без ключей, через Sigstore: подпись удостоверяет, что образ собрал workflow этого репозитория. К образу приложены SBOM и provenance. Проверка:
 
 ```bash
