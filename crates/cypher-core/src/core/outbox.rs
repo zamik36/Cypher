@@ -351,6 +351,7 @@ impl<R: CryptoRngCore> Core<R> {
                 None => self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS),
             },
             DeliveryStatus::Busy => self.retry_later(msg_id, addr.device, RETRY_BUSY_MS),
+            DeliveryStatus::Queued => self.on_inbox_queued(msg_id, addr.device),
         }
     }
 

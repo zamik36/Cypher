@@ -433,6 +433,8 @@ impl<R: CryptoRngCore> Core<R> {
             ServerMsg::Recv { from, device, body } => {
                 self.on_relay(Addr::new(from, device), &body, false);
             }
+            // Sealed like an inbox item: who sent it is inside.
+            ServerMsg::RecvSealed { item } => self.on_inbox_item(&item),
             msg @ (ServerMsg::SendAck { .. }
             | ServerMsg::Keys { .. }
             | ServerMsg::KeysAck { .. }

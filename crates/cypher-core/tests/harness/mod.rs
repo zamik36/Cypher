@@ -816,6 +816,9 @@ impl World {
             | ClientMsg::ResolveLink { .. } => {
                 panic!("unauthenticated request")
             }
+            ClientMsg::SendSealed { .. } | ClientMsg::SetAccess { .. } => {
+                panic!("no sealed delivery yet")
+            }
         }
     }
 

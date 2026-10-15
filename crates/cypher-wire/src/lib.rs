@@ -17,7 +17,7 @@ pub mod relay;
 
 pub use message::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, SEND_HEADER_LEN, SendView, ServerMsg,
-    encode_recv, peek_send, relay_addr_is_valid,
+    encode_recv, encode_recv_sealed, peek_send, relay_addr_is_valid,
 };
 
 /// Bumped on any incompatible change; the gateway rejects other versions.
@@ -39,6 +39,21 @@ pub const MAX_RELAY_ADDR_LEN: usize = 255;
 pub const MAX_DEVICE_LIST_LEN: usize = 32 + 8 + 1 + 4 * cypher_types::MAX_DEVICES + 64;
 /// Longest Web Push endpoint URL a client may register.
 pub const MAX_PUSH_ENDPOINT_LEN: usize = 1024;
+/// Access tokens a device takes sealed deliveries with at once: the last
+/// epoch's, this one's and the next.
+pub const MAX_ACCESS_HASHES: usize = 3;
+
+/// What a device tells its gateway of an access token: the gateway checks
+/// a sealed delivery's token against it, and never learns the token itself
+/// until one is used.
+pub fn access_hash(token: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::new()
+        .chain_update(b"cypher/v4/access-hash")
+        .chain_update(token)
+        .finalize()
+        .into()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum WireError {

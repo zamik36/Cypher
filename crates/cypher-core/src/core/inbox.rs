@@ -235,7 +235,9 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist(op);
     }
 
-    fn on_inbox_item(&mut self, item: &[u8]) {
+    /// An item sealed to this identity, from an inbox or delivered sealed:
+    /// the sender it names is proven by the session the body decrypts in.
+    pub(super) fn on_inbox_item(&mut self, item: &[u8]) {
         let Ok(plain) = cypher_crypto::sealed::open(&self.identity.dh_secret, item) else {
             return;
         };

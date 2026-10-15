@@ -3,8 +3,9 @@ use cypher_types::{DeviceId, LinkId, PeerId};
 
 use crate::codec::{Reader, WriteExt, field_len};
 use crate::{
-    BUNDLE_BASE_LEN, FRAME_HEADER_LEN, MAX_BODY_LEN, MAX_DEVICE_LIST_LEN, MAX_INBOX_BATCH,
-    MAX_INBOX_ITEM_LEN, MAX_OPKS_PER_PUBLISH, MAX_PUSH_ENDPOINT_LEN, MAX_RELAY_ADDR_LEN, WireError,
+    BUNDLE_BASE_LEN, FRAME_HEADER_LEN, MAX_ACCESS_HASHES, MAX_BODY_LEN, MAX_DEVICE_LIST_LEN,
+    MAX_INBOX_BATCH, MAX_INBOX_ITEM_LEN, MAX_OPKS_PER_PUBLISH, MAX_PUSH_ENDPOINT_LEN,
+    MAX_RELAY_ADDR_LEN, WireError,
 };
 
 /// A message plus the request id that correlates it with its reply.
@@ -41,6 +42,24 @@ pub enum ClientMsg {
         device: DeviceId,
         want_ack: bool,
         body: Bytes,
+    },
+    /// Delivers `item` to one device of `to` without naming the sender:
+    /// only through the onion relay. `token` is the device's access token
+    /// for now; `item` is sealed as an inbox item is, and goes to `inbox`,
+    /// if given, when the device is away. Answered with
+    /// [`ServerMsg::SendAck`].
+    SendSealed {
+        to: PeerId,
+        device: DeviceId,
+        token: [u8; 32],
+        inbox: Option<[u8; 32]>,
+        item: Bytes,
+    },
+    /// The hashes ([`crate::access_hash`]) of the tokens this device takes
+    /// sealed deliveries with, replacing those told before; at most
+    /// [`MAX_ACCESS_HASHES`].
+    SetAccess {
+        hashes: Vec<[u8; 32]>,
     },
     /// `base` is a [`BUNDLE_BASE_LEN`]-byte signed prekey bundle.
     PublishKeys {
@@ -141,6 +160,10 @@ pub enum ServerMsg {
     SendAck {
         status: DeliveryStatus,
     },
+    /// An item delivered sealed: the gateway does not know who sent it.
+    RecvSealed {
+        item: Bytes,
+    },
     Keys {
         base: Bytes,
         opk: Option<(u32, [u8; 32])>,
@@ -188,6 +211,8 @@ pub enum DeliveryStatus {
     Delivered = 0,
     Offline = 1,
     Busy = 2,
+    /// A sealed send left in the device's inbox while it is away.
+    Queued = 3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +243,9 @@ mod kind {
     pub(super) const SEND: u8 = 0x10;
     pub(super) const RECV: u8 = 0x11;
     pub(super) const SEND_ACK: u8 = 0x12;
+    pub(super) const SEND_SEALED: u8 = 0x13;
+    pub(super) const RECV_SEALED: u8 = 0x14;
+    pub(super) const SET_ACCESS: u8 = 0x15;
     pub(super) const PUBLISH_KEYS: u8 = 0x20;
     pub(super) const FETCH_KEYS: u8 = 0x21;
     pub(super) const KEYS: u8 = 0x22;
@@ -314,6 +342,39 @@ impl Frame<ClientMsg> {
                 b.put_u32_le(device.0);
                 b.put_u8(u8::from(*want_ack));
                 b.put_slice(body);
+                b
+            }
+            M::SendSealed {
+                to,
+                device,
+                token,
+                inbox,
+                item,
+            } => {
+                let mut b = header(kind::SEND_SEALED, id, item.len().saturating_add(101));
+                b.put_slice(to.as_bytes());
+                b.put_u32_le(device.0);
+                b.put_slice(token);
+                match inbox {
+                    Some(inbox) => {
+                        b.put_u8(1);
+                        b.put_slice(inbox);
+                    }
+                    None => b.put_u8(0),
+                }
+                b.put_slice(item);
+                b
+            }
+            M::SetAccess { hashes } => {
+                let mut b = header(
+                    kind::SET_ACCESS,
+                    id,
+                    hashes.len().saturating_mul(32).saturating_add(1),
+                );
+                b.put_u8(field_len(hashes.len()));
+                for hash in hashes {
+                    b.put_slice(hash);
+                }
                 b
             }
             M::PublishKeys {
@@ -437,6 +498,37 @@ impl Frame<ClientMsg> {
                 };
                 return Ok(Self::new(req_id, send));
             }
+            kind::SEND_SEALED => {
+                let to = PeerId(r.array()?);
+                let device = r.device()?;
+                let token = r.array()?;
+                let inbox = if read_bool(&mut r)? {
+                    Some(r.array()?)
+                } else {
+                    None
+                };
+                let item = r.rest();
+                if item.len() > MAX_INBOX_ITEM_LEN {
+                    return Err(WireError::TooLarge);
+                }
+                let send = M::SendSealed {
+                    to,
+                    device,
+                    token,
+                    inbox,
+                    item,
+                };
+                return Ok(Self::new(req_id, send));
+            }
+            kind::SET_ACCESS => {
+                let count = r.u8()? as usize;
+                if count > MAX_ACCESS_HASHES {
+                    return Err(WireError::TooLarge);
+                }
+                M::SetAccess {
+                    hashes: (0..count).map(|_| r.array()).collect::<Result<_, _>>()?,
+                }
+            }
             kind::PUBLISH_KEYS => {
                 let base = Bytes::copy_from_slice(&r.array::<BUNDLE_BASE_LEN>()?);
                 let replace_opks = read_bool(&mut r)?;
@@ -477,11 +569,7 @@ impl Frame<ClientMsg> {
             }
             kind::INBOX_FETCH => M::InboxFetch {
                 proof: InboxProof::read(&mut r)?,
-                close: match r.u8()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(WireError::Malformed),
-                },
+                close: read_bool(&mut r)?,
             },
             kind::INBOX_ACK => M::InboxAck {
                 proof: InboxProof::read(&mut r)?,
@@ -525,6 +613,7 @@ impl Frame<ServerMsg> {
                 b.put_u8(*status as u8);
                 b
             }
+            M::RecvSealed { item } => return recv_sealed_frame(id, item),
             M::Keys { base, opk } => {
                 let mut b = header(kind::KEYS, id, base.len().saturating_add(37));
                 b.put_slice(base);
@@ -624,9 +713,17 @@ impl Frame<ServerMsg> {
                     0 => DeliveryStatus::Delivered,
                     1 => DeliveryStatus::Offline,
                     2 => DeliveryStatus::Busy,
+                    3 => DeliveryStatus::Queued,
                     _ => return Err(WireError::Malformed),
                 },
             },
+            kind::RECV_SEALED => {
+                let item = r.rest();
+                if item.len() > MAX_INBOX_ITEM_LEN {
+                    return Err(WireError::TooLarge);
+                }
+                return Ok(Self::new(req_id, M::RecvSealed { item }));
+            }
             kind::KEYS => M::Keys {
                 base: Bytes::copy_from_slice(&r.array::<BUNDLE_BASE_LEN>()?),
                 opk: read_opk(&mut r)?,
@@ -692,6 +789,18 @@ fn recv_frame(req_id: u32, from: &PeerId, device: DeviceId, body: &[u8]) -> Byte
     b.put_slice(from.as_bytes());
     b.put_u32_le(device.0);
     b.put_slice(body);
+    b.freeze()
+}
+
+/// The unsolicited frame that hands a device an item delivered sealed;
+/// the gateway builds it straight from what it was relayed.
+pub fn encode_recv_sealed(item: &[u8]) -> Bytes {
+    recv_sealed_frame(0, item)
+}
+
+fn recv_sealed_frame(req_id: u32, item: &[u8]) -> Bytes {
+    let mut b = header(kind::RECV_SEALED, req_id, item.len());
+    b.put_slice(item);
     b.freeze()
 }
 

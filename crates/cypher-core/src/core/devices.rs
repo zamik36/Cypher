@@ -339,7 +339,7 @@ impl<R: CryptoRngCore> Core<R> {
                 .own
                 .as_ref()
                 .and_then(|l| l.with(&self.identity, offer.device).ok()),
-            DeliveryStatus::Offline | DeliveryStatus::Busy => None,
+            DeliveryStatus::Offline | DeliveryStatus::Busy | DeliveryStatus::Queued => None,
         };
         if let Some(list) = next {
             self.publish_listing(list, Some((offer.device, offer.name)));

@@ -144,7 +144,9 @@ impl Handler {
             ClientMsg::Hello { .. }
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
-            | ClientMsg::Send { .. } => Ok(error(ErrorCode::BadRequest)),
+            | ClientMsg::Send { .. }
+            | ClientMsg::SendSealed { .. }
+            | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::BadRequest)),
         }
     }
 
@@ -171,7 +173,9 @@ impl Handler {
             ClientMsg::Hello { .. }
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
-            | ClientMsg::Send { .. } => Ok(error(ErrorCode::BadRequest)),
+            | ClientMsg::Send { .. }
+            | ClientMsg::SendSealed { .. }
+            | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::BadRequest)),
         }
     }
 

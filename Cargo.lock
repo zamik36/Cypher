@@ -1924,6 +1924,7 @@ dependencies = [
  "criterion",
  "cypher-types",
  "proptest",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

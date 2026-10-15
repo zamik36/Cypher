@@ -7,7 +7,7 @@ use bytes::Bytes;
 use cypher_types::{DeviceId, LinkId, PeerId};
 use cypher_wire::{
     BUNDLE_BASE_LEN, ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, MAX_INBOX_ITEM_LEN,
-    SEND_HEADER_LEN, SendView, ServerMsg, WireError, encode_recv, peek_send,
+    SEND_HEADER_LEN, SendView, ServerMsg, WireError, encode_recv, encode_recv_sealed, peek_send,
 };
 
 fn proof(n: u8) -> InboxProof {
@@ -77,6 +77,24 @@ fn client_samples() -> Vec<ClientMsg> {
         ClientMsg::ResolveLink { link: link() },
         ClientMsg::Bootstrap,
         ClientMsg::PushKey,
+        ClientMsg::SendSealed {
+            to: PeerId([3; 32]),
+            device: DeviceId(2),
+            token: [5; 32],
+            inbox: Some([6; 32]),
+            item: Bytes::from_static(b"sealed"),
+        },
+        ClientMsg::SendSealed {
+            to: PeerId([3; 32]),
+            device: DeviceId::FIRST,
+            token: [5; 32],
+            inbox: None,
+            item: Bytes::new(),
+        },
+        ClientMsg::SetAccess {
+            hashes: vec![[1; 32], [2; 32], [3; 32]],
+        },
+        ClientMsg::SetAccess { hashes: Vec::new() },
     ];
     samples.extend(inbox_samples());
     samples
@@ -123,6 +141,12 @@ fn server_samples() -> Vec<ServerMsg> {
         },
         ServerMsg::SendAck {
             status: DeliveryStatus::Offline,
+        },
+        ServerMsg::SendAck {
+            status: DeliveryStatus::Queued,
+        },
+        ServerMsg::RecvSealed {
+            item: Bytes::from_static(b"sealed item"),
         },
         ServerMsg::Keys {
             base: Bytes::from(vec![3; BUNDLE_BASE_LEN]),
@@ -290,6 +314,54 @@ fn recv_hot_path_matches_generic_encoder() {
     )
     .encode();
     assert_eq!(encode_recv(&from, DeviceId(5), &body), generic);
+}
+
+#[test]
+fn sealed_deliveries_are_bounded_and_built_like_any_frame() {
+    let item = Bytes::from_static(b"sealed");
+    let generic = Frame::new(0, ServerMsg::RecvSealed { item: item.clone() }).encode();
+    assert_eq!(encode_recv_sealed(&item), generic);
+
+    let send = |item: Bytes| {
+        Frame::new(
+            1,
+            ClientMsg::SendSealed {
+                to: PeerId([1; 32]),
+                device: DeviceId::FIRST,
+                token: [2; 32],
+                inbox: None,
+                item,
+            },
+        )
+        .encode()
+    };
+    let largest = Bytes::from(vec![0; MAX_INBOX_ITEM_LEN]);
+    Frame::<ClientMsg>::decode(send(largest)).unwrap();
+    let larger = Bytes::from(vec![0; MAX_INBOX_ITEM_LEN + 1]);
+    assert_eq!(
+        Frame::<ClientMsg>::decode(send(larger)),
+        Err(WireError::TooLarge)
+    );
+
+    let access = |n| {
+        Frame::new(
+            1,
+            ClientMsg::SetAccess {
+                hashes: vec![[1; 32]; n],
+            },
+        )
+        .encode()
+    };
+    Frame::<ClientMsg>::decode(access(cypher_wire::MAX_ACCESS_HASHES)).unwrap();
+    assert_eq!(
+        Frame::<ClientMsg>::decode(access(cypher_wire::MAX_ACCESS_HASHES + 1)),
+        Err(WireError::TooLarge)
+    );
+    assert_ne!(
+        cypher_wire::access_hash(&[1; 32]),
+        cypher_wire::access_hash(&[2; 32])
+    );
+    assert_ne!(cypher_wire::access_hash(&[1; 32]), [1; 32]);
 }
 
 #[test]

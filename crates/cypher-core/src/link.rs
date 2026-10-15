@@ -214,6 +214,7 @@ impl Provision {
             }
             ServerMsg::Pong
             | ServerMsg::SendAck { .. }
+            | ServerMsg::RecvSealed { .. }
             | ServerMsg::Keys { .. }
             | ServerMsg::KeysAck { .. }
             | ServerMsg::Devices { .. }
