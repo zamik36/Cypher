@@ -13,7 +13,6 @@ bench = false
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
-sha2.workspace = true
 cypher-types.workspace = true
 
 [dev-dependencies]

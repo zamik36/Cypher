@@ -40,17 +40,6 @@ pub const MAX_DEVICE_LIST_LEN: usize = 32 + 8 + 1 + 4 * cypher_types::MAX_DEVICE
 /// Longest Web Push endpoint URL a client may register.
 pub const MAX_PUSH_ENDPOINT_LEN: usize = 1024;
 
-/// Public inbox address derived from the owner's secret. Writers need only
-/// the id; fetching or acknowledging requires the preimage.
-pub fn inbox_id(secret: &[u8; 32]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    Sha256::new()
-        .chain_update(b"cypher/v2/inbox")
-        .chain_update(secret)
-        .finalize()
-        .into()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum WireError {
     #[error("truncated frame")]
