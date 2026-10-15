@@ -7,11 +7,11 @@ use cypher_crypto::inbox::{InboxKey, InboxOp, push_extra};
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed, PrekeyBundle};
 use cypher_types::{DeviceId, LinkId, PeerId};
-use cypher_wire::{ClientMsg, ErrorCode, Frame, InboxProof, ServerMsg};
+use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, ServerMsg};
 use rand::RngCore as _;
 use rand::rngs::OsRng;
 
-use crate::handler::{CAPABILITY_ONION, CAPABILITY_PUSH, Handler, Pusher};
+use crate::handler::{CAPABILITY_ONION, CAPABILITY_PUSH, Courier, Delivery, Handler, Pusher};
 use crate::push::{Outcome, Subscription};
 use crate::store::Store;
 
@@ -22,6 +22,8 @@ async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
         signing_key: [7; 32],
         relay_addr: relay_addr.map(str::to_owned),
         push: None,
+        courier: Courier::Stub(std::sync::Arc::new(|_, _| Delivery::Away)),
+        fetches: tokio::sync::Semaphore::new(crate::handler::FETCH_PERMITS),
     })
 }
 
@@ -922,4 +924,104 @@ async fn without_a_vapid_key_push_is_unavailable() {
         panic!("no bootstrap");
     };
     assert_eq!(capabilities & CAPABILITY_PUSH, 0);
+}
+
+type Handed = std::sync::Arc<std::sync::Mutex<Vec<(cypher_types::Addr, Bytes)>>>;
+
+/// A courier that answers what the test sets, and keeps what it was handed.
+fn recording_courier(h: &mut Handler) -> (std::sync::Arc<std::sync::Mutex<Delivery>>, Handed) {
+    use std::sync::{Arc, Mutex};
+    let answer = Arc::new(Mutex::new(Delivery::Away));
+    let handed = Handed::default();
+    let (a, seen) = (Arc::clone(&answer), Arc::clone(&handed));
+    h.courier = Courier::Stub(Arc::new(move |to, payload| {
+        seen.lock().unwrap().push((to, payload));
+        *a.lock().unwrap()
+    }));
+    (answer, handed)
+}
+
+#[tokio::test]
+async fn sealed_sends_reach_the_device_or_its_inbox() {
+    let Some(mut h) = handler(None).await else {
+        return;
+    };
+    let (answer, handed) = recording_courier(&mut h);
+    let to = cypher_types::Addr::new(PeerId(random32()), DeviceId(2));
+    let token = random32();
+    let send = |inbox| ClientMsg::SendSealed {
+        to: to.peer,
+        device: to.device,
+        token,
+        inbox,
+        item: Bytes::from_static(b"sealed"),
+    };
+    let ack = |status| ServerMsg::SendAck { status };
+    let refused = |code| ServerMsg::Error { code };
+    let owner = Inbox::random();
+    open_inbox(&h, &owner).await;
+
+    let cases = [
+        (Delivery::Answered(0), None, ack(DeliveryStatus::Delivered)),
+        (Delivery::Answered(2), None, ack(DeliveryStatus::Busy)),
+        (
+            Delivery::Unavailable,
+            Some(owner.id()),
+            ack(DeliveryStatus::Busy),
+        ),
+        (Delivery::Away, None, ack(DeliveryStatus::Offline)),
+        (
+            Delivery::Away,
+            Some(owner.id()),
+            ack(DeliveryStatus::Queued),
+        ),
+        (
+            Delivery::Answered(cypher_server_kit::SEALED_REFUSED),
+            Some(owner.id()),
+            refused(ErrorCode::Unauthorized),
+        ),
+        (
+            Delivery::Away,
+            Some(Inbox::random().id()),
+            refused(ErrorCode::NotFound),
+        ),
+    ];
+    let count = cases.len();
+    for (delivery, inbox, expected) in cases {
+        *answer.lock().unwrap() = delivery;
+        assert_eq!(ask(&h, None, send(inbox)).await, expected, "{delivery:?}");
+    }
+    let handed = handed.lock().unwrap().clone();
+    assert_eq!(handed.len(), count);
+    let payload = [token.as_slice(), b"sealed"].concat();
+    assert!(
+        handed
+            .iter()
+            .all(|(addr, p)| *addr == to && p[..] == payload[..])
+    );
+
+    // Left for the device while it was away, once.
+    let ServerMsg::InboxBatch { items, .. } = ask(&h, None, owner.fetch()).await else {
+        panic!("no batch");
+    };
+    assert_eq!(items, [Bytes::from_static(b"sealed")]);
+}
+
+/// Never over the session: the gateway would see who sends.
+#[tokio::test]
+async fn sealed_sends_go_only_through_the_onion() {
+    let Some(mut h) = handler(None).await else {
+        return;
+    };
+    let (_, handed) = recording_courier(&mut h);
+    let send = ClientMsg::SendSealed {
+        to: PeerId(random32()),
+        device: DeviceId::FIRST,
+        token: random32(),
+        inbox: None,
+        item: Bytes::from_static(b"sealed"),
+    };
+    let signed_in = ask(&h, Some(PeerId(random32())), send).await;
+    assert!(is_error(&signed_in, ErrorCode::BadRequest));
+    assert!(handed.lock().unwrap().is_empty());
 }

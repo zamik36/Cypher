@@ -37,6 +37,7 @@ pub(crate) async fn handle(handler: &Handler, keys: &OnionKeys, blob: &[u8]) -> 
             | ClientMsg::FetchKeys { .. }
             | ClientMsg::FetchDevices { .. }
             | ClientMsg::ResolveLink { .. }
+            | ClientMsg::SendSealed { .. }
     );
     if !allowed {
         return None;

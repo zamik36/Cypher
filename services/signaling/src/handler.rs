@@ -2,8 +2,12 @@ use bytes::Bytes;
 use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::{DeviceList, PrekeyBundle};
 use cypher_types::{Addr, LinkId, PeerId};
-use cypher_wire::{ClientMsg, ErrorCode, Frame, InboxProof, MAX_INBOX_BATCH, ServerMsg};
+use cypher_wire::{
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, MAX_INBOX_BATCH, ServerMsg,
+    access_hash,
+};
 use rand::RngCore;
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 use crate::push::{Outcome, Subscription, WebPush};
@@ -38,6 +42,16 @@ const RESOLVES_PER_HOUR: u32 = 60;
 const HOUR_SECS: u64 = 3600;
 /// How far the time a signed inbox request names may be from the server's.
 const INBOX_CLOCK_SKEW_SECS: u64 = 120;
+/// Sealed sends per access token and hour: the token is one device's for
+/// a week and shared by its contacts, so this bounds what they can push
+/// through to it together; beyond it they send as themselves.
+const SEALED_PER_TOKEN_PER_HOUR: u32 = 3600;
+/// Inbox fetches answered at once. A batch holds up to 768 KiB, so this
+/// bounds that memory (~48 MiB) while the other requests, all small, may
+/// be many more.
+pub(crate) const FETCH_PERMITS: usize = 64;
+/// How long the recipient's gateway has to take a sealed delivery.
+const SEALED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(crate) struct Handler {
     pub store: Store,
@@ -45,6 +59,56 @@ pub(crate) struct Handler {
     pub signing_key: [u8; 32],
     pub relay_addr: Option<String>,
     pub push: Option<Pusher>,
+    pub courier: Courier,
+    pub fetches: Semaphore,
+}
+
+/// Hands sealed sends to the gateway of the device they are for: through
+/// NATS, or to a stand-in in tests.
+pub(crate) enum Courier {
+    Nats(async_nats::Client),
+    #[cfg(test)]
+    Stub(std::sync::Arc<dyn Fn(Addr, Bytes) -> Delivery + Send + Sync>),
+}
+
+/// What became of a sealed delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// The device's gateway answered with this status byte.
+    Answered(u8),
+    /// No gateway holds the device: it is away.
+    Away,
+    /// The gateway did not answer in time.
+    Unavailable,
+}
+
+impl Courier {
+    async fn deliver(&self, to: Addr, payload: Bytes) -> Delivery {
+        match self {
+            Self::Nats(nats) => {
+                let subject = cypher_server_kit::peer_subject(
+                    &to.peer.to_hex(),
+                    to.device,
+                    cypher_server_kit::Origin::Sealed,
+                );
+                let request = async_nats::Request::new()
+                    .payload(payload)
+                    .timeout(Some(SEALED_TIMEOUT));
+                match nats.send_request(subject, request).await {
+                    Ok(reply) => reply
+                        .payload
+                        .first()
+                        .map_or(Delivery::Unavailable, |status| Delivery::Answered(*status)),
+                    Err(e) if e.kind() == async_nats::RequestErrorKind::NoResponders => {
+                        Delivery::Away
+                    }
+                    Err(_) => Delivery::Unavailable,
+                }
+            }
+            #[cfg(test)]
+            Self::Stub(deliver) => deliver(to, payload),
+        }
+    }
 }
 
 /// Sends signals: through Web Push, or into a list in tests.
@@ -155,6 +219,16 @@ impl Handler {
     /// ask for rather than by who asks.
     async fn answer_anonymous(&self, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
         match msg {
+            ClientMsg::SendSealed {
+                to,
+                device,
+                token,
+                inbox,
+                item,
+            } => {
+                self.send_sealed(Addr::new(to, device), &token, inbox, &item)
+                    .await
+            }
             ClientMsg::FetchKeys { peer, device } => {
                 self.fetch_keys(None, Addr::new(peer, device)).await
             }
@@ -174,7 +248,6 @@ impl Handler {
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
             | ClientMsg::Send { .. }
-            | ClientMsg::SendSealed { .. }
             | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::BadRequest)),
         }
     }
@@ -479,7 +552,51 @@ impl Handler {
         })
     }
 
+    /// Hands `item` to the device's gateway, which takes it only with a
+    /// token the device told it; a device that is away finds it in `inbox`.
+    async fn send_sealed(
+        &self,
+        to: Addr,
+        token: &[u8; 32],
+        inbox: Option<[u8; 32]>,
+        item: &Bytes,
+    ) -> redis::RedisResult<ServerMsg> {
+        let bucket = [b"ss:".as_slice(), &access_hash(token)].concat();
+        if !self
+            .store
+            .admit(&bucket, SEALED_PER_TOKEN_PER_HOUR, HOUR_SECS)
+            .await?
+        {
+            return Ok(error(ErrorCode::RateLimited));
+        }
+        let payload = Bytes::from([token.as_slice(), item].concat());
+        let status = match self.courier.deliver(to, payload).await {
+            Delivery::Answered(cypher_server_kit::SEALED_REFUSED) => {
+                return Ok(error(ErrorCode::Unauthorized));
+            }
+            Delivery::Answered(status) if status == DeliveryStatus::Delivered as u8 => {
+                DeliveryStatus::Delivered
+            }
+            Delivery::Answered(_) | Delivery::Unavailable => DeliveryStatus::Busy,
+            Delivery::Away => match inbox {
+                Some(inbox) => {
+                    return Ok(match self.inbox_put(&inbox, item).await? {
+                        ServerMsg::Done => ServerMsg::SendAck {
+                            status: DeliveryStatus::Queued,
+                        },
+                        refused => refused,
+                    });
+                }
+                None => DeliveryStatus::Offline,
+            },
+        };
+        Ok(ServerMsg::SendAck { status })
+    }
+
     async fn inbox_fetch(&self, inbox: &[u8; 32], close: bool) -> redis::RedisResult<ServerMsg> {
+        let Ok(_permit) = self.fetches.try_acquire() else {
+            return Ok(error(ErrorCode::Unavailable));
+        };
         let mut claim = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut claim);
         let items = self

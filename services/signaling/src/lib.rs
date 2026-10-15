@@ -30,14 +30,16 @@ use handler::Handler;
 use keys::OnionKeys;
 use store::Store;
 
-/// Requests handled at once, per source. Session requests (keys, links)
-/// are small; an onion request may return an inbox batch of up to 768 KiB,
-/// so its pool bounds that memory (~48 MiB) and anonymous load cannot crowd
-/// out signed-in users. A request beyond its pool is dropped at once rather
-/// than stalling the subscription: the gateway answers it as unavailable
-/// after its timeout and the client retries with backoff.
+/// Requests handled at once, per source, so anonymous load cannot crowd
+/// out signed-in users. Session requests (keys, links) are small. Onion
+/// requests are many (every sealed message is one, waiting on the
+/// recipient's gateway) and up to ~100 KiB each; inbox fetches, whose
+/// batches are larger, have a pool of their own within
+/// ([`handler::FETCH_PERMITS`]). A request beyond its pool is dropped at
+/// once rather than stalling the subscription: the gateway answers it as
+/// unavailable after its timeout and the client retries with backoff.
 const SESSION_PERMITS: usize = 1024;
-const ONION_PERMITS: usize = 64;
+const ONION_PERMITS: usize = 512;
 /// Key sets are small and the relay caches them.
 const KEY_SET_PERMITS: usize = 16;
 /// How often the onion keys are looked at again: a new epoch's key is in
@@ -208,15 +210,18 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         }
         valid
     });
+    let nats = cypher_server_kit::connect_nats(&config.nats).await?;
     let service = Arc::new(Service {
         handler: Handler {
             store: Store::connect(&config.redis_url).await?,
             signing_key: keys.signing_key(),
             relay_addr,
             push,
+            courier: handler::Courier::Nats(nats.clone()),
+            fetches: Semaphore::new(handler::FETCH_PERMITS),
         },
         keys,
-        nats: cypher_server_kit::connect_nats(&config.nats).await?,
+        nats,
         requests: registry.counter("signaling_requests_total", "Session requests handled")?,
         onion_requests: registry
             .counter("signaling_onion_requests_total", "Onion requests handled")?,
