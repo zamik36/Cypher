@@ -41,7 +41,7 @@ pub(crate) struct Server {
     open_inboxes: HashSet<[u8; 32]>,
     pub closed_inboxes: HashSet<[u8; 32]>,
     claims: HashMap<[u8; 16], ([u8; 32], usize)>,
-    /// Every `Recv` delivered, for replay/tamper attacks.
+    /// Every `Recv` and `RecvSealed` delivered, for replay/tamper attacks.
     pub delivered: Vec<(usize, Bytes)>,
     pub drop_chunks_every: Option<usize>,
     /// Messages (not chunks) still to lose per sender: the server takes and
@@ -67,6 +67,9 @@ pub(crate) struct Server {
     /// Sealed sends asked for, and handed to a device online.
     pub sealed_sends: usize,
     pub sealed_delivered: usize,
+    /// End-to-end messages (not file chunks) sent over a session, where the
+    /// gateway sees who sends.
+    pub named_messages: usize,
 }
 
 pub(crate) struct Client {
@@ -609,7 +612,7 @@ impl World {
     }
 
     fn deliver(&mut self, to: usize, frame: &Frame<ServerMsg>) {
-        if let ServerMsg::Recv { .. } = frame.msg {
+        if let ServerMsg::Recv { .. } | ServerMsg::RecvSealed { .. } = frame.msg {
             self.server.delivered.push((to, frame.encode()));
         }
         self.clients[to]
@@ -730,6 +733,9 @@ impl World {
             } => {
                 let sender = authed.unwrap();
                 let is_chunk = body.first() == Some(&1);
+                if body.first() == Some(&0) {
+                    self.server.named_messages += 1;
+                }
                 let lost = !is_chunk
                     && self
                         .server
@@ -906,8 +912,19 @@ impl World {
                     code: ErrorCode::Unauthorized,
                 };
             }
-            self.server.sealed_delivered += 1;
-            self.deliver(idx, &Frame::new(0, ServerMsg::RecvSealed { item }));
+            // The test knows who sent it, though the server would not.
+            let sender = self.onion_ctx.as_ref().map(|(i, ..)| self.peer(*i));
+            let lost = sender.is_some_and(|sender| {
+                self.server.lose_from.get_mut(&sender).is_some_and(|left| {
+                    let lose = *left > 0;
+                    *left = left.saturating_sub(1);
+                    lose
+                })
+            });
+            if !lost {
+                self.server.sealed_delivered += 1;
+                self.deliver(idx, &Frame::new(0, ServerMsg::RecvSealed { item }));
+            }
             return ack(DeliveryStatus::Delivered);
         }
         match inbox {

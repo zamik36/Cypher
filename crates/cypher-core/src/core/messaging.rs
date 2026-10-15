@@ -638,6 +638,7 @@ impl<R: CryptoRngCore> Core<R> {
         let mut renamed = false;
         if let (Some(s), Some(ad)) = (self.sessions.get_mut(&sender), ad) {
             s.inbox = Some(ad);
+            s.sealed_off_until = 0;
         }
         if let Some(p) = self.peers.get_mut(&from) {
             renamed = p.name != name;

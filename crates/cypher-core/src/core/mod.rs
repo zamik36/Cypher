@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed};
-use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 
@@ -95,6 +95,12 @@ enum Pending {
         batch: bool,
     },
     Send {
+        msg_id: MsgId,
+        addr: Addr,
+        body: Bytes,
+    },
+    /// The same message sent without our name, through the relay.
+    SendSealed {
         msg_id: MsgId,
         addr: Addr,
         body: Bytes,
@@ -412,6 +418,7 @@ impl<R: CryptoRngCore> Core<R> {
                 msg,
                 ServerMsg::InboxBatch { .. }
                     | ServerMsg::Done
+                    | ServerMsg::SendAck { .. }
                     | ServerMsg::PushKey { .. }
                     | ServerMsg::Keys { .. }
                     | ServerMsg::Devices { .. }
@@ -495,7 +502,11 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_response(&mut self, pending: Pending, msg: ServerMsg) {
-        if let ServerMsg::Error { code } = msg {
+        if let (Pending::SendSealed { msg_id, addr, .. }, ServerMsg::Error { code }) =
+            (&pending, &msg)
+        {
+            self.on_sealed_refused(*msg_id, *addr, *code);
+        } else if let ServerMsg::Error { code } = msg {
             self.fail_request(pending, failure(code));
         } else if matches!(
             pending,
@@ -509,16 +520,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn on_success(&mut self, pending: Pending, msg: ServerMsg) {
         match (pending, msg) {
-            (Pending::CreateLink, ServerMsg::LinkCreated { link }) => {
-                self.remember_link(link.as_str(), self.now);
-                self.sync(SyncBody::Link {
-                    code: link.as_str().to_owned(),
-                    at_ms: self.now,
-                });
-                self.emit(Event::LinkCreated {
-                    link: ShareLink::new(link, &self.peer_id).to_string(),
-                });
-            }
+            (Pending::CreateLink, ServerMsg::LinkCreated { link }) => self.on_link_created(link),
             (Pending::Resolve { link }, ServerMsg::LinkResolved { peer }) => {
                 self.on_link_resolved(&link, peer);
             }
@@ -542,7 +544,10 @@ impl<R: CryptoRngCore> Core<R> {
                     self.publish_keys(true);
                 }
             }
-            (Pending::Send { msg_id, addr, body }, ServerMsg::SendAck { status }) => {
+            (
+                Pending::Send { msg_id, addr, body } | Pending::SendSealed { msg_id, addr, body },
+                ServerMsg::SendAck { status },
+            ) => {
                 self.on_send_ack(msg_id, addr, &body, status);
             }
             (Pending::InboxPut { msg_id, addr }, ServerMsg::Done) => {
@@ -566,6 +571,18 @@ impl<R: CryptoRngCore> Core<R> {
             ) => self.on_bootstrap(relay_addr, signing_key),
             (pending, _) => self.fail_request(pending, FailReason::ServerError),
         }
+    }
+
+    /// An invite made here: kept, told to this user's other devices, shown.
+    fn on_link_created(&mut self, link: LinkId) {
+        self.remember_link(link.as_str(), self.now);
+        self.sync(SyncBody::Link {
+            code: link.as_str().to_owned(),
+            at_ms: self.now,
+        });
+        self.emit(Event::LinkCreated {
+            link: ShareLink::new(link, &self.peer_id).to_string(),
+        });
     }
 
     /// Where the relay is and what to seal onion requests to.
@@ -637,7 +654,9 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::InboxPut { msg_id, addr } if reason == FailReason::NotFound => {
                 self.on_inbox_gone(msg_id, addr);
             }
-            Pending::Send { msg_id, addr, .. } | Pending::InboxPut { msg_id, addr } => {
+            Pending::Send { msg_id, addr, .. }
+            | Pending::SendSealed { msg_id, addr, .. }
+            | Pending::InboxPut { msg_id, addr } => {
                 self.on_send_failed(msg_id, addr.device);
             }
             // Closing is tried again on the next tick.

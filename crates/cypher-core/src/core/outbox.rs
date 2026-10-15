@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use cypher_crypto::sealed;
 use cypher_types::{Addr, DeviceId, MsgId, PeerId};
-use cypher_wire::{ClientMsg, DeliveryStatus};
+use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode};
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -29,6 +29,9 @@ const MAX_RETRY_MS: u64 = 10 * 60_000;
 const MAX_DOUBLINGS: u32 = 10;
 /// Messages to one contact kept for a receipt; older ones are let go.
 const MAX_AWAITING_PER_PEER: usize = 500;
+/// How long messages to a device go as ourselves after its token was
+/// used up for the hour.
+const SEALED_PAUSE_MS: u64 = 60 * 60_000;
 
 /// An end-to-end message on its way. Stored as padded plaintext and
 /// encrypted at send time for each device, so a session reset never
@@ -47,6 +50,15 @@ pub(crate) struct OutboxItem {
     /// The best status told so far: a late answer about one device cannot
     /// take back what another device's already told.
     reported: MessageStatus,
+}
+
+/// How a message reaches a contact's device without our name: the
+/// device's access token, the inbox to leave it in if the device is away,
+/// and the key to seal it to.
+struct SealedRoute {
+    token: [u8; 32],
+    inbox: [u8; 32],
+    identity_dh: [u8; 32],
 }
 
 /// One device a message goes to.
@@ -298,6 +310,9 @@ impl<R: CryptoRngCore> Core<R> {
         target.in_flight = true;
 
         self.persist_session(addr);
+        if self.send_sealed(msg_id, addr, &body) {
+            return;
+        }
         let req_id = self.alloc_req();
         self.pending.insert(
             req_id,
@@ -319,6 +334,77 @@ impl<R: CryptoRngCore> Core<R> {
                 body,
             },
         );
+    }
+
+    /// Sends `body` to `addr` without our name, if it can go so; whether
+    /// it went.
+    fn send_sealed(&mut self, msg_id: MsgId, addr: Addr, body: &Bytes) -> bool {
+        let Some(route) = self.sealed_route(addr) else {
+            return false;
+        };
+        let Some(item) = self.seal_item(&route.identity_dh, body) else {
+            return false;
+        };
+        let msg = ClientMsg::SendSealed {
+            to: addr.peer,
+            device: addr.device,
+            token: route.token,
+            inbox: Some(route.inbox),
+            item,
+        };
+        let body = body.clone();
+        self.request(msg, Pending::SendSealed { msg_id, addr, body }, true);
+        true
+    }
+
+    /// How a message to `addr` goes without our name, if it can: to a
+    /// contact's device that told us its access token, while the relay is
+    /// up, and not while its token is off.
+    fn sealed_route(&self, addr: Addr) -> Option<SealedRoute> {
+        if addr.peer == self.peer_id || self.anon.readiness(self.now) != Readiness::Onion {
+            return None;
+        }
+        let peer = self.peers.get(&addr.peer)?;
+        let session = self.sessions.get(&addr)?;
+        if session.sealed_off_until > self.now {
+            return None;
+        }
+        let ad = session.inbox.or_else(|| peer.inbox_of(addr.device))?;
+        let epoch = self.inbox_epoch();
+        Some(SealedRoute {
+            token: ad.token_at(epoch),
+            inbox: ad.at(epoch),
+            identity_dh: peer.identity_dh,
+        })
+    }
+
+    /// The server would not deliver a sealed message: with a refused or
+    /// used-up token it goes as ourselves at once, otherwise later.
+    pub(super) fn on_sealed_refused(&mut self, msg_id: MsgId, addr: Addr, code: ErrorCode) {
+        let off_until = match code {
+            ErrorCode::Unauthorized => u64::MAX,
+            ErrorCode::RateLimited => self.now.saturating_add(SEALED_PAUSE_MS),
+            ErrorCode::NotFound => return self.on_inbox_gone(msg_id, addr),
+            ErrorCode::BadRequest
+            | ErrorCode::TooLarge
+            | ErrorCode::Unavailable
+            | ErrorCode::Internal
+            | ErrorCode::UnsupportedVersion
+            | ErrorCode::Conflict => return self.on_send_failed(msg_id, addr.device),
+        };
+        if let Some(s) = self.sessions.get_mut(&addr) {
+            s.sealed_off_until = off_until;
+        }
+        let now = self.now;
+        if let Some(target) = self
+            .outbox
+            .get_mut(&msg_id)
+            .and_then(|item| item.target(addr.device))
+        {
+            target.in_flight = false;
+            target.next_try = now;
+        }
+        self.send_to(msg_id, addr.device);
     }
 
     pub(super) fn on_send_ack(
@@ -395,21 +481,26 @@ impl<R: CryptoRngCore> Core<R> {
                 return self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS);
             }
         }
+        match self.seal_item(identity_dh, body) {
+            Some(item) => self.request(
+                ClientMsg::InboxPut { inbox, item },
+                Pending::InboxPut { msg_id, addr },
+                true,
+            ),
+            None => self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS),
+        }
+    }
+
+    /// `body` sealed to a contact's identity key with who sends it inside,
+    /// as an inbox item or a sealed delivery carries it.
+    fn seal_item(&mut self, identity_dh: &[u8; 32], body: &[u8]) -> Option<Bytes> {
         let mut plain = Zeroizing::new(Vec::with_capacity(36 + body.len()));
         plain.extend_from_slice(self.peer_id.as_bytes());
         plain.extend_from_slice(&self.device.0.to_le_bytes());
         plain.extend_from_slice(body);
-        match sealed::seal(identity_dh, &plain, &mut self.rng) {
-            Ok(item) => self.request(
-                ClientMsg::InboxPut {
-                    inbox,
-                    item: Bytes::from(item),
-                },
-                Pending::InboxPut { msg_id, addr },
-                true,
-            ),
-            Err(_) => self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS),
-        }
+        sealed::seal(identity_dh, &plain, &mut self.rng)
+            .ok()
+            .map(Bytes::from)
     }
 
     /// Schedules another attempt: `base` doubled per earlier failure, capped,

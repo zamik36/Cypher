@@ -504,6 +504,55 @@ fn a_device_tells_its_gateway_the_access_tokens_of_three_epochs() {
 }
 
 #[test]
+fn online_messages_go_sealed_once_the_contact_told_its_token() {
+    let mut w = paired();
+    let named = w.server.named_messages;
+    let id = w.send_text(A, B, "who sent this?");
+    assert_eq!(w.texts(B), ["who sent this?"]);
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
+    assert_eq!(
+        w.server.named_messages, named,
+        "neither the text nor its receipt names its sender"
+    );
+    assert!(w.server.sealed_delivered >= 2);
+}
+
+#[test]
+fn a_sealed_message_for_a_device_away_waits_in_its_inbox() {
+    let mut w = paired();
+    w.advance(1000);
+    w.disconnect(B);
+    let sealed = w.server.sealed_sends;
+    let id = w.send_text(A, B, "sealed for later");
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Queued));
+    assert_eq!(w.server.sealed_sends, sealed + 1, "one request, not two");
+    assert_eq!(w.inbox_items(&w.inbox_of(B, 0)), 1);
+
+    w.connect(B);
+    w.advance(1000);
+    assert_eq!(w.texts(B), ["sealed for later"]);
+}
+
+#[test]
+fn a_refused_token_falls_back_to_sending_as_oneself() {
+    let mut w = paired();
+    let b = cypher_types::Addr::new(w.peer(B), w.clients[B].device);
+    w.server.access.insert(b, Vec::new());
+    let named = w.server.named_messages;
+    w.send_text(A, B, "token refused");
+    w.send_text(A, B, "still as myself");
+    assert_eq!(w.texts(B), ["token refused", "still as myself"]);
+    assert_eq!(w.server.named_messages, named + 2);
+
+    // Once B greets again, its token is tried again.
+    weeks_pass(&mut w, 1, &[]);
+    let named = w.server.named_messages;
+    w.send_text(A, B, "sealed again");
+    assert_eq!(w.texts(B).last().unwrap(), "sealed again");
+    assert_eq!(w.server.named_messages, named);
+}
+
+#[test]
 fn inboxes_no_longer_read_are_emptied_and_closed() {
     let mut w = paired();
     w.disconnect(B);
@@ -563,13 +612,10 @@ fn messages_survive_restarts_without_key_reuse() {
     assert_eq!(w.texts(A).last().unwrap(), "still here");
 
     let mut headers = std::collections::HashSet::new();
-    for (_, raw) in &w.server.delivered {
-        if let Ok(Frame {
-            msg: ServerMsg::Recv { from, body, .. },
-            ..
-        }) = Frame::<ServerMsg>::decode(raw.clone())
-            && body.first() == Some(&0)
-        {
+    let delivered = delivered_bodies(&w);
+    assert!(delivered.len() >= 8, "every message is looked at");
+    for (from, body) in delivered {
+        if body.first() == Some(&0) {
             let init_len = if body[1] == 1 {
                 32 + 32 + 4 + 5 + 64 - if body[2 + 68] == 0 { 4 } else { 0 }
             } else {
@@ -579,6 +625,30 @@ fn messages_survive_restarts_without_key_reuse() {
             assert!(headers.insert((from, header)), "ratchet header reused");
         }
     }
+}
+
+/// Every body delivered to a device, with who sent it, however it went:
+/// stamped by the gateway, or sealed, opened with the recipient's key as
+/// the recipient does.
+fn delivered_bodies(w: &World) -> Vec<(PeerId, Bytes)> {
+    w.server
+        .delivered
+        .iter()
+        .filter_map(
+            |(to, raw)| match Frame::<ServerMsg>::decode(raw.clone()).ok()?.msg {
+                ServerMsg::Recv { from, body, .. } => Some((from, body)),
+                ServerMsg::RecvSealed { item } => {
+                    let key = IdentitySeed(w.clients[*to].seed)
+                        .derive_identity()
+                        .dh_secret;
+                    let plain = cypher_crypto::sealed::open(&key, &item).ok()?;
+                    let (from, rest) = plain.split_first_chunk::<32>()?;
+                    Some((PeerId(*from), Bytes::copy_from_slice(rest.get(4..)?)))
+                }
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 #[test]

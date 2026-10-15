@@ -47,6 +47,10 @@ pub(crate) struct Session {
     pub inbox: Option<InboxAd>,
     /// Whether our `Hello` went out on this session.
     pub hello_sent: bool,
+    /// Until when messages to the device go as ourselves rather than
+    /// sealed: its token was refused (until it greets again) or used up.
+    /// In memory only.
+    pub sealed_off_until: u64,
 }
 
 /// A name as someone typed it, made safe to show: control characters
@@ -148,6 +152,7 @@ impl Session {
             accepted_ephemerals: Vec::new(),
             inbox: None,
             hello_sent: false,
+            sealed_off_until: 0,
         }
     }
 
@@ -200,6 +205,7 @@ impl Session {
             accepted_ephemerals: r.accepted_ephemerals.clone(),
             inbox: r.inbox,
             hello_sent: r.hello_sent,
+            sealed_off_until: 0,
         })
     }
 }
