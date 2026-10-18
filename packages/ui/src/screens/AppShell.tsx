@@ -6,6 +6,7 @@ import NewChat from "./NewChat";
 import ContactScreen from "./ContactScreen";
 import Settings from "./Settings";
 import ConnectionBanner from "../components/ConnectionBanner";
+import UpdateBanner from "../components/UpdateBanner";
 import ToastContainer from "../components/ToastContainer";
 import Icon from "../components/Icon";
 import { isWide } from "../stores/layout";
@@ -27,6 +28,7 @@ export default function AppShell() {
   return (
     <div class="shell" classList={{ "shell--wide": isWide() }}>
       <ConnectionBanner />
+      <UpdateBanner />
       <div class="shell__panes">
         <Show when={isWide() || atRoot()}>
           <div class="shell__list">

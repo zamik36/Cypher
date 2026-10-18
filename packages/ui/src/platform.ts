@@ -192,6 +192,16 @@ export interface Platform {
     setCloseToTray(enabled: boolean): Promise<void>;
   };
   /**
+   * Updates of the installed app, signed with the release key and checked
+   * before they are installed (desktop); absent elsewhere.
+   */
+  updates?: {
+    /** The newer version the releases offer, if any. */
+    check(): Promise<string | null>;
+    /** Downloads and installs the version `check` found, then restarts. */
+    install(): Promise<void>;
+  };
+  /**
    * Wake-ups while the app is closed (Web Push); absent where the platform
    * has none. The server learns only "this inbox has news".
    */

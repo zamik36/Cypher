@@ -64,6 +64,11 @@ const en = {
   banner_superseded_text:
     "Cypher was opened again on this device, in another window or tab, so this one stopped receiving messages.",
   banner_use_here: "Use here",
+  app_update_title: "Version {version} is available",
+  app_update_text: "It is signed by the Cypher release key and installs in a moment; the app then restarts.",
+  app_update_install: "Update and restart",
+  app_update_installing: "Updating…",
+  app_update_later: "Later",
   server_key_title: "The server's key changed",
   server_key_text:
     "The server shows another key than the first time you connected, so Cypher does not use its anonymous channel. Someone may be impersonating it.",

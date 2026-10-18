@@ -1,6 +1,8 @@
 import { convertFileSrc, invoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 
 let stopLevels: UnlistenFn | null = null;
@@ -35,6 +37,22 @@ function base64Of(blob: Blob): Promise<string> {
   });
 }
 
+/** The update `check` found, until it is installed. */
+let offered: Update | null = null;
+
+/** Signed updates from the releases; Android updates through its store. */
+const updates: Platform["updates"] = {
+  check: async () => {
+    offered = await check();
+    return offered?.version ?? null;
+  },
+  install: async () => {
+    if (!offered) return;
+    await offered.downloadAndInstall();
+    await relaunch();
+  },
+};
+
 /** Runs a command that returns nothing. */
 async function command(cmd: string, args?: InvokeArgs): Promise<void> {
   await invoke(cmd, args);
@@ -43,6 +61,7 @@ async function command(cmd: string, args?: InvokeArgs): Promise<void> {
 export const tauriPlatform: Platform = {
   kind: "desktop",
   capabilities: { tor: true, gatewayConfig: !isAndroid, revealFile: !isAndroid, streamMedia: true },
+  ...(isAndroid ? {} : { updates }),
   hasIdentity: () => invoke<boolean>("has_identity"),
   createIdentity: (nickname, passphrase) => invoke<string>("create_identity", { nickname, passphrase }),
   unlockIdentity: (passphrase) => invoke<[string, string]>("unlock_identity", { passphrase }),

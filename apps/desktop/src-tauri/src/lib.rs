@@ -37,8 +37,13 @@ pub fn run() -> tauri::Result<()> {
         }));
     #[cfg(mobile)]
     let builder = tauri::Builder::default().plugin(tauri_plugin_barcode_scanner::init());
+    // Signed updates from the releases; the key they must carry is in
+    // tauri.conf.json.
     #[cfg(desktop)]
-    let builder = builder.on_window_event(shell::on_close);
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .on_window_event(shell::on_close);
     wire(builder)
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())

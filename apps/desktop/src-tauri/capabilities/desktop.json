@@ -1,0 +1,16 @@
+{
+  "identifier": "desktop",
+  "description": "Desktop-only abilities: installing signed updates and restarting into them",
+  "platforms": [
+    "windows",
+    "macOS",
+    "linux"
+  ],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

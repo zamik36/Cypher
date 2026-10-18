@@ -96,12 +96,57 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev libasound2-dev
       - name: Install desktop dependencies
         run: cd apps/desktop && npm install
+      # Installed apps take an update only if the release key signed it: the
+      # bundles get signatures and the release a latest.json naming them.
+      - name: Updater signing key
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set: installed apps could not update to this release"
+            exit 1
+          fi
+          echo '{"bundle":{"createUpdaterArtifacts":true}}' > apps/desktop/src-tauri/release.conf.json
+      # With a code-signing certificate the Windows installer is signed
+      # (no SmartScreen warning); without one it goes out unsigned.
+      - name: Windows code-signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:CERT) {
+            Write-Output "::warning::WINDOWS_CERTIFICATE is not set: the installer is unsigned"
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT))
+          $password = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $config = @{
+            bundle = @{
+              createUpdaterArtifacts = $true
+              windows = @{
+                certificateThumbprint = $cert.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = "http://timestamp.digicert.com"
+              }
+            }
+          }
+          $config | ConvertTo-Json -Depth 4 | Set-Content apps/desktop/src-tauri/release.conf.json -Encoding utf8
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
+          args: --config src-tauri/release.conf.json
+          includeUpdaterJson: true
           tagName: ${{ github.ref_name }}
           releaseName: "Cypher ${{ github.ref_name }}"
           releaseBody: ${{ needs.versions.outputs.notes }}
