@@ -114,7 +114,7 @@ docker compose exec redis redis-cli ping   # PONG; пароль берётся �
 | `DOMAIN`, `REDIS_PASSWORD`, `GRAFANA_PASSWORD` | Как в `.env`. |
 | `ALERT_TELEGRAM_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | Куда слать алерты: токен бота и id чата. Необязательны. |
 | `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD`, `RELAY_NATS_PASSWORD` | Как в `.env`. Без них деплой откажется стартовать. |
-| `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Подпись Android-сборок (AAB и APK) в релизе. Без них релиз не собирается. Отпечаток этого ключа стоит в `apps/pwa/public/.well-known/assetlinks.json`. |
+| `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Подпись Android-сборок (AAB и APK) в релизе. Без них релиз не собирается. Это тот же ключ, которым подписаны выпущенные APK (с v0.1.0); его отпечаток стоит в `apps/pwa/public/.well-known/assetlinks.json`. |
 | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Подпись обновлений десктопа. Установленное приложение ставит обновление, только если его подписал этот ключ (открытый ключ — в `tauri.conf.json`). Без них релиз не собирается. |
 | `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | Сертификат Authenticode (PFX в base64) и его пароль. Необязательны: без них установщик Windows не подписан, и SmartScreen предупреждает при первом запуске. |
 
