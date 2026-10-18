@@ -108,17 +108,21 @@ jobs:
           releaseDraft: false
           prerelease: false
 
+  # The Android project is in the repository (src-tauri/gen/android) and is
+  # built as it is; the version comes from the workspace like everywhere else.
+  # The release is signed with the keystore from the secrets: an AAB for
+  # Google Play and an APK to install directly.
   android-release:
-    name: Android APK
+    name: Android (AAB and APK)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     needs: [versions]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
           key: android-${{ hashFiles('crates/**/*.rs', 'apps/desktop/src-tauri/src/**/*.rs') }}
@@ -138,59 +142,33 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: cd apps/desktop && npm install
-      - name: Initialize Android project
-        run: cd apps/desktop && npx tauri android init
-      - name: Generate Android icons from source
-        run: cd apps/desktop && npx tauri icon src-tauri/icons/icon.png
-      - name: Decode signing keystore
-        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > apps/desktop/src-tauri/gen/android/release.keystore
-      - name: Patch Android version code
+      - name: Signing keystore
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          GRADLE_FILE="apps/desktop/src-tauri/gen/android/app/build.gradle.kts"
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH * 100))
-
-          sed -i "s/versionCode = .*/versionCode = ${VERSION_CODE}/" "$GRADLE_FILE"
-          sed -i "s/versionName = .*/versionName = \"${VERSION}\"/" "$GRADLE_FILE"
-
-          echo "Set versionCode=${VERSION_CODE}, versionName=${VERSION}"
-          grep -E 'versionCode|versionName' "$GRADLE_FILE"
-      - name: Configure APK signing
+          if [ -z "$KEYSTORE" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set: a release must be signed"
+            exit 1
+          fi
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "CYPHER_ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+      - name: Build AAB and APK
+        env:
+          CYPHER_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CYPHER_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CYPHER_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: cd apps/desktop && npx tauri android build --aab --apk --target aarch64 --target armv7
+      - name: Name the artifacts by version
         run: |
-          GRADLE_FILE="apps/desktop/src-tauri/gen/android/app/build.gradle.kts"
-          KEYSTORE_PATH="${{ github.workspace }}/apps/desktop/src-tauri/gen/android/release.keystore"
-
-          # Insert signingConfigs block before buildTypes
-          sed -i "/buildTypes {/i\\
-              signingConfigs {\\
-                  create(\"release\") {\\
-                      storeFile = file(\"${KEYSTORE_PATH}\")\\
-                      storePassword = \"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}\"\\
-                      keyAlias = \"${{ secrets.ANDROID_KEY_ALIAS }}\"\\
-                      keyPassword = \"${{ secrets.ANDROID_KEY_PASSWORD }}\"\\
-                  }\\
-              }" "$GRADLE_FILE"
-
-          # Wire release buildType to use the signing config
-          sed -i '/getByName("release") {/a\
-                      signingConfig = signingConfigs.getByName("release")' "$GRADLE_FILE"
-      - name: Build Android APK
-        run: cd apps/desktop && npx tauri android build --apk --target aarch64
-      - name: Rename APK with version and commit hash
-        run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          APK_DIR="apps/desktop/src-tauri/gen/android/app/build/outputs/apk"
-          find "$APK_DIR" -name '*.apk' | while read -r apk; do
-            dir=$(dirname "$apk")
-            mv "$apk" "$dir/cypher-${VERSION}-${SHORT_SHA}.apk"
-          done
-      - name: Upload APK
+          version="${GITHUB_REF_NAME#v}"
+          out=apps/desktop/src-tauri/gen/android/app/build/outputs
+          mkdir -p release
+          cp "$(find "$out/bundle" -name '*.aab' | head -n1)" "release/cypher-${version}.aab"
+          cp "$(find "$out/apk" -name '*.apk' | head -n1)" "release/cypher-${version}.apk"
+          ls -la release
+      - name: Upload to the release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
-          files: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

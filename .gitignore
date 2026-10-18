@@ -1,6 +1,9 @@
 # Build output: cargo, Tauri, vite; tests and profiling write under target/ too.
 **/target/
-**/gen/
+# Tauri writes generated schemas under gen/; the Android project there is kept
+# (customised, and built as is on release), minus what its own .gitignore names.
+apps/desktop/src-tauri/gen/*
+!apps/desktop/src-tauri/gen/android/
 node_modules/
 dist/
 apps/pwa/src/wasm/
