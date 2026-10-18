@@ -18,3 +18,16 @@ test("an invite link opens New chat with the code, once the app is unlocked", as
   for (const page of [host, guest]) await expect(page.getByTestId("chat-header")).toBeVisible();
   await expect(guest.getByTestId("chat-header")).toContainText("hal");
 });
+
+test("the site vouches for the Android app, so invite links open it directly", async ({ request }) => {
+  const response = await request.get("/.well-known/assetlinks.json");
+  expect(response.ok()).toBe(true);
+  expect(response.headers()["content-type"]).toContain("application/json");
+  const [statement] = (await response.json()) as {
+    relation: string[];
+    target: { package_name: string; sha256_cert_fingerprints: string[] };
+  }[];
+  expect(statement?.relation).toContain("delegate_permission/common.handle_all_urls");
+  expect(statement?.target.package_name).toBe("dev.cypher.app");
+  expect(statement?.target.sha256_cert_fingerprints[0]).toMatch(/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/);
+});
