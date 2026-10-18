@@ -15,6 +15,9 @@ async fn user_journey_against_in_process_stack() {
     // the gateway hands them over without knowing who sends.
     assert!(stack.counter("gateway_sealed_delivered_total").await > 0);
     assert_eq!(stack.counter("gateway_sealed_refused_total").await, 0);
+    // Every one was answered: a gateway that cannot reply to signaling
+    // (NATS rights) delivers, and the sender then sends again by name.
+    assert_eq!(stack.counter("signaling_sealed_unavailable_total").await, 0);
     stack.stop().await;
 }
 

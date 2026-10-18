@@ -24,6 +24,7 @@ async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
         push: None,
         courier: Courier::Stub(std::sync::Arc::new(|_, _| Delivery::Away)),
         fetches: tokio::sync::Semaphore::new(crate::handler::FETCH_PERMITS),
+        sealed_unavailable: prometheus::IntCounter::new("sealed_unavailable", "test").unwrap(),
     })
 }
 

@@ -61,6 +61,9 @@ pub(crate) struct Handler {
     pub push: Option<Pusher>,
     pub courier: Courier,
     pub fetches: Semaphore,
+    /// Sealed sends no gateway answered: the way to the gateways is broken
+    /// (NATS down or refusing), and senders fall back to their name.
+    pub sealed_unavailable: prometheus::IntCounter,
 }
 
 /// Hands sealed sends to the gateway of the device they are for: through
@@ -580,7 +583,10 @@ impl Handler {
             Delivery::Answered(_) => DeliveryStatus::Busy,
             // The way to the gateway is broken, not the device busy: the
             // client sends as itself for a while instead of waiting.
-            Delivery::Unavailable => return Ok(error(ErrorCode::Unavailable)),
+            Delivery::Unavailable => {
+                self.sealed_unavailable.inc();
+                return Ok(error(ErrorCode::Unavailable));
+            }
             Delivery::Away => match inbox {
                 Some(inbox) => {
                     return Ok(match self.inbox_put(&inbox, item).await? {

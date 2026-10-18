@@ -43,6 +43,15 @@ groups:
           summary: "Signaling drops requests"
           description: "Its request pools have been full for 10 minutes; clients retry, but slower."
 
+      - alert: SealedPathBroken
+        expr: rate(signaling_sealed_unavailable_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sealed messages do not reach the gateways"
+          description: "Signaling gets no answer from gateways for sealed sends (NATS down or its rights wrong); clients send with their name meanwhile."
+
       - alert: DeliveriesBusy
         expr: rate(gateway_busy_total[5m]) > 10
         for: 10m

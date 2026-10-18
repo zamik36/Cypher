@@ -188,6 +188,18 @@ async fn refresh_keys(service: Arc<Service>, shutdown: CancellationToken) {
     }
 }
 
+/// The relay address clients are told of, if it is a valid `host:port`;
+/// anonymous routing is off without one.
+fn relay_public_addr(configured: Option<String>) -> Option<String> {
+    configured.filter(|addr| {
+        let valid = cypher_wire::relay_addr_is_valid(addr);
+        if !valid {
+            warn!(%addr, "relay_public_addr is not a valid host:port; anonymous routing is off");
+        }
+        valid
+    })
+}
+
 /// Serves signaling requests from NATS until `shutdown` is cancelled.
 pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<()> {
     let registry = Metrics::new()?;
@@ -203,13 +215,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
 
     let keys = OnionKeys::new(&secrets::load_or_create_secret(&config.signing_key_path)?);
     let push = web_push(&config)?;
-    let relay_addr = config.relay_public_addr.filter(|addr| {
-        let valid = cypher_wire::relay_addr_is_valid(addr);
-        if !valid {
-            warn!(%addr, "relay_public_addr is not a valid host:port; anonymous routing is off");
-        }
-        valid
-    });
+    let relay_addr = relay_public_addr(config.relay_public_addr);
     let nats = cypher_server_kit::connect_nats(&config.nats).await?;
     let service = Arc::new(Service {
         handler: Handler {
@@ -219,6 +225,10 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
             push,
             courier: handler::Courier::Nats(nats.clone()),
             fetches: Semaphore::new(handler::FETCH_PERMITS),
+            sealed_unavailable: registry.counter(
+                "signaling_sealed_unavailable_total",
+                "Sealed sends no gateway answered in time",
+            )?,
         },
         keys,
         nats,
