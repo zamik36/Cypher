@@ -7,6 +7,11 @@ ignore = [
     "RUSTSEC-2024-0436", # paste: unmaintained via optional arti-client Tor stack, no safe replacement upstream yet
     "RUSTSEC-2023-0071", # rsa Marvin timing advisory via optional arti-client Tor stack, no safe upgrade available yet
     "RUSTSEC-2024-0370", # proc-macro-error: build-time macro via tauri's Linux GTK stack (glib-macros), not shipped code
+    # zbus_names, zvariant, zvariant_derive: merged into zbus 6, so marked unmaintained; zbus 5 comes
+    # with notify-rust and the tauri opener/single-instance plugins (Linux D-Bus) until they move to zbus 6
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
