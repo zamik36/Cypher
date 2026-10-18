@@ -611,6 +611,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// The server's onion keys arrived: what waited for them goes now.
     fn on_onion_ready(&mut self) {
         self.send_deferred();
+        self.flush_outbox();
         self.fetch_inbox();
         self.renew_push();
     }

@@ -517,6 +517,22 @@ fn online_messages_go_sealed_once_the_contact_told_its_token() {
     assert!(w.server.sealed_delivered >= 2);
 }
 
+/// What is written while away goes out once the app is back, and goes
+/// sealed: it waits the moment the relay takes to come up instead of going
+/// with its sender's name.
+#[test]
+fn messages_written_offline_go_sealed_once_the_relay_is_up() {
+    let mut w = paired();
+    w.disconnect(A);
+    w.send_text(A, B, "written on the train");
+    let named = w.server.named_messages;
+    // A fresh start: the relay's keys are not there yet when it connects.
+    w.restart(A);
+    w.advance(2_000);
+    assert_eq!(w.texts(B), ["written on the train"]);
+    assert_eq!(w.server.named_messages, named, "nothing went with A's name");
+}
+
 #[test]
 fn a_sealed_message_for_a_device_away_waits_in_its_inbox() {
     let mut w = paired();

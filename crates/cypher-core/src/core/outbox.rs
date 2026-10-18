@@ -55,6 +55,15 @@ pub(crate) struct OutboxItem {
     reported: MessageStatus,
 }
 
+/// How one copy of a message goes to its device.
+enum Route {
+    Sealed(SealedRoute),
+    /// It would go sealed, but the relay is not up yet.
+    Later,
+    /// Over the session, with our name.
+    Named,
+}
+
 /// How a message reaches a contact's device without our name: the
 /// device's access token, the inbox to leave it in if the device is away,
 /// and the key to seal it to.
@@ -284,10 +293,18 @@ impl<R: CryptoRngCore> Core<R> {
         if !self.is_ready() {
             return;
         }
+        let Some(peer) = self.outbox.get(&msg_id).map(|item| item.peer) else {
+            return;
+        };
+        let addr = Addr::new(peer, device);
+        let route = self.sealed_route(addr);
+        // Still due: it goes as soon as the relay is up (or given up on).
+        if matches!(route, Route::Later) {
+            return;
+        }
         let Some(item) = self.outbox.get_mut(&msg_id) else {
             return;
         };
-        let addr = Addr::new(item.peer, device);
         let Some(session) = self.sessions.get_mut(&addr) else {
             if let Some(target) = item.target(device) {
                 // Keys are on their way; the new session sends it at once.
@@ -313,9 +330,17 @@ impl<R: CryptoRngCore> Core<R> {
         target.in_flight = true;
 
         self.persist_session(addr);
-        if self.send_sealed(msg_id, addr, &body) {
+        if let Route::Sealed(route) = route
+            && self.send_sealed(msg_id, addr, &route, &body)
+        {
             return;
         }
+        self.send_named(msg_id, addr, body);
+    }
+
+    /// Sends `body` to `addr` over the session: the gateway stamps it with
+    /// our name.
+    fn send_named(&mut self, msg_id: MsgId, addr: Addr, body: Bytes) {
         let req_id = self.alloc_req();
         self.pending.insert(
             req_id,
@@ -339,12 +364,15 @@ impl<R: CryptoRngCore> Core<R> {
         );
     }
 
-    /// Sends `body` to `addr` without our name, if it can go so; whether
-    /// it went.
-    fn send_sealed(&mut self, msg_id: MsgId, addr: Addr, body: &Bytes) -> bool {
-        let Some(route) = self.sealed_route(addr) else {
-            return false;
-        };
+    /// Sends `body` to `addr` by `route`, without our name; whether it
+    /// went.
+    fn send_sealed(
+        &mut self,
+        msg_id: MsgId,
+        addr: Addr,
+        route: &SealedRoute,
+        body: &Bytes,
+    ) -> bool {
         let Some(item) = self.seal_item(&route.identity_dh, body) else {
             return false;
         };
@@ -360,25 +388,36 @@ impl<R: CryptoRngCore> Core<R> {
         true
     }
 
-    /// How a message to `addr` goes without our name, if it can: to a
-    /// contact's device that told us its access token, while the relay is
-    /// up, and not while its token is off.
-    fn sealed_route(&self, addr: Addr) -> Option<SealedRoute> {
-        if addr.peer == self.peer_id || self.anon.readiness(self.now) != Readiness::Onion {
-            return None;
+    /// How a message to `addr` goes: without our name to a contact's
+    /// device that told us its access token, while its token is not off,
+    /// once the relay is up; while the relay is still coming up, it waits
+    /// rather than go with our name.
+    fn sealed_route(&self, addr: Addr) -> Route {
+        if addr.peer == self.peer_id {
+            return Route::Named;
         }
-        let peer = self.peers.get(&addr.peer)?;
-        let session = self.sessions.get(&addr)?;
-        if session.sealed_off_until > self.now {
-            return None;
+        let Some(peer) = self.peers.get(&addr.peer) else {
+            return Route::Named;
+        };
+        let Some(session) = self.sessions.get(&addr) else {
+            return Route::Named;
+        };
+        let ad = session.inbox.or_else(|| peer.inbox_of(addr.device));
+        let (Some(ad), true) = (ad, session.sealed_off_until <= self.now) else {
+            return Route::Named;
+        };
+        match self.anon.readiness(self.now) {
+            Readiness::Onion => {
+                let epoch = self.inbox_epoch();
+                Route::Sealed(SealedRoute {
+                    token: ad.token_at(epoch),
+                    inbox: ad.at(epoch),
+                    identity_dh: peer.identity_dh,
+                })
+            }
+            Readiness::Wait => Route::Later,
+            Readiness::Session | Readiness::Unavailable => Route::Named,
         }
-        let ad = session.inbox.or_else(|| peer.inbox_of(addr.device))?;
-        let epoch = self.inbox_epoch();
-        Some(SealedRoute {
-            token: ad.token_at(epoch),
-            inbox: ad.at(epoch),
-            identity_dh: peer.identity_dh,
-        })
     }
 
     /// The server would not deliver a sealed message: with a refused or
