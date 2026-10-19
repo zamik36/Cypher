@@ -604,7 +604,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Asks the relay for the server's onion keys, if they are needed.
     fn ask_key_set(&mut self) {
-        let deadline = self.now + REQUEST_TIMEOUT_MS;
+        let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         if let Some(frame) = self.anon.key_set_request(self.now, deadline) {
             self.effects.push(Effect::Anonymous(frame));
         }
@@ -939,7 +939,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         let req_id = self.alloc_req();
-        let deadline = self.now + REQUEST_TIMEOUT_MS;
+        let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         let frame = Frame::new(req_id, msg).encode();
         let effect = match (anonymous, readiness) {
             (false, _) | (true, Readiness::Session) => Effect::Transmit(frame),

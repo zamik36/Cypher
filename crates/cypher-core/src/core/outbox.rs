@@ -328,7 +328,7 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(session) = self.sessions.get_mut(&addr) else {
             if let Some(target) = item.target(device) {
                 // Keys are on their way; the new session sends it at once.
-                target.next_try = self.now + RETRY_OFFLINE_MS;
+                target.next_try = self.now.saturating_add(RETRY_OFFLINE_MS);
             }
             self.open_session(addr);
             return;
@@ -370,7 +370,7 @@ impl<R: CryptoRngCore> Core<R> {
                     addr,
                     body: body.clone(),
                 },
-                self.now + super::REQUEST_TIMEOUT_MS,
+                self.now.saturating_add(super::REQUEST_TIMEOUT_MS),
             ),
         );
         self.transmit(
@@ -578,7 +578,7 @@ impl<R: CryptoRngCore> Core<R> {
             .and_then(|item| item.target(device))
         {
             target.in_flight = false;
-            target.next_try = now + retry_delay(base, target.attempts, roll);
+            target.next_try = now.saturating_add(retry_delay(base, target.attempts, roll));
             target.attempts = target.attempts.saturating_add(1);
         }
     }

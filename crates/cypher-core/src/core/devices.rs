@@ -316,7 +316,7 @@ impl<R: CryptoRngCore> Core<R> {
             return self.emit(Event::LinkFailed { reason });
         };
         let req_id = self.alloc_req();
-        let deadline = self.now + super::REQUEST_TIMEOUT_MS;
+        let deadline = self.now.saturating_add(super::REQUEST_TIMEOUT_MS);
         let send = ClientMsg::Send {
             to: offer.temp,
             device: DeviceId::FIRST,

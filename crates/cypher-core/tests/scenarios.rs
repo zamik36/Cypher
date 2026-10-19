@@ -2319,6 +2319,46 @@ mod security {
         assert!(w.server.onion_inbox_ops > onion, "and its relay is used");
     }
 
+    /// A driver clock at the very end of time (a browser turns a huge date
+    /// into `u64::MAX`) makes no deadline overflow, which would abort the
+    /// client. Overflow checks are on in the test profile, so an unchecked
+    /// addition panics here; the commands still do what they should.
+    #[test]
+    fn a_clock_at_the_end_of_time_aborts_nothing() {
+        let mut w = super::paired();
+        let a = w.peer(A);
+        let phone = w.provision("phone");
+        let offer = w.offer(phone);
+        w.clients[B].ahead = u64::MAX - w.now;
+        w.disconnect(A);
+        let id = w.msg_id();
+        w.command(
+            B,
+            Command::SendText {
+                peer: a,
+                msg_id: id,
+                text: "at the end of time".into(),
+                reply_to: None,
+            },
+        );
+        w.command(B, Command::CreateLink);
+        w.command(
+            B,
+            Command::LinkDevice {
+                offer,
+                history: false,
+            },
+        );
+        w.clients[B].ahead = 0;
+        assert!(w.has_event(B, |e| matches!(e, Event::Message(m)
+            if m.msg_id == id && m.sent_at_ms == u64::MAX)));
+        assert!(w.has_event(B, |e| matches!(e, Event::LinkCreated { .. })));
+        assert!(
+            w.finish_linking(phone),
+            "the identity was handed to the new device"
+        );
+    }
+
     /// A message delivered before the app restarted is still marked read
     /// when the contact reads it after.
     #[test]
