@@ -174,9 +174,11 @@ pub struct Core<R> {
     /// One per device of a contact we talk to.
     sessions: HashMap<Addr, Session>,
     outbox: BTreeMap<MsgId, OutboxItem>,
-    outgoing: HashMap<FileId, Outgoing>,
-    incoming: HashMap<FileId, Incoming>,
-    pending: HashMap<u32, (Pending, u64)>,
+    // Maps the core walks to make effects are ordered: the same inputs make
+    // the same effects in the same order.
+    outgoing: BTreeMap<FileId, Outgoing>,
+    incoming: BTreeMap<FileId, Incoming>,
+    pending: BTreeMap<u32, (Pending, u64)>,
     /// Anonymous requests made before it was known how they can go: sent
     /// once the relay is up, or its wait is over.
     deferred: VecDeque<(ClientMsg, Pending)>,
@@ -190,17 +192,15 @@ pub struct Core<R> {
     /// When keys were last republished because the server's were not ours.
     last_resync: Option<u64>,
     /// When a fresh session was last started with a device of a contact.
-    last_repair: HashMap<Addr, u64>,
+    last_repair: BTreeMap<Addr, u64>,
     /// When a message carrying our unanswered first one reached a
     /// contact's device.
-    init_heard: HashMap<Addr, u64>,
+    init_heard: BTreeMap<Addr, u64>,
     /// Invites being joined by, while the host's devices answer.
     joining: HashMap<PeerId, Joining>,
     devices: Devices,
     history: History,
     recent: RecentIds,
-    /// Our messages the contact has read, so a late receipt cannot undo it.
-    read: RecentIds,
     progress_at: HashMap<FileId, u64>,
     /// Chunks read from disk for the devices waiting for them.
     reads: HashMap<(FileId, u32), Vec<DeviceId>>,
@@ -209,8 +209,9 @@ pub struct Core<R> {
     server: String,
     server_keys: ServerKeys,
     inbox_epochs: InboxEpochs,
-    /// A signing key the server showed that is not the one remembered.
-    offered_key: Option<[u8; 32]>,
+    /// A signing key a server showed that is not the one remembered for
+    /// it, and that server's address: the key is trusted for it alone.
+    offered_key: Option<(String, [u8; 32])>,
     push: PushState,
     /// The name this user goes by, sent to contacts with `Hello`.
     profile_name: Option<String>,
@@ -258,7 +259,7 @@ impl<R: CryptoRngCore> Core<R> {
             outbox,
             outgoing,
             incoming,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             deferred: VecDeque::new(),
             next_req: 0,
             conn: Conn::Offline,
@@ -267,13 +268,12 @@ impl<R: CryptoRngCore> Core<R> {
             last_inbox_fetch: 0,
             last_inbox_sweep: None,
             last_resync: None,
-            last_repair: HashMap::new(),
-            init_heard: HashMap::new(),
+            last_repair: BTreeMap::new(),
+            init_heard: BTreeMap::new(),
             joining: HashMap::new(),
             devices: own.devices,
             history: own.history,
             recent: RecentIds::default(),
-            read: RecentIds::default(),
             progress_at: HashMap::new(),
             reads: HashMap::new(),
             anon: Anon::default(),
@@ -379,9 +379,11 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.conn = Conn::Offline;
         self.anon.on_disconnected();
-        let pending: Vec<_> = self.pending.drain().map(|(_, (p, _))| p).collect();
+        let pending = std::mem::take(&mut self.pending)
+            .into_values()
+            .map(|(p, _)| p);
         let deferred: Vec<_> = self.deferred.drain(..).map(|(_, p)| p).collect();
-        for p in pending.into_iter().chain(deferred) {
+        for p in pending.chain(deferred) {
             self.fail_request(p, FailReason::Offline);
         }
         self.pause_transfers();
@@ -602,7 +604,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Asks the relay for the server's onion keys, if they are needed.
     fn ask_key_set(&mut self) {
-        let deadline = self.now + REQUEST_TIMEOUT_MS;
+        let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         if let Some(frame) = self.anon.key_set_request(self.now, deadline) {
             self.effects.push(Effect::Anonymous(frame));
         }
@@ -714,7 +716,7 @@ impl<R: CryptoRngCore> Core<R> {
             Command::UnblockPeer { peer } => self.block_contact(peer, false),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
-            Command::SetServer { addr } => self.server = addr,
+            Command::SetServer { addr } => self.set_server(addr),
             Command::TrustServerKey => self.trust_server_key(),
             Command::EnablePush => self.enable_push(),
             Command::RegisterPush {
@@ -937,7 +939,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         let req_id = self.alloc_req();
-        let deadline = self.now + REQUEST_TIMEOUT_MS;
+        let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         let frame = Frame::new(req_id, msg).encode();
         let effect = match (anonymous, readiness) {
             (false, _) | (true, Readiness::Session) => Effect::Transmit(frame),
@@ -1152,7 +1154,7 @@ fn load_outbox(
     Ok(outbox)
 }
 
-type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
+type Transfers = (BTreeMap<FileId, Outgoing>, BTreeMap<FileId, Incoming>);
 
 /// Our saved prekeys, or a fresh set (`true`) when there are none.
 fn load_prekeys(
@@ -1225,7 +1227,7 @@ fn load_transfers(
     rows: &Rows,
     skipped: &mut Skipped,
 ) -> Result<Transfers, CoreError> {
-    let (mut outgoing, mut incoming) = (HashMap::new(), HashMap::new());
+    let (mut outgoing, mut incoming) = (BTreeMap::new(), BTreeMap::new());
     for (k, v) in rows {
         let Some(rec) = skipped.open::<TransferRecord>(vault, Table::Transfers, k, v)? else {
             continue;
@@ -1247,10 +1249,6 @@ struct RecentIds {
 }
 
 impl RecentIds {
-    fn contains(&self, id: &MsgId) -> bool {
-        self.set.contains(id)
-    }
-
     /// Returns false when `id` was already seen.
     fn insert(&mut self, id: MsgId) -> bool {
         if !self.set.insert(id) {

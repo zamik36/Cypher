@@ -28,7 +28,9 @@ pub use api::{
 pub use core::{Core, Rows, Snapshot};
 pub use media::MediaKey;
 pub use share::ShareLink;
-pub use store::{ContactInfo, Record, StoreOp, Table, Vault, message_key, session_key};
+pub use store::{
+    ContactInfo, Record, StoreOp, Table, Vault, message_key, peer_messages, session_key,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CoreError {

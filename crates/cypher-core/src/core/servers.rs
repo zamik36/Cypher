@@ -49,8 +49,8 @@ impl<R: CryptoRngCore> Core<R> {
         match self.server_keys.get(&self.server) {
             Some(known) if *known == shown => Some(shown),
             Some(_) => {
-                self.offered_key = Some(shown);
                 let server = self.server.clone();
+                self.offered_key = Some((server.clone(), shown));
                 self.emit(Event::ServerKeyChanged { server });
                 None
             }
@@ -61,12 +61,26 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    /// The server this device connects to from now on. A key another
+    /// server offered is not this one's to trust.
+    pub(super) fn set_server(&mut self, addr: String) {
+        if addr != self.server {
+            self.offered_key = None;
+        }
+        self.server = addr;
+    }
+
     /// The user trusts the key the server showed instead of the one
-    /// remembered: it is remembered now, and the onion is used again.
+    /// remembered: it is remembered now, and the onion is used again. Only
+    /// for the server that showed it: an answer to a prompt about another
+    /// server pins nothing.
     pub(super) fn trust_server_key(&mut self) {
-        let Some(key) = self.offered_key.take() else {
+        let Some((server, key)) = self.offered_key.take() else {
             return;
         };
+        if server != self.server {
+            return;
+        }
         self.remember_server_key(key);
         self.anon.on_bootstrap(Some(key), self.now);
         self.ask_key_set();

@@ -10,6 +10,8 @@
 
 mod harness;
 
+use std::hash::{DefaultHasher, Hasher};
+
 use bytes::Bytes;
 use cypher_core::{Command, Content, Event, FailReason, MediaKind, MessageStatus, Table, Vault};
 use cypher_crypto::IdentitySeed;
@@ -794,6 +796,37 @@ fn lossy_transfer_completes_through_retransmission() {
     w.advance(60_000);
     assert_eq!(w.clients[B].sinks[&file_id], data);
     assert!(w.has_event(A, |e| matches!(e, Event::TransferComplete { .. })));
+}
+
+/// The core decides alike on alike input: the same scenario, run twice,
+/// makes the same effects in the same order, byte for byte. Here several
+/// lossy transfers at once are retried, paused and resumed.
+#[test]
+fn the_same_inputs_make_the_same_effects() {
+    let run = || {
+        let mut w = paired();
+        w.trace = Some(DefaultHasher::new());
+        w.server.drop_chunks_every = Some(3);
+        let sent: Vec<(FileId, Vec<u8>)> = (0..4)
+            .map(|n| {
+                let data = pattern(600 * 1024 + n);
+                let id = offer_file(&mut w, A, B, data.clone(), "f.bin", MediaKind::File);
+                (id, data)
+            })
+            .collect();
+        for (file_id, _) in &sent {
+            w.command(B, Command::AcceptFile { file_id: *file_id });
+        }
+        w.advance(2_000);
+        w.disconnect(A);
+        w.connect(A);
+        w.advance(60_000);
+        for (file_id, data) in &sent {
+            assert_eq!(&w.clients[B].sinks[file_id], data);
+        }
+        w.trace.take().unwrap().finish()
+    };
+    assert_eq!(run(), run());
 }
 
 #[test]
@@ -2100,5 +2133,319 @@ mod legacy {
         };
         let sealed = vault.seal(Table::Peers, &peer_row.1, &old, &mut rand::rngs::OsRng);
         kv.insert(peer_row, sealed);
+    }
+}
+
+/// Attacks on what a device keeps and sends: each test names what it
+/// guards against.
+mod security {
+    use cypher_core::{
+        Command, Event, MessageStatus, Table, message_key, peer_messages, session_key,
+    };
+    use cypher_crypto::IdentitySeed;
+    use cypher_types::{Addr, DeviceId, MsgId};
+
+    use super::{A, B, C, D, E};
+    use crate::harness::World;
+
+    fn session_row(addr: Addr) -> (u8, Vec<u8>) {
+        (Table::Sessions as u8, session_key(addr))
+    }
+
+    fn rows(w: &World, i: usize, table: Table) -> usize {
+        w.clients[i]
+            .kv
+            .keys()
+            .filter(|(t, _)| *t == table as u8)
+            .count()
+    }
+
+    /// A receipt moves the status only of messages sent to whoever
+    /// sends it: not of another conversation, not of made-up ids (each one
+    /// would be a status row kept forever), also from a stranger.
+    #[test]
+    fn receipts_move_only_the_statuses_of_messages_sent_to_their_sender() {
+        let mut w = World::new(5);
+        w.pair(A, B);
+        w.pair(A, C);
+        let a = w.peer(A);
+        let to_c = w.send_text(A, C, "for C only");
+        assert_eq!(w.status_of(A, to_c), Some(MessageStatus::Delivered));
+
+        let before = rows(&w, A, Table::MessageStatus);
+        let mut ids = vec![to_c];
+        ids.extend((0..300).map(|_| w.msg_id()));
+        w.command(B, Command::MarkRead { peer: a, ids });
+        assert_eq!(
+            w.status_of(A, to_c),
+            Some(MessageStatus::Delivered),
+            "B cannot mark read what A sent to C"
+        );
+        assert_eq!(rows(&w, A, Table::MessageStatus), before, "no made-up rows");
+
+        // A stranger on a used invite, still a request.
+        let link = w.create_link(A);
+        w.command(D, Command::JoinLink { link: link.clone() });
+        w.command(E, Command::JoinLink { link });
+        let e = w.peer(E);
+        assert!(w.contact(A, e).request);
+        let before = rows(&w, A, Table::MessageStatus);
+        let ids: Vec<MsgId> = (0..300).map(|_| w.msg_id()).collect();
+        w.command(E, Command::MarkRead { peer: a, ids });
+        assert_eq!(rows(&w, A, Table::MessageStatus), before);
+        assert_eq!(w.status_of(A, to_c), Some(MessageStatus::Delivered));
+    }
+
+    /// Once one device of the contact read a message, another one
+    /// confirming it later does not take "read" back: neither on the device
+    /// that sent it nor on its sibling, also after both restarted.
+    #[test]
+    fn a_late_delivery_receipt_does_not_undo_read() {
+        let mut w = super::paired();
+        let a2 = w.add_device(A, 2);
+        let b2 = w.add_device(B, 2);
+        w.advance(60 * 60_000);
+        let a = w.peer(A);
+        w.disconnect(b2);
+        let id = w.send_text(A, B, "read on one, late on the other");
+        w.command(
+            B,
+            Command::MarkRead {
+                peer: a,
+                ids: vec![id],
+            },
+        );
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
+        assert_eq!(w.status_of(a2, id), Some(MessageStatus::Read));
+
+        w.restart(A);
+        w.restart(a2);
+        w.connect(b2);
+        w.run();
+        w.command(b2, Command::FetchInbox);
+        w.advance(60_000);
+        assert!(
+            w.texts(b2)
+                .iter()
+                .any(|t| t == "read on one, late on the other")
+        );
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
+        assert_eq!(w.status_of(a2, id), Some(MessageStatus::Read));
+    }
+
+    /// A contact's clock, or a contact lying about it, cannot date a
+    /// message far ahead: its row would sort past every history view and
+    /// outlive deleting the conversation.
+    #[test]
+    fn a_message_from_the_far_future_is_dated_about_now() {
+        let mut w = super::paired();
+        let (a, b) = (w.peer(A), w.peer(B));
+        let now = w.now;
+        let id = w.msg_id();
+        w.clients[B].ahead = u64::MAX / 2;
+        w.command(
+            B,
+            Command::SendText {
+                peer: a,
+                msg_id: id,
+                text: "from the far future".into(),
+                reply_to: None,
+            },
+        );
+        w.clients[B].ahead = 0;
+        let got = w.clients[A].events.iter().find_map(|e| match e {
+            Event::Message(m) if m.msg_id == id => Some(m.sent_at_ms),
+            _ => None,
+        });
+        let sent_at = got.expect("A got it");
+        assert!(
+            (now..now + 60 * 60_000).contains(&sent_at),
+            "dated about now, not {sent_at}"
+        );
+        let key = message_key(&b, sent_at, &id);
+        assert!(
+            w.clients[A]
+                .kv
+                .contains_key(&(Table::Messages as u8, key.clone()))
+        );
+        let (first, last) = peer_messages(&b);
+        assert!(first <= key && key <= last);
+    }
+
+    /// The key one server offered is trusted only for that server:
+    /// answering a stale prompt after switching servers pins nothing.
+    #[test]
+    fn a_key_offered_by_one_server_is_not_pinned_for_another() {
+        let mut w = super::paired();
+        w.clients[A].on_start = vec![Command::SetAnonymity {
+            require_onion: true,
+        }];
+        // The first server changes its key: offered, not trusted.
+        w.server_key = IdentitySeed([6; 32]).derive_identity();
+        w.restart(A);
+        assert_eq!(super::key_changes(&w, A), 1);
+
+        // Same core, now another server, which shows its own key first.
+        w.command(
+            A,
+            Command::SetServer {
+                addr: "other.example:9100".into(),
+            },
+        );
+        w.server_key = IdentitySeed([7; 32]).derive_identity();
+        w.disconnect(A);
+        w.connect(A);
+        w.run();
+        assert_eq!(super::key_changes(&w, A), 1, "first contact: pinned");
+
+        // The user answers the stale prompt about the first server.
+        w.command(A, Command::TrustServerKey);
+        w.clients[A].on_start = vec![
+            Command::SetServer {
+                addr: "other.example:9100".into(),
+            },
+            Command::SetAnonymity {
+                require_onion: true,
+            },
+        ];
+        w.restart(A);
+        assert_eq!(
+            super::key_changes(&w, A),
+            1,
+            "the other server keeps the key it showed first"
+        );
+        let onion = w.server.onion_inbox_ops;
+        w.command(A, Command::FetchInbox);
+        assert!(w.server.onion_inbox_ops > onion, "and its relay is used");
+    }
+
+    /// A driver clock at the very end of time (a browser turns a huge date
+    /// into `u64::MAX`) makes no deadline overflow, which would abort the
+    /// client. Overflow checks are on in the test profile, so an unchecked
+    /// addition panics here; the commands still do what they should.
+    #[test]
+    fn a_clock_at_the_end_of_time_aborts_nothing() {
+        let mut w = super::paired();
+        let a = w.peer(A);
+        let phone = w.provision("phone");
+        let offer = w.offer(phone);
+        w.clients[B].ahead = u64::MAX - w.now;
+        w.disconnect(A);
+        let id = w.msg_id();
+        w.command(
+            B,
+            Command::SendText {
+                peer: a,
+                msg_id: id,
+                text: "at the end of time".into(),
+                reply_to: None,
+            },
+        );
+        w.command(B, Command::CreateLink);
+        w.command(
+            B,
+            Command::LinkDevice {
+                offer,
+                history: false,
+            },
+        );
+        w.clients[B].ahead = 0;
+        assert!(w.has_event(B, |e| matches!(e, Event::Message(m)
+            if m.msg_id == id && m.sent_at_ms == u64::MAX)));
+        assert!(w.has_event(B, |e| matches!(e, Event::LinkCreated { .. })));
+        assert!(
+            w.finish_linking(phone),
+            "the identity was handed to the new device"
+        );
+    }
+
+    /// A message delivered before the app restarted is still marked read
+    /// when the contact reads it after.
+    #[test]
+    fn a_read_receipt_counts_after_a_restart() {
+        let mut w = super::paired();
+        let a = w.peer(A);
+        let id = w.send_text(A, B, "read me later");
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
+        w.restart(A);
+        w.command(
+            B,
+            Command::MarkRead {
+                peer: a,
+                ids: vec![id],
+            },
+        );
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
+    }
+
+    /// The session with an own device taken off the list is gone, durably,
+    /// before the farewell goes out on it. A crash right after the farewell
+    /// leaves no session to encrypt another message under the same message
+    /// key (the same AES-GCM key and nonce).
+    #[test]
+    fn a_crash_after_the_farewell_reuses_no_message_key() {
+        let mut w = super::paired();
+        let _a2 = w.add_device(A, 2);
+        w.advance(60 * 60_000);
+        let target = Addr::new(w.peer(A), DeviceId(2));
+        let row = session_row(target);
+        assert!(w.clients[A].kv.contains_key(&row));
+
+        w.crash_after_send = Some((A, target));
+        w.command(A, Command::UnlinkDevice { device: 2 });
+        let durable = w.crash_rows.take().expect("A said farewell to device 2");
+        w.crash_after_send = None;
+        assert!(
+            !durable.contains_key(&row),
+            "deleted before the farewell went out"
+        );
+
+        // Crash: only what was durable at the farewell survives.
+        w.clients[A].kv = durable;
+        w.restart(A);
+        w.advance(61 * 60_000);
+        let bodies = w.sends_to(A, target);
+        assert!(!bodies.is_empty());
+        for (x, first) in bodies.iter().enumerate() {
+            assert_eq!(first[1], 0, "no X3DH init header on a sibling session");
+            for second in &bodies[x + 1..] {
+                assert_ne!(first[2..42], second[2..42], "a ratchet header used twice");
+            }
+        }
+    }
+
+    /// A bundle of another identity, or of another device of the right
+    /// one, validly signed, answering `FetchKeys` yields no session and
+    /// nothing sent.
+    #[test]
+    fn a_bundle_of_someone_else_makes_no_session() {
+        let mut w = World::new(3);
+        let (b, c) = (w.peer(B), w.peer(C));
+        let (b1, c1) = (Addr::new(b, DeviceId::FIRST), Addr::new(c, DeviceId::FIRST));
+        w.serve_keys_of(b1, c1);
+        let fetches = w.server.key_fetches;
+        let link = w.create_link(B);
+        w.command(A, Command::JoinLink { link });
+        w.advance(10_000);
+        assert!(w.server.key_fetches > fetches, "the keys were asked for");
+        assert!(!w.clients[A].kv.contains_key(&session_row(b1)));
+        assert!(!w.clients[A].kv.contains_key(&session_row(c1)));
+        assert!(w.sends_to(A, b1).is_empty(), "nothing sent to B");
+        assert!(w.sends_to(A, c1).is_empty(), "nor to C");
+
+        let mut w = World::new(2);
+        let b = w.peer(B);
+        let _b2 = w.add_device(B, 2);
+        w.advance(60 * 60_000);
+        let (b1, b2) = (Addr::new(b, DeviceId::FIRST), Addr::new(b, DeviceId(2)));
+        w.serve_keys_of(b1, b2);
+        let link = w.create_link(B);
+        w.command(A, Command::JoinLink { link });
+        w.advance(10_000);
+        assert!(!w.clients[A].kv.contains_key(&session_row(b1)));
+        assert!(
+            w.sends_to(A, b1).is_empty(),
+            "nothing sent to device 1 of B"
+        );
     }
 }

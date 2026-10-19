@@ -114,6 +114,26 @@ impl OutboxItem {
         self.targets.iter().any(|t| t.awaiting)
     }
 
+    /// No device is left to send it to: only its receipts, or the record
+    /// that it was read, are kept.
+    fn settled(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    /// Which of the messages waiting for one contact's receipts go first
+    /// when there are too many: those already read, then those only a read
+    /// receipt is left for, then the oldest still on their way.
+    fn trim_order(&self) -> (u8, u64, MsgId) {
+        match (self.settled(), self.reported) {
+            (true, MessageStatus::Read) => (0, 0, self.msg_id),
+            (true, _) => (1, 0, self.msg_id),
+            (false, _) => {
+                let sent = Envelope::decode(&self.envelope).map_or(0, |e| e.sent_at_ms);
+                (2, sent, self.msg_id)
+            }
+        }
+    }
+
     /// The devices it still goes to.
     pub(super) fn devices(&self) -> impl Iterator<Item = DeviceId> + '_ {
         self.targets.iter().map(|t| t.device)
@@ -308,7 +328,7 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(session) = self.sessions.get_mut(&addr) else {
             if let Some(target) = item.target(device) {
                 // Keys are on their way; the new session sends it at once.
-                target.next_try = self.now + RETRY_OFFLINE_MS;
+                target.next_try = self.now.saturating_add(RETRY_OFFLINE_MS);
             }
             self.open_session(addr);
             return;
@@ -350,7 +370,7 @@ impl<R: CryptoRngCore> Core<R> {
                     addr,
                     body: body.clone(),
                 },
-                self.now + super::REQUEST_TIMEOUT_MS,
+                self.now.saturating_add(super::REQUEST_TIMEOUT_MS),
             ),
         );
         self.transmit(
@@ -558,7 +578,7 @@ impl<R: CryptoRngCore> Core<R> {
             .and_then(|item| item.target(device))
         {
             target.in_flight = false;
-            target.next_try = now + retry_delay(base, target.attempts, roll);
+            target.next_try = now.saturating_add(retry_delay(base, target.attempts, roll));
             target.attempts = target.attempts.saturating_add(1);
         }
     }
@@ -595,17 +615,89 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// A device answered for a message (a receipt), or will never need to:
-    /// the message is done there, and done once no device is left.
+    /// the message is done there.
     pub(super) fn drop_target(&mut self, msg_id: MsgId, device: DeviceId) {
         let Some(item) = self.outbox.get_mut(&msg_id) else {
             return;
         };
         item.targets.retain(|t| t.device != device);
-        if item.targets.is_empty() {
-            self.drop_outbox(&msg_id);
-        } else {
+        self.settle(msg_id);
+    }
+
+    /// Stores what is left of a message after a change. Once no device is
+    /// left to send it to, a message the user sees that some device took
+    /// stays, without its content: their receipts are taken only for
+    /// messages sent to them, and once it is read it stays read, whatever
+    /// late receipt or repeated news of it comes. Anything else is done
+    /// then.
+    fn settle(&mut self, msg_id: MsgId) {
+        let Some(item) = self.outbox.get_mut(&msg_id) else {
+            return;
+        };
+        let kept = item.tracked
+            && matches!(
+                item.reported,
+                MessageStatus::Queued
+                    | MessageStatus::Sent
+                    | MessageStatus::Delivered
+                    | MessageStatus::Read
+            );
+        if !item.settled() {
             self.persist_outbox(&msg_id);
+        } else if kept {
+            item.envelope.zeroize();
+            item.envelope.shrink_to_fit();
+            self.persist_outbox(&msg_id);
+        } else {
+            self.drop_outbox(&msg_id);
         }
+    }
+
+    /// A device of the contact got, or read, a message we sent them. A
+    /// receipt for anything else is not theirs to give: another
+    /// conversation's message, or an id made up to fill the store.
+    pub(super) fn confirm(&mut self, sender: Addr, msg_id: MsgId, status: MessageStatus) {
+        let Some(item) = self
+            .outbox
+            .get_mut(&msg_id)
+            .filter(|i| i.peer == sender.peer && i.tracked)
+        else {
+            return;
+        };
+        let targets = item.targets.len();
+        item.targets.retain(|t| t.device != sender.device);
+        let advanced = rank(status) > rank(item.reported);
+        if advanced {
+            item.reported = status;
+        }
+        if advanced || item.targets.len() != targets {
+            self.settle(msg_id);
+        }
+        if advanced {
+            self.set_status(msg_id, status);
+        }
+    }
+
+    /// A message another device of ours sent: this one takes the contact's
+    /// receipts for it too.
+    pub(super) fn await_receipts(&mut self, peer: PeerId, msg_id: MsgId) {
+        if self.outbox.contains_key(&msg_id) {
+            return;
+        }
+        let item = OutboxItem {
+            msg_id,
+            peer,
+            envelope: Vec::new(),
+            tracked: true,
+            targets: Vec::new(),
+            reported: MessageStatus::Sent,
+        };
+        let op = self
+            .vault
+            .put(Table::Outbox, msg_id.to_vec(), &item, &mut self.rng);
+        self.persist(op);
+        self.outbox.insert(msg_id, item);
+        self.trim_awaiting(&peer);
     }
 
     /// Forgets `addr` as a target of everything on its way.
@@ -622,35 +714,35 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// Tells the UI a message got further, never back.
-    pub(super) fn report(&mut self, msg_id: MsgId, status: MessageStatus) {
-        if let Some(item) = self.outbox.get_mut(&msg_id) {
-            if rank(status) <= rank(item.reported) {
-                return;
-            }
-            item.reported = status;
-            self.persist_outbox(&msg_id);
+    fn report(&mut self, msg_id: MsgId, status: MessageStatus) {
+        let Some(item) = self.outbox.get_mut(&msg_id) else {
+            return;
+        };
+        if rank(status) <= rank(item.reported) {
+            return;
         }
+        item.reported = status;
+        self.persist_outbox(&msg_id);
         self.set_status(msg_id, status);
     }
 
     /// Keeps at most [`MAX_AWAITING_PER_PEER`] messages waiting for one
-    /// contact's receipts, letting the oldest go.
+    /// contact's receipts, letting go first as [`OutboxItem::trim_order`]
+    /// says.
     fn trim_awaiting(&mut self, peer: &PeerId) {
-        let mut waiting: Vec<(u64, MsgId)> = self
+        let waits = |i: &&OutboxItem| i.peer == *peer && (i.settled() || i.awaiting());
+        let count = self.outbox.values().filter(waits).count();
+        let Some(excess) = count.checked_sub(MAX_AWAITING_PER_PEER).filter(|n| *n > 0) else {
+            return;
+        };
+        let mut waiting: Vec<(u8, u64, MsgId)> = self
             .outbox
             .values()
-            .filter(|i| i.peer == *peer && i.awaiting())
-            .map(|i| {
-                let sent = Envelope::decode(&i.envelope).map_or(0, |e| e.sent_at_ms);
-                (sent, i.msg_id)
-            })
+            .filter(waits)
+            .map(OutboxItem::trim_order)
             .collect();
-        if waiting.len() <= MAX_AWAITING_PER_PEER {
-            return;
-        }
-        waiting.sort_unstable();
-        let excess = waiting.len() - MAX_AWAITING_PER_PEER;
-        for (_, id) in waiting.into_iter().take(excess) {
+        waiting.select_nth_unstable(excess - 1);
+        for (_, _, id) in waiting.into_iter().take(excess) {
             self.drop_outbox(&id);
         }
     }
@@ -717,6 +809,41 @@ impl<R: CryptoRngCore> Core<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{Effect, Event};
+    use crate::core::Snapshot;
+    use cypher_crypto::IdentitySeed;
+
+    /// A message another device of ours sent, read by the contact, stays
+    /// read: news of it repeated, a late receipt from another device of
+    /// theirs, or a receipt from someone else change nothing.
+    #[test]
+    fn a_read_message_stays_read_whatever_comes_after() {
+        let seed = IdentitySeed([1; 32]);
+        let snapshot = Snapshot::default();
+        let (mut core, _) =
+            Core::restore(&seed, DeviceId::FIRST, &snapshot, 1_000, rand::rngs::OsRng).unwrap();
+        let (peer, id) = (PeerId([2; 32]), MsgId([3; 16]));
+        core.await_receipts(peer, id);
+        core.confirm(Addr::new(peer, DeviceId::FIRST), id, MessageStatus::Read);
+        core.await_receipts(peer, id);
+        core.confirm(Addr::new(peer, DeviceId(2)), id, MessageStatus::Delivered);
+        core.confirm(
+            Addr::new(PeerId([4; 32]), DeviceId::FIRST),
+            id,
+            MessageStatus::Delivered,
+        );
+        let item = &core.outbox[&id];
+        assert!(item.settled() && item.reported == MessageStatus::Read);
+        let told: Vec<MessageStatus> = core
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Emit(Event::MessageStatus { status, .. }) => Some(*status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, [MessageStatus::Read], "told once, never taken back");
+    }
 
     #[test]
     fn retries_back_off_exponentially_with_jitter_up_to_a_cap() {
