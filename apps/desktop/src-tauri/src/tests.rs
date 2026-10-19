@@ -389,6 +389,7 @@ async fn two_desktops_against_in_process_stack() {
     send_a_voice_note(&a, &b, &a_id, &b_id).await;
     play_a_video_note(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
+    accept_two_files_of_one_name(&a, &b, &b_id).await;
     refuse_to_open_a_program(&a, &b, &b_id).await;
     send_picked_files(&a, &b_id).await;
     send_and_preview_pictures(&a, &b, &b_id).await;
@@ -754,6 +755,44 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
         b.call("reveal_file", unknown).await,
         Err("not_saved".to_owned())
     );
+}
+
+/// Two offers of one name accepted at once land in two files, each whole.
+async fn accept_two_files_of_one_name(a: &Desktop, b: &Desktop, b_id: &str) {
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let client = a.state().client().await.unwrap();
+    let mut ids = Vec::new();
+    for (folder, body) in [("first", "one twin"), ("second", "the other twin")] {
+        let src = a.dir.path().join(folder).join("twin.txt");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, body).unwrap();
+        let kind = cypher_core::MediaKind::File;
+        let (_, file_id) = client
+            .send_file(peer, &src, "text/plain", kind)
+            .await
+            .unwrap();
+        ids.push(file_id);
+    }
+    eventually(|| async {
+        let state = b.state();
+        let offers = state.offers.lock().unwrap();
+        ids.iter().all(|id| offers.contains_key(id)).then_some(())
+    })
+    .await;
+    let accept = |id: FileId| b.call("accept_file", json!({ "fileId": id.to_hex() }));
+    let (first, second) = tokio::join!(accept(ids[0]), accept(ids[1]));
+    first.unwrap();
+    second.unwrap();
+    let downloads = b.dir.path().join("downloads");
+    eventually(|| async {
+        let mut saved = [
+            std::fs::read_to_string(downloads.join("twin.txt")).ok()?,
+            std::fs::read_to_string(downloads.join("twin (1).txt")).ok()?,
+        ];
+        saved.sort();
+        (saved == ["one twin", "the other twin"]).then_some(())
+    })
+    .await;
 }
 
 /// What the file dialog hands back: a path, a `file://` URL, or (Android

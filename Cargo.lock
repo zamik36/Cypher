@@ -1737,6 +1737,7 @@ dependencies = [
  "cypher-transport",
  "cypher-types",
  "futures",
+ "libc",
  "postcard",
  "rand 0.8.5",
  "rusqlite",

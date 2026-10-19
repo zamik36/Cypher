@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use cypher_client::Client;
@@ -360,15 +362,29 @@ pub(crate) async fn accept_file(state: State<'_, AppState>, file_id: String) -> 
     let dir = state
         .paths()
         .downloads
-        .as_deref()
+        .clone()
         .ok_or("no downloads folder")?;
-    let dest = unique_path(dir, &name).ok_or("too many files with this name")?;
-    state
-        .client()
-        .await?
-        .accept_file(id, dest)
+    let client = state.client().await?;
+    let dest = tokio::task::spawn_blocking(move || reserve_download(&dir, &name))
         .await
-        .map_err(err)
+        .map_err(err)?
+        .map_err(err)?;
+    if let Err(e) = client.accept_file(id, dest.clone()).await {
+        release_reservation(&dest).await;
+        return Err(err(e));
+    }
+    Ok(())
+}
+
+/// Deletes a name [`reserve_download`] held if it is still what that left:
+/// an empty regular file. A file with anything in it is the user's and stays.
+pub(crate) async fn release_reservation(path: &Path) {
+    let reserved = tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|m| m.is_file() && m.len() == 0);
+    if reserved {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 #[tauri::command]
@@ -391,26 +407,39 @@ fn display_name(path: &Path) -> String {
 /// Most `name (n).ext` variants tried before giving up.
 const MAX_NAME_VARIANTS: u32 = 10_000;
 
-/// `name`, or `name (n).ext` when taken; `None` rather than overwrite.
-fn unique_path(dir: &Path, name: &str) -> Option<PathBuf> {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return Some(candidate);
-    }
+/// Creates `name` in `dir`, or `name (n).ext` when taken, and returns its
+/// path. The empty file holds the name until the transfer opens it, so two
+/// transfers of one name never share a file; whatever is already there, a
+/// link included, is left alone.
+fn reserve_download(dir: &Path, name: &str) -> io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
         _ => (name, String::new()),
     };
-    (1..=MAX_NAME_VARIANTS)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
+    for n in 0..=MAX_NAME_VARIANTS {
+        let path = if n == 0 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{stem} ({n}){ext}"))
+        };
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "too many files with this name",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
 
-    use super::{runs_code, unique_path};
+    use super::{release_reservation, reserve_download, runs_code};
 
     #[test]
     fn programs_are_told_apart_from_documents() {
@@ -431,12 +460,72 @@ mod tests {
 
     #[test]
     fn never_overwrites() {
-        let dir = std::env::temp_dir().join(format!("cypher-unique-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
-        std::fs::write(dir.join("a (1).txt"), b"x").unwrap();
-        assert_eq!(unique_path(&dir, "a.txt"), Some(dir.join("a (2).txt")));
-        assert_eq!(unique_path(&dir, "b.txt"), Some(dir.join("b.txt")));
-        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a (1).txt"), b"y").unwrap();
+        assert_eq!(
+            reserve_download(dir, "a.txt").unwrap(),
+            dir.join("a (2).txt")
+        );
+        assert_eq!(reserve_download(dir, "b.txt").unwrap(), dir.join("b.txt"));
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"x");
+        assert_eq!(std::fs::read(dir.join("a (1).txt")).unwrap(), b"y");
+        assert_eq!(reserve_download(dir, ".env").unwrap(), dir.join(".env"));
+        assert_eq!(reserve_download(dir, ".env").unwrap(), dir.join(".env (1)"));
+    }
+
+    /// Accepts of one name, even at the same moment, each get a file
+    /// of their own, so cancelling one never deletes another's.
+    #[test]
+    #[expect(
+        clippy::needless_collect,
+        reason = "every thread must be running before the first join"
+    )]
+    fn same_name_downloads_get_their_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let reserved: Vec<PathBuf> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| reserve_download(dir.path(), "report.pdf").unwrap()))
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        let distinct: HashSet<&PathBuf> = reserved.iter().collect();
+        assert_eq!(distinct.len(), reserved.len(), "two transfers, one file");
+        assert!(reserved.iter().all(|p| p.is_file()), "each name is held");
+    }
+
+    /// Only an untouched reservation is deleted, never a file with data.
+    #[tokio::test]
+    async fn a_released_name_goes_only_while_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = reserve_download(dir.path(), "a.txt").unwrap();
+        let filled = reserve_download(dir.path(), "a.txt").unwrap();
+        std::fs::write(&filled, b"received").unwrap();
+        release_reservation(&empty).await;
+        release_reservation(&filled).await;
+        assert!(!empty.exists());
+        assert_eq!(std::fs::read(&filled).unwrap(), b"received");
+    }
+
+    /// A link under the offered name, dangling or not, counts as
+    /// taken; nothing is created where it points.
+    #[test]
+    fn a_link_under_the_name_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside").join("autostart.desktop");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        let link = dir.path().join("notes.txt");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&outside, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&outside, &link);
+        if let Err(e) = made {
+            eprintln!("no symlinks here ({e}); skipped");
+            return;
+        }
+        let picked = reserve_download(dir.path(), "notes.txt").unwrap();
+        assert_eq!(picked, dir.path().join("notes (1).txt"));
+        assert!(!outside.exists(), "created at the link's target");
     }
 }

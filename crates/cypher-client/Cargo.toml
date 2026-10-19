@@ -27,6 +27,10 @@ tracing.workspace = true
 arti-client = { workspace = true, optional = true }
 tor-rtcompat = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW and O_NONBLOCK for opening received files.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 cypher-tls.workspace = true
