@@ -46,9 +46,11 @@ jobs:
         target:
           - { crate: cypher-wire, name: fuzz_frames }
           - { crate: cypher-wire, name: fuzz_bodies }
+          - { crate: cypher-wire, name: fuzz_history }
           - { crate: cypher-crypto, name: fuzz_aead }
           - { crate: cypher-crypto, name: fuzz_ratchet }
           - { crate: cypher-crypto, name: fuzz_decoders }
+          - { crate: cypher-crypto, name: fuzz_keysets }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@master
