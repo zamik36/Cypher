@@ -42,6 +42,15 @@ const KEY_PUBLISHES_PER_HOUR: u32 = 60;
 /// them: one being linked or recovered, and one spare for a second at once.
 /// Publishing a list takes the keys of those it does not name.
 const UNLISTED_DEVICES_WITH_KEYS: usize = 2;
+/// Inbox items one identity may put per hour over its session, all its
+/// devices together (through the onion the relay limits them): a message
+/// to a contact who is away goes to each of its devices and to this
+/// identity's own, so a busy writer puts a few hundred.
+const INBOX_PUTS_PER_HOUR: u32 = 1200;
+/// Inbox reads one identity may make per hour over its session: each
+/// device polls two to four inboxes every five minutes and reads a full
+/// one batch by batch.
+const INBOX_FETCHES_PER_HOUR: u32 = 600;
 /// Lookups of one invite per hour, whoever asks: only those it was given to
 /// know the code, so this cannot be used to make a stranger's invite fail.
 const RESOLVES_PER_LINK_PER_HOUR: u32 = 20;
@@ -72,6 +81,10 @@ pub(crate) struct Handler {
     /// Sealed sends no gateway answered: the way to the gateways is broken
     /// (NATS down or refusing), and senders fall back to their name.
     pub sealed_unavailable: prometheus::IntCounter,
+    /// Inbox writes and openings refused because all inboxes together hold
+    /// their budget or this epoch's openings: someone floods them, or the
+    /// budget is too small for the users.
+    pub inbox_quota_refused: prometheus::IntCounter,
 }
 
 /// Hands sealed sends to the gateway of the device they are for: through
@@ -329,8 +342,22 @@ impl Handler {
     /// identity and are answered the same on either path.
     async fn answer_either(&self, caller: Caller, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
         match msg {
-            ClientMsg::InboxPut { inbox, item } => self.inbox_put(&inbox, &item).await,
+            ClientMsg::InboxPut { inbox, item } => {
+                if !self
+                    .admit_caller(b"ip:", caller, INBOX_PUTS_PER_HOUR)
+                    .await?
+                {
+                    return Ok(error(ErrorCode::RateLimited));
+                }
+                self.inbox_put(&inbox, &item).await
+            }
             ClientMsg::InboxFetch { proof, close } => {
+                if !self
+                    .admit_caller(b"if:", caller, INBOX_FETCHES_PER_HOUR)
+                    .await?
+                {
+                    return Ok(error(ErrorCode::RateLimited));
+                }
                 let op = if close {
                     InboxOp::Close
                 } else {
@@ -630,6 +657,20 @@ impl Handler {
         self.store.admit(&bucket, per_hour, HOUR_SECS).await
     }
 
+    /// [`Self::admit`] for a session's identity; through the onion only
+    /// the relay's limits and the quotas of all inboxes apply.
+    async fn admit_caller(
+        &self,
+        kind: &[u8],
+        caller: Caller,
+        per_hour: u32,
+    ) -> redis::RedisResult<bool> {
+        match caller {
+            Caller::Session(peer) => self.admit(kind, &peer, per_hour).await,
+            Caller::Onion => Ok(true),
+        }
+    }
+
     async fn inbox_put(&self, inbox: &[u8; 32], item: &[u8]) -> redis::RedisResult<ServerMsg> {
         Ok(match self.store.inbox_put(inbox, item).await? {
             PutOutcome::Stored => {
@@ -637,6 +678,11 @@ impl Handler {
                 ServerMsg::Done
             }
             PutOutcome::Full => error(ErrorCode::TooLarge),
+            // To the writer as if this inbox were full: it tries again later.
+            PutOutcome::OverBudget => {
+                self.inbox_quota_refused.inc();
+                error(ErrorCode::TooLarge)
+            }
             PutOutcome::Inactive => error(ErrorCode::NotFound),
         })
     }
@@ -698,7 +744,15 @@ impl Handler {
             .store
             .inbox_fetch(inbox, &claim, MAX_INBOX_BATCH, close)
             .await?;
-        Ok(ServerMsg::InboxBatch { claim, items })
+        // No more inboxes may be opened this epoch: the owner asks again
+        // later, and its inbox is not open to writers meanwhile.
+        Ok(items.map_or_else(
+            || {
+                self.inbox_quota_refused.inc();
+                error(ErrorCode::Unavailable)
+            },
+            |items| ServerMsg::InboxBatch { claim, items },
+        ))
     }
 }
 

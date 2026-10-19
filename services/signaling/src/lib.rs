@@ -261,6 +261,10 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
                 "signaling_sealed_unavailable_total",
                 "Sealed sends no gateway answered in time",
             )?,
+            inbox_quota_refused: registry.counter(
+                "signaling_inbox_quota_refused_total",
+                "Inbox writes and openings refused because all inboxes together are full",
+            )?,
         },
         keys,
         nats,

@@ -17,18 +17,29 @@ use crate::handler::{
     anonymous_allowed,
 };
 use crate::push::{Outcome, Subscription};
-use crate::store::Store;
+use crate::store::{InboxQuota, Store};
 
+/// A handler on the live Redis, whose inboxes have counters of their own:
+/// what other tests and runs leave in their inboxes counts elsewhere.
 async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
+    handler_with(relay_addr, InboxQuota::default()).await
+}
+
+async fn handler_with(relay_addr: Option<&str>, quota: InboxQuota) -> Option<Handler> {
     let url = cypher_server_kit::testing::live_env("CYPHER_TEST_REDIS")?;
+    let quota = InboxQuota {
+        scope: random32().to_vec(),
+        ..quota
+    };
     Some(Handler {
-        store: Store::connect(&url).await.unwrap(),
+        store: Store::connect_with(&url, quota).await.unwrap(),
         signing_key: [7; 32],
         relay_addr: relay_addr.map(str::to_owned),
         push: None,
         courier: Courier::Stub(std::sync::Arc::new(|_, _| Delivery::Away)),
         fetches: tokio::sync::Semaphore::new(crate::handler::FETCH_PERMITS),
         sealed_unavailable: prometheus::IntCounter::new("sealed_unavailable", "test").unwrap(),
+        inbox_quota_refused: prometheus::IntCounter::new("inbox_quota_refused", "test").unwrap(),
     })
 }
 
@@ -1261,4 +1272,127 @@ async fn publishing_keys_is_rate_limited() {
         &ask(&h, me, publish_keys_of(&alice, DeviceId::FIRST)).await,
         ErrorCode::RateLimited
     ));
+}
+
+/// Reads and acknowledges everything `owner` holds.
+async fn drain(h: &Handler, owner: &Inbox) {
+    loop {
+        let ServerMsg::InboxBatch { claim, items } = ask(h, None, owner.fetch()).await else {
+            panic!("no batch");
+        };
+        if items.is_empty() {
+            return;
+        }
+        assert_eq!(ask(h, None, owner.ack(claim)).await, ServerMsg::Done);
+    }
+}
+
+/// All inboxes together hold a bounded number of bytes, however many
+/// anonymous keys open them; reading gives the room back, and the counters
+/// expire with what they count (S-105).
+#[tokio::test]
+async fn all_inboxes_together_hold_a_bounded_number_of_bytes() {
+    let item = Bytes::from(vec![7u8; 1000]);
+    let cost = item.len() as u64 + crate::store::INBOX_ITEM_OVERHEAD;
+    let quota = InboxQuota {
+        budget: 10 * cost,
+        ..InboxQuota::default()
+    };
+    let Some(h) = handler_with(None, quota).await else {
+        return;
+    };
+    let owners: Vec<Inbox> = (0..4).map(|_| Inbox::random()).collect();
+    for owner in &owners {
+        open_inbox(&h, owner).await;
+    }
+    let put = |owner: &Inbox| ClientMsg::InboxPut {
+        inbox: owner.id(),
+        item: item.clone(),
+    };
+    let mut stored = 0;
+    for owner in owners.iter().cycle().take(12) {
+        match ask(&h, None, put(owner)).await {
+            ServerMsg::Done => stored += 1,
+            refused => assert!(is_error(&refused, ErrorCode::TooLarge), "{refused:?}"),
+        }
+    }
+    assert_eq!(stored, 10, "the budget, spread over any number of inboxes");
+    assert_eq!(h.inbox_quota_refused.get(), 2);
+    let counters = h.store.inbox_counters().await;
+    let held: i64 = counters.iter().map(|c| c.0).sum();
+    assert_eq!(held, i64::try_from(10 * cost).unwrap());
+    assert!(
+        counters
+            .iter()
+            .all(|&(_, ttl)| ttl > 0 && ttl <= 15 * 86_400),
+        "counters end the day their inboxes do: {counters:?}"
+    );
+
+    drain(&h, &owners[0]).await;
+    assert_eq!(ask(&h, None, put(&owners[1])).await, ServerMsg::Done);
+    for owner in &owners {
+        drain(&h, owner).await;
+    }
+    assert_eq!(
+        h.store.inbox_counters().await,
+        [],
+        "nothing gone is counted"
+    );
+}
+
+/// Only so many inboxes are opened per epoch, all together; those open stay
+/// open, and closing opens nothing (S-105).
+#[tokio::test]
+async fn inboxes_opened_per_epoch_are_bounded() {
+    let quota = InboxQuota {
+        activations: 2,
+        ..InboxQuota::default()
+    };
+    let Some(h) = handler_with(None, quota).await else {
+        return;
+    };
+    let (a, b, c) = (Inbox::random(), Inbox::random(), Inbox::random());
+    open_inbox(&h, &a).await;
+    open_inbox(&h, &b).await;
+    let refused = ask(&h, None, c.fetch()).await;
+    assert!(is_error(&refused, ErrorCode::Unavailable), "{refused:?}");
+    assert!(
+        is_error(&ask(&h, None, put(c.id())).await, ErrorCode::NotFound),
+        "the refused inbox is not open to writers"
+    );
+    assert_eq!(h.inbox_quota_refused.get(), 1);
+
+    open_inbox(&h, &a).await;
+    assert_eq!(ask(&h, None, put(b.id())).await, ServerMsg::Done);
+    assert!(matches!(
+        ask(&h, None, c.close()).await,
+        ServerMsg::InboxBatch { .. }
+    ));
+}
+
+/// Over a session, one identity's inbox requests are limited; through the
+/// onion the relay limits each asker instead.
+#[tokio::test]
+async fn inbox_requests_over_a_session_are_rate_limited_per_identity() {
+    let Some(h) = handler(None).await else { return };
+    let me = Some(PeerId(random32()));
+    let owner = Inbox::random();
+    for _ in 0..600 {
+        let answer = ask(&h, me, owner.fetch()).await;
+        assert!(matches!(answer, ServerMsg::InboxBatch { .. }), "{answer:?}");
+    }
+    let limited = ask(&h, me, owner.fetch()).await;
+    assert!(is_error(&limited, ErrorCode::RateLimited), "{limited:?}");
+    assert!(matches!(
+        ask(&h, None, owner.fetch()).await,
+        ServerMsg::InboxBatch { .. }
+    ));
+
+    for _ in 0..1200 {
+        let answer = ask(&h, me, put(Inbox::random().id())).await;
+        assert!(is_error(&answer, ErrorCode::NotFound), "{answer:?}");
+    }
+    let limited = ask(&h, me, put(owner.id())).await;
+    assert!(is_error(&limited, ErrorCode::RateLimited), "{limited:?}");
+    assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
 }
