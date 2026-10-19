@@ -15,7 +15,9 @@ use crate::bus::mem::MemBus;
 use crate::bus::{Bus, BusError};
 use crate::metrics::Metrics;
 use crate::outbox::QUEUE_BYTES;
-use crate::session::{EVICT_LEN, Gateway, IDLE_TIMEOUT, Limits, WRITE_TIMEOUT, WRITER_GRACE};
+use crate::session::{
+    EVICT_LEN, Gateway, IDLE_TIMEOUT, LIMIT_NOTICE_INTERVAL, Limits, WRITE_TIMEOUT, WRITER_GRACE,
+};
 
 const LIMITS: Limits = Limits {
     frames_per_sec: 10_000,
@@ -728,6 +730,42 @@ async fn ping_is_answered() {
     a.authenticate().await;
     a.send(5, ClientMsg::Ping).await;
     assert_eq!(a.recv().await.unwrap(), Frame::new(5, ServerMsg::Pong));
+}
+
+/// Q-408: a frame over the rate limit is answered with `RateLimited`
+/// instead of leaving the client to time out, but at most once per
+/// interval, so a flood cannot make the gateway answer every frame.
+#[tokio::test(start_paused = true)]
+async fn frames_over_the_rate_limit_are_answered_once_per_interval() {
+    // A burst of two frames; the bucket refills on the wall clock, which
+    // barely moves while the paused test clock jumps.
+    let limits = Limits {
+        frames_per_sec: 1,
+        ..LIMITS
+    };
+    let gw = Arc::new(Gateway::new(MemBus::default(), limits, metrics()));
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    for req_id in 1..=5 {
+        a.send(req_id, ClientMsg::Ping).await;
+    }
+    let limited = |req_id| {
+        Frame::new(
+            req_id,
+            ServerMsg::Error {
+                code: ErrorCode::RateLimited,
+            },
+        )
+    };
+    assert_eq!(a.recv().await.unwrap(), Frame::new(1, ServerMsg::Pong));
+    assert_eq!(a.recv().await.unwrap(), Frame::new(2, ServerMsg::Pong));
+    assert_eq!(a.recv().await.unwrap(), limited(3));
+    assert_eq!(a.recv().await, None, "4 and 5 are dropped silently");
+    assert_eq!(gw.metrics.rate_limited.get(), 3);
+
+    tokio::time::sleep(LIMIT_NOTICE_INTERVAL).await;
+    a.send(6, ClientMsg::Ping).await;
+    assert_eq!(a.recv().await.unwrap(), limited(6), "a new interval");
 }
 
 #[test]

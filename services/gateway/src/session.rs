@@ -46,6 +46,8 @@ const MAX_SIG_IN_FLIGHT: usize = 32;
 /// `PEER_REQUEST_TIMEOUT`; beyond the limit the sender is told `Busy` at once.
 const MAX_ACKS_IN_FLIGHT: usize = 32;
 const WRITE_BATCH: usize = 64;
+/// How often a client is told that frames over its rate limit were dropped.
+pub(crate) const LIMIT_NOTICE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Length of the nonce a session announces on its device's gateway subject
 /// when it signs in, evicting the device's sessions on other nodes. Frames
@@ -101,6 +103,7 @@ impl<B: Bus> Gateway<B> {
             out,
             cancel: cancel.clone(),
             limiter: ConnLimiter::new(self.limits.frames_per_sec, self.limits.bytes_per_sec),
+            next_limit_notice: Instant::now(),
             sig_permits: Arc::new(Semaphore::new(MAX_SIG_IN_FLIGHT)),
             ack_permits: Arc::new(Semaphore::new(MAX_ACKS_IN_FLIGHT)),
             access: Vec::new(),
@@ -128,6 +131,8 @@ struct Session<B> {
     out: Outbox,
     cancel: CancellationToken,
     limiter: ConnLimiter,
+    /// When a dropped frame may next be answered with `RateLimited`.
+    next_limit_notice: Instant,
     sig_permits: Arc<Semaphore>,
     ack_permits: Arc<Semaphore>,
     /// Hashes of the tokens the device takes sealed deliveries with.
@@ -315,6 +320,7 @@ impl<B: Bus> Session<B> {
         self.gw.metrics.bytes_in.inc_by(bytes.len() as u64);
         if !self.limiter.admit(bytes.len()) {
             self.gw.metrics.rate_limited.inc();
+            self.notice_rate_limited(&bytes);
             return true;
         }
         if let Some(send) = peek_send(&bytes) {
@@ -340,6 +346,27 @@ impl<B: Bus> Session<B> {
                 true
             }
         }
+    }
+
+    /// Answers a frame dropped by the rate limiter with `RateLimited`, so
+    /// the client need not wait for its request to time out. At most once
+    /// per `LIMIT_NOTICE_INTERVAL`: answering every dropped frame would let
+    /// a flood make the gateway write as much as it reads.
+    fn notice_rate_limited(&mut self, dropped: &Bytes) {
+        let now = Instant::now();
+        if now < self.next_limit_notice {
+            return;
+        }
+        let req_id = match peek_send(dropped) {
+            Some(send) => send.req_id,
+            None => match Frame::<ClientMsg>::decode(dropped.clone()) {
+                Ok(frame) => frame.req_id,
+                Err(_) => return,
+            },
+        };
+        self.next_limit_notice = now + LIMIT_NOTICE_INTERVAL;
+        self.out
+            .try_push(frame(req_id, error(ErrorCode::RateLimited)));
     }
 
     /// Relays a `Send` to the device it names; a device may write to its
