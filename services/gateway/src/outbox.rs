@@ -67,15 +67,27 @@ impl Counters {
 }
 
 /// Bytes a queued frame holds of its connection's share and of the budget.
-/// They return when it is dropped, wherever that happens: after delivery,
-/// on a refused send, or with the channel when the connection goes.
-struct Reservation {
+/// They return when it is dropped, wherever that happens: once the frame is
+/// written, on a refused send, or with the channel when the connection goes.
+pub(crate) struct Reservation {
     counters: Arc<Counters>,
     len: usize,
 }
 
+impl Reservation {
+    /// Takes over the bytes of `other`, from the same outbox, to return
+    /// them together.
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        debug_assert!(Arc::ptr_eq(&self.counters, &other.counters));
+        self.len += std::mem::take(&mut other.len);
+    }
+}
+
 impl Drop for Reservation {
     fn drop(&mut self) {
+        if self.len == 0 {
+            return;
+        }
         self.counters.queued.fetch_sub(self.len, Ordering::AcqRel);
         self.counters
             .budget
@@ -85,9 +97,16 @@ impl Drop for Reservation {
 }
 
 /// A frame in the queue with the bytes it holds.
-struct Queued {
+pub(crate) struct Queued {
     frame: Bytes,
-    _reservation: Reservation,
+    reservation: Reservation,
+}
+
+impl Queued {
+    /// The frame to write, and its bytes to hold until it is written.
+    pub(crate) fn into_parts(self) -> (Bytes, Reservation) {
+        (self.frame, self.reservation)
+    }
 }
 
 /// Adds `len` to `counter` unless that would pass `limit`.
@@ -127,12 +146,7 @@ impl Outbox {
         let Some(reservation) = self.counters.reserve(frame.len()) else {
             return false;
         };
-        self.tx
-            .try_send(Queued {
-                frame,
-                _reservation: reservation,
-            })
-            .is_ok()
+        self.tx.try_send(Queued { frame, reservation }).is_ok()
     }
 
     /// Bytes queued for the client right now.
@@ -143,12 +157,12 @@ impl Outbox {
 }
 
 impl OutboxReceiver {
-    pub(crate) async fn recv(&mut self) -> Option<Bytes> {
-        Some(self.rx.recv().await?.frame)
+    pub(crate) async fn recv(&mut self) -> Option<Queued> {
+        self.rx.recv().await
     }
 
-    pub(crate) fn try_recv(&mut self) -> Option<Bytes> {
-        Some(self.rx.try_recv().ok()?.frame)
+    pub(crate) fn try_recv(&mut self) -> Option<Queued> {
+        self.rx.try_recv().ok()
     }
 }
 

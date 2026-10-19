@@ -387,6 +387,39 @@ async fn idle_sessions_close_and_activity_extends_them() {
     assert!(a.closed().await, "a minute without frames closes it");
 }
 
+/// Frames the writer took out but could not write yet still count against
+/// the client's share and the budget, until the client takes them.
+#[tokio::test]
+async fn frames_count_until_written() {
+    let gw = gateway(&MemBus::default());
+    let mut slow = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+    slow.authenticate().await;
+    let mut sender = Client::connect(&gw);
+    sender.authenticate().await;
+    for req_id in 1..=4 {
+        sender.send(req_id, send(slow.addr(), false, b"x")).await;
+    }
+    sender.sync().await;
+    let each = cypher_wire::encode_recv(&sender.peer(), sender.device, b"x").len();
+    let outbox = gw.registry.get(&slow.addr()).unwrap().outbox;
+    assert_eq!(outbox.queued(), 4 * each, "none is written yet");
+    assert_eq!(gw.outbox_used(), 4 * each);
+
+    for _ in 0..4 {
+        assert!(matches!(
+            slow.recv().await.unwrap().msg,
+            ServerMsg::Recv { .. }
+        ));
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while gw.outbox_used() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("written frames return their bytes");
+}
+
 /// S-102: a client that stopped reading is released once its session idles
 /// out, though its writer is stuck on a frame the client never takes.
 #[tokio::test(start_paused = true)]

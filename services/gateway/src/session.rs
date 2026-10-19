@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 
 use crate::bus::{Bus, BusError, BusMsg};
 use crate::metrics::Metrics;
-use crate::outbox::{Budget, Outbox, OutboxReceiver, outbox};
+use crate::outbox::{Budget, Outbox, OutboxReceiver, Queued, Reservation, outbox};
 use crate::registry::{ConnHandle, Registry};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -515,8 +515,9 @@ where
     K: Sink<Bytes, Error = io::Error> + Unpin,
 {
     if write_until_closed(&mut sink, &mut rx, &cancel).await {
-        while let Some(f) = rx.try_recv() {
-            if !written(sink.feed(f)).await {
+        let mut held = None;
+        while let Some(queued) = rx.try_recv() {
+            if !feed(&mut sink, queued, &mut held).await {
                 break;
             }
         }
@@ -544,12 +545,14 @@ where
                 None => return true,
             },
         };
-        if !written(sink.feed(first)).await {
+        // The batch's bytes stay counted until it is flushed.
+        let mut held = None;
+        if !feed(sink, first, &mut held).await {
             return false;
         }
         for _ in 0..WRITE_BATCH {
             let Some(next) = rx.try_recv() else { break };
-            if !written(sink.feed(next)).await {
+            if !feed(sink, next, &mut held).await {
                 return false;
             }
         }
@@ -557,6 +560,20 @@ where
             return false;
         }
     }
+}
+
+/// Writes a queued frame, adding its bytes to those `held` until the next
+/// flush.
+async fn feed<K>(sink: &mut K, queued: Queued, held: &mut Option<Reservation>) -> bool
+where
+    K: Sink<Bytes, Error = io::Error> + Unpin,
+{
+    let (frame, reservation) = queued.into_parts();
+    match held {
+        Some(held) => held.merge(reservation),
+        None => *held = Some(reservation),
+    }
+    written(sink.feed(frame)).await
 }
 
 /// Runs one write to the client for at most `WRITE_TIMEOUT`; false when it
