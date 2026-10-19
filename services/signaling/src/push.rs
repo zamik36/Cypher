@@ -7,7 +7,7 @@
 //! their behalf: only HTTPS on port 443 to known push services, and never
 //! to an address inside a private network.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -324,29 +324,58 @@ async fn resolve(
     }
 }
 
+/// Whether `ip` is an address on the public internet, not one inside a
+/// private, special-purpose or reserved range.
 fn public(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_documentation()
-                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])
-                || v4.octets()[0] == 0)
-        }
-        IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
+        IpAddr::V4(v4) => public_v4(v4),
+        IpAddr::V6(v6) => public_v6(v6),
+    }
+}
+
+fn public_v4(v4: Ipv4Addr) -> bool {
+    let [a, b, c, _] = v4.octets();
+    !(v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || v4.is_documentation()
+        // This network, 0.0.0.0/8.
+        || a == 0
+        // Shared address space (carrier-grade NAT), 100.64.0.0/10.
+        || a == 100 && (64..128).contains(&b)
+        // IETF protocol assignments, 192.0.0.0/24.
+        || a == 192 && b == 0 && c == 0
+        // 6to4 relay anycast, 192.88.99.0/24.
+        || a == 192 && b == 88 && c == 99
+        // Benchmarking, 198.18.0.0/15.
+        || a == 198 && (b == 18 || b == 19)
+        // Reserved, 240.0.0.0/4.
+        || a >= 240)
+}
+
+/// An IPv6 address that carries an IPv4 one (mapped, NAT64, 6to4) is
+/// public if that one is.
+fn public_v6(v6: Ipv6Addr) -> bool {
+    let v4 = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+    match v6.segments() {
+        // IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96, 6to4 2002::/16.
+        [0, 0, 0, 0, 0, 0xffff, hi, lo]
+        | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo]
+        | [0x2002, hi, lo, ..] => public_v4(v4(hi, lo)),
+        // ::/64 (unspecified, loopback, IPv4-compatible and -translated),
+        // discard-only 100::/64, NAT64 for local use 64:ff9b:1::/48 and
+        // documentation 2001:db8::/32.
+        [0 | 0x100, 0, 0, 0, ..] | [0x64, 0xff9b, 1, ..] | [0x2001, 0xdb8, ..] => false,
+        [first, ..] => {
+            !(v6.is_multicast()
+                // Unique local, fc00::/7.
                 || first & 0xfe00 == 0xfc00
+                // Link local, fe80::/10, and the deprecated site local, fec0::/10.
                 || first & 0xffc0 == 0xfe80
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| !public(IpAddr::V4(v4))))
+                || first & 0xffc0 == 0xfec0)
         }
     }
 }
@@ -507,10 +536,37 @@ mod tests {
             "fd00::1",
             "fe80::1",
             "::ffff:10.0.0.1",
+            // Special-purpose ranges, and private IPv4 inside IPv6 (S-109).
+            "64:ff9b::a00:1",
+            "64:ff9b:1::a00:1",
+            "64:ff9b:1::8.8.8.8",
+            "::a00:1",
+            "::8.8.8.8",
+            "::ffff:0:a00:1",
+            "2002:a00:1::1",
+            "2002:7f00:1::",
+            "fec0::1",
+            "100::1",
+            "2001:db8::1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "192.0.0.8",
+            "240.0.0.1",
+            "255.255.255.255",
+            "192.88.99.1",
         ] {
             assert!(!public(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["142.250.74.10", "2a00:1450:4001::200e"] {
+        for ip in [
+            "142.250.74.10",
+            "2a00:1450:4001::200e",
+            // A public IPv4 address behind NAT64 or 6to4 stays reachable.
+            "64:ff9b::8.8.8.8",
+            "2002:808:808::1",
+            "::ffff:8.8.8.8",
+            "198.20.0.1",
+            "192.0.1.1",
+        ] {
             assert!(public(ip.parse().unwrap()), "{ip}");
         }
     }
