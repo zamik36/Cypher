@@ -47,6 +47,12 @@ const MAX_SIG_IN_FLIGHT: usize = 32;
 const MAX_ACKS_IN_FLIGHT: usize = 32;
 const WRITE_BATCH: usize = 64;
 
+/// Length of the nonce a session announces on its device's gateway subject
+/// when it signs in, evicting the device's sessions on other nodes. Frames
+/// relayed on that subject are encoded `Recv`s, always longer.
+pub(crate) const EVICT_LEN: usize = 16;
+type EvictNonce = [u8; EVICT_LEN];
+
 const STATUS_DELIVERED: u8 = DeliveryStatus::Delivered as u8;
 const STATUS_BUSY: u8 = DeliveryStatus::Busy as u8;
 
@@ -131,6 +137,8 @@ struct Session<B> {
 enum Next {
     Frame(Bytes),
     Relayed(BusMsg),
+    /// This session's own eviction came back.
+    Announced,
     /// The idle timer fired; the connection may have been active since.
     Idle,
     Kicked,
@@ -147,9 +155,11 @@ impl<B: Bus> Session<B> {
             .await
             .ok()
             .flatten()?;
-        if let Some((relayed, kick)) = self.attach(me).await {
+        let mut nonce: EvictNonce = [0; EVICT_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        if let Some((relayed, kick)) = self.attach(me, &nonce).await {
             self.out.try_push(frame(0, ServerMsg::Ready));
-            self.pump(me, stream, relayed, &kick).await;
+            self.pump(me, stream, relayed, &kick, &nonce).await;
         }
         Some(me)
     }
@@ -157,7 +167,7 @@ impl<B: Bus> Session<B> {
     /// Registers the session, evicting older ones of the same device here
     /// and on other nodes, and subscribes to frames relayed to it. Other
     /// devices of the identity stay connected.
-    async fn attach(&self, me: Addr) -> Option<(B::Sub, CancellationToken)> {
+    async fn attach(&self, me: Addr, nonce: &EvictNonce) -> Option<(B::Sub, CancellationToken)> {
         let kick = CancellationToken::new();
         if let Some(old) = self.gw.registry.insert(
             me,
@@ -170,17 +180,21 @@ impl<B: Bus> Session<B> {
             old.outbox.try_push(frame(0, ServerMsg::Superseded));
             old.kick.cancel();
         }
-        // An empty message evicts an older session on another node; it goes
-        // out before this session subscribes, so it never reaches itself.
+        // The nonce evicts the device's sessions on other nodes. Subscribing
+        // first means of two logins racing on two nodes at least one hears
+        // the other; this session hears its own too, and knows it by the nonce.
         let hex = me.peer.to_hex();
-        let evict = peer_subject(&hex, me.device, Origin::Gateway);
-        self.gw.bus.publish(evict, Bytes::new()).await;
         let relayed = self
             .gw
             .bus
             .subscribe(peer_subscription(&hex, me.device))
             .await
             .ok()?;
+        let evict = peer_subject(&hex, me.device, Origin::Gateway);
+        self.gw
+            .bus
+            .publish(evict, Bytes::copy_from_slice(nonce))
+            .await;
         Some((relayed, kick))
     }
 
@@ -192,6 +206,7 @@ impl<B: Bus> Session<B> {
         mut stream: S,
         mut relayed: B::Sub,
         kick: &CancellationToken,
+        nonce: &EvictNonce,
     ) where
         S: Stream<Item = io::Result<Bytes>> + Unpin + Send,
     {
@@ -206,9 +221,13 @@ impl<B: Bus> Session<B> {
                 () = self.cancel.cancelled() => Next::Closed,
                 () = kick.cancelled() => Next::Kicked,
                 msg = relayed.next() => match msg {
-                    Some(msg) if msg.origin == Some(Origin::Gateway) && msg.payload.is_empty() => {
-                        self.out.try_push(frame(0, ServerMsg::Superseded));
-                        Next::Kicked
+                    Some(msg) if is_eviction(&msg) => {
+                        if msg.payload.as_ref() == nonce.as_slice() {
+                            Next::Announced
+                        } else {
+                            self.out.try_push(frame(0, ServerMsg::Superseded));
+                            Next::Kicked
+                        }
                     }
                     Some(msg) => Next::Relayed(msg),
                     None => Next::Closed,
@@ -231,6 +250,7 @@ impl<B: Bus> Session<B> {
                     Some(Origin::Sealed) => self.on_sealed(msg).await,
                     None => {}
                 },
+                Next::Announced => {}
                 Next::Idle => {
                     let deadline = last_frame + IDLE_TIMEOUT;
                     if deadline <= Instant::now() {
@@ -508,6 +528,13 @@ where
 /// failed or stalled.
 async fn written(write: impl Future<Output = io::Result<()>>) -> bool {
     matches!(timeout(WRITE_TIMEOUT, write).await, Ok(Ok(())))
+}
+
+/// Whether `msg` announces a session of the device signing in on some node:
+/// a nonce, or nothing at all from a gateway of an earlier release.
+fn is_eviction(msg: &BusMsg) -> bool {
+    msg.origin == Some(Origin::Gateway)
+        && (msg.payload.is_empty() || msg.payload.len() == EVICT_LEN)
 }
 
 /// Whether `hash` is one of `known`, comparing every byte of each.

@@ -11,11 +11,11 @@ use cypher_wire::{
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 
-use crate::bus::Bus as _;
 use crate::bus::mem::MemBus;
+use crate::bus::{Bus, BusError};
 use crate::metrics::Metrics;
 use crate::outbox::QUEUE_BYTES;
-use crate::session::{Gateway, IDLE_TIMEOUT, Limits, WRITE_TIMEOUT, WRITER_GRACE};
+use crate::session::{EVICT_LEN, Gateway, IDLE_TIMEOUT, Limits, WRITE_TIMEOUT, WRITER_GRACE};
 
 const LIMITS: Limits = Limits {
     frames_per_sec: 10_000,
@@ -39,22 +39,22 @@ struct Client {
 }
 
 impl Client {
-    fn connect(gw: &Arc<Gateway<MemBus>>) -> Self {
+    fn connect<B: Bus>(gw: &Arc<Gateway<B>>) -> Self {
         Self::connect_as(gw, IdentityKeyPair::generate())
     }
 
-    fn connect_as(gw: &Arc<Gateway<MemBus>>, id: IdentityKeyPair) -> Self {
+    fn connect_as<B: Bus>(gw: &Arc<Gateway<B>>, id: IdentityKeyPair) -> Self {
         Self::connect_device(gw, id, DeviceId::FIRST)
     }
 
-    fn connect_device(gw: &Arc<Gateway<MemBus>>, id: IdentityKeyPair, device: DeviceId) -> Self {
+    fn connect_device<B: Bus>(gw: &Arc<Gateway<B>>, id: IdentityKeyPair, device: DeviceId) -> Self {
         Self::connect_with(gw, id, device, 4096)
     }
 
     /// `sink_buffer` is how many frames the gateway may write before the
     /// client has to read; 0 behaves like a full TCP window.
-    fn connect_with(
-        gw: &Arc<Gateway<MemBus>>,
+    fn connect_with<B: Bus>(
+        gw: &Arc<Gateway<B>>,
         id: IdentityKeyPair,
         device: DeviceId,
         sink_buffer: usize,
@@ -523,6 +523,76 @@ async fn login_on_another_node_supersedes_the_first() {
         matches!(second.recv().await.unwrap().msg, ServerMsg::Recv { .. }),
         "the new session did not evict itself"
     );
+}
+
+/// A bus whose subscriptions take a moment, as NATS round trips do.
+#[derive(Clone, Default)]
+struct SlowSubscribe(MemBus);
+
+impl Bus for SlowSubscribe {
+    type Sub = <MemBus as Bus>::Sub;
+
+    fn request(
+        &self,
+        subject: String,
+        peer: Option<PeerId>,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Bytes, BusError>> + Send {
+        self.0.request(subject, peer, payload, timeout)
+    }
+
+    fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send {
+        self.0.publish(subject, payload)
+    }
+
+    fn subscribe(
+        &self,
+        subject: String,
+    ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
+        let inner = self.0.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            inner.subscribe(subject).await
+        }
+    }
+}
+
+/// S-103: two logins of one device racing on two nodes do not both stay
+/// signed in, each getting the device's frames.
+#[tokio::test(start_paused = true)]
+async fn concurrent_logins_on_two_nodes_do_not_both_survive() {
+    let bus = SlowSubscribe::default();
+    let gw = || Arc::new(Gateway::new(bus.clone(), LIMITS, metrics()));
+    let (gw1, gw2, gw3) = (gw(), gw(), gw());
+    let seed = cypher_crypto::IdentitySeed([0x5a; 32]);
+    let mut one = Client::connect_as(&gw1, seed.derive_identity());
+    let mut two = Client::connect_as(&gw2, seed.derive_identity());
+    tokio::join!(one.authenticate(), two.authenticate());
+
+    let mut sender = Client::connect(&gw3);
+    sender.authenticate().await;
+    sender.send(1, send(one.addr(), false, b"dup")).await;
+    let mut delivered = 0;
+    let mut superseded = 0;
+    for session in [&mut one, &mut two] {
+        while let Some(Frame { msg, .. }) = session.recv().await {
+            match msg {
+                ServerMsg::Recv { .. } => delivered += 1,
+                ServerMsg::Superseded => superseded += 1,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+    assert!(superseded >= 1, "at least one login evicted the other");
+    assert!(delivered <= 1, "the frame reached {delivered} sessions");
+}
+
+/// An eviction is told from a relayed frame by its length alone.
+#[test]
+fn relayed_frames_are_never_mistaken_for_evictions() {
+    let shortest = cypher_wire::encode_recv(&PeerId([0; 32]), DeviceId::FIRST, &[]);
+    assert!(shortest.len() > EVICT_LEN);
 }
 
 /// A remote node that never answers must not let one sender pile up
