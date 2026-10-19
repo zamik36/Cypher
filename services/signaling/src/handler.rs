@@ -67,6 +67,12 @@ const SEALED_PER_TOKEN_PER_HOUR: u32 = 3600;
 /// bounds that memory (~48 MiB) while the other requests, all small, may
 /// be many more.
 pub(crate) const FETCH_PERMITS: usize = 64;
+/// Push signals sent at once. Each is one outbound HTTPS request of up to
+/// 20 s (the push request timeout); beyond this many a flood of inbox
+/// puts would turn into a flood of requests, and push services ban VAPID
+/// keys that flood them. A signal past the limit is dropped: the device
+/// still finds the item on its next poll.
+pub(crate) const PUSH_PERMITS: usize = 256;
 /// How long the recipient's gateway has to take a sealed delivery.
 const SEALED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -78,6 +84,11 @@ pub(crate) struct Handler {
     pub push: Option<Pusher>,
     pub courier: Courier,
     pub fetches: Semaphore,
+    /// Push signals on their way, at most [`PUSH_PERMITS`]; each task holds
+    /// a permit until its push service answered or timed out.
+    pub pushes: std::sync::Arc<Semaphore>,
+    /// Push signals dropped because [`PUSH_PERMITS`] were on their way.
+    pub push_shed: prometheus::IntCounter,
     /// Sealed sends no gateway answered: the way to the gateways is broken
     /// (NATS down or refusing), and senders fall back to their name.
     pub sealed_unavailable: prometheus::IntCounter,
@@ -454,9 +465,14 @@ impl Handler {
     }
 
     /// The inbox got an item: tell its owner's device, at most once per
-    /// [`PUSH_INTERVAL_SECS`], without holding up the reply.
+    /// [`PUSH_INTERVAL_SECS`], without holding up the reply. With
+    /// [`PUSH_PERMITS`] signals on their way already, this one is dropped.
     async fn signal(&self, inbox: &[u8; 32]) -> redis::RedisResult<()> {
         let Some(push) = self.push.clone() else {
+            return Ok(());
+        };
+        let Ok(permit) = std::sync::Arc::clone(&self.pushes).try_acquire_owned() else {
+            self.push_shed.inc();
             return Ok(());
         };
         let Some(sub) = self
@@ -472,17 +488,14 @@ impl Handler {
             return Ok(());
         }
         let (store, inbox) = (self.store.clone(), *inbox);
-        let task = async move {
+        tokio::spawn(async move {
             if push.send(&sub).await == Outcome::Gone
                 && let Err(e) = store.push_unregister(&inbox).await
             {
                 warn!("forgetting a push subscription failed: {e}");
             }
-        };
-        #[cfg(test)]
-        task.await;
-        #[cfg(not(test))]
-        tokio::spawn(task);
+            drop(permit);
+        });
         Ok(())
     }
 

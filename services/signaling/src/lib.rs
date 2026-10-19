@@ -232,6 +232,37 @@ fn relay_public_addr(configured: Option<String>) -> Option<String> {
     })
 }
 
+/// The request handler on the configured Redis, push service and relay,
+/// handing sealed sends to the gateways over `nats`.
+async fn handler(
+    config: &Config,
+    keys: &OnionKeys,
+    nats: &async_nats::Client,
+    registry: &Metrics,
+) -> anyhow::Result<Handler> {
+    Ok(Handler {
+        store: Store::connect(&config.redis_url).await?,
+        signing_key: keys.signing_key(),
+        relay_addr: relay_public_addr(config.relay_public_addr.clone()),
+        push: web_push(config)?,
+        courier: handler::Courier::Nats(nats.clone()),
+        fetches: Semaphore::new(handler::FETCH_PERMITS),
+        pushes: Arc::new(Semaphore::new(handler::PUSH_PERMITS)),
+        push_shed: registry.counter(
+            "signaling_push_shed_total",
+            "Push signals dropped because too many were on their way",
+        )?,
+        sealed_unavailable: registry.counter(
+            "signaling_sealed_unavailable_total",
+            "Sealed sends no gateway answered in time",
+        )?,
+        inbox_quota_refused: registry.counter(
+            "signaling_inbox_quota_refused_total",
+            "Inbox writes and openings refused because all inboxes together are full",
+        )?,
+    })
+}
+
 /// Serves signaling requests from NATS until `shutdown` is cancelled.
 pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<()> {
     let registry = Metrics::new()?;
@@ -246,26 +277,9 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     );
 
     let keys = OnionKeys::new(&secrets::load_or_create_secret(&config.signing_key_path)?);
-    let push = web_push(&config)?;
-    let relay_addr = relay_public_addr(config.relay_public_addr);
     let nats = cypher_server_kit::connect_nats(&config.nats).await?;
     let service = Arc::new(Service {
-        handler: Handler {
-            store: Store::connect(&config.redis_url).await?,
-            signing_key: keys.signing_key(),
-            relay_addr,
-            push,
-            courier: handler::Courier::Nats(nats.clone()),
-            fetches: Semaphore::new(handler::FETCH_PERMITS),
-            sealed_unavailable: registry.counter(
-                "signaling_sealed_unavailable_total",
-                "Sealed sends no gateway answered in time",
-            )?,
-            inbox_quota_refused: registry.counter(
-                "signaling_inbox_quota_refused_total",
-                "Inbox writes and openings refused because all inboxes together are full",
-            )?,
-        },
+        handler: handler(&config, &keys, &nats, &registry).await?,
         keys,
         nats,
         requests: registry.counter("signaling_requests_total", "Session requests handled")?,
