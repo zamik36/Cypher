@@ -366,9 +366,13 @@ fn public_v6(v6: Ipv6Addr) -> bool {
         | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo]
         | [0x2002, hi, lo, ..] => public_v4(v4(hi, lo)),
         // ::/64 (unspecified, loopback, IPv4-compatible and -translated),
-        // discard-only 100::/64, NAT64 for local use 64:ff9b:1::/48 and
-        // documentation 2001:db8::/32.
-        [0 | 0x100, 0, 0, 0, ..] | [0x64, 0xff9b, 1, ..] | [0x2001, 0xdb8, ..] => false,
+        // discard-only 100::/64, NAT64 for local use 64:ff9b:1::/48, IETF
+        // protocol assignments 2001::/23 (Teredo among them), and
+        // documentation 2001:db8::/32 and 3fff::/20.
+        [0 | 0x100, 0, 0, 0, ..]
+        | [0x64, 0xff9b, 1, ..]
+        | [0x2001, 0..=0x1ff | 0xdb8, ..]
+        | [0x3fff, 0..=0xfff, ..] => false,
         [first, ..] => {
             !(v6.is_multicast()
                 // Unique local, fc00::/7.
@@ -548,6 +552,10 @@ mod tests {
             "fec0::1",
             "100::1",
             "2001:db8::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:1ff::1",
+            "3fff::1",
+            "3fff:fff::1",
             "198.18.0.1",
             "198.19.255.255",
             "192.0.0.8",
@@ -566,6 +574,8 @@ mod tests {
             "::ffff:8.8.8.8",
             "198.20.0.1",
             "192.0.1.1",
+            "2001:200::1",
+            "3fff:1000::1",
         ] {
             assert!(public(ip.parse().unwrap()), "{ip}");
         }
