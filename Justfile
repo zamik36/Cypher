@@ -116,6 +116,18 @@ bench *args:
 # Run lint + hygiene + tests
 check: lint hygiene test
 
+# Fast gate before a push (no tests): the checks that most often fail CI,
+# with the deny policy of ci.yml (advisories block only on vulnerabilities).
+# `just check` remains the full run before a commit.
+prepush:
+    cargo fmt --all -- --check
+    taplo fmt --check
+    typos
+    cargo machete
+    cargo deny --all-features check bans licenses sources
+    cargo deny --all-features check --warn unmaintained --warn unsound --warn yanked advisories
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+
 # Needs locally running services (`just infra services`).
 # Live journeys: the native client, then the browser (web-e2e)
 e2e: && web-e2e
