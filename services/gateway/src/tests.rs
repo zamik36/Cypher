@@ -15,7 +15,7 @@ use crate::bus::Bus as _;
 use crate::bus::mem::MemBus;
 use crate::metrics::Metrics;
 use crate::outbox::QUEUE_BYTES;
-use crate::session::{Gateway, Limits};
+use crate::session::{Gateway, IDLE_TIMEOUT, Limits, WRITE_TIMEOUT, WRITER_GRACE};
 
 const LIMITS: Limits = Limits {
     frames_per_sec: 10_000,
@@ -379,6 +379,45 @@ async fn idle_sessions_close_and_activity_extends_them() {
     );
     tokio::time::sleep(Duration::from_secs(61)).await;
     assert!(a.closed().await, "a minute without frames closes it");
+}
+
+/// S-102: a client that stopped reading is released once its session idles
+/// out, though its writer is stuck on a frame the client never takes.
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_is_released_after_idling() {
+    let gw = gateway(&MemBus::default());
+    let mut stalled = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+    stalled.authenticate().await;
+    let mut sender = Client::connect(&gw);
+    sender.authenticate().await;
+    for req_id in 1..=4 {
+        sender.send(req_id, send(stalled.addr(), false, b"x")).await;
+    }
+    sender.sync().await;
+    assert_eq!(gw.metrics.connections.get(), 2);
+
+    tokio::time::sleep(IDLE_TIMEOUT + WRITER_GRACE + Duration::from_secs(1)).await;
+    assert!(gw.registry.get(&stalled.addr()).is_none());
+    assert_eq!(gw.metrics.connections.get(), 0, "both sessions are closed");
+}
+
+/// S-102: a client that keeps sending but stops reading never idles out;
+/// the stalled write ends its session.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_write_closes_the_session() {
+    let gw = gateway(&MemBus::default());
+    let mut stalled = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+    stalled.authenticate().await;
+    let pings = WRITE_TIMEOUT.as_secs() / 5 + 2;
+    for req_id in 0..u32::try_from(pings).unwrap() {
+        stalled.send(req_id, ClientMsg::Ping).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    assert!(
+        gw.registry.get(&stalled.addr()).is_none(),
+        "unanswered for longer than the write timeout"
+    );
+    assert_eq!(gw.metrics.connections.get(), 0);
 }
 
 #[tokio::test]

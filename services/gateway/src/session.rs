@@ -29,7 +29,15 @@ use crate::outbox::{Budget, Outbox, OutboxReceiver, outbox};
 use crate::registry::{ConnHandle, Registry};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one write to a client (a frame, a flush, the close) may take.
+/// The transport flushes about a frame per write, so a client must take a
+/// full-size frame (1 MiB) at some 35 KB/s; one that stops reading loses
+/// the session instead of holding its connection, queue and address slot.
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a closing session lets its writer deliver the last frames
+/// (`Superseded`, an error) before abandoning it.
+pub(crate) const WRITER_GRACE: Duration = Duration::from_secs(5);
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const SIG_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SIG_IN_FLIGHT: usize = 32;
@@ -80,7 +88,7 @@ impl<B: Bus> Gateway<B> {
         self.metrics.connections.inc();
         let (out, out_rx) = outbox(&self.outbox_budget);
         let cancel = CancellationToken::new();
-        let writer = tokio::spawn(write_loop(sink, out_rx, cancel.clone()));
+        let mut writer = tokio::spawn(write_loop(sink, out_rx, cancel.clone()));
         let mut session = Session {
             gw: Arc::clone(&self),
             conn_id: self.next_conn.fetch_add(1, Ordering::Relaxed),
@@ -95,7 +103,9 @@ impl<B: Bus> Gateway<B> {
             self.registry.remove(&me, session.conn_id);
         }
         cancel.cancel();
-        let _ = writer.await;
+        if timeout(WRITER_GRACE, &mut writer).await.is_err() {
+            writer.abort();
+        }
         self.metrics.connections.dec();
     }
 
@@ -443,40 +453,61 @@ impl<B: Bus> Session<B> {
     }
 }
 
+/// Writes the outbox to the client until the session ends, then delivers
+/// what is left and closes. A failed or stalled write ends the session.
 async fn write_loop<K>(mut sink: K, mut rx: OutboxReceiver, cancel: CancellationToken)
+where
+    K: Sink<Bytes, Error = io::Error> + Unpin,
+{
+    if write_until_closed(&mut sink, &mut rx, &cancel).await {
+        while let Some(f) = rx.try_recv() {
+            if !written(sink.feed(f)).await {
+                break;
+            }
+        }
+        written(sink.close()).await;
+    }
+    cancel.cancel();
+    debug!("writer closed");
+}
+
+/// Writes queued frames in batches, one flush each. True when the session
+/// ended, false when a write failed or stalled.
+async fn write_until_closed<K>(
+    sink: &mut K,
+    rx: &mut OutboxReceiver,
+    cancel: &CancellationToken,
+) -> bool
 where
     K: Sink<Bytes, Error = io::Error> + Unpin,
 {
     loop {
         let first = tokio::select! {
-            () = cancel.cancelled() => break,
+            () = cancel.cancelled() => return true,
             f = rx.recv() => match f {
                 Some(f) => f,
-                None => break,
+                None => return true,
             },
         };
-        if sink.feed(first).await.is_err() {
-            break;
+        if !written(sink.feed(first)).await {
+            return false;
         }
         for _ in 0..WRITE_BATCH {
             let Some(next) = rx.try_recv() else { break };
-            if sink.feed(next).await.is_err() {
-                cancel.cancel();
-                return;
+            if !written(sink.feed(next)).await {
+                return false;
             }
         }
-        if sink.flush().await.is_err() {
-            break;
+        if !written(sink.flush()).await {
+            return false;
         }
     }
-    while let Some(f) = rx.try_recv() {
-        if sink.feed(f).await.is_err() {
-            break;
-        }
-    }
-    let _ = sink.close().await;
-    cancel.cancel();
-    debug!("writer closed");
+}
+
+/// Runs one write to the client for at most `WRITE_TIMEOUT`; false when it
+/// failed or stalled.
+async fn written(write: impl Future<Output = io::Result<()>>) -> bool {
+    matches!(timeout(WRITE_TIMEOUT, write).await, Ok(Ok(())))
 }
 
 /// Whether `hash` is one of `known`, comparing every byte of each.
