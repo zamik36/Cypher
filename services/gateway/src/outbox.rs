@@ -51,21 +51,43 @@ struct Counters {
 
 impl Counters {
     /// Takes `len` bytes from both the connection's share and the budget.
-    fn reserve(&self, len: usize) -> bool {
+    fn reserve(self: &Arc<Self>, len: usize) -> Option<Reservation> {
         if !take(&self.queued, len, QUEUE_BYTES) {
-            return false;
+            return None;
         }
         if !take(&self.budget.used, len, self.budget.limit) {
             self.queued.fetch_sub(len, Ordering::AcqRel);
-            return false;
+            return None;
         }
-        true
+        Some(Reservation {
+            counters: Arc::clone(self),
+            len,
+        })
     }
+}
 
-    fn release(&self, len: usize) {
-        self.queued.fetch_sub(len, Ordering::AcqRel);
-        self.budget.used.fetch_sub(len, Ordering::AcqRel);
+/// Bytes a queued frame holds of its connection's share and of the budget.
+/// They return when it is dropped, wherever that happens: after delivery,
+/// on a refused send, or with the channel when the connection goes.
+struct Reservation {
+    counters: Arc<Counters>,
+    len: usize,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.counters.queued.fetch_sub(self.len, Ordering::AcqRel);
+        self.counters
+            .budget
+            .used
+            .fetch_sub(self.len, Ordering::AcqRel);
     }
+}
+
+/// A frame in the queue with the bytes it holds.
+struct Queued {
+    frame: Bytes,
+    _reservation: Reservation,
 }
 
 /// Adds `len` to `counter` unless that would pass `limit`.
@@ -80,15 +102,13 @@ fn take(counter: &AtomicUsize, len: usize, limit: usize) -> bool {
 /// Bounded outbound queue shared by everything that writes to one client.
 #[derive(Clone)]
 pub struct Outbox {
-    tx: mpsc::Sender<Bytes>,
+    tx: mpsc::Sender<Queued>,
     counters: Arc<Counters>,
 }
 
-/// The writer's end. Dropping it returns whatever is still queued to the
-/// budget.
+/// The writer's end.
 pub(crate) struct OutboxReceiver {
-    rx: mpsc::Receiver<Bytes>,
-    counters: Arc<Counters>,
+    rx: mpsc::Receiver<Queued>,
 }
 
 pub(crate) fn outbox(budget: &Arc<Budget>) -> (Outbox, OutboxReceiver) {
@@ -97,28 +117,22 @@ pub(crate) fn outbox(budget: &Arc<Budget>) -> (Outbox, OutboxReceiver) {
         queued: AtomicUsize::new(0),
         budget: Arc::clone(budget),
     });
-    (
-        Outbox {
-            tx,
-            counters: Arc::clone(&counters),
-        },
-        OutboxReceiver { rx, counters },
-    )
+    (Outbox { tx, counters }, OutboxReceiver { rx })
 }
 
 impl Outbox {
     /// Never waits: returns false when the reader is too slow or gone, or
     /// the gateway holds its whole budget of queued bytes.
     pub fn try_push(&self, frame: Bytes) -> bool {
-        let len = frame.len();
-        if !self.counters.reserve(len) {
+        let Some(reservation) = self.counters.reserve(frame.len()) else {
             return false;
-        }
-        if self.tx.try_send(frame).is_err() {
-            self.counters.release(len);
-            return false;
-        }
-        true
+        };
+        self.tx
+            .try_send(Queued {
+                frame,
+                _reservation: reservation,
+            })
+            .is_ok()
     }
 
     /// Bytes queued for the client right now.
@@ -130,24 +144,11 @@ impl Outbox {
 
 impl OutboxReceiver {
     pub(crate) async fn recv(&mut self) -> Option<Bytes> {
-        let frame = self.rx.recv().await?;
-        self.counters.release(frame.len());
-        Some(frame)
+        Some(self.rx.recv().await?.frame)
     }
 
     pub(crate) fn try_recv(&mut self) -> Option<Bytes> {
-        let frame = self.rx.try_recv().ok()?;
-        self.counters.release(frame.len());
-        Some(frame)
-    }
-}
-
-impl Drop for OutboxReceiver {
-    /// Closing first makes every later `try_push` fail and undo its own
-    /// reservation, so draining releases exactly what was queued.
-    fn drop(&mut self) {
-        self.rx.close();
-        while self.try_recv().is_some() {}
+        Some(self.rx.try_recv().ok()?.frame)
     }
 }
 
@@ -196,6 +197,36 @@ mod tests {
 
         a_rx.recv().await.unwrap();
         assert!(b.try_push(frame), "a written frame returns its bytes");
+    }
+
+    /// Pushes racing the receiver's drop never strand bytes in the budget:
+    /// whether a frame was refused, delivered or still queued, its bytes
+    /// come back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_pushes_and_a_dropped_receiver_leave_nothing_reserved() {
+        async fn push_many(tx: Outbox) {
+            for _ in 0..64 {
+                tx.try_push(Bytes::from_static(b"frame"));
+                tokio::task::yield_now().await;
+            }
+        }
+        let budget = unbounded();
+        for _round in 0..200 {
+            let (tx, mut rx) = outbox(&budget);
+            let pushers: Vec<_> = (0..4)
+                .map(|_| tokio::spawn(push_many(tx.clone())))
+                .collect();
+            drop(tx);
+            for _ in 0..8 {
+                rx.try_recv();
+                tokio::task::yield_now().await;
+            }
+            drop(rx);
+            for pusher in pushers {
+                pusher.await.unwrap();
+            }
+        }
+        assert_eq!(budget.used(), 0);
     }
 
     #[tokio::test]
