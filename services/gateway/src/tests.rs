@@ -16,7 +16,7 @@ use crate::bus::{Bus, BusError};
 use crate::metrics::Metrics;
 use crate::outbox::QUEUE_BYTES;
 use crate::session::{
-    EVICT_LEN, Gateway, IDLE_TIMEOUT, LIMIT_NOTICE_INTERVAL, Limits, WRITE_TIMEOUT, WRITER_GRACE,
+    Gateway, IDLE_TIMEOUT, LIMIT_NOTICE_INTERVAL, Limits, WRITE_TIMEOUT, WRITER_GRACE,
 };
 
 const LIMITS: Limits = Limits {
@@ -589,6 +589,14 @@ impl Bus for SlowSubscribe {
         self.0.publish(subject, payload)
     }
 
+    fn announce(
+        &self,
+        subject: String,
+        nonce: u128,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        self.0.announce(subject, nonce)
+    }
+
     fn subscribe(
         &self,
         subject: String,
@@ -656,6 +664,14 @@ impl Bus for NoPublish {
         std::future::ready(Err(BusError::Unavailable))
     }
 
+    fn announce(
+        &self,
+        _subject: String,
+        _nonce: u128,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        std::future::ready(Err(BusError::Unavailable))
+    }
+
     fn subscribe(
         &self,
         subject: String,
@@ -677,11 +693,22 @@ async fn failed_publishes_are_counted() {
     assert_eq!(gw.metrics.publish_failed.get(), 2, "the relay");
 }
 
-/// An eviction is told from a relayed frame by its length alone.
-#[test]
-fn relayed_frames_are_never_mistaken_for_evictions() {
-    let shortest = cypher_wire::encode_recv(&PeerId([0; 32]), DeviceId::FIRST, &[]);
-    assert!(shortest.len() > EVICT_LEN);
+/// A gateway of the previous release announces a login by an empty message
+/// without a nonce; it still evicts the device's session here.
+#[tokio::test]
+async fn an_eviction_without_a_nonce_still_evicts() {
+    let bus = MemBus::default();
+    let gw = gateway(&bus);
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    let subject = cypher_server_kit::peer_subject(
+        &a.peer().to_hex(),
+        a.device,
+        cypher_server_kit::Origin::Gateway,
+    );
+    bus.publish(subject, Bytes::new()).await.unwrap();
+    assert!(matches!(a.recv().await.unwrap().msg, ServerMsg::Superseded));
+    assert!(a.closed().await);
 }
 
 /// A remote node that never answers must not let one sender pile up
