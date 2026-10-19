@@ -358,8 +358,12 @@ impl<B: Bus> Session<B> {
         }
         let relayed = encode_recv(&me.peer, me.device, &body);
         if let Some(target) = self.gw.registry.get(&to) {
-            self.gw.metrics.delivered_local.inc();
             let ok = target.outbox.try_push(relayed);
+            if ok {
+                self.gw.metrics.delivered_local.inc();
+            } else {
+                self.gw.metrics.busy.inc();
+            }
             if want_ack {
                 let status = if ok {
                     DeliveryStatus::Delivered

@@ -232,6 +232,7 @@ async fn sender_is_stamped_by_the_gateway() {
         }
         other => panic!("unexpected {other:?}"),
     }
+    assert_eq!(gw.metrics.delivered_local.get(), 1);
 }
 
 #[tokio::test]
@@ -269,6 +270,9 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
             status: DeliveryStatus::Busy
         }
     ));
+    // Q-423: a refused delivery counts as busy, not as delivered.
+    assert_eq!(gw.metrics.delivered_local.get(), 0);
+    assert_eq!(gw.metrics.busy.get(), 1);
 }
 
 fn send_body(to: Addr, want_ack: bool, body: Bytes) -> ClientMsg {
