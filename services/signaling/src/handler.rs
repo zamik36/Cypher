@@ -475,16 +475,18 @@ impl Handler {
         let Some(push) = self.push.clone() else {
             return Ok(());
         };
-        let Ok(permit) = std::sync::Arc::clone(&self.pushes).try_acquire_owned() else {
-            self.push_shed.inc();
-            return Ok(());
-        };
         let Some(sub) = self
             .store
             .push_subscription(inbox)
             .await?
             .and_then(|raw| Subscription::from_bytes(&raw))
         else {
+            return Ok(());
+        };
+        // Before the interval is used up, so a dropped signal does not
+        // hold back the next one.
+        let Ok(permit) = std::sync::Arc::clone(&self.pushes).try_acquire_owned() else {
+            self.push_shed.inc();
             return Ok(());
         };
         let bucket = [&b"pn:"[..], inbox].concat();

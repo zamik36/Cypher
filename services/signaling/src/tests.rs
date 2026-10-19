@@ -1463,14 +1463,16 @@ async fn settle(h: &Handler) {
 
 /// Push signals go out from tasks of their own, a bounded number at once:
 /// one past the limit is dropped, not queued, and does not use up the
-/// inbox's signal interval (S-110).
+/// inbox's signal interval. Only signals that would have gone out count as
+/// dropped.
 #[tokio::test]
 async fn push_signals_on_their_way_are_bounded() {
     let Some((h, sent)) = push_handler(Outcome::Sent).await else {
         return;
     };
-    let owner = Inbox::random();
+    let (owner, unsubscribed) = (Inbox::random(), Inbox::random());
     open_inbox(&h, &owner).await;
+    open_inbox(&h, &unsubscribed).await;
     assert_eq!(
         ask(&h, None, subscribe(&owner, "https://ntfy.sh/up5")).await,
         ServerMsg::Done
@@ -1480,9 +1482,10 @@ async fn push_signals_on_their_way_are_bounded() {
         .try_acquire_many_owned(all)
         .unwrap();
     assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
+    assert_eq!(ask(&h, None, put(unsubscribed.id())).await, ServerMsg::Done);
     tokio::task::yield_now().await;
     assert!(sent.lock().unwrap().is_empty(), "dropped while saturated");
-    assert_eq!(h.push_shed.get(), 1);
+    assert_eq!(h.push_shed.get(), 1, "an inbox without push sheds nothing");
 
     drop(busy);
     assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
