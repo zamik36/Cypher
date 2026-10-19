@@ -14,7 +14,7 @@ use cypher_server_kit::metrics::Metrics;
 use cypher_server_kit::ratelimit::ConnLimiter;
 use cypher_server_kit::{SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT};
 use cypher_transport::server::{self, Handler, Listener, Upgrade};
-use cypher_transport::{FrameSink, FrameStream};
+use cypher_transport::{FrameSink, FrameStream, TrustedProxies};
 use cypher_wire::relay::{CORR_LEN, HEADER_LEN, TAG_KEYS, TAG_ONION};
 use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
@@ -250,7 +250,9 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         vec![Listener::bind(config.relay_addr, Upgrade::Tls(TlsAcceptor::from(tls))).await?];
     info!(addr = %config.relay_addr, "relay TLS listening");
     if let Some(addr) = config.ws_addr {
-        listeners.push(Listener::bind(addr, Upgrade::WebSocket).await?);
+        listeners.push(
+            Listener::bind(addr, Upgrade::WebSocket(TrustedProxies::private_networks())).await?,
+        );
         info!(%addr, "relay WebSocket listening");
     }
     let limits = cypher_transport::ConnectionLimits {

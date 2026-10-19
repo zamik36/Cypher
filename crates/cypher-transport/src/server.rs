@@ -35,23 +35,30 @@ pub trait Handler: Send + Sync + 'static {
 #[derive(Clone)]
 pub enum Upgrade {
     Tls(TlsAcceptor),
-    /// Plain WebSocket; TLS is terminated by a reverse proxy in front.
+    /// Plain WebSocket; TLS is terminated by a reverse proxy in front,
+    /// whose connections come from these networks.
     #[cfg(feature = "ws")]
-    WebSocket,
+    WebSocket(crate::limits::TrustedProxies),
 }
 
 /// An upgraded connection and, behind our proxy, the client it forwards.
 type Upgraded = (FrameStream, FrameSink, Option<IpAddr>);
 
 impl Upgrade {
-    async fn apply(&self, tcp: TcpStream) -> Result<Upgraded> {
+    /// `from_proxy`: whether the connection may name the client it
+    /// forwards (see [`Upgrade::forwards_for`]).
+    #[cfg_attr(
+        not(feature = "ws"),
+        expect(unused_variables, reason = "only WebSocket connections are proxied")
+    )]
+    async fn apply(&self, tcp: TcpStream, from_proxy: bool) -> Result<Upgraded> {
         match self {
             Self::Tls(acceptor) => accept_tls(acceptor, tcp).await.map(|conn| {
                 let (stream, sink) = split(conn);
                 (stream, sink, None)
             }),
             #[cfg(feature = "ws")]
-            Self::WebSocket => crate::ws::accept_ws(tcp).await,
+            Self::WebSocket(_) => crate::ws::accept_ws(tcp, from_proxy).await,
         }
     }
 
@@ -65,7 +72,7 @@ impl Upgrade {
         match self {
             Self::Tls(_) => false,
             #[cfg(feature = "ws")]
-            Self::WebSocket => crate::limits::is_trusted_proxy(peer),
+            Self::WebSocket(proxies) => proxies.contains(peer),
         }
     }
 }
@@ -180,7 +187,8 @@ async fn accept_loop<H: Handler>(
         tokio::spawn(async move {
             let _permit = permit;
             let connection = async {
-                let Ok((stream, sink, forwarded)) = upgrade.apply(tcp).await else {
+                let from_proxy = matches!(early, Admission::Deferred);
+                let Ok((stream, sink, forwarded)) = upgrade.apply(tcp, from_proxy).await else {
                     return;
                 };
                 let Admission::Admitted(_slot) = admit_late(early, forwarded.or(peer), &slots)
@@ -195,5 +203,63 @@ async fn accept_loop<H: Handler>(
                 () = connection => {}
             }
         });
+    }
+}
+
+#[cfg(all(test, feature = "ws"))]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+    use crate::limits::TrustedProxies;
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// Admits a connection from `peer` whose upgrade names `forwarded`.
+    fn admit(
+        upgrade: &Upgrade,
+        slots: &Arc<IpSlots>,
+        peer: IpAddr,
+        forwarded: Option<IpAddr>,
+    ) -> Admission {
+        let early = admit_early(upgrade, slots, Some(peer));
+        let forwarded = forwarded.filter(|_| matches!(early, Admission::Deferred));
+        admit_late(early, forwarded.or(Some(peer)), slots)
+    }
+
+    /// S-107: a host on a private network, but not the deployment's proxy,
+    /// cannot pick a fresh per-address share for each connection by naming
+    /// another client in `X-Forwarded-For`.
+    #[test]
+    fn only_a_named_proxy_chooses_the_counted_address() {
+        let slots = IpSlots::new(1);
+        let ws = Upgrade::WebSocket(TrustedProxies::default());
+        let neighbour = v4(172, 18, 0, 9);
+        // Every admitted slot stays held, as by an open connection.
+        let mut held = Vec::new();
+        for n in 1..=50 {
+            if let Admission::Admitted(slot) =
+                admit(&ws, &slots, neighbour, Some(v4(198, 51, 100, n)))
+            {
+                held.push(slot);
+            }
+        }
+        assert_eq!(held.len(), 1, "counted by its own address, limit 1");
+
+        let proxy = v4(172, 30, 0, 2);
+        let ws = Upgrade::WebSocket("172.30.0.2".parse().unwrap());
+        let a = admit(&ws, &slots, proxy, Some(v4(203, 0, 113, 1)));
+        let b = admit(&ws, &slots, proxy, Some(v4(203, 0, 113, 2)));
+        assert!(matches!(a, Admission::Admitted(Some(_))));
+        assert!(
+            matches!(b, Admission::Admitted(Some(_))),
+            "clients behind the named proxy count by their own address"
+        );
+        assert!(matches!(
+            admit(&ws, &slots, proxy, Some(v4(203, 0, 113, 1))),
+            Admission::Refused
+        ));
     }
 }

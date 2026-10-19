@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-use crate::limits::{forwarded_client, is_trusted_proxy};
+use crate::limits::forwarded_client;
 use crate::{FrameSink, FrameStream, HANDSHAKE_TIMEOUT};
 
 /// tungstenite zero-fills up to this many bytes before every socket read
@@ -21,11 +21,13 @@ use crate::{FrameSink, FrameStream, HANDSHAKE_TIMEOUT};
 /// Larger frames still arrive, in more reads.
 const READ_BUFFER: usize = 8 * 1024;
 
-/// Accepts a WebSocket. Also returns the client address our reverse proxy
-/// forwarded, when the connection comes from that proxy.
-pub async fn accept_ws(tcp: TcpStream) -> Result<(FrameStream, FrameSink, Option<IpAddr>)> {
+/// Accepts a WebSocket. When it comes `from_proxy`, our reverse proxy, also
+/// returns the client address the proxy forwarded.
+pub async fn accept_ws(
+    tcp: TcpStream,
+    from_proxy: bool,
+) -> Result<(FrameStream, FrameSink, Option<IpAddr>)> {
     tcp.set_nodelay(true)?;
-    let from_proxy = tcp.peer_addr().is_ok_and(|a| is_trusted_proxy(a.ip()));
     let config = WebSocketConfig::default()
         .read_buffer_size(READ_BUFFER)
         .max_message_size(Some(MAX_FRAME_SIZE))

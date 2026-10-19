@@ -16,6 +16,8 @@ mod dial;
 mod limits;
 
 pub use limits::ConnectionLimits;
+#[cfg(feature = "ws")]
+pub use limits::TrustedProxies;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);

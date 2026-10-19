@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::ensure;
 use cypher_server_kit::ratelimit::BURST_SECS;
 use cypher_transport::server::{self, Handler, Listener, Upgrade};
-use cypher_transport::{FrameSink, FrameStream};
+use cypher_transport::{FrameSink, FrameStream, TrustedProxies};
 use cypher_types::MAX_FRAME_SIZE;
 use serde::Deserialize;
 use tokio_rustls::TlsAcceptor;
@@ -130,7 +130,9 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         vec![Listener::bind(config.gateway_addr, Upgrade::Tls(TlsAcceptor::from(tls))).await?];
     info!(addr = %config.gateway_addr, "gateway TLS listening");
     if let Some(addr) = config.ws_addr {
-        listeners.push(Listener::bind(addr, Upgrade::WebSocket).await?);
+        listeners.push(
+            Listener::bind(addr, Upgrade::WebSocket(TrustedProxies::private_networks())).await?,
+        );
         info!(%addr, "gateway WebSocket listening");
     }
     let limits = cypher_transport::ConnectionLimits {
