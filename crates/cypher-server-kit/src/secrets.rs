@@ -32,7 +32,11 @@ pub fn load_or_create_secret(path: &Path) -> anyhow::Result<[u8; 32]> {
     }
     restrict_file_permissions(&temp_path)?;
 
-    rename_or_reuse(&temp_path, path)?;
+    let linked = link_or_reuse(&temp_path, path);
+    let _ = fs::remove_file(&temp_path);
+    linked?;
+    // Whoever linked first won: every instance signs with the key the file
+    // holds, not with the one it generated.
     read_secret(path)?.ok_or_else(|| anyhow::anyhow!("missing generated secret {}", path.display()))
 }
 
@@ -48,16 +52,17 @@ fn read_secret(path: &Path) -> anyhow::Result<Option<[u8; 32]>> {
     Ok(Some(secret))
 }
 
-fn rename_or_reuse(temp_path: &Path, final_path: &Path) -> anyhow::Result<()> {
-    match fs::rename(temp_path, final_path) {
+/// Puts the complete secret in `temp_path` in place at `final_path`, unless
+/// another instance starting at the same time already did. Unlike `rename`,
+/// `hard_link` fails if the target exists, so a secret once in place is
+/// never replaced.
+fn link_or_reuse(temp_path: &Path, final_path: &Path) -> anyhow::Result<()> {
+    match fs::hard_link(temp_path, final_path) {
         Ok(()) => Ok(()),
-        Err(_) if final_path.exists() => {
-            let _ = fs::remove_file(temp_path);
-            Ok(())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e).with_context(|| {
             format!(
-                "failed to move generated secret {} -> {}",
+                "failed to put generated secret {} in place at {}",
                 temp_path.display(),
                 final_path.display()
             )
@@ -121,14 +126,42 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), [1u8; 31], "left untouched");
     }
 
+    /// Two instances starting on an empty shared volume each generate a key
+    /// and put it in place: the second finds the first's and uses it, so
+    /// both sign with the key the file keeps (S-108).
     #[test]
-    fn losing_the_rename_race_keeps_the_winner() {
+    fn instances_racing_on_first_start_end_up_with_one_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("signing_key.bin");
+        let (first, second) = (temp_path(&path, 1), temp_path(&path, 2));
+        fs::write(&first, [0xaa; 32]).unwrap();
+        fs::write(&second, [0xbb; 32]).unwrap();
+        link_or_reuse(&first, &path).unwrap();
+        let key_a = read_secret(&path).unwrap().unwrap();
+        // The second, past its own existence check a moment earlier.
+        link_or_reuse(&second, &path).unwrap();
+        let key_b = read_secret(&path).unwrap().unwrap();
+        assert_eq!(key_a, key_b, "both instances sign with one key");
+        assert_eq!(fs::read(&path).unwrap(), [0xaa; 32], "the first one won");
+    }
+
+    #[test]
+    fn a_secret_that_cannot_be_put_in_place_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone.tmp");
+        link_or_reuse(&gone, &dir.path().join("none")).unwrap_err();
+    }
+
+    #[test]
+    fn no_temp_file_is_left_behind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key.bin");
-        fs::write(&path, [9u8; 32]).unwrap();
-        rename_or_reuse(&dir.path().join("gone.tmp"), &path).unwrap();
-        assert_eq!(load_or_create_secret(&path).unwrap(), [9u8; 32]);
-        rename_or_reuse(&dir.path().join("gone.tmp"), &dir.path().join("none")).unwrap_err();
+        load_or_create_secret(&path).unwrap();
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["key.bin"]);
     }
 
     #[cfg(unix)]
