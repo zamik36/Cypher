@@ -1096,7 +1096,7 @@ async fn a_subscription_that_ends_is_an_error() {
 }
 
 /// `sig.req` is the session path: a request on it without a valid peer
-/// header is refused, never answered as anonymous (S-111).
+/// header is refused, never answered as anonymous.
 #[tokio::test]
 async fn forwarded_requests_without_a_valid_peer_are_refused() {
     let Some(mut h) = handler(None).await else {

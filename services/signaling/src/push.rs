@@ -500,7 +500,7 @@ mod tests {
             "https://fcm.googleapis.com/a b",
             "ftp://fcm.googleapis.com/x",
             "fcm.googleapis.com/x",
-            // Not DNS names, though they end like an allowed one (S-301).
+            // Not DNS names, though they end like an allowed one.
             "https://a\r\nx-injected.notify.windows.com/x",
             "https://a..notify.windows.com/x",
             "https://*.notify.windows.com/x",
@@ -536,7 +536,7 @@ mod tests {
             "fd00::1",
             "fe80::1",
             "::ffff:10.0.0.1",
-            // Special-purpose ranges, and private IPv4 inside IPv6 (S-109).
+            // Special-purpose ranges, and private IPv4 inside IPv6.
             "64:ff9b::a00:1",
             "64:ff9b:1::a00:1",
             "64:ff9b:1::8.8.8.8",
@@ -763,22 +763,64 @@ mod properties {
         }
     }
 
+    /// The services the policy below allows, as the spec says: exact
+    /// names, or any subdomain of a `*.` entry.
+    fn known(host: &str) -> bool {
+        KNOWN_SERVICES
+            .iter()
+            .chain(&["push.example.org"])
+            .any(|known| match known.strip_prefix("*.") {
+                Some(domain) => host.ends_with(&format!(".{domain}")),
+                None => host == *known,
+            })
+    }
+
+    /// Letters, digits and hyphens in labels that are not empty.
+    fn plain_dns_name(host: &str) -> bool {
+        host.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    }
+
+    /// An endpoint that starts like a real one half the time, with random
+    /// pieces around and inside the host.
+    fn likely_endpoint(rng: &mut StdRng, pieces: &[String]) -> String {
+        if rng.gen_bool(0.5) {
+            return endpoint(rng, pieces);
+        }
+        let hosts = ["fcm.googleapis.com", "a.notify.windows.com", "ntfy.sh"];
+        let host = hosts.get(rng.gen_range(0..hosts.len())).map_or("", |h| *h);
+        let around = |rng: &mut StdRng| {
+            if rng.gen_bool(0.5) {
+                String::new()
+            } else {
+                endpoint(rng, pieces)
+            }
+        };
+        let (before, after) = (around(rng), around(rng));
+        format!("https://{before}{host}{after}")
+    }
+
     /// Whatever an endpoint holds, one that passes names a known push
-    /// service by DNS name, over HTTPS on port 443 (S-301).
+    /// service by a plain DNS name, over HTTPS on port 443; and endpoints
+    /// that are fine do pass.
     #[test]
     fn checked_endpoints_name_a_known_service_by_dns_name() {
         let pieces = pieces();
         let policy = Policy::new(&["push.example.org".into()]);
         let mut rng = StdRng::seed_from_u64(0xe0d);
-        let mut bad = Vec::new();
+        let (mut passed, mut bad) = (0, Vec::new());
         for _ in 0..200_000 {
-            let e = endpoint(&mut rng, &pieces);
+            let e = likely_endpoint(&mut rng, &pieces);
             let Some(t) = policy.check(&e) else { continue };
+            passed += 1;
             let sound = t.tls
                 && t.port == 443
-                && t.host.parse::<IpAddr>().is_err()
-                && !t.host.split('.').any(str::is_empty)
-                && rustls_pki_types::DnsName::try_from(t.host.as_str()).is_ok()
+                && plain_dns_name(&t.host)
+                && known(&t.host)
                 && !t.path.chars().any(|c| c.is_ascii_control() || c == ' ');
             if !sound {
                 bad.push(e);
@@ -788,5 +830,6 @@ mod properties {
         bad.dedup();
         bad.truncate(8);
         assert_eq!(bad, Vec::<String>::new());
+        assert!(passed > 1000, "only {passed} endpoints passed");
     }
 }
