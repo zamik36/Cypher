@@ -609,10 +609,10 @@ impl Bus for SlowSubscribe {
     }
 }
 
-/// S-103: two logins of one device racing on two nodes do not both stay
-/// signed in, each getting the device's frames.
+/// S-103: of two logins of one device racing on two nodes exactly one stays
+/// signed in, and only it gets the device's frames.
 #[tokio::test(start_paused = true)]
-async fn concurrent_logins_on_two_nodes_do_not_both_survive() {
+async fn of_two_racing_logins_on_two_nodes_exactly_one_stays() {
     let bus = SlowSubscribe::default();
     let gw = || Arc::new(Gateway::new(bus.clone(), LIMITS, metrics()));
     let (gw1, gw2, gw3) = (gw(), gw(), gw());
@@ -624,19 +624,20 @@ async fn concurrent_logins_on_two_nodes_do_not_both_survive() {
     let mut sender = Client::connect(&gw3);
     sender.authenticate().await;
     sender.send(1, send(one.addr(), false, b"dup")).await;
-    let mut delivered = 0;
-    let mut superseded = 0;
+    let mut got = Vec::new();
     for session in [&mut one, &mut two] {
+        let mut msgs = Vec::new();
         while let Some(Frame { msg, .. }) = session.recv().await {
-            match msg {
-                ServerMsg::Recv { .. } => delivered += 1,
-                ServerMsg::Superseded => superseded += 1,
-                other => panic!("unexpected {other:?}"),
-            }
+            msgs.push(msg);
         }
+        got.push(msgs);
     }
-    assert!(superseded >= 1, "at least one login evicted the other");
-    assert!(delivered <= 1, "the frame reached {delivered} sessions");
+    let survivor = |msgs: &[ServerMsg]| matches!(msgs, [ServerMsg::Recv { .. }]);
+    let evicted = |msgs: &[ServerMsg]| matches!(msgs, [ServerMsg::Superseded]);
+    assert!(
+        (survivor(&got[0]) && evicted(&got[1])) || (evicted(&got[0]) && survivor(&got[1])),
+        "one stays and gets the frame, the other is superseded: {got:?}"
+    );
 }
 
 /// A bus that takes no publishes, as NATS when its connection is gone.

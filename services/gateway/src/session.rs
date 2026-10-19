@@ -53,6 +53,10 @@ pub(crate) const LIMIT_NOTICE_INTERVAL: Duration = Duration::from_secs(1);
 /// What a session announces itself by when it signs in, evicting the
 /// device's sessions on other nodes.
 type EvictNonce = u128;
+/// How long a session waits to hear its own announcement back before it
+/// takes any other as newer (see `Echo`); the bus returns it in a round
+/// trip, milliseconds.
+const ECHO_WAIT: Duration = Duration::from_secs(5);
 
 const STATUS_DELIVERED: u8 = DeliveryStatus::Delivered as u8;
 const STATUS_BUSY: u8 = DeliveryStatus::Busy as u8;
@@ -138,11 +142,46 @@ struct Session<B> {
     access: Vec<[u8; 32]>,
 }
 
+/// A signed-in session's subscription and announcement.
+struct Attached<S> {
+    relayed: S,
+    kick: CancellationToken,
+    nonce: EvictNonce,
+    echo: Echo,
+}
+
+/// Whether a session has heard its own announcement back, which decides
+/// which of two logins of a device racing on two nodes stays. The bus
+/// hands announcements on one subject to every subscriber in the same
+/// order, and both sessions subscribed before announcing. Another
+/// session's announcement heard before this one's own was sent earlier:
+/// that session hears this one's afterwards and yields to it. One heard
+/// after is a newer login, which this session yields to.
+enum Echo {
+    /// Not heard back yet; announcements arriving until `until` are older.
+    /// The bound covers an announcement lost on the way.
+    Awaited { until: Instant },
+    /// Heard back, or never sent: every other announcement is newer.
+    Heard,
+}
+
+impl Echo {
+    /// Whether this session yields to another's announcement arriving at
+    /// `now`.
+    fn yields(&self, now: Instant) -> bool {
+        match self {
+            Self::Awaited { until } => now >= *until,
+            Self::Heard => true,
+        }
+    }
+}
+
 enum Next {
     Frame(Bytes),
     Relayed(BusMsg),
-    /// This session's own eviction came back.
-    Announced,
+    /// A session of the device signed in somewhere, this one included; the
+    /// nonce it announced, if its gateway names one.
+    Announcement(Option<EvictNonce>),
     /// The idle timer fired; the connection may have been active since.
     Idle,
     Kicked,
@@ -162,9 +201,9 @@ impl<B: Bus> Session<B> {
         let mut nonce = [0; 16];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
         let nonce = EvictNonce::from_le_bytes(nonce);
-        if let Some((relayed, kick)) = self.attach(me, nonce).await {
+        if let Some(attached) = self.attach(me, nonce).await {
             self.out.try_push(frame(0, ServerMsg::Ready));
-            self.pump(me, stream, relayed, &kick, nonce).await;
+            self.pump(me, stream, attached).await;
         }
         Some(me)
     }
@@ -172,7 +211,7 @@ impl<B: Bus> Session<B> {
     /// Registers the session, evicting older ones of the same device here
     /// and on other nodes, and subscribes to frames relayed to it. Other
     /// devices of the identity stay connected.
-    async fn attach(&self, me: Addr, nonce: EvictNonce) -> Option<(B::Sub, CancellationToken)> {
+    async fn attach(&self, me: Addr, nonce: EvictNonce) -> Option<Attached<B::Sub>> {
         let kick = CancellationToken::new();
         if let Some(old) = self.gw.registry.insert(
             me,
@@ -187,8 +226,7 @@ impl<B: Bus> Session<B> {
         }
         // The announcement evicts the device's sessions on other nodes.
         // Subscribing first means of two logins racing on two nodes at least
-        // one hears the other; this session hears its own too, and knows it
-        // by the nonce.
+        // one hears the other; see `Echo` for which of them stays.
         let hex = me.peer.to_hex();
         let relayed = self
             .gw
@@ -197,28 +235,39 @@ impl<B: Bus> Session<B> {
             .await
             .ok()?;
         let evict = peer_subject(&hex, me.device, Origin::Gateway);
-        if let Err(error) = self.gw.bus.announce(evict, nonce).await {
-            self.gw.metrics.publish_failed.inc();
-            warn!(
-                ?error,
-                "eviction not published: the device may stay signed in on another node"
-            );
-        }
-        Some((relayed, kick))
+        let echo = match self.gw.bus.announce(evict, nonce).await {
+            Ok(()) => Echo::Awaited {
+                until: Instant::now() + ECHO_WAIT,
+            },
+            Err(error) => {
+                self.gw.metrics.publish_failed.inc();
+                warn!(
+                    ?error,
+                    "eviction not published: the device may stay signed in on another node"
+                );
+                Echo::Heard
+            }
+        };
+        Some(Attached {
+            relayed,
+            kick,
+            nonce,
+            echo,
+        })
     }
 
     /// Moves frames both ways until the client leaves, idles, is evicted or
     /// the gateway shuts down.
-    async fn pump<S>(
-        &mut self,
-        me: Addr,
-        mut stream: S,
-        mut relayed: B::Sub,
-        kick: &CancellationToken,
-        nonce: EvictNonce,
-    ) where
+    async fn pump<S>(&mut self, me: Addr, mut stream: S, attached: Attached<B::Sub>)
+    where
         S: Stream<Item = io::Result<Bytes>> + Unpin + Send,
     {
+        let Attached {
+            mut relayed,
+            kick,
+            nonce,
+            mut echo,
+        } = attached;
         // One timer per session, re-armed only when it fires: resetting it on
         // every frame put a timer-wheel insert and removal on the hot path.
         let idle = sleep(IDLE_TIMEOUT);
@@ -230,14 +279,7 @@ impl<B: Bus> Session<B> {
                 () = self.cancel.cancelled() => Next::Closed,
                 () = kick.cancelled() => Next::Kicked,
                 msg = relayed.next() => match msg {
-                    Some(msg) if is_eviction(&msg) => {
-                        if msg.announcer == Some(nonce) {
-                            Next::Announced
-                        } else {
-                            self.out.try_push(frame(0, ServerMsg::Superseded));
-                            Next::Kicked
-                        }
-                    }
+                    Some(msg) if is_eviction(&msg) => Next::Announcement(msg.announcer),
                     Some(msg) => Next::Relayed(msg),
                     None => Next::Closed,
                 },
@@ -259,7 +301,13 @@ impl<B: Bus> Session<B> {
                     Some(Origin::Sealed) => self.on_sealed(msg).await,
                     None => {}
                 },
-                Next::Announced => {}
+                Next::Announcement(announcer) if announcer == Some(nonce) => echo = Echo::Heard,
+                Next::Announcement(_) => {
+                    if echo.yields(Instant::now()) {
+                        self.out.try_push(frame(0, ServerMsg::Superseded));
+                        break;
+                    }
+                }
                 Next::Idle => {
                     let deadline = last_frame + IDLE_TIMEOUT;
                     if deadline <= Instant::now() {
