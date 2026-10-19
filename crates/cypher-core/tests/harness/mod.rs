@@ -75,6 +75,9 @@ pub(crate) struct Server {
     pub named_messages: usize,
 }
 
+/// A driver's store: `(table, key)` to the sealed value.
+pub(crate) type Kv = BTreeMap<(u8, Vec<u8>), Vec<u8>>;
+
 pub(crate) struct Client {
     pub seed: [u8; 32],
     /// Which of its identity's devices this client is.
@@ -82,7 +85,7 @@ pub(crate) struct Client {
     pub core: Option<Core<Rng>>,
     /// A new device waiting to be linked, instead of a core.
     pub provision: Option<Provision>,
-    pub kv: BTreeMap<(u8, Vec<u8>), Vec<u8>>,
+    pub kv: Kv,
     pub sources: HashMap<FileId, Vec<u8>>,
     pub sinks: HashMap<FileId, Vec<u8>>,
     pub closed: HashMap<FileId, bool>,
@@ -113,6 +116,12 @@ pub(crate) struct World {
     rng: Rng,
     /// A hash of every effect the cores made, in order, once set.
     pub trace: Option<DefaultHasher>,
+    /// Every frame a client transmitted, in order.
+    pub transmitted: Vec<(usize, Bytes)>,
+    /// The driver of this client "crashes" right after its first `Send` to
+    /// this device: `crash_rows` keeps only the rows persisted until then.
+    pub crash_after_send: Option<(usize, Addr)>,
+    pub crash_rows: Option<Kv>,
 }
 
 impl World {
@@ -133,6 +142,9 @@ impl World {
             onion_ctx: None,
             rng: Rng::seed_from_u64(1),
             trace: None,
+            transmitted: Vec::new(),
+            crash_after_send: None,
+            crash_rows: None,
         };
         for _ in 0..n {
             let seed: [u8; 32] = rng.r#gen();
@@ -408,6 +420,27 @@ impl World {
             .collect();
     }
 
+    /// The bodies of every `Send` client `i` transmitted to `to`.
+    pub(crate) fn sends_to(&self, i: usize, to: Addr) -> Vec<Bytes> {
+        self.transmitted
+            .iter()
+            .filter(|(c, _)| *c == i)
+            .filter_map(|(_, raw)| match Frame::<ClientMsg>::decode(raw.clone()) {
+                Ok(Frame {
+                    msg:
+                        ClientMsg::Send {
+                            to: p,
+                            device,
+                            body,
+                            ..
+                        },
+                    ..
+                }) if Addr::new(p, device) == to => Some(body),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Makes the server answer `share` with `impostor`'s identity.
     pub(crate) fn hijack_link(&mut self, share: &str, impostor: usize) {
         let link = share.split_once('-').map_or(share, |(l, _)| l).to_owned();
@@ -547,11 +580,7 @@ impl World {
             trace_effect(self.trace.as_mut(), i, &effect);
             let c = &mut self.clients[i];
             match effect {
-                Effect::Transmit(b) => {
-                    if c.connected {
-                        self.wire.push_back((i, b));
-                    }
-                }
+                Effect::Transmit(b) => self.transmit(i, b),
                 Effect::Anonymous(b) => self.onion_wire.push_back((i, b)),
                 Effect::Persist(StoreOp::Put { table, key, value }) => {
                     c.kv.insert((table as u8, key), value);
@@ -601,6 +630,27 @@ impl World {
                 }
                 Effect::Disconnect { .. } => c.connected = false,
             }
+        }
+    }
+
+    /// A frame client `i` sends, kept for the tests; what was durable at a
+    /// `Send` meant to "crash" the client is kept too.
+    fn transmit(&mut self, i: usize, b: Bytes) {
+        let c = &self.clients[i];
+        self.transmitted.push((i, b.clone()));
+        if self.crash_rows.is_none()
+            && let Some((who, addr)) = self.crash_after_send
+            && who == i
+            && let Ok(Frame {
+                msg: ClientMsg::Send { to, device, .. },
+                ..
+            }) = Frame::<ClientMsg>::decode(b.clone())
+            && Addr::new(to, device) == addr
+        {
+            self.crash_rows = Some(c.kv.clone());
+        }
+        if c.connected {
+            self.wire.push_back((i, b));
         }
     }
 

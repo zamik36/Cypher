@@ -2135,3 +2135,52 @@ mod legacy {
         kv.insert(peer_row, sealed);
     }
 }
+
+/// Attacks on what a device keeps and sends: each test names what it
+/// guards against.
+mod security {
+    use cypher_core::{Command, Table, session_key};
+    use cypher_types::{Addr, DeviceId};
+
+    use super::A;
+
+    fn session_row(addr: Addr) -> (u8, Vec<u8>) {
+        (Table::Sessions as u8, session_key(addr))
+    }
+
+    /// The session with an own device taken off the list is gone, durably,
+    /// before the farewell goes out on it. A crash right after the farewell
+    /// leaves no session to encrypt another message under the same message
+    /// key (the same AES-GCM key and nonce).
+    #[test]
+    fn a_crash_after_the_farewell_reuses_no_message_key() {
+        let mut w = super::paired();
+        let _a2 = w.add_device(A, 2);
+        w.advance(60 * 60_000);
+        let target = Addr::new(w.peer(A), DeviceId(2));
+        let row = session_row(target);
+        assert!(w.clients[A].kv.contains_key(&row));
+
+        w.crash_after_send = Some((A, target));
+        w.command(A, Command::UnlinkDevice { device: 2 });
+        let durable = w.crash_rows.take().expect("A said farewell to device 2");
+        w.crash_after_send = None;
+        assert!(
+            !durable.contains_key(&row),
+            "deleted before the farewell went out"
+        );
+
+        // Crash: only what was durable at the farewell survives.
+        w.clients[A].kv = durable;
+        w.restart(A);
+        w.advance(61 * 60_000);
+        let bodies = w.sends_to(A, target);
+        assert!(!bodies.is_empty());
+        for (x, first) in bodies.iter().enumerate() {
+            assert_eq!(first[1], 0, "no X3DH init header on a sibling session");
+            for second in &bodies[x + 1..] {
+                assert_ne!(first[2..42], second[2..42], "a ratchet header used twice");
+            }
+        }
+    }
+}

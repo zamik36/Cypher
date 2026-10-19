@@ -15,7 +15,7 @@ use super::{Conn, Core, Pending};
 use crate::api::{Effect, Event, FailReason};
 use crate::envelope::{Body, Envelope, InboxAd};
 use crate::link::{LinkOffer, seal_handover};
-use crate::peer::Peer;
+use crate::peer::{Peer, Session};
 use crate::relay;
 use crate::store::{META_DEVICES, StoreOp, Table, session_key};
 
@@ -403,8 +403,10 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// Ends the sessions with our own devices the list no longer has, telling
-    /// each over it first, so a removed device that is online stops now
-    /// rather than at its next check.
+    /// each over it last, so a removed device that is online stops now
+    /// rather than at its next check. The session is deleted, durably,
+    /// before the farewell goes out on it: should the app stop in between,
+    /// no message key is ever used for a second, different message.
     fn forget_unlisted_own(&mut self) {
         let Some(list) = &self.devices.own else {
             return;
@@ -431,26 +433,23 @@ impl<R: CryptoRngCore> Core<R> {
         }
         .encode();
         for addr in gone {
-            self.say_farewell(addr, &farewell);
-            self.sessions.remove(&addr);
+            let Some(session) = self.sessions.remove(&addr) else {
+                continue;
+            };
             self.persist(StoreOp::Delete {
                 table: Table::Sessions,
                 key: session_key(addr),
             });
             self.drop_targets(addr);
+            self.say_farewell(addr, session, &farewell);
         }
     }
 
     /// Hands a removed device the list without it, at most once and only if
-    /// it is online: one away learns when it next checks.
-    fn say_farewell(&mut self, addr: Addr, farewell: &[u8]) {
-        if !self.is_ready() {
-            return;
-        }
-        let Some(session) = self.sessions.get_mut(&addr) else {
-            return;
-        };
-        if !session.ratchet.can_send() {
+    /// it is online: one away learns when it next checks. `session` is
+    /// already deleted: it encrypts this one message and is dropped.
+    fn say_farewell(&mut self, addr: Addr, mut session: Session, farewell: &[u8]) {
+        if !self.is_ready() || !session.ratchet.can_send() {
             return;
         }
         let Ok((header, ct)) = session.ratchet.encrypt(farewell, b"") else {
