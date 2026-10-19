@@ -3,6 +3,8 @@
 pub mod cert;
 pub mod config;
 mod reload;
+#[cfg(test)]
+mod testdata;
 
 pub use cert::SelfSignedCert;
 pub use config::{
