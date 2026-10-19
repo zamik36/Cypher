@@ -1,7 +1,7 @@
 //! Redis persistence. Keys are short binary prefixes plus raw ids.
 
 use bytes::Bytes;
-use cypher_types::{Addr, LinkId, PeerId};
+use cypher_types::{Addr, DeviceId, LinkId, PeerId};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
 
@@ -46,6 +46,16 @@ const DEVICES_SCRIPT: &str = r"
     redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[3])
     return 1";
 
+/// KEYS: unlisted devices. ARGV: device, max devices, ttl. Whether the
+/// device may hold keys while its identity's list does not name it: it
+/// already does, or there is room for one more such device.
+const UNLISTED_SCRIPT: &str = r"
+    if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return 1 end
+    if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
+    redis.call('SADD', KEYS[1], ARGV[1])
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+    return 1";
+
 pub(crate) enum PutOutcome {
     Stored,
     Full,
@@ -62,6 +72,7 @@ pub(crate) struct Store {
     ack_script: Script,
     admit_script: Script,
     devices_script: Script,
+    unlisted_script: Script,
 }
 
 impl Store {
@@ -130,6 +141,7 @@ impl Store {
                 return 1",
             ),
             devices_script: Script::new(DEVICES_SCRIPT),
+            unlisted_script: Script::new(UNLISTED_SCRIPT),
         })
     }
 
@@ -226,6 +238,34 @@ impl Store {
     pub(crate) async fn fetch_devices(&self, peer: &PeerId) -> redis::RedisResult<Option<Bytes>> {
         let list: Option<Vec<u8>> = self.redis.clone().get(key(b"d:", peer.as_bytes())).await?;
         Ok(list.map(Bytes::from))
+    }
+
+    /// Notes that `addr` holds keys though its identity's list does not
+    /// name it; `false` when `max` such devices hold keys already.
+    pub(crate) async fn admit_unlisted(&self, addr: Addr, max: usize) -> redis::RedisResult<bool> {
+        let admitted: i64 = self
+            .unlisted_script
+            .key(key(b"u:", addr.peer.as_bytes()))
+            .arg(addr.device.0)
+            .arg(max)
+            .arg(KEYS_TTL_SECS)
+            .invoke_async(&mut self.redis.clone())
+            .await?;
+        Ok(admitted == 1)
+    }
+
+    /// The devices of `peer` that hold keys though its list did not name
+    /// them, forgotten as such.
+    pub(crate) async fn take_unlisted(&self, peer: &PeerId) -> redis::RedisResult<Vec<DeviceId>> {
+        let unlisted = key(b"u:", peer.as_bytes());
+        let (devices,): (Vec<u32>,) = redis::pipe()
+            .atomic()
+            .smembers(&unlisted)
+            .del(&unlisted)
+            .ignore()
+            .query_async(&mut self.redis.clone())
+            .await?;
+        Ok(devices.into_iter().map(DeviceId).collect())
     }
 
     /// Forgets the keys of a device its identity no longer lists.

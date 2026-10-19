@@ -1185,3 +1185,80 @@ fn only_requests_that_need_no_identity_pass_the_onion() {
         assert!(!anonymous_allowed(msg), "{msg:?}");
     }
 }
+
+fn publish_keys_of(id: &IdentityKeyPair, device: DeviceId) -> ClientMsg {
+    ClientMsg::PublishKeys {
+        base: device_bundle(id, device),
+        opks: vec![(1, random32())],
+        replace_opks: true,
+    }
+}
+
+/// Only devices an identity lists hold keys, and a few about to be listed:
+/// one identity cannot store keys for any number of devices (S-106).
+#[tokio::test]
+async fn keys_are_kept_only_for_listed_devices_and_a_few_joining() {
+    let Some(h) = handler(None).await else { return };
+    let alice = IdentityKeyPair::generate();
+    let me = Some(alice.peer_id());
+    let mut acked = Vec::new();
+    for device in (1000..1010).map(DeviceId) {
+        if let ServerMsg::KeysAck { .. } = ask(&h, me, publish_keys_of(&alice, device)).await {
+            acked.push(device);
+        }
+    }
+    assert_eq!(
+        acked,
+        [DeviceId(1000), DeviceId(1001)],
+        "two may be joining"
+    );
+    let again = ask(&h, me, publish_keys_of(&alice, DeviceId(1001))).await;
+    assert!(matches!(again, ServerMsg::KeysAck { .. }), "{again:?}");
+
+    // The list names one of them: the other loses its keys, and the
+    // listed devices publish as they like.
+    let list = DeviceList::sign(&alice, 1, [DeviceId::FIRST, DeviceId(1001)]).unwrap();
+    assert_eq!(ask(&h, me, publish_devices(&list)).await, ServerMsg::Done);
+    let fetch = |device| ClientMsg::FetchKeys {
+        peer: alice.peer_id(),
+        device,
+    };
+    let bob = Some(IdentityKeyPair::generate().peer_id());
+    assert!(is_error(
+        &ask(&h, bob, fetch(DeviceId(1000))).await,
+        ErrorCode::NotFound
+    ));
+    assert!(matches!(
+        ask(&h, bob, fetch(DeviceId(1001))).await,
+        ServerMsg::Keys { .. }
+    ));
+    for device in [
+        DeviceId::FIRST,
+        DeviceId(1001),
+        DeviceId(1002),
+        DeviceId(1003),
+    ] {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
+        assert!(
+            matches!(answer, ServerMsg::KeysAck { .. }),
+            "{device}: {answer:?}"
+        );
+    }
+    let refused = ask(&h, me, publish_keys_of(&alice, DeviceId(1004))).await;
+    assert!(is_error(&refused, ErrorCode::BadRequest), "{refused:?}");
+}
+
+#[tokio::test]
+async fn publishing_keys_is_rate_limited() {
+    let Some(h) = handler(None).await else { return };
+    let alice = IdentityKeyPair::generate();
+    let me = Some(alice.peer_id());
+    for _ in 0..60 {
+        let answer = ask(&h, me, publish_keys_of(&alice, DeviceId::FIRST)).await;
+        assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
+    }
+    assert!(is_error(
+        &ask(&h, me, publish_keys_of(&alice, DeviceId::FIRST)).await,
+        ErrorCode::RateLimited
+    ));
+}

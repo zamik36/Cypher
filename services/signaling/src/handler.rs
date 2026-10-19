@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::{DeviceList, PrekeyBundle};
-use cypher_types::{Addr, LinkId, PeerId};
+use cypher_types::{Addr, DeviceId, LinkId, PeerId};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, MAX_INBOX_BATCH, ServerMsg,
     access_hash,
@@ -34,6 +34,14 @@ const DEVICE_FETCHES_PER_HOUR: u32 = 120;
 /// Device lists one identity may publish per hour: linking and unlinking
 /// are rare.
 const DEVICE_PUBLISHES_PER_HOUR: u32 = 10;
+/// Key publishes one identity may make per hour, all its devices together:
+/// each device publishes on every connect and when it runs low on one-time
+/// prekeys, so this leaves room for flaky mobile links.
+const KEY_PUBLISHES_PER_HOUR: u32 = 60;
+/// Devices of one identity that may hold keys while its list does not name
+/// them: one being linked or recovered, and one spare for a second at once.
+/// Publishing a list takes the keys of those it does not name.
+const UNLISTED_DEVICES_WITH_KEYS: usize = 2;
 /// Lookups of one invite per hour, whoever asks: only those it was given to
 /// know the code, so this cannot be used to make a stranger's invite fail.
 const RESOLVES_PER_LINK_PER_HOUR: u32 = 20;
@@ -468,9 +476,33 @@ impl Handler {
         let Some(device) = device else {
             return Ok(error(ErrorCode::BadRequest));
         };
+        if !self.admit(b"pk:", peer, KEY_PUBLISHES_PER_HOUR).await? {
+            return Ok(error(ErrorCode::RateLimited));
+        }
         let addr = Addr::new(*peer, device);
+        if !self.may_hold_keys(addr).await? {
+            return Ok(error(ErrorCode::BadRequest));
+        }
         let opks_left = self.store.publish_keys(addr, base, opks, replace).await?;
         Ok(ServerMsg::KeysAck { opks_left })
+    }
+
+    /// Whether the device `addr` may hold keys: its identity lists it (the
+    /// first device, before there is a list), or it is one of the few
+    /// about to be listed, since a device being linked or recovered
+    /// publishes its keys before its list names it.
+    async fn may_hold_keys(&self, addr: Addr) -> redis::RedisResult<bool> {
+        let list = self.store.fetch_devices(&addr.peer).await?;
+        let listed = match list.as_deref().map(DeviceList::decode) {
+            Some(Ok(list)) => list.contains(addr.device),
+            Some(Err(_)) | None => addr.device == DeviceId::FIRST,
+        };
+        if listed {
+            return Ok(true);
+        }
+        self.store
+            .admit_unlisted(addr, UNLISTED_DEVICES_WITH_KEYS)
+            .await
     }
 
     /// A device's keys. One identity asking is limited per hour; through the
@@ -520,9 +552,12 @@ impl Handler {
         {
             return Ok(error(ErrorCode::Conflict));
         }
-        // Best effort: keys expire on their own anyway.
+        // Best effort: keys expire on their own anyway. Devices that held
+        // keys before a list named them count as listed until now.
         let old = old.and_then(|o| DeviceList::decode(&o).ok());
-        for &device in old.iter().flat_map(DeviceList::devices) {
+        let unlisted = self.store.take_unlisted(peer).await?;
+        let held = old.iter().flat_map(DeviceList::devices).chain(&unlisted);
+        for &device in held {
             if !new.contains(device) {
                 self.store
                     .forget_device_keys(Addr::new(*peer, device))
