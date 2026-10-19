@@ -711,24 +711,15 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    /// The contact got (or read) our messages: they stop waiting, and their
-    /// status moves on, never back from "read".
-    /// One device of a contact confirms our messages: they are done there.
+    /// One device of a contact got (or read) our messages: they are done
+    /// there, and their status moves on, never back from "read".
     fn on_receipt(&mut self, sender: Addr, kind: ReceiptKind, ids: Vec<MsgId>) {
         let status = match kind {
             ReceiptKind::Delivered => MessageStatus::Delivered,
             ReceiptKind::Read => MessageStatus::Read,
         };
         for id in ids {
-            if self.outbox.get(&id).is_some_and(|i| i.peer == sender.peer) {
-                self.drop_target(id, sender.device);
-            }
-            if status == MessageStatus::Read {
-                self.read.insert(id);
-            } else if self.read.contains(&id) {
-                continue;
-            }
-            self.report(id, status);
+            self.confirm(sender, id, status);
         }
     }
 

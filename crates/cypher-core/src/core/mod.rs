@@ -201,8 +201,6 @@ pub struct Core<R> {
     devices: Devices,
     history: History,
     recent: RecentIds,
-    /// Our messages the contact has read, so a late receipt cannot undo it.
-    read: RecentIds,
     progress_at: HashMap<FileId, u64>,
     /// Chunks read from disk for the devices waiting for them.
     reads: HashMap<(FileId, u32), Vec<DeviceId>>,
@@ -275,7 +273,6 @@ impl<R: CryptoRngCore> Core<R> {
             devices: own.devices,
             history: own.history,
             recent: RecentIds::default(),
-            read: RecentIds::default(),
             progress_at: HashMap::new(),
             reads: HashMap::new(),
             anon: Anon::default(),
@@ -1251,10 +1248,6 @@ struct RecentIds {
 }
 
 impl RecentIds {
-    fn contains(&self, id: &MsgId) -> bool {
-        self.set.contains(id)
-    }
-
     /// Returns false when `id` was already seen.
     fn insert(&mut self, id: MsgId) -> bool {
         if !self.set.insert(id) {

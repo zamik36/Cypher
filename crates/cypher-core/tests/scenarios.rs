@@ -2139,14 +2139,114 @@ mod legacy {
 /// Attacks on what a device keeps and sends: each test names what it
 /// guards against.
 mod security {
-    use cypher_core::{Command, Table, session_key};
-    use cypher_types::{Addr, DeviceId};
+    use cypher_core::{Command, MessageStatus, Table, session_key};
+    use cypher_types::{Addr, DeviceId, MsgId};
 
-    use super::{A, B, C};
+    use super::{A, B, C, D, E};
     use crate::harness::World;
 
     fn session_row(addr: Addr) -> (u8, Vec<u8>) {
         (Table::Sessions as u8, session_key(addr))
+    }
+
+    fn rows(w: &World, i: usize, table: Table) -> usize {
+        w.clients[i]
+            .kv
+            .keys()
+            .filter(|(t, _)| *t == table as u8)
+            .count()
+    }
+
+    /// A receipt moves the status only of messages sent to whoever
+    /// sends it: not of another conversation, not of made-up ids (each one
+    /// would be a status row kept forever), also from a stranger.
+    #[test]
+    fn receipts_move_only_the_statuses_of_messages_sent_to_their_sender() {
+        let mut w = World::new(5);
+        w.pair(A, B);
+        w.pair(A, C);
+        let a = w.peer(A);
+        let to_c = w.send_text(A, C, "for C only");
+        assert_eq!(w.status_of(A, to_c), Some(MessageStatus::Delivered));
+
+        let before = rows(&w, A, Table::MessageStatus);
+        let mut ids = vec![to_c];
+        ids.extend((0..300).map(|_| w.msg_id()));
+        w.command(B, Command::MarkRead { peer: a, ids });
+        assert_eq!(
+            w.status_of(A, to_c),
+            Some(MessageStatus::Delivered),
+            "B cannot mark read what A sent to C"
+        );
+        assert_eq!(rows(&w, A, Table::MessageStatus), before, "no made-up rows");
+
+        // A stranger on a used invite, still a request.
+        let link = w.create_link(A);
+        w.command(D, Command::JoinLink { link: link.clone() });
+        w.command(E, Command::JoinLink { link });
+        let e = w.peer(E);
+        assert!(w.contact(A, e).request);
+        let before = rows(&w, A, Table::MessageStatus);
+        let ids: Vec<MsgId> = (0..300).map(|_| w.msg_id()).collect();
+        w.command(E, Command::MarkRead { peer: a, ids });
+        assert_eq!(rows(&w, A, Table::MessageStatus), before);
+        assert_eq!(w.status_of(A, to_c), Some(MessageStatus::Delivered));
+    }
+
+    /// Once one device of the contact read a message, another one
+    /// confirming it later does not take "read" back: neither on the device
+    /// that sent it nor on its sibling, also after both restarted.
+    #[test]
+    fn a_late_delivery_receipt_does_not_undo_read() {
+        let mut w = super::paired();
+        let a2 = w.add_device(A, 2);
+        let b2 = w.add_device(B, 2);
+        w.advance(60 * 60_000);
+        let a = w.peer(A);
+        w.disconnect(b2);
+        let id = w.send_text(A, B, "read on one, late on the other");
+        w.command(
+            B,
+            Command::MarkRead {
+                peer: a,
+                ids: vec![id],
+            },
+        );
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
+        assert_eq!(w.status_of(a2, id), Some(MessageStatus::Read));
+
+        w.restart(A);
+        w.restart(a2);
+        w.connect(b2);
+        w.run();
+        w.command(b2, Command::FetchInbox);
+        w.advance(60_000);
+        assert!(
+            w.texts(b2)
+                .iter()
+                .any(|t| t == "read on one, late on the other")
+        );
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
+        assert_eq!(w.status_of(a2, id), Some(MessageStatus::Read));
+    }
+
+    /// A message delivered before the app restarted is still marked read
+    /// when the contact reads it after.
+    #[test]
+    fn a_read_receipt_counts_after_a_restart() {
+        let mut w = super::paired();
+        let a = w.peer(A);
+        let id = w.send_text(A, B, "read me later");
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
+        w.restart(A);
+        w.command(
+            B,
+            Command::MarkRead {
+                peer: a,
+                ids: vec![id],
+            },
+        );
+        assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
     }
 
     /// The session with an own device taken off the list is gone, durably,

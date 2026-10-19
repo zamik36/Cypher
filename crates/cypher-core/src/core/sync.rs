@@ -104,6 +104,7 @@ impl<R: CryptoRngCore> Core<R> {
                         status: MessageStatus::Sent,
                         content,
                     });
+                    self.await_receipts(peer, msg_id);
                 }
             }
             SyncBody::Read { peer, ids } => {
