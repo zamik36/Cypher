@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 cypher-types.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 rcgen.workspace = true
 webpki-roots.workspace = true
 rustls-native-certs = "0.8"

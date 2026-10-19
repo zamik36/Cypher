@@ -4,13 +4,14 @@
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # In-process stacks share one Redis and NATS: two at once would answer each
-# other's requests (one queue group), so they run one at a time. Default
-# profile overrides apply to every profile.
+# other's requests (one queue group), so they run one at a time. The
+# monitoring check (tests/e2e) starts a stack too. Default profile overrides
+# apply to every profile.
 [test-groups]
 live-stack = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = "test(/in_process_stack/)"
+filter = "test(/in_process_stack/) | (package(e2e) & binary(monitoring))"
 test-group = "live-stack"
 
 [profile.ci]

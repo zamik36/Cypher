@@ -30,3 +30,8 @@ doc = false
 name = "fuzz_decoders"
 path = "fuzz_targets/fuzz_decoders.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_keysets"
+path = "fuzz_targets/fuzz_keysets.rs"
+doc = false

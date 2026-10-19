@@ -6,12 +6,13 @@ use std::time::Duration;
 
 use cypher_types::{Error, Result};
 use rustls::crypto::ring::default_provider;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tracing::debug;
 
 use crate::cert::SelfSignedCert;
-use crate::reload::PemCert;
+use crate::reload::{PemCert, pem_reason};
 
 /// How long a service waits for certificates another container writes
 /// (e.g. Caddy with auto-HTTPS) before giving up.
@@ -127,8 +128,8 @@ pub fn make_client_config() -> Arc<ClientConfig> {
 pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
     ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
-        let cert = cert.map_err(|e| transport("invalid certificate PEM", e))?;
+    for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let cert = cert.map_err(|e| transport("invalid certificate PEM", pem_reason(&e)))?;
         roots
             .add(cert)
             .map_err(|e| transport("failed to add certificate", e))?;
@@ -174,6 +175,7 @@ pub async fn load_server_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdata;
 
     struct PemFiles {
         dir: tempfile::TempDir,
@@ -262,10 +264,7 @@ mod tests {
             .unwrap();
         let client = make_client_config_with_pem(&files.cert_pem).unwrap();
         let shown = handshake(server, client);
-        let expected = rustls_pemfile::certs(&mut files.cert_pem.as_bytes())
-            .next()
-            .unwrap()
-            .unwrap();
+        let expected = CertificateDer::from_pem_slice(files.cert_pem.as_bytes()).unwrap();
         assert_eq!(shown.first(), Some(&expected));
     }
 
@@ -285,6 +284,69 @@ mod tests {
         assert!(reason(load(&cert, &empty).await).contains("no private key"));
         assert!(reason(load(&cert, &cert).await).contains("no private key"));
         assert!(reason(load(&key, &cert).await).contains("no certificate"));
+        let bad_key = files.write(
+            "bad-key.pem",
+            "-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----\n",
+        );
+        assert!(reason(load(&cert, &bad_key).await).contains("invalid private key"));
+        let cut = files.write(
+            "cut.pem",
+            "-----BEGIN CERTIFICATE-----
+MIIB
+",
+        );
+        let cut = reason(load(&cut, &key).await);
+        assert!(cut.contains("missing -----END CERTIFICATE-----"), "{cut}");
+    }
+
+    /// Operators bring keys in every PEM form: PKCS#8 (the rcgen pairs
+    /// above), SEC1 (`EC PRIVATE KEY`) and PKCS#1 (`RSA PRIVATE KEY`).
+    #[tokio::test]
+    async fn sec1_and_pkcs1_keys_are_served() {
+        let files = PemFiles::new();
+        for (name, (cert_pem, key_pem)) in
+            [("sec1", testdata::sec1()), ("pkcs1", testdata::pkcs1())]
+        {
+            let cert = files.write(&format!("{name}-cert.pem"), &cert_pem);
+            let key = files.write(&format!("{name}-key.pem"), &key_pem);
+            let server = load(&cert, &key).await.unwrap();
+            let client = make_client_config_with_pem(&cert_pem).unwrap();
+            assert_eq!(handshake(server, client).len(), 1, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_whole_chain_in_the_certificate_file_is_served() {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .signed_by(&leaf_key, &issuer)
+            .unwrap();
+
+        let files = PemFiles::new();
+        let cert = files.write("chain.pem", &[leaf.pem(), ca.pem()].concat());
+        let key = files.write("key.pem", &leaf_key.serialize_pem());
+        let server = load(&cert, &key).await.unwrap();
+        let client = make_client_config_with_pem(&ca.pem()).unwrap();
+        let shown = handshake(server, client);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown.first().map(AsRef::as_ref), Some(leaf.der().as_ref()));
+        assert_eq!(shown.get(1).map(AsRef::as_ref), Some(ca.der().as_ref()));
+    }
+
+    #[tokio::test]
+    async fn one_file_may_hold_both_the_key_and_the_certificate() {
+        let files = PemFiles::new();
+        let pem = [files.key_pem.as_str(), files.cert_pem.as_str()].concat();
+        let both = files.write("both.pem", &pem);
+        let server = load(&both, &both).await.unwrap();
+        let client = make_client_config_with_pem(&pem).unwrap();
+        assert_eq!(handshake(server, client).len(), 1);
     }
 
     #[tokio::test]
