@@ -2142,6 +2142,7 @@ mod security {
     use cypher_core::{
         Command, Event, MessageStatus, Table, message_key, peer_messages, session_key,
     };
+    use cypher_crypto::IdentitySeed;
     use cypher_types::{Addr, DeviceId, MsgId};
 
     use super::{A, B, C, D, E};
@@ -2269,6 +2270,53 @@ mod security {
         );
         let (first, last) = peer_messages(&b);
         assert!(first <= key && key <= last);
+    }
+
+    /// The key one server offered is trusted only for that server:
+    /// answering a stale prompt after switching servers pins nothing.
+    #[test]
+    fn a_key_offered_by_one_server_is_not_pinned_for_another() {
+        let mut w = super::paired();
+        w.clients[A].on_start = vec![Command::SetAnonymity {
+            require_onion: true,
+        }];
+        // The first server changes its key: offered, not trusted.
+        w.server_key = IdentitySeed([6; 32]).derive_identity();
+        w.restart(A);
+        assert_eq!(super::key_changes(&w, A), 1);
+
+        // Same core, now another server, which shows its own key first.
+        w.command(
+            A,
+            Command::SetServer {
+                addr: "other.example:9100".into(),
+            },
+        );
+        w.server_key = IdentitySeed([7; 32]).derive_identity();
+        w.disconnect(A);
+        w.connect(A);
+        w.run();
+        assert_eq!(super::key_changes(&w, A), 1, "first contact: pinned");
+
+        // The user answers the stale prompt about the first server.
+        w.command(A, Command::TrustServerKey);
+        w.clients[A].on_start = vec![
+            Command::SetServer {
+                addr: "other.example:9100".into(),
+            },
+            Command::SetAnonymity {
+                require_onion: true,
+            },
+        ];
+        w.restart(A);
+        assert_eq!(
+            super::key_changes(&w, A),
+            1,
+            "the other server keeps the key it showed first"
+        );
+        let onion = w.server.onion_inbox_ops;
+        w.command(A, Command::FetchInbox);
+        assert!(w.server.onion_inbox_ops > onion, "and its relay is used");
     }
 
     /// A message delivered before the app restarted is still marked read

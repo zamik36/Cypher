@@ -209,8 +209,9 @@ pub struct Core<R> {
     server: String,
     server_keys: ServerKeys,
     inbox_epochs: InboxEpochs,
-    /// A signing key the server showed that is not the one remembered.
-    offered_key: Option<[u8; 32]>,
+    /// A signing key a server showed that is not the one remembered for
+    /// it, and that server's address: the key is trusted for it alone.
+    offered_key: Option<(String, [u8; 32])>,
     push: PushState,
     /// The name this user goes by, sent to contacts with `Hello`.
     profile_name: Option<String>,
@@ -715,7 +716,7 @@ impl<R: CryptoRngCore> Core<R> {
             Command::UnblockPeer { peer } => self.block_contact(peer, false),
             Command::SetProfileName { name } => self.set_profile_name(name.as_deref()),
             Command::SetAnonymity { require_onion } => self.anon.set_require_onion(require_onion),
-            Command::SetServer { addr } => self.server = addr,
+            Command::SetServer { addr } => self.set_server(addr),
             Command::TrustServerKey => self.trust_server_key(),
             Command::EnablePush => self.enable_push(),
             Command::RegisterPush {
