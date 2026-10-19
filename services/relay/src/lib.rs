@@ -20,7 +20,7 @@ use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use prometheus::{IntCounter, IntGauge};
 use serde::Deserialize;
-use tokio::time::Instant;
+use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -30,6 +30,11 @@ const MAX_REQUEST: usize = 128 * 1024;
 /// clients ask for it on every connection.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long writing one reply to a client may take. Replies are at most a
+/// frame (1 MiB), so a client must read at some 35 KB/s while it has one
+/// pending; one that stops reading is closed instead of keeping its
+/// connection and address slot.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Requests one connection may have in flight at once.
 const PIPELINE: usize = 8;
 const FRAMES_PER_SEC: u64 = 20;
@@ -93,7 +98,7 @@ pub trait OnionUpstream: Send + Sync + 'static {
 
 impl OnionUpstream for async_nats::Client {
     async fn forward(&self, subject: &'static str, request: Bytes) -> Option<Bytes> {
-        let reply = tokio::time::timeout(REQUEST_TIMEOUT, self.request(subject, request));
+        let reply = timeout(REQUEST_TIMEOUT, self.request(subject, request));
         Some(reply.await.ok()?.ok()?.payload)
     }
 }
@@ -158,8 +163,10 @@ impl<U: OnionUpstream> Relay<U> {
                     in_flight.push(self.forward(frame));
                 }
                 Some(reply) = in_flight.next(), if !in_flight.is_empty() => {
+                    // Nothing else is polled meanwhile, the idle timer
+                    // included: a client that stops reading is cut off here.
                     if let Some(reply) = reply
-                        && sink.send(reply).await.is_err()
+                        && !matches!(timeout(WRITE_TIMEOUT, sink.send(reply)).await, Ok(Ok(())))
                     {
                         break;
                     }

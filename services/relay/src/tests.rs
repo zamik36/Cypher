@@ -51,7 +51,7 @@ impl Conn {
     }
 
     async fn reply(&mut self) -> (u64, Bytes) {
-        let frame = tokio::time::timeout(Duration::from_secs(5), self.rx.next())
+        let frame = timeout(Duration::from_secs(5), self.rx.next())
             .await
             .expect("reply in time")
             .expect("connection open");
@@ -66,8 +66,14 @@ fn relay() -> Arc<Relay<FakeSignaling>> {
 }
 
 fn connect(relay: &Arc<Relay<FakeSignaling>>) -> Conn {
+    connect_with(relay, 64)
+}
+
+/// `sink_buffer` is how many replies the relay may write before the client
+/// has to read; 0 behaves like a full TCP window.
+fn connect_with(relay: &Arc<Relay<FakeSignaling>>, sink_buffer: usize) -> Conn {
     let (tx, in_rx) = mpsc::channel(64);
-    let (out_tx, rx) = mpsc::channel(64);
+    let (out_tx, rx) = mpsc::channel(sink_buffer);
     let stream: FrameStream = Box::pin(in_rx);
     let sink: FrameSink =
         Box::pin(out_tx.sink_map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe)));
@@ -188,6 +194,30 @@ async fn a_client_that_stops_reading_is_disconnected() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(relay.metrics.connections.get(), 0);
+}
+
+/// S-104: while a reply waits for a client that stopped reading, nothing
+/// else on the connection runs, the idle timer included; the stalled write
+/// itself closes the connection.
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_is_closed_when_a_reply_stalls() {
+    let relay = relay();
+    let mut stalled = connect_with(&relay, 0);
+    for corr in [1, 2, 3] {
+        stalled.send(corr, b"req").await;
+    }
+    let mut reading = connect(&relay);
+    reading.send(9, b"req").await;
+    assert_eq!(reading.reply().await.0, 9);
+    assert_eq!(relay.metrics.connections.get(), 2);
+
+    // Well before IDLE_TIMEOUT, so the reading client is still connected.
+    tokio::time::sleep(WRITE_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(
+        relay.metrics.connections.get(),
+        1,
+        "only the reading client is left"
+    );
 }
 
 #[test]
