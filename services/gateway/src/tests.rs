@@ -640,7 +640,9 @@ async fn of_two_racing_logins_on_two_nodes_exactly_one_stays() {
     );
 }
 
-/// A bus that takes no publishes, as NATS when its connection is gone.
+/// A bus that refuses every publish, as the NATS client does once it is
+/// closed or for a payload over the server's limit (while it reconnects it
+/// buffers instead).
 #[derive(Clone, Default)]
 struct NoPublish(MemBus);
 
