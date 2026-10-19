@@ -224,9 +224,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arc-swap"
@@ -448,7 +448,7 @@ dependencies = [
  "memchr",
  "pin-project",
  "portable-atomic",
- "rand 0.8.5",
+ "rand 0.8.8",
  "regex",
  "ring",
  "rustls-native-certs",
@@ -1675,7 +1675,7 @@ dependencies = [
  "cypher-types",
  "futures",
  "postcard",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rusqlite",
  "rustls",
  "serde",
@@ -1698,7 +1698,7 @@ dependencies = [
  "cypher-wire",
  "ed25519-dalek",
  "postcard",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "serde",
@@ -1722,7 +1722,7 @@ dependencies = [
  "hmac",
  "postcard",
  "proptest",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "serde",
@@ -1792,7 +1792,7 @@ dependencies = [
  "console-subscriber",
  "cypher-types",
  "prometheus",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "tempfile",
  "tokio",
@@ -1837,7 +1837,7 @@ name = "cypher-types"
 version = "0.3.0"
 dependencies = [
  "hex",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_core 0.6.4",
  "serde",
  "thiserror 2.0.18",
@@ -1855,7 +1855,7 @@ dependencies = [
  "getrandom 0.2.17",
  "js-sys",
  "qrcode",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_core 0.6.4",
  "serde",
  "serde-wasm-bindgen",
@@ -2353,7 +2353,7 @@ dependencies = [
  "futures",
  "gateway",
  "p256",
- "rand 0.8.5",
+ "rand 0.8.8",
  "relay",
  "rustls",
  "signaling",
@@ -2920,7 +2920,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "prometheus",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "serde",
  "tokio",
@@ -4602,7 +4602,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "smallvec",
  "zeroize",
 ]
@@ -5819,9 +5819,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -6881,7 +6881,7 @@ dependencies = [
  "hkdf",
  "p256",
  "prometheus",
- "rand 0.8.5",
+ "rand 0.8.8",
  "redis",
  "rustls-pki-types",
  "serde",
@@ -8031,7 +8031,7 @@ dependencies = [
  "futures-sink",
  "http",
  "httparse",
- "rand 0.8.5",
+ "rand 0.8.8",
  "ring",
  "rustls-pki-types",
  "tokio",

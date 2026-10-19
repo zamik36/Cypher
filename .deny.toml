@@ -1,13 +1,32 @@
 [advisories]
 # An ignore that no longer matches anything is stale and must be removed.
 unused-ignored-advisory = "deny"
+# Unsound advisories count for dependencies too, not only workspace crates.
+unsound = "all"
+# Every ignore names why it does not apply and the date to look at it again
+# (or earlier, when the named upstream release lands).
 ignore = [
-    "RUSTSEC-2025-0134", # rustls-pemfile: unmaintained (migrating later)
-    "RUSTSEC-2024-0436", # paste: unmaintained via optional arti-client Tor stack, no safe replacement upstream yet
-    "RUSTSEC-2023-0071", # rsa Marvin timing advisory via optional arti-client Tor stack, no safe upgrade available yet
-    "RUSTSEC-2024-0370", # proc-macro-error: build-time macro via tauri's Linux GTK stack (glib-macros), not shipped code
-    # zbus_names, zvariant, zvariant_derive: merged into zbus 6, so marked unmaintained; zbus 5 comes
-    # with notify-rust and the tauri opener/single-instance plugins (Linux D-Bus) until they move to zbus 6
+    # rustls-pemfile: unmaintained; only reads operator-supplied PEM files.
+    # review: 2027-01-15
+    "RUSTSEC-2025-0134",
+    # paste: unmaintained, build-time macro via the optional arti-client Tor
+    # stack; no replacement upstream yet. review: 2027-01-15 or arti 0.47
+    "RUSTSEC-2024-0436",
+    # rsa: Marvin timing attack on decryption via the optional arti-client Tor
+    # stack, which only verifies RSA signatures. review: 2027-01-15 or arti 0.47
+    "RUSTSEC-2023-0071",
+    # proc-macro-error: unmaintained build-time macro via tauri's Linux GTK
+    # stack (glib-macros), not shipped code. review: 2027-01-15
+    "RUSTSEC-2024-0370",
+    # glib 0.18: unsound VariantStrIter, via tauri's Linux GTK stack (gtk-rs
+    # 0.18 is what wry/tao build on); no crate in the graph but glib itself
+    # uses VariantStrIter.
+    # review: 2027-01-15 or tauri on gtk-rs >= 0.20
+    "RUSTSEC-2024-0429",
+    # zbus_names, zvariant, zvariant_derive: merged into zbus 6, so marked
+    # unmaintained; zbus 5 comes with notify-rust and the tauri opener and
+    # single-instance plugins (Linux D-Bus) until they move to zbus 6.
+    # review: 2027-01-15
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
@@ -32,6 +51,13 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
+# Duplicates nobody here can fix: the Windows bindings come in several
+# generations through tokio, mio, tauri and others, and arti-client (optional
+# Tor stack) is on newer RustCrypto and rand releases than the core crypto.
+skip-tree = [
+    { crate = "windows-sys", reason = "several generations across the ecosystem" },
+    { crate = "arti-client", reason = "optional Tor stack; own dependency generation" },
+]
 # Version wildcards are banned for crates.io deps; workspace path deps are fine.
 wildcards = "deny"
 allow-wildcard-paths = true
