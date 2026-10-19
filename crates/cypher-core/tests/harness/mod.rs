@@ -23,7 +23,7 @@ pub(crate) type Rng = ChaCha20Rng;
 /// The one epoch the test server's onion key is published for.
 const ONION_EPOCH: u32 = 1;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Keys {
     base: Bytes,
     opks: Vec<(u32, [u8; 32])>,
@@ -418,6 +418,13 @@ impl World {
                 (id, PublicKey::from(&secret).to_bytes())
             })
             .collect();
+    }
+
+    /// Makes the server answer `FetchKeys` for `of` with the bundle `with`
+    /// published (validly signed, by whoever `with` is).
+    pub(crate) fn serve_keys_of(&mut self, of: Addr, with: Addr) {
+        let keys = self.server.keys[&with].clone();
+        self.server.keys.insert(of, keys);
     }
 
     /// The bodies of every `Send` client `i` transmitted to `to`.

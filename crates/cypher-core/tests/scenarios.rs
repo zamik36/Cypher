@@ -2142,7 +2142,8 @@ mod security {
     use cypher_core::{Command, Table, session_key};
     use cypher_types::{Addr, DeviceId};
 
-    use super::A;
+    use super::{A, B, C};
+    use crate::harness::World;
 
     fn session_row(addr: Addr) -> (u8, Vec<u8>) {
         (Table::Sessions as u8, session_key(addr))
@@ -2182,5 +2183,40 @@ mod security {
                 assert_ne!(first[2..42], second[2..42], "a ratchet header used twice");
             }
         }
+    }
+
+    /// A bundle of another identity, or of another device of the right
+    /// one, validly signed, answering `FetchKeys` yields no session and
+    /// nothing sent.
+    #[test]
+    fn a_bundle_of_someone_else_makes_no_session() {
+        let mut w = World::new(3);
+        let (b, c) = (w.peer(B), w.peer(C));
+        let (b1, c1) = (Addr::new(b, DeviceId::FIRST), Addr::new(c, DeviceId::FIRST));
+        w.serve_keys_of(b1, c1);
+        let fetches = w.server.key_fetches;
+        let link = w.create_link(B);
+        w.command(A, Command::JoinLink { link });
+        w.advance(10_000);
+        assert!(w.server.key_fetches > fetches, "the keys were asked for");
+        assert!(!w.clients[A].kv.contains_key(&session_row(b1)));
+        assert!(!w.clients[A].kv.contains_key(&session_row(c1)));
+        assert!(w.sends_to(A, b1).is_empty(), "nothing sent to B");
+        assert!(w.sends_to(A, c1).is_empty(), "nor to C");
+
+        let mut w = World::new(2);
+        let b = w.peer(B);
+        let _b2 = w.add_device(B, 2);
+        w.advance(60 * 60_000);
+        let (b1, b2) = (Addr::new(b, DeviceId::FIRST), Addr::new(b, DeviceId(2)));
+        w.serve_keys_of(b1, b2);
+        let link = w.create_link(B);
+        w.command(A, Command::JoinLink { link });
+        w.advance(10_000);
+        assert!(!w.clients[A].kv.contains_key(&session_row(b1)));
+        assert!(
+            w.sends_to(A, b1).is_empty(),
+            "nothing sent to device 1 of B"
+        );
     }
 }
