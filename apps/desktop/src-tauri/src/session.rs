@@ -7,13 +7,12 @@ use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
 use cypher_core::Event;
-use cypher_media::Recorder;
 use cypher_types::{FileId, PeerId};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
-use crate::ephemeral::Linking;
+use crate::ephemeral::{Linking, Voice};
 
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -86,8 +85,7 @@ pub(crate) struct AppState {
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
     pub offers: Offers,
-    /// The voice note being recorded, if any.
-    pub voice: StdMutex<Option<Recorder>>,
+    pub voice: Voice,
     /// The last files dropped on the window.
     pub dropped: StdMutex<crate::commands::transfer::Dropped>,
     pub linking: Linking,
@@ -102,7 +100,7 @@ impl AppState {
             session: Mutex::default(),
             endpoint: Mutex::default(),
             offers: Offers::default(),
-            voice: StdMutex::default(),
+            voice: Voice::default(),
             dropped: StdMutex::default(),
             linking: Linking::default(),
         }
@@ -226,11 +224,15 @@ impl AppState {
         *self.identity.lock().await = None;
     }
 
+    /// Closes the microphone of a voice note being recorded (first, before
+    /// waiting on the client), stops the client and a link being waited for.
     pub(crate) async fn stop(&self) {
+        self.voice.reset().await;
         let session = self.session.lock().await.take();
         if let Some(s) = session {
             s.close().await;
         }
+        self.linking.cancel().await;
     }
 }
 

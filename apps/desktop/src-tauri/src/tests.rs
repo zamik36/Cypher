@@ -21,6 +21,7 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 
+use crate::ephemeral::NotKept;
 use crate::session::{self, AppState, Paths};
 use crate::{media_scheme, shell};
 
@@ -299,15 +300,40 @@ async fn commands_fail_cleanly_before_connecting() {
     assert_eq!(stop.unwrap_err(), "not recording");
     assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
 
-    *desktop.state().voice.lock().unwrap() = Some(recorder(4_800));
+    desktop.state().voice.hold(recorder(4_800));
     let again = call("voice_start", json!({})).await;
     assert_eq!(again.unwrap_err(), "already recording");
     assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
-    assert!(desktop.state().voice.lock().unwrap().is_none());
+    assert!(!desktop.state().voice.is_recording());
 
     let note = media_request(&FileId([3; 16]).to_hex(), None);
     let offline = media_scheme::answer(desktop.app.handle(), &note).await;
     assert_eq!(offline.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Locking or erasing closes the microphone and gives up a link being
+/// waited for, so nothing recorded meanwhile reaches the next identity.
+#[tokio::test]
+async fn lock_and_erase_stop_the_microphone() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    desktop.create("alice").await;
+    let state = desktop.state();
+    for cmd in ["lock", "erase_device"] {
+        state.voice.hold(recorder(4_800));
+        let start = json!({ "addr": "127.0.0.1:1", "name": "Laptop" });
+        desktop.call("link_start", start).await.unwrap();
+
+        desktop.call(cmd, json!({})).await.unwrap();
+        assert!(!state.voice.is_recording(), "still recording after {cmd}");
+        assert!(state.linking.take().await.is_none(), "linking after {cmd}");
+    }
+
+    // A microphone that opens while the app locks is closed again.
+    let ticket = state.voice.ticket().unwrap();
+    desktop.call("lock", json!({})).await.unwrap();
+    let late = state.voice.keep(ticket, recorder(4_800));
+    assert!(matches!(late, Err(NotKept::Reset(_))));
+    assert!(!state.voice.is_recording());
 }
 
 /// A cancel that comes after `link_finish` took the wait, but before it
@@ -596,10 +622,10 @@ async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
 /// Everything after the microphone: stop, encode, send, and the peer's copy.
 async fn send_a_voice_note(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
     let stop = || a.call("voice_stop", json!({ "peerId": b_id }));
-    *a.state().voice.lock().unwrap() = Some(recorder(4_800));
+    a.state().voice.hold(recorder(4_800));
     assert_eq!(stop().await, Ok(Value::Null), "100 ms is too short to send");
 
-    *a.state().voice.lock().unwrap() = Some(recorder(48_000));
+    a.state().voice.hold(recorder(48_000));
     let sent = stop().await.unwrap();
     let duration = sent["duration_ms"].as_u64().unwrap();
     assert!((980..=1020).contains(&duration), "{duration} ms");

@@ -16,6 +16,7 @@ use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 use super::chat::parse_peer;
+use crate::ephemeral::NotKept;
 use crate::session::{AppState, CmdResult, err};
 
 /// Shorter presses are treated as accidental taps and discarded.
@@ -36,9 +37,7 @@ pub(crate) async fn voice_start<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
-    if state.voice.lock().map_err(err)?.is_some() {
-        return Err("already recording".into());
-    }
+    let ticket = state.voice.ticket().ok_or("already recording")?;
     let recorder = tauri::async_runtime::spawn_blocking(move || {
         Recorder::start(move |level| {
             let _ = app.emit("cypher://voice_level", level);
@@ -47,14 +46,16 @@ pub(crate) async fn voice_start<R: Runtime>(
     .await
     .map_err(err)?
     .map_err(err)?;
-    let mut slot = state.voice.lock().map_err(err)?;
-    if slot.is_some() {
-        drop(slot);
-        recorder.cancel();
-        return Err("already recording".into());
-    }
-    *slot = Some(recorder);
-    Ok(())
+    let (recorder, reason) = match state.voice.keep(ticket, recorder) {
+        Ok(()) => return Ok(()),
+        Err(NotKept::AlreadyRecording(recorder)) => (recorder, "already recording"),
+        // Locked while the microphone opened: it closes again.
+        Err(NotKept::Reset(recorder)) => (recorder, "cancelled"),
+    };
+    tauri::async_runtime::spawn_blocking(move || recorder.cancel())
+        .await
+        .map_err(err)?;
+    Err(reason.into())
 }
 
 /// Stops recording and sends the note; `None` when it was too short.
@@ -64,12 +65,7 @@ pub(crate) async fn voice_stop(
     peer_id: String,
 ) -> CmdResult<Option<MediaSent>> {
     let peer = parse_peer(&peer_id)?;
-    let recorder = state
-        .voice
-        .lock()
-        .map_err(err)?
-        .take()
-        .ok_or("not recording")?;
+    let recorder = state.voice.take().ok_or("not recording")?;
     let recording = tauri::async_runtime::spawn_blocking(move || recorder.finish())
         .await
         .map_err(err)?
@@ -99,8 +95,7 @@ pub(crate) async fn voice_stop(
 
 #[tauri::command]
 pub(crate) async fn voice_cancel(state: State<'_, AppState>) -> CmdResult<()> {
-    let recorder = state.voice.lock().map_err(err)?.take();
-    if let Some(recorder) = recorder {
+    if let Some(recorder) = state.voice.take() {
         tauri::async_runtime::spawn_blocking(move || recorder.cancel())
             .await
             .map_err(err)?;
