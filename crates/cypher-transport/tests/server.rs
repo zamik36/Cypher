@@ -161,8 +161,10 @@ mod websocket {
 
     use super::*;
 
-    async fn start_ws() -> (String, CancellationToken) {
-        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Upgrade::WebSocket)
+    /// A WebSocket listener trusting `proxies` to name their clients.
+    async fn start_ws_behind(proxies: &str) -> (String, CancellationToken) {
+        let upgrade = Upgrade::WebSocket(proxies.parse().unwrap());
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), upgrade)
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -177,6 +179,11 @@ mod websocket {
             shutdown.clone(),
         ));
         (addr, shutdown)
+    }
+
+    /// The tests connect from loopback, here taken as the proxy.
+    async fn start_ws() -> (String, CancellationToken) {
+        start_ws_behind("127.0.0.1").await
     }
 
     async fn next(
@@ -216,6 +223,18 @@ mod websocket {
         assert!(
             connect_as(&addr, "203.0.113.1").await.is_none(),
             "the first client is at its limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_is_not_a_named_proxy_cannot_name_its_client() {
+        let (addr, _shutdown) = start_ws_behind("").await;
+        let _a = connect_as(&addr, "203.0.113.1")
+            .await
+            .expect("first connection");
+        assert!(
+            connect_as(&addr, "203.0.113.2").await.is_none(),
+            "counted by its own address, whatever the header says"
         );
     }
 

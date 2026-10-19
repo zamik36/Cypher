@@ -8,11 +8,17 @@ use cypher_server_kit::{Origin, PEER_HEADER};
 use cypher_types::PeerId;
 use futures::{Stream, StreamExt};
 
+/// The header carrying the nonce of a session that announces itself.
+const ANNOUNCER_HEADER: &str = "cy-evict";
+
 pub struct BusMsg {
     pub payload: Bytes,
     pub reply: Option<String>,
     /// Who sent it, by the subject it came on.
     pub origin: Option<Origin>,
+    /// On an announcement, the nonce of the session that sent it, if its
+    /// gateway names one (earlier releases do not).
+    pub announcer: Option<u128>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +39,20 @@ pub trait Bus: Send + Sync + 'static {
         timeout: Duration,
     ) -> impl Future<Output = Result<Bytes, BusError>> + Send;
 
-    fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send;
+    /// Hands `payload` to the bus. `Ok` means it was queued, not delivered.
+    fn publish(
+        &self,
+        subject: String,
+        payload: Bytes,
+    ) -> impl Future<Output = Result<(), BusError>> + Send;
+
+    /// Announces a session signing in: an empty message, as earlier
+    /// releases send, with the session's `nonce` beside it.
+    fn announce(
+        &self,
+        subject: String,
+        nonce: u128,
+    ) -> impl Future<Output = Result<(), BusError>> + Send;
 
     fn subscribe(
         &self,
@@ -69,16 +88,34 @@ impl Bus for async_nats::Client {
         }
     }
 
-    async fn publish(&self, subject: String, payload: Bytes) {
-        let _ = Self::publish(self, subject, payload).await;
+    async fn publish(&self, subject: String, payload: Bytes) -> Result<(), BusError> {
+        Self::publish(self, subject, payload)
+            .await
+            .map_err(|_| BusError::Unavailable)
+    }
+
+    async fn announce(&self, subject: String, nonce: u128) -> Result<(), BusError> {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(ANNOUNCER_HEADER, format!("{nonce:032x}").as_str());
+        self.publish_with_headers(subject, headers, Bytes::new())
+            .await
+            .map_err(|_| BusError::Unavailable)
     }
 
     async fn subscribe(&self, subject: String) -> Result<Self::Sub, BusError> {
         fn to_bus_msg(m: async_nats::Message) -> BusMsg {
+            // Only announcements are empty and carry a nonce.
+            let announcer = m
+                .headers
+                .as_ref()
+                .filter(|_| m.payload.is_empty())
+                .and_then(|h| h.get(ANNOUNCER_HEADER))
+                .and_then(|v| u128::from_str_radix(v.as_str(), 16).ok());
             BusMsg {
                 origin: Origin::of(&m.subject),
                 payload: m.payload,
                 reply: m.reply.map(|r| r.to_string()),
+                announcer,
             }
         }
         Self::subscribe(self, subject)
@@ -181,6 +218,7 @@ pub(crate) mod mem {
                 payload: payload.clone(),
                 reply: Some(inbox.clone()),
                 origin: None,
+                announcer: None,
             }) {
                 return Err(BusError::NoResponders);
             }
@@ -190,7 +228,11 @@ pub(crate) mod mem {
                 .map_err(|_| BusError::Unavailable)
         }
 
-        fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send {
+        fn publish(
+            &self,
+            subject: String,
+            payload: Bytes,
+        ) -> impl Future<Output = Result<(), BusError>> + Send {
             let waiter = self.inner.lock().unwrap().replies.remove(&subject);
             match waiter {
                 Some(tx) => {
@@ -201,10 +243,25 @@ pub(crate) mod mem {
                         payload: payload.clone(),
                         reply: None,
                         origin: None,
+                        announcer: None,
                     });
                 }
             }
-            std::future::ready(())
+            std::future::ready(Ok(()))
+        }
+
+        fn announce(
+            &self,
+            subject: String,
+            nonce: u128,
+        ) -> impl Future<Output = Result<(), BusError>> + Send {
+            self.deliver(&subject, || BusMsg {
+                payload: Bytes::new(),
+                reply: None,
+                origin: None,
+                announcer: Some(nonce),
+            });
+            std::future::ready(Ok(()))
         }
 
         fn subscribe(

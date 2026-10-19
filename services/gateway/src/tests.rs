@@ -4,19 +4,25 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cypher_crypto::IdentityKeyPair;
-use cypher_types::{Addr, DeviceId, PeerId, SESSION_AUTH_CONTEXT};
-use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
+use cypher_types::{Addr, DeviceId, MAX_FRAME_SIZE, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_wire::{
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_BODY_LEN, PROTOCOL_VERSION, ServerMsg,
+};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 
-use crate::bus::Bus as _;
 use crate::bus::mem::MemBus;
+use crate::bus::{Bus, BusError};
 use crate::metrics::Metrics;
-use crate::session::{Gateway, Limits};
+use crate::outbox::QUEUE_BYTES;
+use crate::session::{
+    Gateway, IDLE_TIMEOUT, LIMIT_NOTICE_INTERVAL, Limits, WRITE_TIMEOUT, WRITER_GRACE,
+};
 
 const LIMITS: Limits = Limits {
     frames_per_sec: 10_000,
     bytes_per_sec: 1 << 30,
+    outbox_bytes: 1 << 30,
 };
 
 fn gateway(bus: &MemBus) -> Arc<Gateway<MemBus>> {
@@ -35,17 +41,28 @@ struct Client {
 }
 
 impl Client {
-    fn connect(gw: &Arc<Gateway<MemBus>>) -> Self {
+    fn connect<B: Bus>(gw: &Arc<Gateway<B>>) -> Self {
         Self::connect_as(gw, IdentityKeyPair::generate())
     }
 
-    fn connect_as(gw: &Arc<Gateway<MemBus>>, id: IdentityKeyPair) -> Self {
+    fn connect_as<B: Bus>(gw: &Arc<Gateway<B>>, id: IdentityKeyPair) -> Self {
         Self::connect_device(gw, id, DeviceId::FIRST)
     }
 
-    fn connect_device(gw: &Arc<Gateway<MemBus>>, id: IdentityKeyPair, device: DeviceId) -> Self {
+    fn connect_device<B: Bus>(gw: &Arc<Gateway<B>>, id: IdentityKeyPair, device: DeviceId) -> Self {
+        Self::connect_with(gw, id, device, 4096)
+    }
+
+    /// `sink_buffer` is how many frames the gateway may write before the
+    /// client has to read; 0 behaves like a full TCP window.
+    fn connect_with<B: Bus>(
+        gw: &Arc<Gateway<B>>,
+        id: IdentityKeyPair,
+        device: DeviceId,
+        sink_buffer: usize,
+    ) -> Self {
         let (tx, stream) = mpsc::channel(64);
-        let (sink, rx) = mpsc::channel(4096);
+        let (sink, rx) = mpsc::channel(sink_buffer);
         let sink = sink.sink_map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe));
         tokio::spawn(Arc::clone(gw).handle(stream, sink));
         Self { tx, rx, id, device }
@@ -217,6 +234,7 @@ async fn sender_is_stamped_by_the_gateway() {
         }
         other => panic!("unexpected {other:?}"),
     }
+    assert_eq!(gw.metrics.delivered_local.get(), 1);
 }
 
 #[tokio::test]
@@ -242,7 +260,7 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
         b,
         crate::registry::ConnHandle {
             conn_id: u64::MAX,
-            outbox: crate::outbox::outbox().0,
+            outbox: crate::outbox::outbox(&crate::outbox::Budget::new(usize::MAX)).0,
             kick: tokio_util::sync::CancellationToken::new(),
         },
     );
@@ -254,6 +272,101 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
             status: DeliveryStatus::Busy
         }
     ));
+    // A refused delivery counts as busy, not as delivered.
+    assert_eq!(gw.metrics.delivered_local.get(), 0);
+    assert_eq!(gw.metrics.busy.get(), 1);
+}
+
+fn send_body(to: Addr, want_ack: bool, body: Bytes) -> ClientMsg {
+    ClientMsg::Send {
+        to: to.peer,
+        device: to.device,
+        want_ack,
+        body,
+    }
+}
+
+impl Client {
+    /// Sends `body` to `to` and returns the status the gateway acknowledged.
+    async fn send_acked(&mut self, req_id: u32, to: Addr, body: Bytes) -> DeliveryStatus {
+        self.send(req_id, send_body(to, true, body)).await;
+        match self.recv().await.unwrap() {
+            Frame {
+                req_id: acked,
+                msg: ServerMsg::SendAck { status },
+            } if acked == req_id => status,
+            other => panic!("expected an ack for {req_id}, got {other:?}"),
+        }
+    }
+
+    /// Waits until the gateway handled everything sent before.
+    async fn sync(&mut self) {
+        self.send(u32::MAX, ClientMsg::Ping).await;
+        assert!(matches!(self.recv().await.unwrap().msg, ServerMsg::Pong));
+    }
+}
+
+/// Clients that stop reading cannot make the gateway hold more than
+/// its outbox budget, however many of them there are; once they leave,
+/// their queued bytes return to it.
+#[tokio::test]
+async fn stalled_readers_cannot_hold_more_than_the_outbox_budget() {
+    let budget = 2 * QUEUE_BYTES;
+    let limits = Limits {
+        outbox_bytes: budget,
+        ..LIMITS
+    };
+    let gw = Arc::new(Gateway::new(MemBus::default(), limits, metrics()));
+    let mut stalled = Vec::new();
+    for _ in 0..4 {
+        let mut c = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+        c.authenticate().await;
+        stalled.push(c);
+    }
+    let mut sender = Client::connect(&gw);
+    sender.authenticate().await;
+    let body = Bytes::from(vec![0u8; MAX_BODY_LEN]);
+    // Each round offers every queue more than its own share; writers take
+    // a frame or two out before they block, so a few rounds fill all.
+    for _round in 0..3 {
+        for to in stalled.iter().map(Client::addr) {
+            for _ in 0..QUEUE_BYTES / MAX_BODY_LEN + 2 {
+                sender.send(0, send_body(to, false, body.clone())).await;
+            }
+        }
+        sender.sync().await;
+        assert!(gw.outbox_used() <= budget);
+    }
+    let queued: usize = stalled
+        .iter()
+        .map(|c| gw.registry.get(&c.addr()).unwrap().outbox.queued())
+        .sum();
+    assert_eq!(queued, gw.outbox_used());
+    assert!(
+        queued + MAX_FRAME_SIZE > budget,
+        "the budget is spent: {queued} of {budget}"
+    );
+
+    let mut reader = Client::connect(&gw);
+    reader.authenticate().await;
+    assert_eq!(
+        sender.send_acked(2, reader.addr(), body.clone()).await,
+        DeliveryStatus::Busy,
+        "past the budget a delivery is refused, not queued"
+    );
+
+    drop(stalled);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while gw.outbox_used() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("closed sessions return their queued bytes");
+    assert_eq!(
+        sender.send_acked(3, reader.addr(), body).await,
+        DeliveryStatus::Delivered
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -272,6 +385,78 @@ async fn idle_sessions_close_and_activity_extends_them() {
     );
     tokio::time::sleep(Duration::from_secs(61)).await;
     assert!(a.closed().await, "a minute without frames closes it");
+}
+
+/// Frames the writer took out but could not write yet still count against
+/// the client's share and the budget, until the client takes them.
+#[tokio::test]
+async fn frames_count_until_written() {
+    let gw = gateway(&MemBus::default());
+    let mut slow = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+    slow.authenticate().await;
+    let mut sender = Client::connect(&gw);
+    sender.authenticate().await;
+    for req_id in 1..=4 {
+        sender.send(req_id, send(slow.addr(), false, b"x")).await;
+    }
+    sender.sync().await;
+    let each = cypher_wire::encode_recv(&sender.peer(), sender.device, b"x").len();
+    let outbox = gw.registry.get(&slow.addr()).unwrap().outbox;
+    assert_eq!(outbox.queued(), 4 * each, "none is written yet");
+    assert_eq!(gw.outbox_used(), 4 * each);
+
+    for _ in 0..4 {
+        assert!(matches!(
+            slow.recv().await.unwrap().msg,
+            ServerMsg::Recv { .. }
+        ));
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while gw.outbox_used() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("written frames return their bytes");
+}
+
+/// A client that stopped reading is released once its session idles
+/// out, though its writer is stuck on a frame the client never takes.
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_is_released_after_idling() {
+    let gw = gateway(&MemBus::default());
+    let mut stalled = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+    stalled.authenticate().await;
+    let mut sender = Client::connect(&gw);
+    sender.authenticate().await;
+    for req_id in 1..=4 {
+        sender.send(req_id, send(stalled.addr(), false, b"x")).await;
+    }
+    sender.sync().await;
+    assert_eq!(gw.metrics.connections.get(), 2);
+
+    tokio::time::sleep(IDLE_TIMEOUT + WRITER_GRACE + Duration::from_secs(1)).await;
+    assert!(gw.registry.get(&stalled.addr()).is_none());
+    assert_eq!(gw.metrics.connections.get(), 0, "both sessions are closed");
+}
+
+/// A client that keeps sending but stops reading never idles out;
+/// the stalled write ends its session.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_write_closes_the_session() {
+    let gw = gateway(&MemBus::default());
+    let mut stalled = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+    stalled.authenticate().await;
+    let pings = WRITE_TIMEOUT.as_secs() / 5 + 2;
+    for req_id in 0..u32::try_from(pings).unwrap() {
+        stalled.send(req_id, ClientMsg::Ping).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    assert!(
+        gw.registry.get(&stalled.addr()).is_none(),
+        "unanswered for longer than the write timeout"
+    );
+    assert_eq!(gw.metrics.connections.get(), 0);
 }
 
 #[tokio::test]
@@ -379,6 +564,156 @@ async fn login_on_another_node_supersedes_the_first() {
     );
 }
 
+/// A bus whose subscriptions take a moment, as NATS round trips do.
+#[derive(Clone, Default)]
+struct SlowSubscribe(MemBus);
+
+impl Bus for SlowSubscribe {
+    type Sub = <MemBus as Bus>::Sub;
+
+    fn request(
+        &self,
+        subject: String,
+        peer: Option<PeerId>,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Bytes, BusError>> + Send {
+        self.0.request(subject, peer, payload, timeout)
+    }
+
+    fn publish(
+        &self,
+        subject: String,
+        payload: Bytes,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        self.0.publish(subject, payload)
+    }
+
+    fn announce(
+        &self,
+        subject: String,
+        nonce: u128,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        self.0.announce(subject, nonce)
+    }
+
+    fn subscribe(
+        &self,
+        subject: String,
+    ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
+        let inner = self.0.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            inner.subscribe(subject).await
+        }
+    }
+}
+
+/// Of two logins of one device racing on two nodes exactly one stays
+/// signed in, and only it gets the device's frames.
+#[tokio::test(start_paused = true)]
+async fn of_two_racing_logins_on_two_nodes_exactly_one_stays() {
+    let bus = SlowSubscribe::default();
+    let gw = || Arc::new(Gateway::new(bus.clone(), LIMITS, metrics()));
+    let (gw1, gw2, gw3) = (gw(), gw(), gw());
+    let seed = cypher_crypto::IdentitySeed([0x5a; 32]);
+    let mut one = Client::connect_as(&gw1, seed.derive_identity());
+    let mut two = Client::connect_as(&gw2, seed.derive_identity());
+    tokio::join!(one.authenticate(), two.authenticate());
+
+    let mut sender = Client::connect(&gw3);
+    sender.authenticate().await;
+    sender.send(1, send(one.addr(), false, b"dup")).await;
+    let mut got = Vec::new();
+    for session in [&mut one, &mut two] {
+        let mut msgs = Vec::new();
+        while let Some(Frame { msg, .. }) = session.recv().await {
+            msgs.push(msg);
+        }
+        got.push(msgs);
+    }
+    let survivor = |msgs: &[ServerMsg]| matches!(msgs, [ServerMsg::Recv { .. }]);
+    let evicted = |msgs: &[ServerMsg]| matches!(msgs, [ServerMsg::Superseded]);
+    assert!(
+        (survivor(&got[0]) && evicted(&got[1])) || (evicted(&got[0]) && survivor(&got[1])),
+        "one stays and gets the frame, the other is superseded: {got:?}"
+    );
+}
+
+/// A bus that refuses every publish, as the NATS client does once it is
+/// closed or for a payload over the server's limit (while it reconnects it
+/// buffers instead).
+#[derive(Clone, Default)]
+struct NoPublish(MemBus);
+
+impl Bus for NoPublish {
+    type Sub = <MemBus as Bus>::Sub;
+
+    fn request(
+        &self,
+        subject: String,
+        peer: Option<PeerId>,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Bytes, BusError>> + Send {
+        self.0.request(subject, peer, payload, timeout)
+    }
+
+    fn publish(
+        &self,
+        _subject: String,
+        _payload: Bytes,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        std::future::ready(Err(BusError::Unavailable))
+    }
+
+    fn announce(
+        &self,
+        _subject: String,
+        _nonce: u128,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        std::future::ready(Err(BusError::Unavailable))
+    }
+
+    fn subscribe(
+        &self,
+        subject: String,
+    ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
+        self.0.subscribe(subject)
+    }
+}
+
+/// Publishes the bus refuses (the eviction at sign-in, a relay to
+/// another node) are counted instead of vanishing.
+#[tokio::test]
+async fn failed_publishes_are_counted() {
+    let gw = Arc::new(Gateway::new(NoPublish::default(), LIMITS, metrics()));
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    assert_eq!(gw.metrics.publish_failed.get(), 1, "the eviction");
+    a.send(1, send(first(PeerId([3; 32])), false, b"x")).await;
+    a.sync().await;
+    assert_eq!(gw.metrics.publish_failed.get(), 2, "the relay");
+}
+
+/// A gateway of the previous release announces a login by an empty message
+/// without a nonce; it still evicts the device's session here.
+#[tokio::test]
+async fn an_eviction_without_a_nonce_still_evicts() {
+    let bus = MemBus::default();
+    let gw = gateway(&bus);
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    let subject = cypher_server_kit::peer_subject(
+        &a.peer().to_hex(),
+        a.device,
+        cypher_server_kit::Origin::Gateway,
+    );
+    bus.publish(subject, Bytes::new()).await.unwrap();
+    assert!(matches!(a.recv().await.unwrap().msg, ServerMsg::Superseded));
+    assert!(a.closed().await);
+}
+
 /// A remote node that never answers must not let one sender pile up
 /// pending deliveries: past the limit the sender is told `Busy` at once.
 #[tokio::test]
@@ -458,6 +793,41 @@ async fn ping_is_answered() {
     a.authenticate().await;
     a.send(5, ClientMsg::Ping).await;
     assert_eq!(a.recv().await.unwrap(), Frame::new(5, ServerMsg::Pong));
+}
+
+/// A frame over the rate limit is answered with `RateLimited`
+/// instead of leaving the client to time out, but at most once per
+/// interval, so a flood cannot make the gateway answer every frame.
+#[tokio::test(start_paused = true)]
+async fn frames_over_the_rate_limit_are_answered_once_per_interval() {
+    // The byte bucket holds two bytes, less than any frame, so every frame
+    // is over the limit however the wall clock it refills on moves; the
+    // notices follow the test clock.
+    let limits = Limits {
+        bytes_per_sec: 1,
+        ..LIMITS
+    };
+    let gw = Arc::new(Gateway::new(MemBus::default(), limits, metrics()));
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    for req_id in 1..=3 {
+        a.send(req_id, ClientMsg::Ping).await;
+    }
+    let limited = |req_id| {
+        Frame::new(
+            req_id,
+            ServerMsg::Error {
+                code: ErrorCode::RateLimited,
+            },
+        )
+    };
+    assert_eq!(a.recv().await.unwrap(), limited(1));
+    assert_eq!(a.recv().await, None, "2 and 3 are dropped silently");
+    assert_eq!(gw.metrics.rate_limited.get(), 3);
+
+    tokio::time::sleep(LIMIT_NOTICE_INTERVAL).await;
+    a.send(6, ClientMsg::Ping).await;
+    assert_eq!(a.recv().await.unwrap(), limited(6), "a new interval");
 }
 
 #[test]
