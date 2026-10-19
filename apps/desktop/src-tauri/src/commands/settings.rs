@@ -62,8 +62,3 @@ pub(crate) async fn trust_server_key(state: State<'_, AppState>) -> CmdResult<()
 pub(crate) async fn reconnect(state: State<'_, AppState>) -> CmdResult<()> {
     state.client().await?.reconnect().await.map_err(err)
 }
-
-#[tauri::command]
-pub(crate) async fn get_nickname(state: State<'_, AppState>) -> CmdResult<Option<String>> {
-    Ok(state.nickname().await)
-}

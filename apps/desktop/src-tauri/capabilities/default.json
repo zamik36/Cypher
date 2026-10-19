@@ -1,9 +1,9 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for the Cypher desktop app",
+  "description": "What the Cypher UI in the main window may call: the app's commands, events, deep links and notifications",
   "windows": ["main"],
   "permissions": [
-    "core:default",
+    "app-commands",
     "core:event:default",
     "deep-link:default",
     "notification:default",

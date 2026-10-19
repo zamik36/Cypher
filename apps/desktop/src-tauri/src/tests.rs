@@ -4,6 +4,7 @@
 //! The two-desktop scenario needs `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS`
 //! (see `tests/e2e`).
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +23,7 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 
+use crate::commands::names::COMMANDS;
 use crate::ephemeral::NotKept;
 use crate::session::{self, AppState, Paths};
 use crate::{media_scheme, shell};
@@ -48,9 +50,7 @@ impl Desktop {
             transport: None,
         };
         std::fs::create_dir_all(dir.path().join("downloads")).unwrap();
-        let app = crate::wire(mock_builder())
-            .build(mock_context(noop_assets()))
-            .unwrap();
+        let app = crate::wire(mock_builder()).build(app_context()).unwrap();
         app.manage(AppState::new(paths, tls));
         app.manage(shell::CloseToTray::default());
         let webview = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
@@ -66,27 +66,7 @@ impl Desktop {
         body: InvokeBody,
         headers: HeaderMap,
     ) -> Result<Value, Value> {
-        let request = InvokeRequest {
-            cmd: cmd.into(),
-            callback: CallbackFn(0),
-            error: CallbackFn(1),
-            // The app's own origin, which differs per platform.
-            url: if cfg!(windows) {
-                "http://tauri.localhost"
-            } else {
-                "tauri://localhost"
-            }
-            .parse()
-            .unwrap(),
-            body,
-            headers,
-            invoke_key: INVOKE_KEY.into(),
-        };
-        let webview = self.webview.clone();
-        tokio::task::spawn_blocking(move || get_ipc_response(&webview, request))
-            .await
-            .unwrap()
-            .map(|body| body.deserialize().unwrap())
+        invoke_from(&self.webview, LOCAL_ORIGIN, cmd, body, headers).await
     }
 
     /// `invoke(cmd, args)` from the webview; an error is the command's message.
@@ -109,6 +89,46 @@ impl Desktop {
         let args = json!({ "addr": gateway, "anonymous": false, "bridges": [] });
         text(&self.call("connect_to_gateway", args).await.unwrap())
     }
+}
+
+/// The app's own origin, which differs per platform.
+const LOCAL_ORIGIN: &str = if cfg!(windows) {
+    "http://tauri.localhost"
+} else {
+    "tauri://localhost"
+};
+
+/// The mock runtime's context with the app's own access control: the
+/// capabilities and command permissions `build.rs` generates.
+fn app_context() -> tauri::Context<MockRuntime> {
+    let mut context = mock_context(noop_assets());
+    let mut app = crate::context::<MockRuntime>();
+    std::mem::swap(context.runtime_authority_mut(), app.runtime_authority_mut());
+    context
+}
+
+/// Calls `cmd` from `webview` showing a page of `origin`.
+async fn invoke_from(
+    webview: &WebviewWindow<MockRuntime>,
+    origin: &str,
+    cmd: &str,
+    body: InvokeBody,
+    headers: HeaderMap,
+) -> Result<Value, Value> {
+    let request = InvokeRequest {
+        cmd: cmd.into(),
+        callback: CallbackFn(0),
+        error: CallbackFn(1),
+        url: origin.parse().unwrap(),
+        body,
+        headers,
+        invoke_key: INVOKE_KEY.into(),
+    };
+    let webview = webview.clone();
+    tokio::task::spawn_blocking(move || get_ipc_response(&webview, request))
+        .await
+        .unwrap()
+        .map(|body| body.deserialize().unwrap())
 }
 
 fn text(value: &Value) -> String {
@@ -163,10 +183,7 @@ async fn identity_lifecycle_without_a_server() {
         desktop.call("has_identity", no_args()).await,
         Ok(json!(false))
     );
-    assert_eq!(
-        desktop.call("get_nickname", no_args()).await,
-        Ok(Value::Null)
-    );
+    assert!(is_locked(&desktop).await);
 
     let peer = desktop.create("alice").await;
     assert_eq!(
@@ -180,10 +197,7 @@ async fn identity_lifecycle_without_a_server() {
         .call("safety_number", json!({ "peerId": "zz" }))
         .await;
     assert_eq!(invalid.unwrap_err(), "invalid peer id");
-    assert_eq!(
-        desktop.call("get_nickname", no_args()).await,
-        Ok(json!("alice"))
-    );
+    assert!(!is_locked(&desktop).await);
 
     let with_pass = |passphrase: &str| json!({ "passphrase": passphrase });
     desktop
@@ -212,6 +226,12 @@ async fn identity_lifecycle_without_a_server() {
     lock_then_erase(&desktop, &peer, &text(&mnemonic)).await;
 }
 
+/// Whether the identity is forgotten: a safety number needs it unlocked.
+async fn is_locked(desktop: &Desktop) -> bool {
+    let bob = json!({ "peerId": cypher_types::PeerId([9; 32]).to_hex() });
+    desktop.call("safety_number", bob).await == Err("identity is locked".to_owned())
+}
+
 /// Locking forgets the identity until the passphrase; erasing, for a
 /// forgotten one, makes room to start over.
 async fn lock_then_erase(desktop: &Desktop, peer: &str, mnemonic: &str) {
@@ -219,10 +239,7 @@ async fn lock_then_erase(desktop: &Desktop, peer: &str, mnemonic: &str) {
     let with_pass = |passphrase: &str| json!({ "passphrase": passphrase });
     // Locking forgets the identity until the passphrase is typed again.
     desktop.call("lock", no_args()).await.unwrap();
-    assert_eq!(
-        desktop.call("get_nickname", no_args()).await,
-        Ok(Value::Null)
-    );
+    assert!(is_locked(desktop).await);
     assert_eq!(
         desktop.call("export_mnemonic", with_pass(PASS)).await,
         Ok(json!(mnemonic))
@@ -236,10 +253,7 @@ async fn lock_then_erase(desktop: &Desktop, peer: &str, mnemonic: &str) {
         desktop.call("has_identity", no_args()).await,
         Ok(json!(false))
     );
-    assert_eq!(
-        desktop.call("get_nickname", no_args()).await,
-        Ok(Value::Null)
-    );
+    assert!(is_locked(desktop).await);
     let args = json!({ "mnemonic": mnemonic, "nickname": "alice", "passphrase": PASS });
     assert_eq!(desktop.call("import_mnemonic", args).await, Ok(json!(peer)));
 }
@@ -432,6 +446,100 @@ async fn a_link_cancel_is_kept_until_the_wait_begins() {
     let (_waiting, fresh) = desktop.state().linking.take().await.unwrap();
     assert!(!fresh.is_cancelled());
     assert!(desktop.state().linking.take().await.is_none(), "taken once");
+}
+
+/// The command names `tauri.ts` passes to `invoke(…)` or its `command(…)`
+/// wrapper.
+fn names_the_ui_invokes(source: &str) -> BTreeSet<&str> {
+    let mut names = BTreeSet::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("(\"") {
+        let (before, after) = rest.split_at(at);
+        rest = after.get(2..).unwrap_or_default();
+        // `invoke<T>("…")`: the type argument sits between name and call.
+        let callee = match before.strip_suffix('>') {
+            Some(generic) => generic.rsplit_once('<').map_or("", |(name, _)| name),
+            None => before,
+        };
+        let callee = callee
+            .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or_default();
+        if matches!(callee, "invoke" | "command") {
+            names.insert(rest.split('"').next().unwrap_or_default());
+        }
+    }
+    names
+}
+
+/// The UI calls exactly the listed commands, no more, no fewer.
+#[test]
+fn the_ui_invokes_exactly_the_listed_commands() {
+    let ui = include_str!("../../src/tauri.ts");
+    let listed: BTreeSet<&str> = COMMANDS.iter().copied().collect();
+    assert_eq!(listed.len(), COMMANDS.len(), "a command is listed twice");
+    assert_eq!(names_the_ui_invokes(ui), listed);
+}
+
+/// Registered for the tests only (see `wire`) and not listed in
+/// `COMMANDS`, so no permission names it.
+#[tauri::command]
+pub(crate) fn unlisted_command() {}
+
+/// Every listed command reaches its handler from the main window; a
+/// registered command outside the list is refused before its handler.
+#[tokio::test]
+async fn every_listed_command_is_registered_and_granted() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    for &cmd in COMMANDS {
+        // Holding a recording keeps `voice_start` off the real microphone.
+        desktop.state().voice.hold(recorder(480));
+        let Err(error) = desktop.call(cmd, json!({})).await else {
+            continue;
+        };
+        assert_ne!(error, format!("Command {cmd} not found"));
+        assert!(!error.contains("not allowed"), "{cmd}: {error}");
+    }
+    assert!(!COMMANDS.contains(&"unlisted_command"));
+    let unlisted = desktop.call("unlisted_command", json!({})).await;
+    let refused = unlisted.expect_err("an unlisted command ran");
+    assert!(refused.contains("not allowed"), "{refused}");
+}
+
+/// App commands answer only the main window showing the app's own
+/// pages: another webview, or a remote page in the main window, is refused.
+#[tokio::test]
+async fn other_webviews_and_remote_pages_cannot_call_the_app() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    desktop.create("alice").await;
+    let other = WebviewWindowBuilder::new(&desktop.app, "other", WebviewUrl::default())
+        .build()
+        .unwrap();
+    let pass = || InvokeBody::Json(json!({ "passphrase": PASS }));
+    let from_other = invoke_from(
+        &other,
+        LOCAL_ORIGIN,
+        "export_mnemonic",
+        pass(),
+        HeaderMap::new(),
+    )
+    .await;
+    let refused = from_other.expect_err("an unlisted webview read the phrase");
+    assert!(refused.to_string().contains("not allowed"), "{refused}");
+
+    let remote = invoke_from(
+        &desktop.webview,
+        "https://evil.example",
+        "export_mnemonic",
+        pass(),
+        HeaderMap::new(),
+    )
+    .await;
+    let refused = remote.expect_err("a remote page read the phrase");
+    assert!(refused.to_string().contains("not allowed"), "{refused}");
+
+    let main = desktop.call("export_mnemonic", json!({ "passphrase": PASS }));
+    assert!(main.await.is_ok(), "the app's own page may");
 }
 
 #[tokio::test]

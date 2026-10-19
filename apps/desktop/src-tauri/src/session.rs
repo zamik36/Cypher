@@ -125,14 +125,6 @@ impl AppState {
         Ok(cypher_core::ui::safety_number(&own, peer))
     }
 
-    pub(crate) async fn nickname(&self) -> Option<String> {
-        self.identity
-            .lock()
-            .await
-            .as_ref()
-            .map(|i| i.nickname.clone())
-    }
-
     pub(crate) async fn endpoint(&self) -> Endpoint {
         self.endpoint.lock().await.clone()
     }
