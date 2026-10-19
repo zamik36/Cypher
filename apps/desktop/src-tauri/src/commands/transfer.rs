@@ -64,8 +64,14 @@ pub(crate) struct Dropped {
     paths: Vec<PathBuf>,
 }
 
-#[cfg(test)]
 impl Dropped {
+    /// Forgets the files; the id keeps counting, so an old drop's id never
+    /// names a later one.
+    pub(crate) fn forget(&mut self) {
+        self.paths.clear();
+    }
+
+    #[cfg(test)]
     pub(crate) fn id_for_tests(&self) -> u64 {
         self.id
     }
@@ -80,7 +86,7 @@ struct DropInfo {
 /// Remembers a drop and tells the UI, which answers with `send_dropped`.
 pub(crate) fn files_dropped<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
     let state = app.state::<AppState>();
-    let Ok(mut dropped) = state.dropped.lock() else {
+    let Ok(mut dropped) = state.transfers.dropped.lock() else {
         return;
     };
     dropped.id += 1;
@@ -103,7 +109,7 @@ pub(crate) async fn send_dropped<R: Runtime>(
 ) -> CmdResult<Vec<TransferInfo>> {
     let peer = parse_peer(&peer_id)?;
     let paths = {
-        let mut dropped = state.dropped.lock().map_err(err)?;
+        let mut dropped = state.transfers.dropped.lock().map_err(err)?;
         if dropped.id != id || dropped.paths.is_empty() {
             return Err("this drop is gone".into());
         }
@@ -349,26 +355,34 @@ fn runs_code(path: &Path) -> bool {
 }
 
 /// Saves into the user's downloads folder under the (already sanitized)
-/// offered name, never overwriting an existing file.
+/// offered name, never overwriting an existing file. The offer stays open
+/// if accepting fails.
 #[tauri::command]
 pub(crate) async fn accept_file(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
     let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
-    let name = state
-        .offers
-        .lock()
-        .map_err(err)?
-        .remove(&id)
-        .ok_or("unknown offer")?;
+    let offers = &state.transfers.offers;
+    let (name, ticket) = offers.take(&id).ok_or("unknown offer")?;
+    let accepted = accept_as(&state, id, &name, ticket).await;
+    if accepted.is_err() {
+        offers.restore(id, name, ticket);
+    }
+    accepted
+}
+
+async fn accept_as(state: &AppState, id: FileId, name: &str, ticket: u64) -> CmdResult<()> {
     let dir = state
         .paths()
         .downloads
         .clone()
         .ok_or("no downloads folder")?;
     let client = state.client().await?;
+    let name = name.to_owned();
     let dest = tokio::task::spawn_blocking(move || reserve_download(&dir, &name))
         .await
         .map_err(err)?
         .map_err(err)?;
+    // Noted before the client hears of it: its failure may come at once.
+    state.transfers.offers.accepted(id, dest.clone(), ticket);
     if let Err(e) = client.accept_file(id, dest.clone()).await {
         release_reservation(&dest).await;
         return Err(err(e));
@@ -395,7 +409,9 @@ pub(crate) async fn cancel_transfer(state: State<'_, AppState>, file_id: String)
         .await?
         .command(Command::CancelTransfer { file_id: id })
         .await
-        .map_err(err)
+        .map_err(err)?;
+    state.transfers.offers.forget(&id);
+    Ok(())
 }
 
 fn display_name(path: &Path) -> String {

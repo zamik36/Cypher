@@ -1,18 +1,18 @@
 //! The unlocked identity and the running client, shared by all commands.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
 use cypher_core::Event;
-use cypher_types::{FileId, PeerId};
+use cypher_types::PeerId;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
-use crate::ephemeral::{Linking, Voice};
+use crate::commands::transfer::release_reservation;
+use crate::ephemeral::{Linking, Transfers, Voice};
 
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -35,9 +35,6 @@ impl Session {
         self.pump.abort();
     }
 }
-
-/// Names of files offered to us, so accepted files can be saved safely.
-pub(crate) type Offers = Arc<StdMutex<HashMap<FileId, String>>>;
 
 /// Connection parameters of the current session, reused on restarts.
 #[derive(Clone, Default)]
@@ -84,10 +81,8 @@ pub(crate) struct AppState {
     identity: Mutex<Option<Unlocked>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
-    pub offers: Offers,
     pub voice: Voice,
-    /// The last files dropped on the window.
-    pub dropped: StdMutex<crate::commands::transfer::Dropped>,
+    pub transfers: Transfers,
     pub linking: Linking,
 }
 
@@ -99,9 +94,8 @@ impl AppState {
             identity: Mutex::default(),
             session: Mutex::default(),
             endpoint: Mutex::default(),
-            offers: Offers::default(),
             voice: Voice::default(),
-            dropped: StdMutex::default(),
+            transfers: Transfers::default(),
             linking: Linking::default(),
         }
     }
@@ -178,13 +172,11 @@ impl AppState {
             .await
             .map_err(err)?;
         let (events, _) = broadcast::channel(256);
-        let (tx, offers) = (events.clone(), Arc::clone(&self.offers));
+        let (tx, offers) = (events.clone(), self.transfers.offers.clone());
         let pump = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                if let Event::TransferOffered { file_id, name, .. } = &event
-                    && let Ok(mut offers) = offers.lock()
-                {
-                    offers.insert(*file_id, name.clone());
+                if let Some(reserved) = offers.track(&event) {
+                    release_later(reserved);
                 }
                 emit(&event);
                 let _ = tx.send(event);
@@ -225,7 +217,8 @@ impl AppState {
     }
 
     /// Closes the microphone of a voice note being recorded (first, before
-    /// waiting on the client), stops the client and a link being waited for.
+    /// waiting on the client), stops the client, a link being waited for, and
+    /// forgets offered and dropped files.
     pub(crate) async fn stop(&self) {
         self.voice.reset().await;
         let session = self.session.lock().await.take();
@@ -233,7 +226,14 @@ impl AppState {
             s.close().await;
         }
         self.linking.cancel().await;
+        self.transfers.reset();
     }
+}
+
+/// Releases the name reserved for a file whose transfer failed, off the
+/// event pump.
+fn release_later(reserved: PathBuf) {
+    tokio::spawn(async move { release_reservation(&reserved).await });
 }
 
 /// Waits for the first event `pick` accepts.

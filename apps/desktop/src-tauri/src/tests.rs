@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
+use cypher_core::Event;
 use cypher_media::Recorder;
 use cypher_types::FileId;
 use serde_json::{Value, json};
@@ -334,6 +335,83 @@ async fn lock_and_erase_stop_the_microphone() {
     let late = state.voice.keep(ticket, recorder(4_800));
     assert!(matches!(late, Err(NotKept::Reset(_))));
     assert!(!state.voice.is_recording());
+}
+
+fn offer_of(file_id: FileId) -> Event {
+    Event::TransferOffered {
+        peer: cypher_types::PeerId([1; 32]),
+        file_id,
+        name: "notes.txt".into(),
+        size: 5,
+        mime: "text/plain".into(),
+    }
+}
+
+/// Locking or erasing forgets files offered to the identity and the last
+/// drop; an accept under way when it happens puts nothing back.
+#[tokio::test]
+async fn lock_and_erase_forget_offers_and_drops() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    desktop.create("alice").await;
+    let state = desktop.state();
+    let offers = &state.transfers.offers;
+    let file = FileId([5; 16]);
+    for cmd in ["lock", "erase_device"] {
+        offers.track(&offer_of(file));
+        let dropped = vec![desktop.dir.path().to_owned()];
+        crate::commands::transfer::files_dropped(desktop.app.handle(), dropped);
+        let drop_id = state.transfers.dropped.lock().unwrap().id_for_tests();
+
+        desktop.call(cmd, json!({})).await.unwrap();
+        assert!(!offers.contains(&file), "offer kept after {cmd}");
+        let peer = cypher_types::PeerId([1; 32]).to_hex();
+        let send = json!({ "peerId": peer, "id": drop_id });
+        let gone = desktop.call("send_dropped", send).await;
+        assert_eq!(gone.unwrap_err(), "this drop is gone", "after {cmd}");
+    }
+
+    offers.track(&offer_of(file));
+    let (name, ticket) = offers.take(&file).unwrap();
+    desktop.call("lock", json!({})).await.unwrap();
+    offers.restore(file, name, ticket);
+    assert!(
+        !offers.contains(&file),
+        "an earlier identity's offer came back"
+    );
+}
+
+/// An offer stays open when accepting it fails, and goes when its transfer
+/// fails or completes; an accepted file whose transfer fails hands back
+/// its reserved name to release.
+#[tokio::test]
+async fn an_offer_lasts_until_accepted_or_ended() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    desktop.create("bob").await;
+    let offers = &desktop.state().transfers.offers;
+    let file = FileId([6; 16]);
+    offers.track(&offer_of(file));
+    let accept = desktop.call("accept_file", json!({ "fileId": file.to_hex() }));
+    assert_eq!(accept.await.unwrap_err(), "not connected");
+    assert!(offers.contains(&file), "a failed accept keeps the offer");
+    let downloads = std::fs::read_dir(desktop.dir.path().join("downloads")).unwrap();
+    assert_eq!(downloads.count(), 0, "no name reserved");
+
+    let failed = Event::TransferFailed {
+        file_id: file,
+        reason: cypher_core::FailReason::Cancelled,
+    };
+    assert_eq!(offers.track(&failed), None);
+    assert!(!offers.contains(&file), "a failed transfer's offer goes");
+    offers.track(&offer_of(file));
+    offers.track(&Event::TransferComplete { file_id: file });
+    assert!(!offers.contains(&file), "a completed transfer's offer goes");
+
+    offers.track(&offer_of(file));
+    let (_, ticket) = offers.take(&file).unwrap();
+    let reserved = desktop.dir.path().join("downloads").join("notes.txt");
+    offers.accepted(file, reserved.clone(), ticket);
+    assert_eq!(offers.track(&failed), Some(reserved));
+    assert_eq!(offers.track(&failed), None, "released once");
 }
 
 /// A cancel that comes after `link_finish` took the wait, but before it
@@ -758,14 +836,8 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
         .await
         .unwrap();
 
-    let offered = eventually(|| async {
-        b.state()
-            .offers
-            .lock()
-            .unwrap()
-            .contains_key(&file_id)
-            .then_some(())
-    });
+    let offered =
+        eventually(|| async { b.state().transfers.offers.contains(&file_id).then_some(()) });
     offered.await;
     let file = json!({ "fileId": file_id.to_hex() });
     b.call("accept_file", file.clone()).await.unwrap();
@@ -821,8 +893,8 @@ async fn accept_two_files_of_one_name(a: &Desktop, b: &Desktop, b_id: &str) {
     }
     eventually(|| async {
         let state = b.state();
-        let offers = state.offers.lock().unwrap();
-        ids.iter().all(|id| offers.contains_key(id)).then_some(())
+        let offers = &state.transfers.offers;
+        ids.iter().all(|id| offers.contains(id)).then_some(())
     })
     .await;
     let accept = |id: FileId| b.call("accept_file", json!({ "fileId": id.to_hex() }));
@@ -901,7 +973,7 @@ async fn send_and_preview_pictures(a: &Desktop, b: &Desktop, b_id: &str) {
         a.app.handle(),
         vec![dropped, a.dir.path().to_owned()],
     );
-    let id = a.state().dropped.lock().unwrap().id_for_tests();
+    let id = a.state().transfers.dropped.lock().unwrap().id_for_tests();
     let send = json!({ "peerId": b_id, "id": id });
     let sent = a.call("send_dropped", send.clone()).await.unwrap();
     assert_eq!(
@@ -920,15 +992,7 @@ async fn send_and_preview_pictures(a: &Desktop, b: &Desktop, b_id: &str) {
 async fn accept_and_preview(b: &Desktop, info: &Value, png: &[u8]) {
     let file_id = text(&info["file_id"]);
     let id = FileId::from_hex(&file_id).unwrap();
-    eventually(|| async {
-        b.state()
-            .offers
-            .lock()
-            .unwrap()
-            .contains_key(&id)
-            .then_some(())
-    })
-    .await;
+    eventually(|| async { b.state().transfers.offers.contains(&id).then_some(()) }).await;
     let file = json!({ "fileId": file_id });
     b.call("accept_file", file.clone()).await.unwrap();
     eventually(|| async {
@@ -960,15 +1024,7 @@ async fn refuse_to_open_a_program(a: &Desktop, b: &Desktop, b_id: &str) {
         )
         .await
         .unwrap();
-    eventually(|| async {
-        b.state()
-            .offers
-            .lock()
-            .unwrap()
-            .contains_key(&file_id)
-            .then_some(())
-    })
-    .await;
+    eventually(|| async { b.state().transfers.offers.contains(&file_id).then_some(()) }).await;
     let file = json!({ "fileId": file_id.to_hex() });
     b.call("accept_file", file.clone()).await.unwrap();
     eventually(|| async {
