@@ -6,12 +6,13 @@ use std::time::Duration;
 
 use cypher_types::{Error, Result};
 use rustls::crypto::ring::default_provider;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tracing::debug;
 
 use crate::cert::SelfSignedCert;
-use crate::reload::PemCert;
+use crate::reload::{PemCert, pem_reason};
 
 /// How long a service waits for certificates another container writes
 /// (e.g. Caddy with auto-HTTPS) before giving up.
@@ -127,8 +128,8 @@ pub fn make_client_config() -> Arc<ClientConfig> {
 pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
     ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
-        let cert = cert.map_err(|e| transport("invalid certificate PEM", e))?;
+    for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let cert = cert.map_err(|e| transport("invalid certificate PEM", pem_reason(&e)))?;
         roots
             .add(cert)
             .map_err(|e| transport("failed to add certificate", e))?;
@@ -263,10 +264,7 @@ mod tests {
             .unwrap();
         let client = make_client_config_with_pem(&files.cert_pem).unwrap();
         let shown = handshake(server, client);
-        let expected = rustls_pemfile::certs(&mut files.cert_pem.as_bytes())
-            .next()
-            .unwrap()
-            .unwrap();
+        let expected = CertificateDer::from_pem_slice(files.cert_pem.as_bytes()).unwrap();
         assert_eq!(shown.first(), Some(&expected));
     }
 
@@ -291,6 +289,14 @@ mod tests {
             "-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----\n",
         );
         assert!(reason(load(&cert, &bad_key).await).contains("invalid private key"));
+        let cut = files.write(
+            "cut.pem",
+            "-----BEGIN CERTIFICATE-----
+MIIB
+",
+        );
+        let cut = reason(load(&cut, &key).await);
+        assert!(cut.contains("missing -----END CERTIFICATE-----"), "{cut}");
     }
 
     /// Operators bring keys in every PEM form: PKCS#8 (the rcgen pairs

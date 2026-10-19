@@ -2,13 +2,13 @@
 //! so a renewal (Let's Encrypt replaces it every ~60 days) takes effect
 //! without restarting the service.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, SystemTime};
 
 use cypher_types::{Error, Result};
+use rustls::pki_types::pem::{self, PemObject};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
@@ -100,18 +100,34 @@ fn transport(context: &str, e: impl std::fmt::Display) -> Error {
     Error::Transport(format!("{context}: {e}"))
 }
 
+/// A PEM parse error as text: the markers and lines it quotes are bytes,
+/// shown as a byte list by its own `Display`.
+pub(crate) fn pem_reason(e: &pem::Error) -> String {
+    match e {
+        pem::Error::MissingSectionEnd { end_marker } => {
+            // The marker is the section label, e.g. `CERTIFICATE`.
+            format!(
+                "missing -----END {}-----",
+                String::from_utf8_lossy(end_marker)
+            )
+        }
+        pem::Error::IllegalSectionStart { line } => {
+            format!("illegal section start {}", String::from_utf8_lossy(line))
+        }
+        other => other.to_string(),
+    }
+}
+
 fn read(cert_path: &PathBuf, key_path: &PathBuf) -> Result<CertifiedKey> {
-    let open = |path: &PathBuf| {
-        File::open(path)
-            .map(BufReader::new)
-            .map_err(|e| transport(&format!("failed to open {}", path.display()), e))
-    };
-    let certs = rustls_pemfile::certs(&mut open(cert_path)?)
+    let open_failed =
+        |path: &PathBuf, e: pem::Error| transport(&format!("failed to open {}", path.display()), e);
+    let certs = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|e| open_failed(cert_path, e))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
             transport(
                 &format!("invalid certificate in {}", cert_path.display()),
-                e,
+                pem_reason(&e),
             )
         })?;
     if certs.is_empty() {
@@ -120,9 +136,17 @@ fn read(cert_path: &PathBuf, key_path: &PathBuf) -> Result<CertifiedKey> {
             cert_path.display()
         )));
     }
-    let key = rustls_pemfile::private_key(&mut open(key_path)?)
-        .map_err(|e| transport(&format!("invalid private key in {}", key_path.display()), e))?
-        .ok_or_else(|| Error::Transport(format!("no private key in {}", key_path.display())))?;
+    // The first key section; certificates in the same file are skipped.
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::pem_file_iter(key_path)
+        .map_err(|e| open_failed(key_path, e))?
+        .next()
+        .ok_or_else(|| Error::Transport(format!("no private key in {}", key_path.display())))?
+        .map_err(|e| {
+            transport(
+                &format!("invalid private key in {}", key_path.display()),
+                pem_reason(&e),
+            )
+        })?;
     let signing_key = rustls::crypto::ring::sign::any_supported_type(&key).map_err(|e| {
         transport(
             &format!("unusable private key in {}", key_path.display()),
@@ -148,7 +172,7 @@ fn read(cert_path: &PathBuf, key_path: &PathBuf) -> Result<CertifiedKey> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::FileTimes;
+    use std::fs::{File, FileTimes};
 
     use super::*;
 

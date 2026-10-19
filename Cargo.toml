@@ -153,7 +153,6 @@ rustls = { version = "0.23", default-features = false, features = [
     "logging",
     "tls12",
 ] }
-rustls-pemfile = "2"
 bytes = "1"
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }
