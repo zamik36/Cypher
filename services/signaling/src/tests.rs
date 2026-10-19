@@ -1302,15 +1302,23 @@ async fn drain(h: &Handler, owner: &Inbox) {
     }
 }
 
+/// What the day counters of `h` count together, as seen at `now`.
+async fn budget_held(h: &Handler, now: u64) -> u64 {
+    let held: i64 = h.store.inbox_counters(now).await.iter().map(|c| c.0).sum();
+    held.unsigned_abs()
+}
+
 /// All inboxes together hold a bounded number of bytes, however many
 /// anonymous keys open them; reading gives the room back, and the counters
-/// expire with what they count (S-105).
+/// expire with what they count.
 #[tokio::test]
 async fn all_inboxes_together_hold_a_bounded_number_of_bytes() {
+    use crate::store::{INBOX_ITEM_OVERHEAD, INBOX_OPENING_COST};
     let item = Bytes::from(vec![7u8; 1000]);
-    let cost = item.len() as u64 + crate::store::INBOX_ITEM_OVERHEAD;
+    let cost = item.len() as u64 + INBOX_ITEM_OVERHEAD;
+    let opened = 4 * INBOX_OPENING_COST;
     let quota = InboxQuota {
-        budget: 10 * cost,
+        budget: opened + 10 * cost,
         ..InboxQuota::default()
     };
     let Some(h) = handler_with(None, quota).await else {
@@ -1333,9 +1341,9 @@ async fn all_inboxes_together_hold_a_bounded_number_of_bytes() {
     }
     assert_eq!(stored, 10, "the budget, spread over any number of inboxes");
     assert_eq!(h.inbox_quota_refused.get(), 2);
-    let counters = h.store.inbox_counters().await;
-    let held: i64 = counters.iter().map(|c| c.0).sum();
-    assert_eq!(held, i64::try_from(10 * cost).unwrap());
+    let now = crate::now_secs();
+    assert_eq!(budget_held(&h, now).await, opened + 10 * cost);
+    let counters = h.store.inbox_counters(now).await;
     assert!(
         counters
             .iter()
@@ -1348,19 +1356,23 @@ async fn all_inboxes_together_hold_a_bounded_number_of_bytes() {
     for owner in &owners {
         drain(&h, owner).await;
     }
-    assert_eq!(
-        h.store.inbox_counters().await,
-        [],
-        "nothing gone is counted"
-    );
+    assert_eq!(budget_held(&h, now).await, opened, "only the openings");
+    for owner in &owners {
+        assert!(matches!(
+            ask(&h, None, owner.close()).await,
+            ServerMsg::InboxBatch { .. }
+        ));
+    }
+    assert_eq!(h.store.inbox_counters(now).await, [], "nothing gone counts");
 }
 
-/// Only so many inboxes are opened per epoch, all together; those open stay
-/// open, and closing opens nothing (S-105).
+/// Opening an inbox draws on the budget of all inboxes: past it nothing
+/// new opens, while inboxes open already stay open; closing one makes
+/// room again.
 #[tokio::test]
-async fn inboxes_opened_per_epoch_are_bounded() {
+async fn openings_count_against_the_budget_of_all_inboxes() {
     let quota = InboxQuota {
-        activations: 2,
+        budget: 2 * crate::store::INBOX_OPENING_COST,
         ..InboxQuota::default()
     };
     let Some(h) = handler_with(None, quota).await else {
@@ -1378,11 +1390,36 @@ async fn inboxes_opened_per_epoch_are_bounded() {
     assert_eq!(h.inbox_quota_refused.get(), 1);
 
     open_inbox(&h, &a).await;
-    assert_eq!(ask(&h, None, put(b.id())).await, ServerMsg::Done);
     assert!(matches!(
-        ask(&h, None, c.close()).await,
+        ask(&h, None, b.close()).await,
         ServerMsg::InboxBatch { .. }
     ));
+    open_inbox(&h, &c).await;
+}
+
+/// An item put just before midnight and read just after is taken off the
+/// counter it was put on: put and ack agree on the day by the list's
+/// expiry, not by when they run.
+#[tokio::test]
+async fn put_and_ack_agree_across_a_day_boundary() {
+    let Some(h) = handler(None).await else { return };
+    let owner = Inbox::random();
+    open_inbox(&h, &owner).await;
+    let (before, after) = {
+        let day = crate::now_secs() / 86_400;
+        (day * 86_400 + 86_399, (day + 1) * 86_400)
+    };
+    let opened = crate::store::INBOX_OPENING_COST;
+    let stored = h.store.inbox_put(&owner.id(), b"sealed", before).await;
+    assert!(matches!(stored, Ok(crate::store::PutOutcome::Stored)));
+    assert!(budget_held(&h, before).await > opened);
+
+    let ServerMsg::InboxBatch { claim, items } = ask(&h, None, owner.fetch()).await else {
+        panic!("no batch");
+    };
+    assert_eq!(items.len(), 1);
+    h.store.inbox_ack(&owner.id(), &claim, after).await.unwrap();
+    assert_eq!(budget_held(&h, after).await, opened);
 }
 
 /// Over a session, one identity's inbox requests are limited; through the

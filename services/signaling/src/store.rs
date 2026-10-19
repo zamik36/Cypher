@@ -32,92 +32,112 @@ pub(crate) const INBOX_BUDGET_BYTES: u64 = 256 << 20;
 /// headers), charged against [`INBOX_BUDGET_BYTES`] so that a flood of
 /// tiny items cannot hold far more memory than the budget says.
 pub(crate) const INBOX_ITEM_OVERHEAD: u64 = 64;
-/// Inboxes owners may open per inbox epoch (a week), all together. A
-/// device opens about one new inbox a week (the next epoch's), so this is
-/// room for some 100 000 devices; it bounds how many inboxes anonymous
-/// key-making can open, each a few hundred bytes of Redis even when empty.
-pub(crate) const MAX_INBOX_ACTIVATIONS_PER_EPOCH: u64 = 100_000;
+/// What an open inbox costs Redis even while empty (its opening key and
+/// expiry entry, rounded up), charged against [`INBOX_BUDGET_BYTES`] for as
+/// long as it stays open. Anyone with a fresh key can open an inbox, so
+/// openings draw on the budget items do: a flood of them refuses new
+/// openings only once it holds as much as a flood of items would.
+pub(crate) const INBOX_OPENING_COST: u64 = 200;
 const DAY_SECS: u64 = 24 * 3600;
-/// Inbox bytes are counted per day on which they expire, today and the
-/// days an inbox can live on: the counters expire with what they count,
-/// so they cannot drift however items leave.
+/// What inboxes hold is counted on the day it expires, in a counter that
+/// expires at that day's end: today and every day an inbox can live on.
+/// A count thus outlives what it counts by less than a day, whether that
+/// was read or expired unread.
 const BUDGET_DAYS: u64 = INBOX_TTL_SECS / DAY_SECS + 1;
 
-/// Lua for the inbox scripts: the day counter the items of list KEYS[1]
-/// count on, and when that counter expires. The day counters are the keys
-/// from `first` on, one per day from today.
-const BUDGET_BUCKET: &str = r"
-    local function budget_bucket(first, now)
+/// Lua for the inbox scripts, which keep the day counters of the budget:
+/// the keys from `first` on, one per day from the day `now` falls on.
+const BUDGET: &str = r"
+    -- The counter for what expires at `expires` (unix seconds, as
+    -- EXPIRETIME gives), and when that counter expires.
+    local function budget_bucket(first, now, expires)
       local today = math.floor(now / 86400)
-      local left = math.max(redis.call('TTL', KEYS[1]), 0)
-      local day = math.floor((now + left) / 86400) - today
+      local day = math.floor(expires / 86400) - today
       day = math.max(0, math.min(day, #KEYS - first))
       return KEYS[first + day], (today + day + 1) * 86400
     end
+    local function budget_held(first)
+      local held = 0
+      for _, v in ipairs(redis.call('MGET', unpack(KEYS, first))) do
+        held = held + math.max(tonumber(v or '0'), 0)
+      end
+      return held
+    end
+    local function budget_add(first, now, expires, cost)
+      local bucket, ends = budget_bucket(first, now, expires)
+      redis.call('INCRBY', bucket, cost)
+      redis.call('EXPIREAT', bucket, ends)
+    end
+    -- Only a counter that still lives is lowered: one that expired counts
+    -- nothing any more.
+    local function budget_take(first, now, expires, cost)
+      if expires < 0 then return end
+      local bucket = budget_bucket(first, now, expires)
+      if redis.call('EXISTS', bucket) == 1
+        and redis.call('DECRBY', bucket, cost) <= 0 then
+        redis.call('DEL', bucket)
+      end
+    end
 ";
 
-/// KEYS: items, byte count, activation, day counters. ARGV: item, max
-/// items, max bytes, ttl, budget, now, item overhead. Neither key's expiry
-/// moves on a write, so a flood cannot keep an inbox alive.
+/// KEYS: items, byte count, opening, day counters. ARGV: item, max items,
+/// max bytes, ttl, budget, now, item overhead. Neither key's expiry moves
+/// on a write, so a flood cannot keep an inbox alive.
 const PUT_SCRIPT: &str = r"
     if redis.call('EXISTS', KEYS[3]) == 0 then return -1 end
     local size = #ARGV[1]
     local bytes = tonumber(redis.call('GET', KEYS[2]) or '0')
     if redis.call('LLEN', KEYS[1]) >= tonumber(ARGV[2])
       or bytes + size > tonumber(ARGV[3]) then return 0 end
-    local cost, held = size + tonumber(ARGV[7]), 0
-    for _, v in ipairs(redis.call('MGET', unpack(KEYS, 4))) do
-      held = held + math.max(tonumber(v or '0'), 0)
-    end
-    if held + cost > tonumber(ARGV[5]) then return -2 end
+    local cost = size + tonumber(ARGV[7])
+    if budget_held(4) + cost > tonumber(ARGV[5]) then return -2 end
     redis.call('RPUSH', KEYS[1], ARGV[1])
     redis.call('EXPIRE', KEYS[1], ARGV[4], 'NX')
     redis.call('INCRBY', KEYS[2], size)
     redis.call('EXPIRE', KEYS[2], ARGV[4], 'NX')
-    local bucket, ends = budget_bucket(4, tonumber(ARGV[6]))
-    redis.call('INCRBY', bucket, cost)
-    redis.call('EXPIREAT', bucket, ends)
+    budget_add(4, tonumber(ARGV[6]), redis.call('EXPIRETIME', KEYS[1]), cost)
     return 1";
 
 /// KEYS: items, claim, byte count, day counters. ARGV: claim hex, now,
-/// item overhead. A day counter is lowered only while it lives: one that
-/// expired counts nothing any more.
+/// item overhead. The claim names the list's expiry: a list made anew
+/// since (the old one expired) holds other items, and is left alone.
 const ACK_SCRIPT: &str = r"
     local v = redis.call('GET', KEYS[2])
     if not v or string.sub(v, 1, 32) ~= ARGV[1] then return 0 end
-    local n, bytes = string.match(string.sub(v, 34), '^(%d+):(%d+)$')
-    n, bytes = tonumber(n), tonumber(bytes)
-    local bucket = budget_bucket(4, tonumber(ARGV[2]))
-    local listed = redis.call('EXISTS', KEYS[1]) == 1
+    redis.call('DEL', KEYS[2])
+    local n, bytes, expires =
+      string.match(string.sub(v, 34), '^(%d+):(%d+):(%-?%d+)$')
+    n, bytes, expires = tonumber(n), tonumber(bytes), tonumber(expires)
+    if not expires or redis.call('EXPIRETIME', KEYS[1]) ~= expires then
+      return 0
+    end
     redis.call('LTRIM', KEYS[1], n, -1)
     if redis.call('DECRBY', KEYS[3], bytes) <= 0 then
       redis.call('DEL', KEYS[3])
     end
-    redis.call('DEL', KEYS[2])
-    if listed and redis.call('EXISTS', bucket) == 1
-      and redis.call('DECRBY', bucket, bytes + n * tonumber(ARGV[3])) <= 0 then
-      redis.call('DEL', bucket)
-    end
+    budget_take(4, tonumber(ARGV[2]), expires, bytes + n * tonumber(ARGV[3]))
     return n";
 
-/// KEYS: items, claim, activation, push, inboxes opened this epoch. ARGV:
-/// claim hex, max items, max bytes, claim ttl, inbox ttl, close, max
-/// openings, openings ttl. Reading (as the owner) is what keeps an inbox
-/// open for writers; closing shuts it to them and drops its push
-/// subscription at once. Opening an inbox that is not open counts against
-/// the epoch's openings; past them the answer is nil and nothing changes.
+/// KEYS: items, claim, opening, push, day counters. ARGV: claim hex, max
+/// items, max bytes, claim ttl, inbox ttl, close, budget, now, opening
+/// cost. Reading (as the owner) is what keeps an inbox open for writers,
+/// and its opening counted until it closes or expires; closing shuts it
+/// to writers and drops its push subscription at once. An inbox not open
+/// yet is opened only within the budget; past it the answer is nil and
+/// nothing changes.
 const FETCH_SCRIPT: &str = r"
+    local now, opening = tonumber(ARGV[8]), tonumber(ARGV[9])
+    local opened = redis.call('EXPIRETIME', KEYS[3])
+    if ARGV[6] ~= '1' and opened < 0
+      and budget_held(5) + opening > tonumber(ARGV[7]) then
+      return false
+    end
+    budget_take(5, now, opened, opening)
     if ARGV[6] == '1' then
       redis.call('DEL', KEYS[3], KEYS[4])
-    elseif redis.call('EXISTS', KEYS[3]) == 1 then
-      redis.call('SET', KEYS[3], 1, 'EX', ARGV[5])
     else
-      if tonumber(redis.call('GET', KEYS[5]) or '0') >= tonumber(ARGV[7]) then
-        return false
-      end
-      redis.call('INCR', KEYS[5])
-      redis.call('EXPIRE', KEYS[5], ARGV[8], 'NX')
       redis.call('SET', KEYS[3], 1, 'EX', ARGV[5])
+      budget_add(5, now, redis.call('EXPIRETIME', KEYS[3]), opening)
     end
     if redis.call('EXISTS', KEYS[2]) == 1 then return {} end
     local items = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[2]) - 1)
@@ -128,7 +148,9 @@ const FETCH_SCRIPT: &str = r"
       out[#out + 1] = v
     end
     if #out > 0 then
-      redis.call('SET', KEYS[2], ARGV[1] .. ':' .. #out .. ':' .. total, 'EX', ARGV[4])
+      local claim = ARGV[1] .. ':' .. #out .. ':' .. total .. ':'
+        .. redis.call('EXPIRETIME', KEYS[1])
+      redis.call('SET', KEYS[2], claim, 'EX', ARGV[4])
     end
     return out";
 
@@ -185,8 +207,6 @@ pub(crate) enum PutOutcome {
 pub(crate) struct InboxQuota {
     /// Bytes, see [`INBOX_BUDGET_BYTES`].
     pub budget: u64,
-    /// Inboxes opened per epoch, see [`MAX_INBOX_ACTIVATIONS_PER_EPOCH`].
-    pub activations: u64,
     /// Prefix of the shared counters' keys, so tests keep their own.
     pub scope: Vec<u8>,
 }
@@ -195,7 +215,6 @@ impl Default for InboxQuota {
     fn default() -> Self {
         Self {
             budget: INBOX_BUDGET_BYTES,
-            activations: MAX_INBOX_ACTIVATIONS_PER_EPOCH,
             scope: Vec::new(),
         }
     }
@@ -208,12 +227,6 @@ impl InboxQuota {
         (today..today.saturating_add(BUDGET_DAYS))
             .map(|day| [self.scope.as_slice(), b"ib:", &day.to_le_bytes()].concat())
             .collect()
-    }
-
-    /// The counter of inboxes opened in the epoch `now` falls on.
-    fn activations_counter(&self, now: u64) -> Vec<u8> {
-        let epoch = cypher_crypto::inbox::inbox_epoch(now);
-        [self.scope.as_slice(), b"ia:", &epoch.to_le_bytes()].concat()
     }
 }
 
@@ -239,9 +252,9 @@ impl Store {
         Ok(Self {
             redis,
             quota,
-            put_script: Script::new(&[BUDGET_BUCKET, PUT_SCRIPT].concat()),
-            fetch_script: Script::new(FETCH_SCRIPT),
-            ack_script: Script::new(&[BUDGET_BUCKET, ACK_SCRIPT].concat()),
+            put_script: Script::new(&[BUDGET, PUT_SCRIPT].concat()),
+            fetch_script: Script::new(&[BUDGET, FETCH_SCRIPT].concat()),
+            ack_script: Script::new(&[BUDGET, ACK_SCRIPT].concat()),
             // A fixed-window counter. KEYS: bucket. ARGV: limit, window.
             admit_script: Script::new(
                 r"
@@ -507,12 +520,13 @@ impl Store {
         self.redis.clone().del(key(b"p:", inbox)).await
     }
 
+    /// Puts `item` in `inbox`, at `now` (unix seconds).
     pub(crate) async fn inbox_put(
         &self,
         inbox: &[u8; 32],
         item: &[u8],
+        now: u64,
     ) -> redis::RedisResult<PutOutcome> {
-        let now = crate::now_secs();
         let stored: i64 = self
             .put_script
             .key(key(b"i:", inbox))
@@ -539,41 +553,43 @@ impl Store {
     /// Claims the oldest items exclusively until acked or the claim expires.
     /// With `close`, writers find the inbox gone from now on; what it still
     /// holds stays readable until it expires. `None` when the inbox is not
-    /// open and no more inboxes may be opened this epoch.
+    /// open and all inboxes together hold their budget already.
     pub(crate) async fn inbox_fetch(
         &self,
         inbox: &[u8; 32],
         claim: &[u8; 16],
         max_items: usize,
         close: bool,
+        now: u64,
     ) -> redis::RedisResult<Option<Vec<Bytes>>> {
-        let now = crate::now_secs();
         let items: Option<Vec<Vec<u8>>> = self
             .fetch_script
             .key(key(b"i:", inbox))
             .key(key(b"c:", inbox))
             .key(key(b"a:", inbox))
             .key(key(b"p:", inbox))
-            .key(self.quota.activations_counter(now))
+            .key(self.quota.day_counters(now))
             .arg(hex::encode(claim))
             .arg(max_items)
             .arg(MAX_BATCH_BYTES)
             .arg(CLAIM_TTL_SECS)
             .arg(INBOX_TTL_SECS)
             .arg(u8::from(close))
-            .arg(self.quota.activations)
-            .arg(2 * cypher_crypto::inbox::INBOX_EPOCH_SECS)
+            .arg(self.quota.budget)
+            .arg(now)
+            .arg(INBOX_OPENING_COST)
             .invoke_async(&mut self.redis.clone())
             .await?;
         Ok(items.map(|items| items.into_iter().map(Bytes::from).collect()))
     }
 
+    /// Drops what `claim` took from `inbox`, at `now` (unix seconds).
     pub(crate) async fn inbox_ack(
         &self,
         inbox: &[u8; 32],
         claim: &[u8; 16],
+        now: u64,
     ) -> redis::RedisResult<()> {
-        let now = crate::now_secs();
         let _: i64 = self
             .ack_script
             .key(key(b"i:", inbox))
@@ -588,13 +604,13 @@ impl Store {
         Ok(())
     }
 
-    /// The day counters of all inboxes that exist: what each counts, and
-    /// the seconds until it expires.
+    /// The day counters of the budget that exist, as seen at `now`: what
+    /// each counts, and the seconds until it expires.
     #[cfg(test)]
-    pub(crate) async fn inbox_counters(&self) -> Vec<(i64, i64)> {
+    pub(crate) async fn inbox_counters(&self, now: u64) -> Vec<(i64, i64)> {
         let mut redis = self.redis.clone();
         let mut counters = Vec::new();
-        for counter in self.quota.day_counters(crate::now_secs()) {
+        for counter in self.quota.day_counters(now) {
             let held: Option<i64> = redis.get(&counter).await.unwrap();
             if let Some(held) = held {
                 counters.push((held, redis.ttl(&counter).await.unwrap()));

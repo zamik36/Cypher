@@ -97,8 +97,8 @@ pub(crate) struct Handler {
     /// (NATS down or refusing), and senders fall back to their name.
     pub sealed_unavailable: prometheus::IntCounter,
     /// Inbox writes and openings refused because all inboxes together hold
-    /// their budget or this epoch's openings: someone floods them, or the
-    /// budget is too small for the users.
+    /// their budget: someone floods them, or the budget is too small for
+    /// the users.
     pub inbox_quota_refused: prometheus::IntCounter,
 }
 
@@ -388,7 +388,7 @@ impl Handler {
                     return Ok(error(ErrorCode::Unauthorized));
                 }
                 self.store
-                    .inbox_ack(&proof.inbox, &claim)
+                    .inbox_ack(&proof.inbox, &claim, crate::now_secs())
                     .await
                     .map(|()| ServerMsg::Done)
             }
@@ -697,19 +697,21 @@ impl Handler {
     }
 
     async fn inbox_put(&self, inbox: &[u8; 32], item: &[u8]) -> redis::RedisResult<ServerMsg> {
-        Ok(match self.store.inbox_put(inbox, item).await? {
-            PutOutcome::Stored => {
-                self.signal(inbox).await?;
-                ServerMsg::Done
-            }
-            PutOutcome::Full => error(ErrorCode::TooLarge),
-            // To the writer as if this inbox were full: it tries again later.
-            PutOutcome::OverBudget => {
-                self.inbox_quota_refused.inc();
-                error(ErrorCode::TooLarge)
-            }
-            PutOutcome::Inactive => error(ErrorCode::NotFound),
-        })
+        Ok(
+            match self.store.inbox_put(inbox, item, crate::now_secs()).await? {
+                PutOutcome::Stored => {
+                    self.signal(inbox).await?;
+                    ServerMsg::Done
+                }
+                PutOutcome::Full => error(ErrorCode::TooLarge),
+                // To the writer as if this inbox were full: it tries again later.
+                PutOutcome::OverBudget => {
+                    self.inbox_quota_refused.inc();
+                    error(ErrorCode::TooLarge)
+                }
+                PutOutcome::Inactive => error(ErrorCode::NotFound),
+            },
+        )
     }
 
     /// Hands `item` to the device's gateway, which takes it only with a
@@ -767,10 +769,10 @@ impl Handler {
         rand::rngs::OsRng.fill_bytes(&mut claim);
         let items = self
             .store
-            .inbox_fetch(inbox, &claim, MAX_INBOX_BATCH, close)
+            .inbox_fetch(inbox, &claim, MAX_INBOX_BATCH, close, crate::now_secs())
             .await?;
-        // No more inboxes may be opened this epoch: the owner asks again
-        // later, and its inbox is not open to writers meanwhile.
+        // All inboxes together are full: the owner asks again later, and
+        // its inbox is not open to writers meanwhile.
         Ok(items.map_or_else(
             || {
                 self.inbox_quota_refused.inc();
