@@ -158,12 +158,20 @@ impl Network {
             Some((addr, prefix)) => (addr, Some(prefix.parse::<u8>().map_err(|_| invalid())?)),
             None => (entry, None),
         };
-        let addr = addr
-            .parse::<IpAddr>()
-            .map_err(|_| invalid())?
-            .to_canonical();
+        let written = addr.parse::<IpAddr>().map_err(|_| invalid())?;
+        let addr = written.to_canonical();
+        // An IPv4 network written mapped into IPv6 (`::ffff:10.0.0.0/104`)
+        // has 96 bits of mapping prefix before its own.
+        let mapping = if written.is_ipv6() && addr.is_ipv4() {
+            96
+        } else {
+            0
+        };
         let bits = if addr.is_ipv4() { 32 } else { 128 };
-        let prefix = prefix.unwrap_or(bits);
+        let prefix = match prefix {
+            Some(written) => written.checked_sub(mapping).ok_or_else(invalid)?,
+            None => bits,
+        };
         if prefix > bits {
             return Err(invalid());
         }
@@ -272,9 +280,14 @@ mod tests {
             !everyone.contains(ip("2001:db8::1")),
             "IPv4 networks hold no IPv6"
         );
+        let mapped: TrustedProxies = "::ffff:10.0.0.0/104".parse().unwrap();
+        assert!(mapped.contains(ip("10.9.8.7")), "the /8 under the mapping");
+        assert!(!mapped.contains(ip("11.0.0.1")));
         for invalid in [
             "10.0.0.0/33",
             "::/129",
+            "::ffff:10.0.0.0/95",
+            "::ffff:10.0.0.0/129",
             "garbage",
             "10.0.0.1/x",
             "10.0.0.1/",
