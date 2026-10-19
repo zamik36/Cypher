@@ -25,7 +25,7 @@ use tracing::debug;
 
 use crate::bus::{Bus, BusError, BusMsg};
 use crate::metrics::Metrics;
-use crate::outbox::{Outbox, OutboxReceiver, outbox};
+use crate::outbox::{Budget, Outbox, OutboxReceiver, outbox};
 use crate::registry::{ConnHandle, Registry};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -46,6 +46,8 @@ const STATUS_BUSY: u8 = DeliveryStatus::Busy as u8;
 pub struct Limits {
     pub frames_per_sec: u64,
     pub bytes_per_sec: u64,
+    /// Bytes the queues of all connections may hold together.
+    pub outbox_bytes: usize,
 }
 
 pub struct Gateway<B> {
@@ -54,6 +56,7 @@ pub struct Gateway<B> {
     pub limits: Limits,
     pub metrics: Metrics,
     next_conn: AtomicU64,
+    outbox_budget: Arc<Budget>,
 }
 
 impl<B: Bus> Gateway<B> {
@@ -64,6 +67,7 @@ impl<B: Bus> Gateway<B> {
             limits,
             metrics,
             next_conn: AtomicU64::new(1),
+            outbox_budget: Budget::new(limits.outbox_bytes),
         }
     }
 
@@ -74,7 +78,7 @@ impl<B: Bus> Gateway<B> {
         K: Sink<Bytes, Error = io::Error> + Unpin + Send + 'static,
     {
         self.metrics.connections.inc();
-        let (out, out_rx) = outbox();
+        let (out, out_rx) = outbox(&self.outbox_budget);
         let cancel = CancellationToken::new();
         let writer = tokio::spawn(write_loop(sink, out_rx, cancel.clone()));
         let mut session = Session {
@@ -93,6 +97,12 @@ impl<B: Bus> Gateway<B> {
         cancel.cancel();
         let _ = writer.await;
         self.metrics.connections.dec();
+    }
+
+    /// Bytes queued for all clients right now.
+    #[cfg(test)]
+    pub(crate) fn outbox_used(&self) -> usize {
+        self.outbox_budget.used()
     }
 }
 

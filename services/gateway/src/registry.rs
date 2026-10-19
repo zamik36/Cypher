@@ -39,13 +39,13 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::outbox::outbox;
+    use crate::outbox::{Budget, outbox};
     use cypher_types::{DeviceId, PeerId};
 
     fn handle(id: u64) -> ConnHandle {
         ConnHandle {
             conn_id: id,
-            outbox: outbox().0,
+            outbox: outbox(&Budget::new(usize::MAX)).0,
             kick: CancellationToken::new(),
         }
     }

@@ -4,19 +4,23 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cypher_crypto::IdentityKeyPair;
-use cypher_types::{Addr, DeviceId, PeerId, SESSION_AUTH_CONTEXT};
-use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
+use cypher_types::{Addr, DeviceId, MAX_FRAME_SIZE, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_wire::{
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_BODY_LEN, PROTOCOL_VERSION, ServerMsg,
+};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 
 use crate::bus::Bus as _;
 use crate::bus::mem::MemBus;
 use crate::metrics::Metrics;
+use crate::outbox::QUEUE_BYTES;
 use crate::session::{Gateway, Limits};
 
 const LIMITS: Limits = Limits {
     frames_per_sec: 10_000,
     bytes_per_sec: 1 << 30,
+    outbox_bytes: 1 << 30,
 };
 
 fn gateway(bus: &MemBus) -> Arc<Gateway<MemBus>> {
@@ -44,8 +48,19 @@ impl Client {
     }
 
     fn connect_device(gw: &Arc<Gateway<MemBus>>, id: IdentityKeyPair, device: DeviceId) -> Self {
+        Self::connect_with(gw, id, device, 4096)
+    }
+
+    /// `sink_buffer` is how many frames the gateway may write before the
+    /// client has to read; 0 behaves like a full TCP window.
+    fn connect_with(
+        gw: &Arc<Gateway<MemBus>>,
+        id: IdentityKeyPair,
+        device: DeviceId,
+        sink_buffer: usize,
+    ) -> Self {
         let (tx, stream) = mpsc::channel(64);
-        let (sink, rx) = mpsc::channel(4096);
+        let (sink, rx) = mpsc::channel(sink_buffer);
         let sink = sink.sink_map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe));
         tokio::spawn(Arc::clone(gw).handle(stream, sink));
         Self { tx, rx, id, device }
@@ -242,7 +257,7 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
         b,
         crate::registry::ConnHandle {
             conn_id: u64::MAX,
-            outbox: crate::outbox::outbox().0,
+            outbox: crate::outbox::outbox(&crate::outbox::Budget::new(usize::MAX)).0,
             kick: tokio_util::sync::CancellationToken::new(),
         },
     );
@@ -254,6 +269,98 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
             status: DeliveryStatus::Busy
         }
     ));
+}
+
+fn send_body(to: Addr, want_ack: bool, body: Bytes) -> ClientMsg {
+    ClientMsg::Send {
+        to: to.peer,
+        device: to.device,
+        want_ack,
+        body,
+    }
+}
+
+impl Client {
+    /// Sends `body` to `to` and returns the status the gateway acknowledged.
+    async fn send_acked(&mut self, req_id: u32, to: Addr, body: Bytes) -> DeliveryStatus {
+        self.send(req_id, send_body(to, true, body)).await;
+        match self.recv().await.unwrap() {
+            Frame {
+                req_id: acked,
+                msg: ServerMsg::SendAck { status },
+            } if acked == req_id => status,
+            other => panic!("expected an ack for {req_id}, got {other:?}"),
+        }
+    }
+
+    /// Waits until the gateway handled everything sent before.
+    async fn sync(&mut self) {
+        self.send(u32::MAX, ClientMsg::Ping).await;
+        assert!(matches!(self.recv().await.unwrap().msg, ServerMsg::Pong));
+    }
+}
+
+/// S-101: clients that stop reading cannot make the gateway hold more than
+/// its outbox budget, however many of them there are; once they leave,
+/// their queued bytes return to it.
+#[tokio::test]
+async fn stalled_readers_cannot_hold_more_than_the_outbox_budget() {
+    let budget = 2 * QUEUE_BYTES;
+    let limits = Limits {
+        outbox_bytes: budget,
+        ..LIMITS
+    };
+    let gw = Arc::new(Gateway::new(MemBus::default(), limits, metrics()));
+    let mut stalled = Vec::new();
+    for _ in 0..4 {
+        let mut c = Client::connect_with(&gw, IdentityKeyPair::generate(), DeviceId::FIRST, 0);
+        c.authenticate().await;
+        stalled.push(c);
+    }
+    let mut sender = Client::connect(&gw);
+    sender.authenticate().await;
+    let body = Bytes::from(vec![0u8; MAX_BODY_LEN]);
+    // Each round offers every queue more than its own share; writers take
+    // a frame or two out before they block, so a few rounds fill all.
+    for _round in 0..3 {
+        for to in stalled.iter().map(Client::addr) {
+            for _ in 0..QUEUE_BYTES / MAX_BODY_LEN + 2 {
+                sender.send(0, send_body(to, false, body.clone())).await;
+            }
+        }
+        sender.sync().await;
+        assert!(gw.outbox_used() <= budget);
+    }
+    let queued: usize = stalled
+        .iter()
+        .map(|c| gw.registry.get(&c.addr()).unwrap().outbox.queued())
+        .sum();
+    assert_eq!(queued, gw.outbox_used());
+    assert!(
+        queued + MAX_FRAME_SIZE > budget,
+        "the budget is spent: {queued} of {budget}"
+    );
+
+    let mut reader = Client::connect(&gw);
+    reader.authenticate().await;
+    assert_eq!(
+        sender.send_acked(2, reader.addr(), body.clone()).await,
+        DeliveryStatus::Busy,
+        "past the budget a delivery is refused, not queued"
+    );
+
+    drop(stalled);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while gw.outbox_used() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("closed sessions return their queued bytes");
+    assert_eq!(
+        sender.send_acked(3, reader.addr(), body).await,
+        DeliveryStatus::Delivered
+    );
 }
 
 #[tokio::test(start_paused = true)]

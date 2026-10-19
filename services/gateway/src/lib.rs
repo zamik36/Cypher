@@ -121,6 +121,7 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
         Limits {
             frames_per_sec: config.frames_per_sec,
             bytes_per_sec: config.bytes_per_sec,
+            outbox_bytes: outbox::OUTBOX_BUDGET,
         },
         metrics::Metrics::register(&registry)?,
     ));
