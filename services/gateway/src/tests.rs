@@ -800,16 +800,17 @@ async fn ping_is_answered() {
 /// interval, so a flood cannot make the gateway answer every frame.
 #[tokio::test(start_paused = true)]
 async fn frames_over_the_rate_limit_are_answered_once_per_interval() {
-    // A burst of two frames; the bucket refills on the wall clock, which
-    // barely moves while the paused test clock jumps.
+    // The byte bucket holds two bytes, less than any frame, so every frame
+    // is over the limit however the wall clock it refills on moves; the
+    // notices follow the test clock.
     let limits = Limits {
-        frames_per_sec: 1,
+        bytes_per_sec: 1,
         ..LIMITS
     };
     let gw = Arc::new(Gateway::new(MemBus::default(), limits, metrics()));
     let mut a = Client::connect(&gw);
     a.authenticate().await;
-    for req_id in 1..=5 {
+    for req_id in 1..=3 {
         a.send(req_id, ClientMsg::Ping).await;
     }
     let limited = |req_id| {
@@ -820,10 +821,8 @@ async fn frames_over_the_rate_limit_are_answered_once_per_interval() {
             },
         )
     };
-    assert_eq!(a.recv().await.unwrap(), Frame::new(1, ServerMsg::Pong));
-    assert_eq!(a.recv().await.unwrap(), Frame::new(2, ServerMsg::Pong));
-    assert_eq!(a.recv().await.unwrap(), limited(3));
-    assert_eq!(a.recv().await, None, "4 and 5 are dropped silently");
+    assert_eq!(a.recv().await.unwrap(), limited(1));
+    assert_eq!(a.recv().await, None, "2 and 3 are dropped silently");
     assert_eq!(gw.metrics.rate_limited.get(), 3);
 
     tokio::time::sleep(LIMIT_NOTICE_INTERVAL).await;
