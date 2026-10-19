@@ -129,6 +129,16 @@ pub fn message_key(peer: &PeerId, sent_at_ms: u64, msg_id: &MsgId) -> Vec<u8> {
     k
 }
 
+/// The first and the last [`message_key`] a conversation can have, both
+/// inclusive: every message with `peer` lies between them, whatever its
+/// date, so the range lists or deletes the whole conversation.
+pub fn peer_messages(peer: &PeerId) -> (Vec<u8>, Vec<u8>) {
+    (
+        message_key(peer, 0, &MsgId([0; MsgId::LEN])),
+        message_key(peer, u64::MAX, &MsgId([u8::MAX; MsgId::LEN])),
+    )
+}
+
 /// At-rest encryption for every record the core persists. Records are bound
 /// to their `(table, key)` through the AEAD associated data, so a storage
 /// attacker cannot swap values between keys.
@@ -366,6 +376,26 @@ mod tests {
             let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
             let sealed = v.seal(Table::Messages, &key, &msg, &mut OsRng);
             assert_eq!(v.open_message(&key, &sealed).unwrap(), msg);
+        }
+    }
+
+    #[test]
+    fn a_conversation_lies_within_its_range_and_no_other_does() {
+        let p = PeerId([7; 32]);
+        let (first, last) = peer_messages(&p);
+        for (at, id) in [(0, [0; 16]), (1, [9; 16]), (u64::MAX, [0xFF; 16])] {
+            let key = message_key(&p, at, &MsgId(id));
+            assert!(first <= key && key <= last, "{at}");
+        }
+        let mut before = [7; 32];
+        before[31] = 6;
+        let mut after = [7; 32];
+        after[31] = 8;
+        for other in [PeerId(before), PeerId(after)] {
+            for (at, id) in [(0, [0; 16]), (u64::MAX, [0xFF; 16])] {
+                let key = message_key(&other, at, &MsgId(id));
+                assert!(key < first || key > last);
+            }
         }
     }
 

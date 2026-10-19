@@ -2139,7 +2139,9 @@ mod legacy {
 /// Attacks on what a device keeps and sends: each test names what it
 /// guards against.
 mod security {
-    use cypher_core::{Command, MessageStatus, Table, session_key};
+    use cypher_core::{
+        Command, Event, MessageStatus, Table, message_key, peer_messages, session_key,
+    };
     use cypher_types::{Addr, DeviceId, MsgId};
 
     use super::{A, B, C, D, E};
@@ -2228,6 +2230,45 @@ mod security {
         );
         assert_eq!(w.status_of(A, id), Some(MessageStatus::Read));
         assert_eq!(w.status_of(a2, id), Some(MessageStatus::Read));
+    }
+
+    /// A contact's clock, or a contact lying about it, cannot date a
+    /// message far ahead: its row would sort past every history view and
+    /// outlive deleting the conversation.
+    #[test]
+    fn a_message_from_the_far_future_is_dated_about_now() {
+        let mut w = super::paired();
+        let (a, b) = (w.peer(A), w.peer(B));
+        let now = w.now;
+        let id = w.msg_id();
+        w.clients[B].ahead = u64::MAX / 2;
+        w.command(
+            B,
+            Command::SendText {
+                peer: a,
+                msg_id: id,
+                text: "from the far future".into(),
+                reply_to: None,
+            },
+        );
+        w.clients[B].ahead = 0;
+        let got = w.clients[A].events.iter().find_map(|e| match e {
+            Event::Message(m) if m.msg_id == id => Some(m.sent_at_ms),
+            _ => None,
+        });
+        let sent_at = got.expect("A got it");
+        assert!(
+            (now..now + 60 * 60_000).contains(&sent_at),
+            "dated about now, not {sent_at}"
+        );
+        let key = message_key(&b, sent_at, &id);
+        assert!(
+            w.clients[A]
+                .kv
+                .contains_key(&(Table::Messages as u8, key.clone()))
+        );
+        let (first, last) = peer_messages(&b);
+        assert!(first <= key && key <= last);
     }
 
     /// A message delivered before the app restarted is still marked read

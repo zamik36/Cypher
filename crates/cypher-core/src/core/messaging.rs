@@ -22,6 +22,11 @@ const LINK_TTL_MS: u64 = 24 * 3600 * 1000;
 const MAX_OWN_LINKS: usize = 32;
 /// Strangers waiting for an answer at once; more are not let in.
 const MAX_PENDING_REQUESTS: usize = 20;
+/// How far ahead of ours the clock a message is dated by may run. A message
+/// dated later is dated this far ahead instead: its date is in its storage
+/// key, which drivers range over to show and to delete a conversation, so
+/// a date anywhere up to `u64::MAX` would hide the row from both.
+const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
 
 /// An invite being joined by, while the host's devices answer one by one.
 pub(super) struct Joining {
@@ -266,7 +271,12 @@ impl<R: CryptoRngCore> Core<R> {
         self.cancel_transfers_with(peer);
     }
 
-    pub(super) fn store_message(&mut self, msg: StoredMessage) {
+    /// Stores a message and shows it. Its date, told by whoever sent it, is
+    /// held to at most [`MAX_CLOCK_SKEW_MS`] ahead of now.
+    pub(super) fn store_message(&mut self, mut msg: StoredMessage) {
+        msg.sent_at_ms = msg
+            .sent_at_ms
+            .min(self.now.saturating_add(MAX_CLOCK_SKEW_MS));
         let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
         let op = self.vault.put(Table::Messages, key, &msg, &mut self.rng);
         self.persist(op);

@@ -99,6 +99,8 @@ pub(crate) struct Client {
     pub on_start: Vec<Command>,
     pub events: Vec<Event>,
     pub connected: bool,
+    /// How far this client's clock runs ahead of the world's.
+    pub ahead: u64,
     inputs: VecDeque<Input>,
 }
 
@@ -162,6 +164,7 @@ impl World {
                 on_start: Vec::new(),
                 events: Vec::new(),
                 connected: false,
+                ahead: 0,
                 inputs: VecDeque::new(),
             });
         }
@@ -191,6 +194,7 @@ impl World {
             on_start: Vec::new(),
             events: Vec::new(),
             connected: false,
+            ahead: 0,
             inputs: VecDeque::new(),
         });
         let i = self.clients.len() - 1;
@@ -218,6 +222,7 @@ impl World {
             on_start: Vec::new(),
             events: Vec::new(),
             connected: false,
+            ahead: 0,
             inputs: VecDeque::new(),
         });
         let i = self.clients.len() - 1;
@@ -520,7 +525,7 @@ impl World {
                     progressed = true;
                     let c = &mut self.clients[i];
                     let effects = match (c.core.as_mut(), c.provision.as_mut()) {
-                        (Some(core), _) => core.handle(input, self.now),
+                        (Some(core), _) => core.handle(input, self.now.saturating_add(c.ahead)),
                         (None, Some(provision)) => provision.handle(input, self.now),
                         (None, None) => Vec::new(),
                     };
