@@ -241,7 +241,7 @@ mod tests {
         ));
     }
 
-    /// S-107: a host on a private network, but not the deployment's proxy,
+    /// A host on a private network, but not the deployment's proxy,
     /// cannot pick a fresh per-address share for each connection by naming
     /// another client in `X-Forwarded-For`.
     #[test]

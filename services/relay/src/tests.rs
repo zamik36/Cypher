@@ -196,7 +196,7 @@ async fn a_client_that_stops_reading_is_disconnected() {
     assert_eq!(relay.metrics.connections.get(), 0);
 }
 
-/// S-104: while a reply waits for a client that stopped reading, nothing
+/// While a reply waits for a client that stopped reading, nothing
 /// else on the connection runs, the idle timer included; the stalled write
 /// itself closes the connection.
 #[tokio::test(start_paused = true)]

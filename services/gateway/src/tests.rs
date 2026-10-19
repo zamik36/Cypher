@@ -272,7 +272,7 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
             status: DeliveryStatus::Busy
         }
     ));
-    // Q-423: a refused delivery counts as busy, not as delivered.
+    // A refused delivery counts as busy, not as delivered.
     assert_eq!(gw.metrics.delivered_local.get(), 0);
     assert_eq!(gw.metrics.busy.get(), 1);
 }
@@ -306,7 +306,7 @@ impl Client {
     }
 }
 
-/// S-101: clients that stop reading cannot make the gateway hold more than
+/// Clients that stop reading cannot make the gateway hold more than
 /// its outbox budget, however many of them there are; once they leave,
 /// their queued bytes return to it.
 #[tokio::test]
@@ -420,7 +420,7 @@ async fn frames_count_until_written() {
     .expect("written frames return their bytes");
 }
 
-/// S-102: a client that stopped reading is released once its session idles
+/// A client that stopped reading is released once its session idles
 /// out, though its writer is stuck on a frame the client never takes.
 #[tokio::test(start_paused = true)]
 async fn a_client_that_stops_reading_is_released_after_idling() {
@@ -440,7 +440,7 @@ async fn a_client_that_stops_reading_is_released_after_idling() {
     assert_eq!(gw.metrics.connections.get(), 0, "both sessions are closed");
 }
 
-/// S-102: a client that keeps sending but stops reading never idles out;
+/// A client that keeps sending but stops reading never idles out;
 /// the stalled write ends its session.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_write_closes_the_session() {
@@ -609,7 +609,7 @@ impl Bus for SlowSubscribe {
     }
 }
 
-/// S-103: of two logins of one device racing on two nodes exactly one stays
+/// Of two logins of one device racing on two nodes exactly one stays
 /// signed in, and only it gets the device's frames.
 #[tokio::test(start_paused = true)]
 async fn of_two_racing_logins_on_two_nodes_exactly_one_stays() {
@@ -683,7 +683,7 @@ impl Bus for NoPublish {
     }
 }
 
-/// Q-403: publishes the bus refuses (the eviction at sign-in, a relay to
+/// Publishes the bus refuses (the eviction at sign-in, a relay to
 /// another node) are counted instead of vanishing.
 #[tokio::test]
 async fn failed_publishes_are_counted() {
@@ -795,7 +795,7 @@ async fn ping_is_answered() {
     assert_eq!(a.recv().await.unwrap(), Frame::new(5, ServerMsg::Pong));
 }
 
-/// Q-408: a frame over the rate limit is answered with `RateLimited`
+/// A frame over the rate limit is answered with `RateLimited`
 /// instead of leaving the client to time out, but at most once per
 /// interval, so a flood cannot make the gateway answer every frame.
 #[tokio::test(start_paused = true)]
