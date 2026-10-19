@@ -1209,67 +1209,78 @@ fn publish_keys_of(id: &IdentityKeyPair, device: DeviceId) -> ClientMsg {
     }
 }
 
-/// Only devices an identity lists hold keys, and a few about to be listed:
-/// one identity cannot store keys for any number of devices (S-106).
-#[tokio::test]
-async fn keys_are_kept_only_for_listed_devices_and_a_few_joining() {
-    let Some(h) = handler(None).await else { return };
-    let alice = IdentityKeyPair::generate();
-    let me = Some(alice.peer_id());
-    let mut acked = Vec::new();
-    for device in (1000..1010).map(DeviceId) {
-        if let ServerMsg::KeysAck { .. } = ask(&h, me, publish_keys_of(&alice, device)).await {
-            acked.push(device);
-        }
-    }
-    assert_eq!(
-        acked,
-        [DeviceId(1000), DeviceId(1001)],
-        "two may be joining"
-    );
-    let again = ask(&h, me, publish_keys_of(&alice, DeviceId(1001))).await;
-    assert!(matches!(again, ServerMsg::KeysAck { .. }), "{again:?}");
-
-    // The list names one of them: the other loses its keys, and the
-    // listed devices publish as they like.
-    let list = DeviceList::sign(&alice, 1, [DeviceId::FIRST, DeviceId(1001)]).unwrap();
-    assert_eq!(ask(&h, me, publish_devices(&list)).await, ServerMsg::Done);
-    let fetch = |device| ClientMsg::FetchKeys {
+/// Whether anyone can fetch the keys of `alice`'s `device`.
+async fn has_keys(h: &Handler, alice: &IdentityKeyPair, device: DeviceId) -> bool {
+    let fetch = ClientMsg::FetchKeys {
         peer: alice.peer_id(),
         device,
     };
     let bob = Some(IdentityKeyPair::generate().peer_id());
-    assert!(is_error(
-        &ask(&h, bob, fetch(DeviceId(1000))).await,
-        ErrorCode::NotFound
-    ));
-    assert!(matches!(
-        ask(&h, bob, fetch(DeviceId(1001))).await,
-        ServerMsg::Keys { .. }
-    ));
-    for device in [
-        DeviceId::FIRST,
-        DeviceId(1001),
-        DeviceId(1002),
-        DeviceId(1003),
-    ] {
-        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
-        assert!(
-            matches!(answer, ServerMsg::KeysAck { .. }),
-            "{device}: {answer:?}"
-        );
+    match ask(h, bob, fetch).await {
+        ServerMsg::Keys { .. } => true,
+        other => {
+            assert!(is_error(&other, ErrorCode::NotFound), "{other:?}");
+            false
+        }
     }
-    let refused = ask(&h, me, publish_keys_of(&alice, DeviceId(1004))).await;
-    assert!(is_error(&refused, ErrorCode::BadRequest), "{refused:?}");
 }
 
+/// Only devices an identity lists hold keys, and the two latest of those
+/// about to be listed: one identity cannot store keys for any number of
+/// devices, and a device that publishes is never refused for it.
 #[tokio::test]
-async fn publishing_keys_is_rate_limited() {
+async fn keys_are_kept_only_for_listed_devices_and_the_latest_joining() {
     let Some(h) = handler(None).await else { return };
     let alice = IdentityKeyPair::generate();
     let me = Some(alice.peer_id());
-    for _ in 0..60 {
-        let answer = ask(&h, me, publish_keys_of(&alice, DeviceId::FIRST)).await;
+    for device in [1000, 1001, 1002, 1000, 1003].map(DeviceId) {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
+        assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
+    }
+    // 1001 published longest ago and gave way to 1003, then 1002 did; 1000
+    // published again in between, so it stays.
+    let mut held = Vec::new();
+    for device in [1000, 1001, 1002, 1003].map(DeviceId) {
+        if has_keys(&h, &alice, device).await {
+            held.push(device);
+        }
+    }
+    assert_eq!(held, [DeviceId(1000), DeviceId(1003)]);
+
+    // The list names one of them: the other loses its keys, and listed
+    // devices never make others give way.
+    let list = DeviceList::sign(&alice, 1, [DeviceId::FIRST, DeviceId(1003)]).unwrap();
+    assert_eq!(ask(&h, me, publish_devices(&list)).await, ServerMsg::Done);
+    assert!(!has_keys(&h, &alice, DeviceId(1000)).await);
+    for device in [
+        DeviceId::FIRST,
+        DeviceId(1003),
+        DeviceId(1004),
+        DeviceId(1005),
+    ] {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
+        assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
+    }
+    for device in [
+        DeviceId::FIRST,
+        DeviceId(1003),
+        DeviceId(1004),
+        DeviceId(1005),
+    ] {
+        assert!(has_keys(&h, &alice, device).await, "{device}");
+    }
+}
+
+/// Key publishes are limited per identity, however many device ids it
+/// makes up: 60 an hour for each device it may have.
+#[tokio::test]
+async fn publishing_keys_is_rate_limited_per_identity() {
+    let Some(h) = handler(None).await else { return };
+    let alice = IdentityKeyPair::generate();
+    let me = Some(alice.peer_id());
+    let per_hour = 60 * u32::try_from(cypher_types::MAX_DEVICES).unwrap();
+    for device in (1..=per_hour).map(DeviceId) {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
         assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
     }
     assert!(is_error(

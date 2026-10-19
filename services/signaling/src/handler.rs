@@ -36,11 +36,15 @@ const DEVICE_FETCHES_PER_HOUR: u32 = 120;
 const DEVICE_PUBLISHES_PER_HOUR: u32 = 10;
 /// Key publishes one identity may make per hour, all its devices together:
 /// each device publishes on every connect and when it runs low on one-time
-/// prekeys, so this leaves room for flaky mobile links.
-const KEY_PUBLISHES_PER_HOUR: u32 = 60;
+/// prekeys, so 60 a device leaves room for flaky mobile links. Counted per
+/// identity, not per device, so made-up device ids cannot multiply it.
+const KEY_PUBLISHES_PER_HOUR: u32 = 60 * MAX_DEVICES_U32;
+const MAX_DEVICES_U32: u32 = 6;
+const _: () = assert!(MAX_DEVICES_U32 as usize == cypher_types::MAX_DEVICES);
 /// Devices of one identity that may hold keys while its list does not name
 /// them: one being linked or recovered, and one spare for a second at once.
-/// Publishing a list takes the keys of those it does not name.
+/// A further one takes the place of the one that published longest ago;
+/// publishing a list takes the keys of those it does not name.
 const UNLISTED_DEVICES_WITH_KEYS: usize = 2;
 /// Inbox items one identity may put per hour over its session, all its
 /// devices together (through the onion the relay limits them): a message
@@ -520,29 +524,37 @@ impl Handler {
             return Ok(error(ErrorCode::RateLimited));
         }
         let addr = Addr::new(*peer, device);
-        if !self.may_hold_keys(addr).await? {
-            return Ok(error(ErrorCode::BadRequest));
-        }
+        self.make_room_for_keys(addr).await?;
         let opks_left = self.store.publish_keys(addr, base, opks, replace).await?;
         Ok(ServerMsg::KeysAck { opks_left })
     }
 
-    /// Whether the device `addr` may hold keys: its identity lists it (the
-    /// first device, before there is a list), or it is one of the few
+    /// Lets the device `addr` hold keys. One its identity lists (the first
+    /// device, before there is a list) always may. One it does not is
     /// about to be listed, since a device being linked or recovered
-    /// publishes its keys before its list names it.
-    async fn may_hold_keys(&self, addr: Addr) -> redis::RedisResult<bool> {
+    /// publishes its keys before its list names it; only a few such
+    /// devices keep keys, so the one that published longest ago loses them.
+    async fn make_room_for_keys(&self, addr: Addr) -> redis::RedisResult<()> {
         let list = self.store.fetch_devices(&addr.peer).await?;
         let listed = match list.as_deref().map(DeviceList::decode) {
             Some(Ok(list)) => list.contains(addr.device),
             Some(Err(_)) | None => addr.device == DeviceId::FIRST,
         };
         if listed {
-            return Ok(true);
+            return Ok(());
         }
-        self.store
-            .admit_unlisted(addr, UNLISTED_DEVICES_WITH_KEYS)
-            .await
+        let evicted = self
+            .store
+            .note_unlisted(addr, UNLISTED_DEVICES_WITH_KEYS)
+            .await?;
+        match evicted {
+            Some(device) => {
+                self.store
+                    .forget_device_keys(Addr::new(addr.peer, device))
+                    .await
+            }
+            None => Ok(()),
+        }
     }
 
     /// A device's keys. One identity asking is limited per hour; through the

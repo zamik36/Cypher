@@ -155,15 +155,20 @@ const DEVICES_SCRIPT: &str = r"
     redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[3])
     return 1";
 
-/// KEYS: unlisted devices. ARGV: device, max devices, ttl. Whether the
-/// device may hold keys while its identity's list does not name it: it
-/// already does, or there is room for one more such device.
+/// KEYS: unlisted devices, scored in the order they last published. ARGV:
+/// device, max devices, ttl. Notes the device as the latest; when `max`
+/// others are noted already, the one that published longest ago makes
+/// room and is returned (0: none).
 const UNLISTED_SCRIPT: &str = r"
-    if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return 1 end
-    if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
-    redis.call('SADD', KEYS[1], ARGV[1])
+    local evicted = 0
+    if not redis.call('ZSCORE', KEYS[1], ARGV[1])
+      and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then
+      evicted = tonumber(redis.call('ZPOPMIN', KEYS[1])[1])
+    end
+    local latest = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')[2]
+    redis.call('ZADD', KEYS[1], tonumber(latest or '0') + 1, ARGV[1])
     redis.call('EXPIRE', KEYS[1], ARGV[3])
-    return 1";
+    return evicted";
 
 pub(crate) enum PutOutcome {
     Stored,
@@ -346,9 +351,14 @@ impl Store {
     }
 
     /// Notes that `addr` holds keys though its identity's list does not
-    /// name it; `false` when `max` such devices hold keys already.
-    pub(crate) async fn admit_unlisted(&self, addr: Addr, max: usize) -> redis::RedisResult<bool> {
-        let admitted: i64 = self
+    /// name it. With `max` such devices noted already, the one that
+    /// published longest ago is no longer, and is returned: its keys go.
+    pub(crate) async fn note_unlisted(
+        &self,
+        addr: Addr,
+        max: usize,
+    ) -> redis::RedisResult<Option<DeviceId>> {
+        let evicted: u32 = self
             .unlisted_script
             .key(key(b"u:", addr.peer.as_bytes()))
             .arg(addr.device.0)
@@ -356,7 +366,7 @@ impl Store {
             .arg(KEYS_TTL_SECS)
             .invoke_async(&mut self.redis.clone())
             .await?;
-        Ok(admitted == 1)
+        Ok((evicted != 0).then_some(DeviceId(evicted)))
     }
 
     /// The devices of `peer` that hold keys though its list did not name
@@ -365,7 +375,7 @@ impl Store {
         let unlisted = key(b"u:", peer.as_bytes());
         let (devices,): (Vec<u32>,) = redis::pipe()
             .atomic()
-            .smembers(&unlisted)
+            .zrange(&unlisted, 0, -1)
             .del(&unlisted)
             .ignore()
             .query_async(&mut self.redis.clone())
