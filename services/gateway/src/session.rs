@@ -36,7 +36,8 @@ pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// the session instead of holding its connection, queue and address slot.
 pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a closing session lets its writer deliver the last frames
-/// (`Superseded`, an error) before abandoning it.
+/// (`Superseded`, an error) before abandoning it. Frames it has not
+/// written by then are dropped unsent; the client learns nothing of them.
 pub(crate) const WRITER_GRACE: Duration = Duration::from_secs(5);
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const SIG_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -515,16 +516,25 @@ where
     K: Sink<Bytes, Error = io::Error> + Unpin,
 {
     if write_until_closed(&mut sink, &mut rx, &cancel).await {
-        let mut held = None;
-        while let Some(queued) = rx.try_recv() {
-            if !feed(&mut sink, queued, &mut held).await {
-                break;
-            }
-        }
-        written(sink.close()).await;
+        drain_and_close(&mut sink, &mut rx).await;
     }
     cancel.cancel();
     debug!("writer closed");
+}
+
+/// Writes what is still queued and closes; a failed write leaves the rest,
+/// and closing, undone.
+async fn drain_and_close<K>(sink: &mut K, rx: &mut OutboxReceiver)
+where
+    K: Sink<Bytes, Error = io::Error> + Unpin,
+{
+    let mut held = None;
+    while let Some(queued) = rx.try_recv() {
+        if !feed(sink, queued, &mut held).await {
+            return;
+        }
+    }
+    written(sink.close()).await;
 }
 
 /// Writes queued frames in batches, one flush each. True when the session
