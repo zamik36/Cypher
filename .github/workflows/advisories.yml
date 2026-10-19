@@ -1,0 +1,110 @@
+name: Advisories
+
+# New advisories land without any change here, so the dependency graphs of
+# main and dev are checked daily and on demand, and at once when the
+# dependency set changes. A pull request that changes it gets the strict
+# check as its status; a failure anywhere else opens (or comments on) one
+# tracking issue. CI on push blocks only on vulnerabilities (ci.yml, deny).
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, dev]
+    paths:
+      - Cargo.lock
+      - .deny.toml
+      - crates/*/fuzz/Cargo.toml
+      - .github/workflows/advisories.yml
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - Cargo.lock
+      - .deny.toml
+      - crates/*/fuzz/Cargo.toml
+      - .github/workflows/advisories.yml
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Advisories (${{ matrix.ref || github.ref_name }}, ${{ matrix.lockfile.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # A schedule runs on the default branch only, so scheduled and manual
+        # runs check out both long-lived branches; push and pull_request
+        # check the commit that triggered them ('' is the event's own ref).
+        ref: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["main", "dev"]' || '[""]') }}
+        lockfile:
+          - { name: workspace, dir: . }
+          - { name: cypher-wire fuzz, dir: crates/cypher-wire/fuzz }
+          - { name: cypher-crypto fuzz, dir: crates/cypher-crypto/fuzz }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-deny@0.19.0,cargo-audit@0.22.2
+      # The fuzz crates are workspaces of their own and keep no lockfile in
+      # git: resolve one as the fuzz jobs do, so the check sees what they build.
+      - name: Resolve the lockfile
+        if: matrix.lockfile.dir != '.'
+        run: cargo generate-lockfile --manifest-path ${{ matrix.lockfile.dir }}/Cargo.toml
+      # The policy of .deny.toml (unsound = "all"). Most ignored crates are
+      # not in the fuzz graphs, so an unmatched ignore is no error there.
+      - name: cargo deny
+        run: >-
+          cargo deny --manifest-path ${{ matrix.lockfile.dir }}/Cargo.toml --all-features
+          check --config .deny.toml
+          ${{ matrix.lockfile.dir != '.' && '--allow advisory-not-detected' || '' }}
+          advisories
+      # A second reader over the whole lockfile (every target and feature),
+      # with the ignores of .deny.toml: only the quoted entries of its ignore
+      # array, not ids that comments mention.
+      - name: cargo audit
+        run: |
+          ignores=$(grep -oE '^\s*"RUSTSEC-[0-9]+-[0-9]+"' .deny.toml | tr -d ' "' | sed 's/^/--ignore=/')
+          # shellcheck disable=SC2086
+          cargo audit --file ${{ matrix.lockfile.dir }}/Cargo.lock --deny unsound $ignores
+
+  report:
+    name: Tracking issue
+    needs: [check]
+    # A pull request shows the failure as its status; no issue for it.
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Dependency advisory check failed"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          body="Advisory check failed ($GITHUB_EVENT_NAME on $GITHUB_REF_NAME; scheduled and manual runs cover main and dev): $RUN_URL"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body
+
+          Update the dependency or add an ignore with its reason and a review
+          date to .deny.toml. Close this issue once the check passes again."
+          fi
