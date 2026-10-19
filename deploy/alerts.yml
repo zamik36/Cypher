@@ -52,6 +52,24 @@ groups:
           summary: "Sealed messages do not reach the gateways"
           description: "Signaling gets no answer from gateways for sealed sends (NATS down or its rights wrong); clients send with their name meanwhile."
 
+      - alert: InboxBudgetFull
+        expr: rate(signaling_inbox_quota_refused_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "All inboxes together are full"
+          description: "Signaling refuses inbox items and new inboxes because all inboxes hold their shared budget: offline delivery fails for everyone. Someone floods them, or the budget is too small for the users."
+
+      - alert: PushSignalsShed
+        expr: rate(signaling_push_shed_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Signaling drops push signals"
+          description: "Too many push signals are on their way at once; devices find their messages on their next poll instead of being woken."
+
       - alert: DeliveriesBusy
         expr: rate(gateway_busy_total[5m]) > 10
         for: 10m

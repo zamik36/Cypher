@@ -1,6 +1,7 @@
 //! The request handler against a live Redis (`CYPHER_TEST_REDIS`); each test
-//! skips without it. Fresh random identities, links and inboxes keep runs
-//! independent of each other and of leftover state.
+//! skips without it locally and fails without it in CI. Fresh random
+//! identities, links and inboxes keep runs independent of each other and of
+//! leftover state.
 
 use bytes::Bytes;
 use cypher_crypto::inbox::{InboxKey, InboxOp, push_extra};
@@ -11,25 +12,48 @@ use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, Serve
 use rand::RngCore as _;
 use rand::rngs::OsRng;
 
-use crate::handler::{CAPABILITY_ONION, CAPABILITY_PUSH, Courier, Delivery, Handler, Pusher};
+use crate::handler::{
+    CAPABILITY_ONION, CAPABILITY_PUSH, Caller, Courier, Delivery, Handler, PUSH_PERMITS, Pusher,
+    anonymous_allowed,
+};
 use crate::push::{Outcome, Subscription};
-use crate::store::Store;
+use crate::store::{InboxQuota, Store};
 
+/// A handler on the live Redis, whose inboxes have counters of their own:
+/// what other tests and runs leave in their inboxes counts elsewhere.
 async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
-    let url = std::env::var("CYPHER_TEST_REDIS").ok()?;
+    handler_with(relay_addr, InboxQuota::default()).await
+}
+
+async fn handler_with(relay_addr: Option<&str>, quota: InboxQuota) -> Option<Handler> {
+    let url = cypher_server_kit::testing::live_env("CYPHER_TEST_REDIS")?;
+    let quota = InboxQuota {
+        scope: random32().to_vec(),
+        ..quota
+    };
     Some(Handler {
-        store: Store::connect(&url).await.unwrap(),
+        store: Store::connect_with(&url, quota).await.unwrap(),
         signing_key: [7; 32],
         relay_addr: relay_addr.map(str::to_owned),
         push: None,
         courier: Courier::Stub(std::sync::Arc::new(|_, _| Delivery::Away)),
         fetches: tokio::sync::Semaphore::new(crate::handler::FETCH_PERMITS),
+        pushes: std::sync::Arc::new(tokio::sync::Semaphore::new(PUSH_PERMITS)),
+        push_shed: prometheus::IntCounter::new("push_shed", "test").unwrap(),
         sealed_unavailable: prometheus::IntCounter::new("sealed_unavailable", "test").unwrap(),
+        inbox_quota_refused: prometheus::IntCounter::new("inbox_quota_refused", "test").unwrap(),
     })
 }
 
+/// Asks `msg` as `peer` signed in at a gateway, or without one as no one in
+/// particular, as the onion path does once its filter let `msg` through.
 async fn ask(h: &Handler, peer: Option<PeerId>, msg: ClientMsg) -> ServerMsg {
-    let reply = h.handle(peer, Frame::new(9, msg).encode()).await;
+    let caller = peer.map_or(Caller::Onion, Caller::Session);
+    let reply = h.handle(caller, Frame::new(9, msg).encode()).await;
+    decode_reply(reply)
+}
+
+fn decode_reply(reply: Bytes) -> ServerMsg {
     let frame = Frame::<ServerMsg>::decode(reply).unwrap();
     assert_eq!(frame.req_id, 9, "replies echo the request id");
     frame.msg
@@ -591,7 +615,9 @@ async fn bootstrap_advertises_the_onion_relay_when_configured() {
 #[tokio::test]
 async fn undecodable_frames_get_bad_request() {
     let Some(h) = handler(None).await else { return };
-    let reply = h.handle(None, Bytes::from_static(&[0xEE, 1, 2])).await;
+    let reply = h
+        .handle(Caller::Onion, Bytes::from_static(&[0xEE, 1, 2]))
+        .await;
     let frame = Frame::<ServerMsg>::decode(reply).unwrap();
     assert_eq!(frame.req_id, 0);
     assert!(is_error(&frame.msg, ErrorCode::BadRequest));
@@ -879,6 +905,7 @@ async fn push_is_registered_anonymously_and_signals_once_per_burst() {
     // Two items in a row wake the device once.
     assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
     assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
+    settle(&h).await;
     let got = sent.lock().unwrap().clone();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].endpoint, "https://ntfy.sh/up1");
@@ -903,6 +930,7 @@ async fn a_subscription_the_push_service_dropped_is_forgotten() {
         ServerMsg::Done
     );
     assert_eq!(ask(&h, None, put(inbox)).await, ServerMsg::Done);
+    settle(&h).await;
     assert_eq!(sent.lock().unwrap().len(), 1);
     assert_eq!(h.store.push_subscription(&inbox).await.unwrap(), None);
 }
@@ -1025,4 +1053,442 @@ async fn sealed_sends_go_only_through_the_onion() {
     let signed_in = ask(&h, Some(PeerId(random32())), send).await;
     assert!(is_error(&signed_in, ErrorCode::BadRequest));
     assert!(handed.lock().unwrap().is_empty());
+}
+
+/// A subscription that ends on its own stops the service with an error,
+/// and while it lasts each pool sheds what it has no permit for.
+#[tokio::test]
+async fn a_subscription_that_ends_is_an_error() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
+
+    let shed = prometheus::IntCounter::new("shed", "test").unwrap();
+    let (gate, handled) = (CancellationToken::new(), Arc::new(AtomicUsize::new(0)));
+    let (g, done) = (gate.clone(), Arc::clone(&handled));
+    let messages = futures::stream::iter([1, 2, 3]);
+    let ended = crate::serve("sig.test", messages, 1, &shed, move |_| {
+        let (g, done) = (g.clone(), Arc::clone(&done));
+        async move {
+            g.cancelled().await;
+            done.fetch_add(1, Ordering::SeqCst);
+        }
+    })
+    .await;
+    assert!(ended.to_string().contains("sig.test"), "{ended}");
+    assert_eq!(shed.get(), 2, "one permit: the first is handled, two shed");
+
+    let shutdown = CancellationToken::new();
+    crate::stopped(Some(ended), &shutdown).unwrap_err();
+    shutdown.cancel();
+    let ended = anyhow::anyhow!("closed while shutting down");
+    crate::stopped(Some(ended), &shutdown).unwrap();
+    crate::stopped(None, &CancellationToken::new()).unwrap();
+
+    gate.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while handled.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// `sig.req` is the session path: a request on it without a valid peer
+/// header is refused, never answered as anonymous.
+#[tokio::test]
+async fn forwarded_requests_without_a_valid_peer_are_refused() {
+    let Some(mut h) = handler(None).await else {
+        return;
+    };
+    let (_, handed) = recording_courier(&mut h);
+    let owner = Inbox::random();
+    let sealed = ClientMsg::SendSealed {
+        to: PeerId(random32()),
+        device: DeviceId::FIRST,
+        token: random32(),
+        inbox: None,
+        item: Bytes::from_static(b"sealed"),
+    };
+    let mut short = PeerId(random32()).to_hex();
+    short.truncate(62);
+    for header in [None, Some(""), Some("zz"), Some(short.as_str())] {
+        for msg in [sealed.clone(), owner.fetch(), ClientMsg::PushKey] {
+            let reply = h
+                .handle_forwarded(header, Frame::new(9, msg).encode())
+                .await;
+            let reply = decode_reply(reply);
+            assert!(
+                is_error(&reply, ErrorCode::BadRequest),
+                "{header:?}: {reply:?}"
+            );
+        }
+    }
+    assert!(handed.lock().unwrap().is_empty(), "nothing was delivered");
+
+    let peer = PeerId(random32()).to_hex();
+    let reply = h
+        .handle_forwarded(Some(&peer), Frame::new(9, owner.fetch()).encode())
+        .await;
+    assert!(matches!(decode_reply(reply), ServerMsg::InboxBatch { .. }));
+}
+
+/// What the onion lets through: requests that name a blind inbox and
+/// introductions, nothing that needs an identity or is not a signaling
+/// request at all.
+#[test]
+fn only_requests_that_need_no_identity_pass_the_onion() {
+    let proof = Inbox::random().proof(InboxOp::Fetch, &[]);
+    let anonymous = [
+        put([1; 32]),
+        ClientMsg::InboxFetch {
+            proof,
+            close: false,
+        },
+        ClientMsg::InboxAck {
+            proof,
+            claim: [0; 16],
+        },
+        ClientMsg::PushKey,
+        Inbox::random().register("https://ntfy.sh/x", [4; 65]),
+        ClientMsg::PushUnregister { proof },
+        ClientMsg::FetchKeys {
+            peer: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+        },
+        fetch_devices(PeerId([1; 32])),
+        ClientMsg::ResolveLink {
+            link: LinkId::random(&mut OsRng),
+        },
+        ClientMsg::SendSealed {
+            to: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+            token: [0; 32],
+            inbox: None,
+            item: Bytes::new(),
+        },
+    ];
+    let identified = [
+        ClientMsg::PublishKeys {
+            base: Bytes::new(),
+            opks: Vec::new(),
+            replace_opks: false,
+        },
+        ClientMsg::PublishDevices { list: Bytes::new() },
+        ClientMsg::CreateLink,
+        ClientMsg::Bootstrap,
+        ClientMsg::Hello {
+            version: 4,
+            peer: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+        },
+        ClientMsg::Auth { signature: [0; 64] },
+        ClientMsg::Ping,
+        ClientMsg::Send {
+            to: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+            want_ack: false,
+            body: Bytes::new(),
+        },
+        ClientMsg::SetAccess { hashes: Vec::new() },
+    ];
+    for msg in &anonymous {
+        assert!(anonymous_allowed(msg), "{msg:?}");
+    }
+    for msg in &identified {
+        assert!(!anonymous_allowed(msg), "{msg:?}");
+    }
+}
+
+fn publish_keys_of(id: &IdentityKeyPair, device: DeviceId) -> ClientMsg {
+    ClientMsg::PublishKeys {
+        base: device_bundle(id, device),
+        opks: vec![(1, random32())],
+        replace_opks: true,
+    }
+}
+
+/// Whether anyone can fetch the keys of `alice`'s `device`.
+async fn has_keys(h: &Handler, alice: &IdentityKeyPair, device: DeviceId) -> bool {
+    let fetch = ClientMsg::FetchKeys {
+        peer: alice.peer_id(),
+        device,
+    };
+    let bob = Some(IdentityKeyPair::generate().peer_id());
+    match ask(h, bob, fetch).await {
+        ServerMsg::Keys { .. } => true,
+        other => {
+            assert!(is_error(&other, ErrorCode::NotFound), "{other:?}");
+            false
+        }
+    }
+}
+
+/// Only devices an identity lists hold keys, and the two latest of those
+/// about to be listed: one identity cannot store keys for any number of
+/// devices, and a device that publishes is never refused for it.
+#[tokio::test]
+async fn keys_are_kept_only_for_listed_devices_and_the_latest_joining() {
+    let Some(h) = handler(None).await else { return };
+    let alice = IdentityKeyPair::generate();
+    let me = Some(alice.peer_id());
+    for device in [1000, 1001, 1002, 1000, 1003].map(DeviceId) {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
+        assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
+    }
+    // 1001 published longest ago and gave way to 1003, then 1002 did; 1000
+    // published again in between, so it stays.
+    let mut held = Vec::new();
+    for device in [1000, 1001, 1002, 1003].map(DeviceId) {
+        if has_keys(&h, &alice, device).await {
+            held.push(device);
+        }
+    }
+    assert_eq!(held, [DeviceId(1000), DeviceId(1003)]);
+
+    // The list names one of them: the other loses its keys, and listed
+    // devices never make others give way.
+    let list = DeviceList::sign(&alice, 1, [DeviceId::FIRST, DeviceId(1003)]).unwrap();
+    assert_eq!(ask(&h, me, publish_devices(&list)).await, ServerMsg::Done);
+    assert!(!has_keys(&h, &alice, DeviceId(1000)).await);
+    for device in [
+        DeviceId::FIRST,
+        DeviceId(1003),
+        DeviceId(1004),
+        DeviceId(1005),
+    ] {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
+        assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
+    }
+    for device in [
+        DeviceId::FIRST,
+        DeviceId(1003),
+        DeviceId(1004),
+        DeviceId(1005),
+    ] {
+        assert!(has_keys(&h, &alice, device).await, "{device}");
+    }
+}
+
+/// Key publishes are limited per identity, however many device ids it
+/// makes up: 60 an hour for each device it may have.
+#[tokio::test]
+async fn publishing_keys_is_rate_limited_per_identity() {
+    let Some(h) = handler(None).await else { return };
+    let alice = IdentityKeyPair::generate();
+    let me = Some(alice.peer_id());
+    let per_hour = 60 * u32::try_from(cypher_types::MAX_DEVICES).unwrap();
+    for device in (1..=per_hour).map(DeviceId) {
+        let answer = ask(&h, me, publish_keys_of(&alice, device)).await;
+        assert!(matches!(answer, ServerMsg::KeysAck { .. }), "{answer:?}");
+    }
+    assert!(is_error(
+        &ask(&h, me, publish_keys_of(&alice, DeviceId::FIRST)).await,
+        ErrorCode::RateLimited
+    ));
+}
+
+/// Reads and acknowledges everything `owner` holds.
+async fn drain(h: &Handler, owner: &Inbox) {
+    loop {
+        let ServerMsg::InboxBatch { claim, items } = ask(h, None, owner.fetch()).await else {
+            panic!("no batch");
+        };
+        if items.is_empty() {
+            return;
+        }
+        assert_eq!(ask(h, None, owner.ack(claim)).await, ServerMsg::Done);
+    }
+}
+
+/// What the day counters of `h` count together, as seen at `now`.
+async fn budget_held(h: &Handler, now: u64) -> u64 {
+    let held: i64 = h.store.inbox_counters(now).await.iter().map(|c| c.0).sum();
+    held.unsigned_abs()
+}
+
+/// All inboxes together hold a bounded number of bytes, however many
+/// anonymous keys open them; reading gives the room back, and the counters
+/// expire with what they count.
+#[tokio::test]
+async fn all_inboxes_together_hold_a_bounded_number_of_bytes() {
+    use crate::store::{INBOX_ITEM_OVERHEAD, INBOX_OPENING_COST};
+    let item = Bytes::from(vec![7u8; 1000]);
+    let cost = item.len() as u64 + INBOX_ITEM_OVERHEAD;
+    let opened = 4 * INBOX_OPENING_COST;
+    let quota = InboxQuota {
+        budget: opened + 10 * cost,
+        ..InboxQuota::default()
+    };
+    let Some(h) = handler_with(None, quota).await else {
+        return;
+    };
+    let owners: Vec<Inbox> = (0..4).map(|_| Inbox::random()).collect();
+    for owner in &owners {
+        open_inbox(&h, owner).await;
+    }
+    let put = |owner: &Inbox| ClientMsg::InboxPut {
+        inbox: owner.id(),
+        item: item.clone(),
+    };
+    let mut stored = 0;
+    for owner in owners.iter().cycle().take(12) {
+        match ask(&h, None, put(owner)).await {
+            ServerMsg::Done => stored += 1,
+            refused => assert!(is_error(&refused, ErrorCode::TooLarge), "{refused:?}"),
+        }
+    }
+    assert_eq!(stored, 10, "the budget, spread over any number of inboxes");
+    assert_eq!(h.inbox_quota_refused.get(), 2);
+    let now = crate::now_secs();
+    assert_eq!(budget_held(&h, now).await, opened + 10 * cost);
+    let counters = h.store.inbox_counters(now).await;
+    assert!(
+        counters
+            .iter()
+            .all(|&(_, ttl)| ttl > 0 && ttl <= 15 * 86_400),
+        "counters end the day their inboxes do: {counters:?}"
+    );
+
+    drain(&h, &owners[0]).await;
+    assert_eq!(ask(&h, None, put(&owners[1])).await, ServerMsg::Done);
+    for owner in &owners {
+        drain(&h, owner).await;
+    }
+    assert_eq!(budget_held(&h, now).await, opened, "only the openings");
+    for owner in &owners {
+        assert!(matches!(
+            ask(&h, None, owner.close()).await,
+            ServerMsg::InboxBatch { .. }
+        ));
+    }
+    assert_eq!(h.store.inbox_counters(now).await, [], "nothing gone counts");
+}
+
+/// Opening an inbox draws on the budget of all inboxes: past it nothing
+/// new opens, while inboxes open already stay open; closing one makes
+/// room again.
+#[tokio::test]
+async fn openings_count_against_the_budget_of_all_inboxes() {
+    let quota = InboxQuota {
+        budget: 2 * crate::store::INBOX_OPENING_COST,
+        ..InboxQuota::default()
+    };
+    let Some(h) = handler_with(None, quota).await else {
+        return;
+    };
+    let (a, b, c) = (Inbox::random(), Inbox::random(), Inbox::random());
+    open_inbox(&h, &a).await;
+    open_inbox(&h, &b).await;
+    let refused = ask(&h, None, c.fetch()).await;
+    assert!(is_error(&refused, ErrorCode::Unavailable), "{refused:?}");
+    assert!(
+        is_error(&ask(&h, None, put(c.id())).await, ErrorCode::NotFound),
+        "the refused inbox is not open to writers"
+    );
+    assert_eq!(h.inbox_quota_refused.get(), 1);
+
+    open_inbox(&h, &a).await;
+    assert!(matches!(
+        ask(&h, None, b.close()).await,
+        ServerMsg::InboxBatch { .. }
+    ));
+    open_inbox(&h, &c).await;
+}
+
+/// An item put just before midnight and read just after is taken off the
+/// counter it was put on: put and ack agree on the day by the list's
+/// expiry, not by when they run.
+#[tokio::test]
+async fn put_and_ack_agree_across_a_day_boundary() {
+    let Some(h) = handler(None).await else { return };
+    let owner = Inbox::random();
+    open_inbox(&h, &owner).await;
+    let (before, after) = {
+        let day = crate::now_secs() / 86_400;
+        (day * 86_400 + 86_399, (day + 1) * 86_400)
+    };
+    let opened = crate::store::INBOX_OPENING_COST;
+    let stored = h.store.inbox_put(&owner.id(), b"sealed", before).await;
+    assert!(matches!(stored, Ok(crate::store::PutOutcome::Stored)));
+    assert!(budget_held(&h, before).await > opened);
+
+    let ServerMsg::InboxBatch { claim, items } = ask(&h, None, owner.fetch()).await else {
+        panic!("no batch");
+    };
+    assert_eq!(items.len(), 1);
+    h.store.inbox_ack(&owner.id(), &claim, after).await.unwrap();
+    assert_eq!(budget_held(&h, after).await, opened);
+}
+
+/// Over a session, one identity's inbox requests are limited; through the
+/// onion the relay limits each asker instead.
+#[tokio::test]
+async fn inbox_requests_over_a_session_are_rate_limited_per_identity() {
+    let Some(h) = handler(None).await else { return };
+    let me = Some(PeerId(random32()));
+    let owner = Inbox::random();
+    for _ in 0..600 {
+        let answer = ask(&h, me, owner.fetch()).await;
+        assert!(matches!(answer, ServerMsg::InboxBatch { .. }), "{answer:?}");
+    }
+    let limited = ask(&h, me, owner.fetch()).await;
+    assert!(is_error(&limited, ErrorCode::RateLimited), "{limited:?}");
+    assert!(matches!(
+        ask(&h, None, owner.fetch()).await,
+        ServerMsg::InboxBatch { .. }
+    ));
+
+    for _ in 0..1200 {
+        let answer = ask(&h, me, put(Inbox::random().id())).await;
+        assert!(is_error(&answer, ErrorCode::NotFound), "{answer:?}");
+    }
+    let limited = ask(&h, me, put(owner.id())).await;
+    assert!(is_error(&limited, ErrorCode::RateLimited), "{limited:?}");
+    assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
+}
+
+/// Waits until every push signal on its way got its answer: each holds a
+/// permit until then.
+async fn settle(h: &Handler) {
+    let all = u32::try_from(PUSH_PERMITS).unwrap();
+    let wait = h.pushes.acquire_many(all);
+    let permits = tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .expect("push signals settle")
+        .unwrap();
+    drop(permits);
+}
+
+/// Push signals go out from tasks of their own, a bounded number at once:
+/// one past the limit is dropped, not queued, and does not use up the
+/// inbox's signal interval. Only signals that would have gone out count as
+/// dropped.
+#[tokio::test]
+async fn push_signals_on_their_way_are_bounded() {
+    let Some((h, sent)) = push_handler(Outcome::Sent).await else {
+        return;
+    };
+    let (owner, unsubscribed) = (Inbox::random(), Inbox::random());
+    open_inbox(&h, &owner).await;
+    open_inbox(&h, &unsubscribed).await;
+    assert_eq!(
+        ask(&h, None, subscribe(&owner, "https://ntfy.sh/up5")).await,
+        ServerMsg::Done
+    );
+    let all = u32::try_from(PUSH_PERMITS).unwrap();
+    let busy = std::sync::Arc::clone(&h.pushes)
+        .try_acquire_many_owned(all)
+        .unwrap();
+    assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
+    assert_eq!(ask(&h, None, put(unsubscribed.id())).await, ServerMsg::Done);
+    tokio::task::yield_now().await;
+    assert!(sent.lock().unwrap().is_empty(), "dropped while saturated");
+    assert_eq!(h.push_shed.get(), 1, "an inbox without push sheds nothing");
+
+    drop(busy);
+    assert_eq!(ask(&h, None, put(owner.id())).await, ServerMsg::Done);
+    settle(&h).await;
+    assert_eq!(sent.lock().unwrap().len(), 1, "sent once there is room");
 }

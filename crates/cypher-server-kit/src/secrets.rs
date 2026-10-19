@@ -18,21 +18,12 @@ pub fn load_or_create_secret(path: &Path) -> anyhow::Result<[u8; 32]> {
 
     let mut secret = [0u8; 32];
     OsRng.fill_bytes(&mut secret);
-    let temp_path = temp_path(path, OsRng.next_u64());
-    {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)
-            .with_context(|| format!("failed to create {}", temp_path.display()))?;
-        file.write_all(&secret)
-            .with_context(|| format!("failed to write {}", temp_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", temp_path.display()))?;
-    }
-    restrict_file_permissions(&temp_path)?;
-
-    rename_or_reuse(&temp_path, path)?;
+    let temp = TempFile(temp_path(path, OsRng.next_u64()));
+    write_new(&temp.0, &secret).with_context(|| format!("failed to write {}", temp.0.display()))?;
+    link_or_reuse(&temp.0, path, &secret)?;
+    drop(temp);
+    // Whoever put a secret in place first won: every instance signs with
+    // the key the file holds, not with the one it generated.
     read_secret(path)?.ok_or_else(|| anyhow::anyhow!("missing generated secret {}", path.display()))
 }
 
@@ -48,16 +39,50 @@ fn read_secret(path: &Path) -> anyhow::Result<Option<[u8; 32]>> {
     Ok(Some(secret))
 }
 
-fn rename_or_reuse(temp_path: &Path, final_path: &Path) -> anyhow::Result<()> {
-    match fs::rename(temp_path, final_path) {
-        Ok(()) => Ok(()),
-        Err(_) if final_path.exists() => {
-            let _ = fs::remove_file(temp_path);
-            Ok(())
+/// A file that must not outlive the attempt that made it, whichever way
+/// that attempt ends.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `secret` to `path`, which must not exist yet, readable by the
+/// owner only.
+fn write_new(path: &Path, secret: &[u8; 32]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    restrict_file_permissions(path)?;
+    file.write_all(secret)?;
+    file.sync_all()
+}
+
+/// Puts the complete secret in `temp_path` in place at `final_path`, unless
+/// another instance starting at the same time already did. Unlike `rename`,
+/// `hard_link` fails if the target exists, so a secret once in place is
+/// never replaced. On a volume without hard links `secret` is written to
+/// `final_path` directly, still only if it does not exist: a crash midway
+/// then leaves a short file, which the next start refuses rather than
+/// replaces.
+fn link_or_reuse(temp_path: &Path, final_path: &Path, secret: &[u8; 32]) -> anyhow::Result<()> {
+    let placed = match fs::hard_link(temp_path, final_path) {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            write_new(final_path, secret)
         }
+        placed => placed,
+    };
+    match placed {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e).with_context(|| {
             format!(
-                "failed to move generated secret {} -> {}",
+                "failed to put generated secret {} in place at {}",
                 temp_path.display(),
                 final_path.display()
             )
@@ -74,11 +99,10 @@ fn temp_path(path: &Path, nonce: u64) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn restrict_file_permissions(path: &Path) -> anyhow::Result<()> {
+fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("failed to restrict permissions on {}", path.display()))
 }
 
 #[cfg(not(unix))]
@@ -86,7 +110,7 @@ fn restrict_file_permissions(path: &Path) -> anyhow::Result<()> {
     clippy::unnecessary_wraps,
     reason = "same signature as the Unix variant, which can fail"
 )]
-fn restrict_file_permissions(_path: &Path) -> anyhow::Result<()> {
+fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -121,14 +145,63 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), [1u8; 31], "left untouched");
     }
 
+    /// Two instances starting on an empty shared volume each generate a key
+    /// and put it in place: the second finds the first's and uses it, so
+    /// both sign with the key the file keeps.
     #[test]
-    fn losing_the_rename_race_keeps_the_winner() {
+    fn instances_racing_on_first_start_end_up_with_one_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("signing_key.bin");
+        let (first, second) = (temp_path(&path, 1), temp_path(&path, 2));
+        fs::write(&first, [0xaa; 32]).unwrap();
+        fs::write(&second, [0xbb; 32]).unwrap();
+        link_or_reuse(&first, &path, &[0xaa; 32]).unwrap();
+        let key_a = read_secret(&path).unwrap().unwrap();
+        // The second, past its own existence check a moment earlier.
+        link_or_reuse(&second, &path, &[0xbb; 32]).unwrap();
+        let key_b = read_secret(&path).unwrap().unwrap();
+        assert_eq!(key_a, key_b, "both instances sign with one key");
+        assert_eq!(fs::read(&path).unwrap(), [0xaa; 32], "the first one won");
+    }
+
+    #[test]
+    fn a_secret_that_cannot_be_put_in_place_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone.tmp");
+        link_or_reuse(&gone, &dir.path().join("none"), &[1; 32]).unwrap_err();
+    }
+
+    /// Without hard links the secret is written in place, but never over
+    /// one that is there already.
+    #[test]
+    fn writing_in_place_never_replaces_a_secret() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key.bin");
-        fs::write(&path, [9u8; 32]).unwrap();
-        rename_or_reuse(&dir.path().join("gone.tmp"), &path).unwrap();
-        assert_eq!(load_or_create_secret(&path).unwrap(), [9u8; 32]);
-        rename_or_reuse(&dir.path().join("gone.tmp"), &dir.path().join("none")).unwrap_err();
+        write_new(&path, &[3; 32]).unwrap();
+        let err = write_new(&path, &[4; 32]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(read_secret(&path).unwrap(), Some([3; 32]));
+    }
+
+    #[test]
+    fn a_temp_file_goes_however_the_attempt_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.bin.0.tmp");
+        fs::write(&path, b"partial").unwrap();
+        drop(TempFile(path.clone()));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn no_temp_file_is_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.bin");
+        load_or_create_secret(&path).unwrap();
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["key.bin"]);
     }
 
     #[cfg(unix)]

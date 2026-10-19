@@ -7,7 +7,7 @@
 //! their behalf: only HTTPS on port 443 to known push services, and never
 //! to an address inside a private network.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -134,7 +134,7 @@ impl Policy {
         }
         let allowed = port == 443
             && host.parse::<IpAddr>().is_err()
-            && !host.starts_with('[')
+            && dns_name(&host)
             && self
                 .hosts
                 .iter()
@@ -146,6 +146,14 @@ impl Policy {
                 });
         allowed.then(|| Target::new(tls, host, port, path))
     }
+}
+
+/// Whether `host` is a DNS name: labels of letters, digits and hyphens,
+/// none empty. Anything else (brackets, control characters, `*`, a
+/// trailing dot) could neither be resolved as meant nor go into the JWT
+/// audience as is.
+fn dns_name(host: &str) -> bool {
+    !host.split('.').any(str::is_empty) && rustls_pki_types::DnsName::try_from(host).is_ok()
 }
 
 /// A checked endpoint.
@@ -316,29 +324,62 @@ async fn resolve(
     }
 }
 
+/// Whether `ip` is an address on the public internet, not one inside a
+/// private, special-purpose or reserved range.
 fn public(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_documentation()
-                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])
-                || v4.octets()[0] == 0)
-        }
-        IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
+        IpAddr::V4(v4) => public_v4(v4),
+        IpAddr::V6(v6) => public_v6(v6),
+    }
+}
+
+fn public_v4(v4: Ipv4Addr) -> bool {
+    let [a, b, c, _] = v4.octets();
+    !(v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || v4.is_documentation()
+        // This network, 0.0.0.0/8.
+        || a == 0
+        // Shared address space (carrier-grade NAT), 100.64.0.0/10.
+        || a == 100 && (64..128).contains(&b)
+        // IETF protocol assignments, 192.0.0.0/24.
+        || a == 192 && b == 0 && c == 0
+        // 6to4 relay anycast, 192.88.99.0/24.
+        || a == 192 && b == 88 && c == 99
+        // Benchmarking, 198.18.0.0/15.
+        || a == 198 && (b == 18 || b == 19)
+        // Reserved, 240.0.0.0/4.
+        || a >= 240)
+}
+
+/// An IPv6 address that carries an IPv4 one (mapped, NAT64, 6to4) is
+/// public if that one is.
+fn public_v6(v6: Ipv6Addr) -> bool {
+    let v4 = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+    match v6.segments() {
+        // IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96, 6to4 2002::/16.
+        [0, 0, 0, 0, 0, 0xffff, hi, lo]
+        | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo]
+        | [0x2002, hi, lo, ..] => public_v4(v4(hi, lo)),
+        // ::/64 (unspecified, loopback, IPv4-compatible and -translated),
+        // discard-only 100::/64, NAT64 for local use 64:ff9b:1::/48, IETF
+        // protocol assignments 2001::/23 (Teredo among them), and
+        // documentation 2001:db8::/32 and 3fff::/20.
+        [0 | 0x100, 0, 0, 0, ..]
+        | [0x64, 0xff9b, 1, ..]
+        | [0x2001, 0..=0x1ff | 0xdb8, ..]
+        | [0x3fff, 0..=0xfff, ..] => false,
+        [first, ..] => {
+            !(v6.is_multicast()
+                // Unique local, fc00::/7.
                 || first & 0xfe00 == 0xfc00
+                // Link local, fe80::/10, and the deprecated site local, fec0::/10.
                 || first & 0xffc0 == 0xfe80
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| !public(IpAddr::V4(v4))))
+                || first & 0xffc0 == 0xfec0)
         }
     }
 }
@@ -463,6 +504,14 @@ mod tests {
             "https://fcm.googleapis.com/a b",
             "ftp://fcm.googleapis.com/x",
             "fcm.googleapis.com/x",
+            // Not DNS names, though they end like an allowed one.
+            "https://a\r\nx-injected.notify.windows.com/x",
+            "https://a..notify.windows.com/x",
+            "https://*.notify.windows.com/x",
+            "https://a\u{2028}.notify.windows.com/x",
+            "https://a\0.notify.windows.com/x",
+            "https://a\".notify.windows.com/x",
+            "https://fcm.googleapis.com./x",
         ] {
             assert!(!ok(bad), "{bad}");
         }
@@ -491,10 +540,43 @@ mod tests {
             "fd00::1",
             "fe80::1",
             "::ffff:10.0.0.1",
+            // Special-purpose ranges, and private IPv4 inside IPv6.
+            "64:ff9b::a00:1",
+            "64:ff9b:1::a00:1",
+            "64:ff9b:1::8.8.8.8",
+            "::a00:1",
+            "::8.8.8.8",
+            "::ffff:0:a00:1",
+            "2002:a00:1::1",
+            "2002:7f00:1::",
+            "fec0::1",
+            "100::1",
+            "2001:db8::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:1ff::1",
+            "3fff::1",
+            "3fff:fff::1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "192.0.0.8",
+            "240.0.0.1",
+            "255.255.255.255",
+            "192.88.99.1",
         ] {
             assert!(!public(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["142.250.74.10", "2a00:1450:4001::200e"] {
+        for ip in [
+            "142.250.74.10",
+            "2a00:1450:4001::200e",
+            // A public IPv4 address behind NAT64 or 6to4 stays reachable.
+            "64:ff9b::8.8.8.8",
+            "2002:808:808::1",
+            "::ffff:8.8.8.8",
+            "198.20.0.1",
+            "192.0.1.1",
+            "2001:200::1",
+            "3fff:1000::1",
+        ] {
             assert!(public(ip.parse().unwrap()), "{ip}");
         }
     }
@@ -604,5 +686,160 @@ mod tests {
         let gone = Subscription { endpoint, ..sub };
         assert_eq!(web.send(&gone).await, Outcome::Gone);
         request.await.unwrap();
+    }
+}
+
+/// Randomised checks of the two parsers fed by anonymous clients: the
+/// module is private to the crate, so an external fuzz target cannot reach
+/// them. A fixed seed keeps failures reproducible.
+#[cfg(test)]
+mod properties {
+    use rand::rngs::StdRng;
+    use rand::{Rng as _, SeedableRng as _};
+
+    use super::*;
+
+    const PLAIN: &[&str] = &[
+        "https://",
+        "http://",
+        "fcm.googleapis.com",
+        "notify.windows.com",
+        "ntfy.sh",
+        "web.push.apple.com",
+        "evil.com",
+        ".",
+        ":",
+        "443",
+        "8443",
+        "@",
+        "/",
+        "::1",
+        "127.0.0.1",
+        "%2e",
+        "FCM",
+        "a",
+        "-",
+        ":443",
+        "xn--",
+    ];
+    /// NUL, tab, LF, CR, space, number sign, star, question mark, brackets,
+    /// backslash, e acute, line separator.
+    const CODES: &[u32] = &[0, 9, 10, 13, 32, 35, 42, 63, 91, 93, 92, 0xe9, 0x2028];
+
+    fn pieces() -> Vec<String> {
+        PLAIN
+            .iter()
+            .map(ToString::to_string)
+            .chain(
+                CODES
+                    .iter()
+                    .filter_map(|&c| char::from_u32(c))
+                    .map(String::from),
+            )
+            .collect()
+    }
+
+    fn endpoint(rng: &mut StdRng, pieces: &[String]) -> String {
+        (0..rng.gen_range(1..10))
+            .map(|_| {
+                pieces
+                    .get(rng.gen_range(0..pieces.len()))
+                    .map_or("", String::as_str)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn subscriptions_parse_only_what_they_wrote() {
+        let pieces = pieces();
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        for _ in 0..200_000 {
+            let mut raw = vec![0u8; rng.gen_range(0..120)];
+            rng.fill(raw.as_mut_slice());
+            if rng.gen_bool(0.5) {
+                let tail = endpoint(&mut rng, &pieces);
+                raw.truncate(81);
+                raw.extend_from_slice(tail.as_bytes());
+            }
+            match Subscription::from_bytes(&raw) {
+                Some(sub) => assert_eq!(sub.to_bytes(), raw),
+                None => assert!(
+                    raw.len() < 81
+                        || raw
+                            .get(81..)
+                            .is_some_and(|e| std::str::from_utf8(e).is_err())
+                ),
+            }
+        }
+    }
+
+    /// The services the policy below allows, as the spec says: exact
+    /// names, or any subdomain of a `*.` entry.
+    fn known(host: &str) -> bool {
+        KNOWN_SERVICES
+            .iter()
+            .chain(&["push.example.org"])
+            .any(|known| match known.strip_prefix("*.") {
+                Some(domain) => host.ends_with(&format!(".{domain}")),
+                None => host == *known,
+            })
+    }
+
+    /// Letters, digits and hyphens in labels that are not empty.
+    fn plain_dns_name(host: &str) -> bool {
+        host.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    }
+
+    /// An endpoint that starts like a real one half the time, with random
+    /// pieces around and inside the host.
+    fn likely_endpoint(rng: &mut StdRng, pieces: &[String]) -> String {
+        if rng.gen_bool(0.5) {
+            return endpoint(rng, pieces);
+        }
+        let hosts = ["fcm.googleapis.com", "a.notify.windows.com", "ntfy.sh"];
+        let host = hosts.get(rng.gen_range(0..hosts.len())).map_or("", |h| *h);
+        let around = |rng: &mut StdRng| {
+            if rng.gen_bool(0.5) {
+                String::new()
+            } else {
+                endpoint(rng, pieces)
+            }
+        };
+        let (before, after) = (around(rng), around(rng));
+        format!("https://{before}{host}{after}")
+    }
+
+    /// Whatever an endpoint holds, one that passes names a known push
+    /// service by a plain DNS name, over HTTPS on port 443; and endpoints
+    /// that are fine do pass.
+    #[test]
+    fn checked_endpoints_name_a_known_service_by_dns_name() {
+        let pieces = pieces();
+        let policy = Policy::new(&["push.example.org".into()]);
+        let mut rng = StdRng::seed_from_u64(0xe0d);
+        let (mut passed, mut bad) = (0, Vec::new());
+        for _ in 0..200_000 {
+            let e = likely_endpoint(&mut rng, &pieces);
+            let Some(t) = policy.check(&e) else { continue };
+            passed += 1;
+            let sound = t.tls
+                && t.port == 443
+                && plain_dns_name(&t.host)
+                && known(&t.host)
+                && !t.path.chars().any(|c| c.is_ascii_control() || c == ' ');
+            if !sound {
+                bad.push(e);
+            }
+        }
+        bad.sort();
+        bad.dedup();
+        bad.truncate(8);
+        assert_eq!(bad, Vec::<String>::new());
+        assert!(passed > 1000, "only {passed} endpoints passed");
     }
 }

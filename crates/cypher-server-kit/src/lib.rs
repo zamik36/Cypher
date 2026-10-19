@@ -4,6 +4,8 @@
 pub mod metrics;
 pub mod ratelimit;
 pub mod secrets;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
 
 use serde::de::DeserializeOwned;
 

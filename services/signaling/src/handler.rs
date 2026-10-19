@@ -1,14 +1,14 @@
 use bytes::Bytes;
 use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::{DeviceList, PrekeyBundle};
-use cypher_types::{Addr, LinkId, PeerId};
+use cypher_types::{Addr, DeviceId, LinkId, PeerId};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, MAX_INBOX_BATCH, ServerMsg,
     access_hash,
 };
 use rand::RngCore;
 use tokio::sync::Semaphore;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::push::{Outcome, Subscription, WebPush};
 use crate::store::{PutOutcome, Store};
@@ -34,6 +34,27 @@ const DEVICE_FETCHES_PER_HOUR: u32 = 120;
 /// Device lists one identity may publish per hour: linking and unlinking
 /// are rare.
 const DEVICE_PUBLISHES_PER_HOUR: u32 = 10;
+/// Key publishes one identity may make per hour, all its devices together:
+/// each device publishes on every connect and when it runs low on one-time
+/// prekeys, so 60 a device leaves room for flaky mobile links. Counted per
+/// identity, not per device, so made-up device ids cannot multiply it.
+const KEY_PUBLISHES_PER_HOUR: u32 = 60 * MAX_DEVICES_U32;
+const MAX_DEVICES_U32: u32 = 6;
+const _: () = assert!(MAX_DEVICES_U32 as usize == cypher_types::MAX_DEVICES);
+/// Devices of one identity that may hold keys while its list does not name
+/// them: one being linked or recovered, and one spare for a second at once.
+/// A further one takes the place of the one that published longest ago;
+/// publishing a list takes the keys of those it does not name.
+const UNLISTED_DEVICES_WITH_KEYS: usize = 2;
+/// Inbox items one identity may put per hour over its session, all its
+/// devices together (through the onion the relay limits them): a message
+/// to a contact who is away goes to each of its devices and to this
+/// identity's own, so a busy writer puts a few hundred.
+const INBOX_PUTS_PER_HOUR: u32 = 1200;
+/// Inbox reads one identity may make per hour over its session: each
+/// device polls two to four inboxes every five minutes and reads a full
+/// one batch by batch.
+const INBOX_FETCHES_PER_HOUR: u32 = 600;
 /// Lookups of one invite per hour, whoever asks: only those it was given to
 /// know the code, so this cannot be used to make a stranger's invite fail.
 const RESOLVES_PER_LINK_PER_HOUR: u32 = 20;
@@ -50,6 +71,12 @@ const SEALED_PER_TOKEN_PER_HOUR: u32 = 3600;
 /// bounds that memory (~48 MiB) while the other requests, all small, may
 /// be many more.
 pub(crate) const FETCH_PERMITS: usize = 64;
+/// Push signals sent at once. Each is one outbound HTTPS request of up to
+/// 20 s (the push request timeout); beyond this many a flood of inbox
+/// puts would turn into a flood of requests, and push services ban VAPID
+/// keys that flood them. A signal past the limit is dropped: the device
+/// still finds the item on its next poll.
+pub(crate) const PUSH_PERMITS: usize = 256;
 /// How long the recipient's gateway has to take a sealed delivery.
 const SEALED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -61,9 +88,18 @@ pub(crate) struct Handler {
     pub push: Option<Pusher>,
     pub courier: Courier,
     pub fetches: Semaphore,
+    /// Push signals on their way, at most [`PUSH_PERMITS`]; each task holds
+    /// a permit until its push service answered or timed out.
+    pub pushes: std::sync::Arc<Semaphore>,
+    /// Push signals dropped because [`PUSH_PERMITS`] were on their way.
+    pub push_shed: prometheus::IntCounter,
     /// Sealed sends no gateway answered: the way to the gateways is broken
     /// (NATS down or refusing), and senders fall back to their name.
     pub sealed_unavailable: prometheus::IntCounter,
+    /// Inbox writes and openings refused because all inboxes together hold
+    /// their budget: someone floods them, or the budget is too small for
+    /// the users.
+    pub inbox_quota_refused: prometheus::IntCounter,
 }
 
 /// Hands sealed sends to the gateway of the device they are for: through
@@ -157,21 +193,81 @@ impl Pusher {
     }
 }
 
+/// Who a request comes from, as far as signaling knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// The identity signed in at the gateway that forwarded the request.
+    Session(PeerId),
+    /// No one in particular: the request came through the onion relay.
+    Onion,
+}
+
+/// Whether `msg` may come through the onion, from no one in particular:
+/// requests that name a blind inbox, and introductions, which are limited
+/// by what they ask for rather than by who asks. Requests that need an
+/// identity, and what is not a signaling request at all, are not.
+pub(crate) fn anonymous_allowed(msg: &ClientMsg) -> bool {
+    match msg {
+        ClientMsg::InboxPut { .. }
+        | ClientMsg::InboxFetch { .. }
+        | ClientMsg::InboxAck { .. }
+        | ClientMsg::PushKey
+        | ClientMsg::PushRegister { .. }
+        | ClientMsg::PushUnregister { .. }
+        | ClientMsg::FetchKeys { .. }
+        | ClientMsg::FetchDevices { .. }
+        | ClientMsg::ResolveLink { .. }
+        | ClientMsg::SendSealed { .. } => true,
+        ClientMsg::PublishKeys { .. }
+        | ClientMsg::PublishDevices { .. }
+        | ClientMsg::CreateLink
+        | ClientMsg::Bootstrap
+        | ClientMsg::Hello { .. }
+        | ClientMsg::Auth { .. }
+        | ClientMsg::Ping
+        | ClientMsg::Send { .. }
+        | ClientMsg::SetAccess { .. } => false,
+    }
+}
+
+/// The reply `code` to an encoded request, echoing its id when it has one.
+fn refuse(frame: Bytes, code: ErrorCode) -> Bytes {
+    let req_id = Frame::<ClientMsg>::decode(frame).map_or(0, |f| f.req_id);
+    Frame::new(req_id, error(code)).encode()
+}
+
 impl Handler {
-    /// Answers one client request. `peer` is the gateway-authenticated
-    /// identity, absent for anonymous (onion) requests.
-    pub(crate) async fn handle(&self, peer: Option<PeerId>, frame: Bytes) -> Bytes {
-        let (req_id, msg) = match Frame::<ClientMsg>::decode(frame) {
-            Ok(Frame { req_id, msg }) => (req_id, self.answer(peer, msg).await),
-            Err(_) => (0, error(ErrorCode::BadRequest)),
-        };
-        Frame::new(req_id, msg).encode()
+    /// Answers a request a gateway forwarded on `sig.req`, from the identity
+    /// its peer header names (`peer_hex`). Without a valid one it is
+    /// refused rather than taken as anonymous: only the onion is anonymous.
+    pub(crate) async fn handle_forwarded(&self, peer_hex: Option<&str>, frame: Bytes) -> Bytes {
+        if let Some(peer) = peer_hex.and_then(PeerId::from_hex) {
+            self.handle(Caller::Session(peer), frame).await
+        } else {
+            debug!("a forwarded request without a valid peer header");
+            refuse(frame, ErrorCode::BadRequest)
+        }
     }
 
-    async fn answer(&self, peer: Option<PeerId>, msg: ClientMsg) -> ServerMsg {
-        let result = match peer {
-            Some(peer) => self.answer_session(&peer, msg).await,
-            None => self.answer_anonymous(msg).await,
+    /// Answers one encoded request from `caller`.
+    pub(crate) async fn handle(&self, caller: Caller, frame: Bytes) -> Bytes {
+        match Frame::<ClientMsg>::decode(frame) {
+            Ok(frame) => self.handle_frame(caller, frame).await,
+            Err(_) => Frame::new(0, error(ErrorCode::BadRequest)).encode(),
+        }
+    }
+
+    /// Answers one decoded request from `caller`.
+    pub(crate) async fn handle_frame(&self, caller: Caller, frame: Frame<ClientMsg>) -> Bytes {
+        let Frame { req_id, msg } = frame;
+        Frame::new(req_id, self.answer(caller, msg).await).encode()
+    }
+
+    async fn answer(&self, caller: Caller, msg: ClientMsg) -> ServerMsg {
+        let result = match caller {
+            Caller::Session(peer) => self.answer_session(&peer, msg).await,
+            Caller::Onion if anonymous_allowed(&msg) => self.answer_anonymous(msg).await,
+            Caller::Onion => Ok(error(ErrorCode::Unauthorized)),
         };
         result.unwrap_or_else(|e| {
             warn!("redis error: {e}");
@@ -207,7 +303,9 @@ impl Handler {
             | ClientMsg::InboxAck { .. }
             | ClientMsg::PushKey
             | ClientMsg::PushRegister { .. }
-            | ClientMsg::PushUnregister { .. }) => self.answer_either(Some(*peer), msg).await,
+            | ClientMsg::PushUnregister { .. }) => {
+                self.answer_either(Caller::Session(*peer), msg).await
+            }
             ClientMsg::Hello { .. }
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
@@ -217,9 +315,8 @@ impl Handler {
         }
     }
 
-    /// A request through the onion relay, from no one in particular: inbox
-    /// and push requests, and introductions, which are limited by what they
-    /// ask for rather than by who asks.
+    /// A request through the onion relay, from no one in particular, of a
+    /// kind [`anonymous_allowed`] lets through.
     async fn answer_anonymous(&self, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
         match msg {
             ClientMsg::SendSealed {
@@ -242,29 +339,40 @@ impl Handler {
             | ClientMsg::InboxAck { .. }
             | ClientMsg::PushKey
             | ClientMsg::PushRegister { .. }
-            | ClientMsg::PushUnregister { .. }) => self.answer_either(None, msg).await,
+            | ClientMsg::PushUnregister { .. }) => self.answer_either(Caller::Onion, msg).await,
+            // Turned away by `anonymous_allowed` before they get here.
             ClientMsg::PublishKeys { .. }
             | ClientMsg::PublishDevices { .. }
             | ClientMsg::CreateLink
-            | ClientMsg::Bootstrap => Ok(error(ErrorCode::Unauthorized)),
-            ClientMsg::Hello { .. }
+            | ClientMsg::Bootstrap
+            | ClientMsg::Hello { .. }
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
             | ClientMsg::Send { .. }
-            | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::BadRequest)),
+            | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::Unauthorized)),
         }
     }
 
     /// Inbox and push requests, which name a blind inbox rather than an
     /// identity and are answered the same on either path.
-    async fn answer_either(
-        &self,
-        peer: Option<PeerId>,
-        msg: ClientMsg,
-    ) -> redis::RedisResult<ServerMsg> {
+    async fn answer_either(&self, caller: Caller, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
         match msg {
-            ClientMsg::InboxPut { inbox, item } => self.inbox_put(&inbox, &item).await,
+            ClientMsg::InboxPut { inbox, item } => {
+                if !self
+                    .admit_caller(b"ip:", caller, INBOX_PUTS_PER_HOUR)
+                    .await?
+                {
+                    return Ok(error(ErrorCode::RateLimited));
+                }
+                self.inbox_put(&inbox, &item).await
+            }
             ClientMsg::InboxFetch { proof, close } => {
+                if !self
+                    .admit_caller(b"if:", caller, INBOX_FETCHES_PER_HOUR)
+                    .await?
+                {
+                    return Ok(error(ErrorCode::RateLimited));
+                }
                 let op = if close {
                     InboxOp::Close
                 } else {
@@ -280,31 +388,22 @@ impl Handler {
                     return Ok(error(ErrorCode::Unauthorized));
                 }
                 self.store
-                    .inbox_ack(&proof.inbox, &claim)
+                    .inbox_ack(&proof.inbox, &claim, crate::now_secs())
                     .await
                     .map(|()| ServerMsg::Done)
             }
-            msg => self.push_request(peer, msg).await,
+            msg => self.push_request(caller, msg).await,
         }
     }
 
-    async fn push_request(
-        &self,
-        peer: Option<PeerId>,
-        msg: ClientMsg,
-    ) -> redis::RedisResult<ServerMsg> {
-        match (msg, peer) {
+    async fn push_request(&self, caller: Caller, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
+        match (msg, caller) {
             (ClientMsg::PushKey, _) => Ok(self.push.as_ref().map_or_else(
                 || error(ErrorCode::Unavailable),
                 |push| ServerMsg::PushKey {
                     key: push.public_key(),
                 },
             )),
-            // Only anonymously: a session would tie the device's push
-            // address to its identity.
-            (ClientMsg::PushRegister { .. } | ClientMsg::PushUnregister { .. }, Some(_)) => {
-                Ok(error(ErrorCode::BadRequest))
-            }
             (
                 ClientMsg::PushRegister {
                     proof,
@@ -312,7 +411,7 @@ impl Handler {
                     p256dh,
                     auth,
                 },
-                None,
+                Caller::Onion,
             ) => {
                 let extra = push_extra(&endpoint, &p256dh, &auth);
                 if !proven(&proof, InboxOp::PushRegister, &extra) {
@@ -325,7 +424,7 @@ impl Handler {
                 };
                 self.push_register(&proof.inbox, &sub).await
             }
-            (ClientMsg::PushUnregister { proof }, None) => {
+            (ClientMsg::PushUnregister { proof }, Caller::Onion) => {
                 if !proven(&proof, InboxOp::PushUnregister, &[]) {
                     return Ok(error(ErrorCode::Unauthorized));
                 }
@@ -334,6 +433,8 @@ impl Handler {
                     .await
                     .map(|()| ServerMsg::Done)
             }
+            // Registering only anonymously: a session would tie the
+            // device's push address to its identity.
             _ => Ok(error(ErrorCode::BadRequest)),
         }
     }
@@ -368,7 +469,8 @@ impl Handler {
     }
 
     /// The inbox got an item: tell its owner's device, at most once per
-    /// [`PUSH_INTERVAL_SECS`], without holding up the reply.
+    /// [`PUSH_INTERVAL_SECS`], without holding up the reply. With
+    /// [`PUSH_PERMITS`] signals on their way already, this one is dropped.
     async fn signal(&self, inbox: &[u8; 32]) -> redis::RedisResult<()> {
         let Some(push) = self.push.clone() else {
             return Ok(());
@@ -381,22 +483,25 @@ impl Handler {
         else {
             return Ok(());
         };
+        // Before the interval is used up, so a dropped signal does not
+        // hold back the next one.
+        let Ok(permit) = std::sync::Arc::clone(&self.pushes).try_acquire_owned() else {
+            self.push_shed.inc();
+            return Ok(());
+        };
         let bucket = [&b"pn:"[..], inbox].concat();
         if !self.store.admit(&bucket, 1, PUSH_INTERVAL_SECS).await? {
             return Ok(());
         }
         let (store, inbox) = (self.store.clone(), *inbox);
-        let task = async move {
+        tokio::spawn(async move {
             if push.send(&sub).await == Outcome::Gone
                 && let Err(e) = store.push_unregister(&inbox).await
             {
                 warn!("forgetting a push subscription failed: {e}");
             }
-        };
-        #[cfg(test)]
-        task.await;
-        #[cfg(not(test))]
-        tokio::spawn(task);
+            drop(permit);
+        });
         Ok(())
     }
 
@@ -417,9 +522,41 @@ impl Handler {
         let Some(device) = device else {
             return Ok(error(ErrorCode::BadRequest));
         };
+        if !self.admit(b"pk:", peer, KEY_PUBLISHES_PER_HOUR).await? {
+            return Ok(error(ErrorCode::RateLimited));
+        }
         let addr = Addr::new(*peer, device);
+        self.make_room_for_keys(addr).await?;
         let opks_left = self.store.publish_keys(addr, base, opks, replace).await?;
         Ok(ServerMsg::KeysAck { opks_left })
+    }
+
+    /// Lets the device `addr` hold keys. One its identity lists (the first
+    /// device, before there is a list) always may. One it does not is
+    /// about to be listed, since a device being linked or recovered
+    /// publishes its keys before its list names it; only a few such
+    /// devices keep keys, so the one that published longest ago loses them.
+    async fn make_room_for_keys(&self, addr: Addr) -> redis::RedisResult<()> {
+        let list = self.store.fetch_devices(&addr.peer).await?;
+        let listed = match list.as_deref().map(DeviceList::decode) {
+            Some(Ok(list)) => list.contains(addr.device),
+            Some(Err(_)) | None => addr.device == DeviceId::FIRST,
+        };
+        if listed {
+            return Ok(());
+        }
+        let evicted = self
+            .store
+            .note_unlisted(addr, UNLISTED_DEVICES_WITH_KEYS)
+            .await?;
+        match evicted {
+            Some(device) => {
+                self.store
+                    .forget_device_keys(Addr::new(addr.peer, device))
+                    .await
+            }
+            None => Ok(()),
+        }
     }
 
     /// A device's keys. One identity asking is limited per hour; through the
@@ -469,9 +606,12 @@ impl Handler {
         {
             return Ok(error(ErrorCode::Conflict));
         }
-        // Best effort: keys expire on their own anyway.
+        // Best effort: keys expire on their own anyway. Devices that held
+        // keys before a list named them count as listed until now.
         let old = old.and_then(|o| DeviceList::decode(&o).ok());
-        for &device in old.iter().flat_map(DeviceList::devices) {
+        let unlisted = self.store.take_unlisted(peer).await?;
+        let held = old.iter().flat_map(DeviceList::devices).chain(&unlisted);
+        for &device in held {
             if !new.contains(device) {
                 self.store
                     .forget_device_keys(Addr::new(*peer, device))
@@ -544,15 +684,36 @@ impl Handler {
         self.store.admit(&bucket, per_hour, HOUR_SECS).await
     }
 
+    /// [`Self::admit`] for a session's identity; through the onion only
+    /// the relay's limits and the quotas of all inboxes apply.
+    async fn admit_caller(
+        &self,
+        kind: &[u8],
+        caller: Caller,
+        per_hour: u32,
+    ) -> redis::RedisResult<bool> {
+        match caller {
+            Caller::Session(peer) => self.admit(kind, &peer, per_hour).await,
+            Caller::Onion => Ok(true),
+        }
+    }
+
     async fn inbox_put(&self, inbox: &[u8; 32], item: &[u8]) -> redis::RedisResult<ServerMsg> {
-        Ok(match self.store.inbox_put(inbox, item).await? {
-            PutOutcome::Stored => {
-                self.signal(inbox).await?;
-                ServerMsg::Done
-            }
-            PutOutcome::Full => error(ErrorCode::TooLarge),
-            PutOutcome::Inactive => error(ErrorCode::NotFound),
-        })
+        Ok(
+            match self.store.inbox_put(inbox, item, crate::now_secs()).await? {
+                PutOutcome::Stored => {
+                    self.signal(inbox).await?;
+                    ServerMsg::Done
+                }
+                PutOutcome::Full => error(ErrorCode::TooLarge),
+                // To the writer as if this inbox were full: it tries again later.
+                PutOutcome::OverBudget => {
+                    self.inbox_quota_refused.inc();
+                    error(ErrorCode::TooLarge)
+                }
+                PutOutcome::Inactive => error(ErrorCode::NotFound),
+            },
+        )
     }
 
     /// Hands `item` to the device's gateway, which takes it only with a
@@ -610,9 +771,17 @@ impl Handler {
         rand::rngs::OsRng.fill_bytes(&mut claim);
         let items = self
             .store
-            .inbox_fetch(inbox, &claim, MAX_INBOX_BATCH, close)
+            .inbox_fetch(inbox, &claim, MAX_INBOX_BATCH, close, crate::now_secs())
             .await?;
-        Ok(ServerMsg::InboxBatch { claim, items })
+        // All inboxes together are full: the owner asks again later, and
+        // its inbox is not open to writers meanwhile.
+        Ok(items.map_or_else(
+            || {
+                self.inbox_quota_refused.inc();
+                error(ErrorCode::Unavailable)
+            },
+            |items| ServerMsg::InboxBatch { claim, items },
+        ))
     }
 }
 

@@ -18,8 +18,7 @@ use cypher_server_kit::metrics::Metrics;
 use cypher_server_kit::{
     PEER_HEADER, SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT, SIG_QUEUE_GROUP, SIG_REQUEST_SUBJECT, secrets,
 };
-use cypher_types::PeerId;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use prometheus::IntCounter;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
@@ -121,20 +120,19 @@ impl Service {
     }
 
     /// Handles `subject` until its subscription ends, at most `permits`
-    /// requests at once.
-    async fn serve(self: Arc<Self>, subject: &'static str, mut sub: Subscriber, permits: usize) {
-        let permits = Arc::new(Semaphore::new(permits));
-        while let Some(msg) = sub.next().await {
-            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-                self.shed.inc();
-                continue;
-            };
-            let service = Arc::clone(&self);
-            tokio::spawn(async move {
-                service.dispatch(subject, msg).await;
-                drop(permit);
-            });
-        }
+    /// requests at once; why it ended is returned.
+    async fn serve(
+        self: Arc<Self>,
+        subject: &'static str,
+        sub: Subscriber,
+        permits: usize,
+    ) -> anyhow::Error {
+        let service = Arc::clone(&self);
+        serve(subject, sub, permits, &self.shed, move |msg| {
+            let service = Arc::clone(&service);
+            async move { service.dispatch(subject, msg).await }
+        })
+        .await
     }
 
     async fn dispatch(&self, subject: &str, msg: Message) {
@@ -152,8 +150,12 @@ impl Service {
                 .headers
                 .as_ref()
                 .and_then(|h| h.get(PEER_HEADER))
-                .and_then(|v| PeerId::from_hex(v.as_str()));
-            Some(self.handler.handle(peer, msg.payload.clone()).await)
+                .map(async_nats::HeaderValue::as_str);
+            Some(
+                self.handler
+                    .handle_forwarded(peer, msg.payload.clone())
+                    .await,
+            )
         };
         if let Some(reply) = reply
             && let Err(e) = self.nats.publish(reply_to, reply).await
@@ -161,6 +163,36 @@ impl Service {
             warn!("failed to publish reply: {e}");
         }
     }
+}
+
+/// Hands each message of `sub` to its own task from `handle`, at most
+/// `permits` at once; what comes beyond is dropped and counted in `shed`.
+/// A NATS subscription ends only once its connection is gone for good, so
+/// its end is an error: the service stops instead of idling unseen.
+async fn serve<T, F, Fut>(
+    subject: &'static str,
+    mut sub: impl Stream<Item = T> + Unpin,
+    permits: usize,
+    shed: &IntCounter,
+    handle: F,
+) -> anyhow::Error
+where
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let permits = Arc::new(Semaphore::new(permits));
+    while let Some(msg) = sub.next().await {
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            shed.inc();
+            continue;
+        };
+        let task = handle(msg);
+        tokio::spawn(async move {
+            task.await;
+            drop(permit);
+        });
+    }
+    anyhow::anyhow!("the subscription to {subject} ended")
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -200,6 +232,37 @@ fn relay_public_addr(configured: Option<String>) -> Option<String> {
     })
 }
 
+/// The request handler on the configured Redis, push service and relay,
+/// handing sealed sends to the gateways over `nats`.
+async fn handler(
+    config: &Config,
+    keys: &OnionKeys,
+    nats: &async_nats::Client,
+    registry: &Metrics,
+) -> anyhow::Result<Handler> {
+    Ok(Handler {
+        store: Store::connect(&config.redis_url).await?,
+        signing_key: keys.signing_key(),
+        relay_addr: relay_public_addr(config.relay_public_addr.clone()),
+        push: web_push(config)?,
+        courier: handler::Courier::Nats(nats.clone()),
+        fetches: Semaphore::new(handler::FETCH_PERMITS),
+        pushes: Arc::new(Semaphore::new(handler::PUSH_PERMITS)),
+        push_shed: registry.counter(
+            "signaling_push_shed_total",
+            "Push signals dropped because too many were on their way",
+        )?,
+        sealed_unavailable: registry.counter(
+            "signaling_sealed_unavailable_total",
+            "Sealed sends no gateway answered in time",
+        )?,
+        inbox_quota_refused: registry.counter(
+            "signaling_inbox_quota_refused_total",
+            "Inbox writes and openings refused because all inboxes together are full",
+        )?,
+    })
+}
+
 /// Serves signaling requests from NATS until `shutdown` is cancelled.
 pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<()> {
     let registry = Metrics::new()?;
@@ -214,22 +277,9 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     );
 
     let keys = OnionKeys::new(&secrets::load_or_create_secret(&config.signing_key_path)?);
-    let push = web_push(&config)?;
-    let relay_addr = relay_public_addr(config.relay_public_addr);
     let nats = cypher_server_kit::connect_nats(&config.nats).await?;
     let service = Arc::new(Service {
-        handler: Handler {
-            store: Store::connect(&config.redis_url).await?,
-            signing_key: keys.signing_key(),
-            relay_addr,
-            push,
-            courier: handler::Courier::Nats(nats.clone()),
-            fetches: Semaphore::new(handler::FETCH_PERMITS),
-            sealed_unavailable: registry.counter(
-                "signaling_sealed_unavailable_total",
-                "Sealed sends no gateway answered in time",
-            )?,
-        },
+        handler: handler(&config, &keys, &nats, &registry).await?,
         keys,
         nats,
         requests: registry.counter("signaling_requests_total", "Session requests handled")?,
@@ -250,13 +300,22 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     let key_sets = service.subscribe(SIG_KEYS_SUBJECT).await?;
     registry.set_ready(service.nats.clone());
     info!("signaling ready");
-    tokio::select! {
-        () = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, sessions, SESSION_PERMITS) => {}
-        () = Arc::clone(&service).serve(SIG_ONION_SUBJECT, onion, ONION_PERMITS) => {}
-        () = Arc::clone(&service).serve(SIG_KEYS_SUBJECT, key_sets, KEY_SET_PERMITS) => {}
-        () = refresh_keys(Arc::clone(&service), shutdown.clone()) => {}
-        () = shutdown.cancelled() => {}
-    }
+    let ended = tokio::select! {
+        e = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, sessions, SESSION_PERMITS) => Some(e),
+        e = Arc::clone(&service).serve(SIG_ONION_SUBJECT, onion, ONION_PERMITS) => Some(e),
+        e = Arc::clone(&service).serve(SIG_KEYS_SUBJECT, key_sets, KEY_SET_PERMITS) => Some(e),
+        () = refresh_keys(Arc::clone(&service), shutdown.clone()) => None,
+        () = shutdown.cancelled() => None,
+    };
     let _ = service.nats.flush().await;
-    Ok(())
+    stopped(ended, &shutdown)
+}
+
+/// How `run` ends: a subscription that `ended` on its own is a failure,
+/// one that ended because of `shutdown` is not.
+fn stopped(ended: Option<anyhow::Error>, shutdown: &CancellationToken) -> anyhow::Result<()> {
+    match ended {
+        Some(e) if !shutdown.is_cancelled() => Err(e),
+        Some(_) | None => Ok(()),
+    }
 }

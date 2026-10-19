@@ -80,6 +80,7 @@ jobs:
     env:
       CYPHER_TEST_REDIS: redis://:ci@127.0.0.1:6379
       CYPHER_TEST_NATS: nats://127.0.0.1:4222
+      CYPHER_REQUIRE_LIVE: "1"
       GATEWAY_NATS_PASSWORD: gw
       SIGNALING_NATS_PASSWORD: sig
       RELAY_NATS_PASSWORD: rel
