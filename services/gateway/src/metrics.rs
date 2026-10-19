@@ -13,6 +13,7 @@ pub struct Metrics {
     pub rate_limited: IntCounter,
     pub auth_failures: IntCounter,
     pub rejected: IntCounter,
+    pub publish_failed: IntCounter,
 }
 
 impl Metrics {
@@ -47,6 +48,10 @@ impl Metrics {
             )?,
             auth_failures: r.counter("gateway_auth_failures_total", "Failed authentications")?,
             rejected: r.counter("gateway_rejected_total", "Connections rejected at capacity")?,
+            publish_failed: r.counter(
+                "gateway_publish_failed_total",
+                "Evictions, relays and delivery replies the bus did not take",
+            )?,
         })
     }
 }

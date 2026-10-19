@@ -542,7 +542,11 @@ impl Bus for SlowSubscribe {
         self.0.request(subject, peer, payload, timeout)
     }
 
-    fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send {
+    fn publish(
+        &self,
+        subject: String,
+        payload: Bytes,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
         self.0.publish(subject, payload)
     }
 
@@ -586,6 +590,52 @@ async fn concurrent_logins_on_two_nodes_do_not_both_survive() {
     }
     assert!(superseded >= 1, "at least one login evicted the other");
     assert!(delivered <= 1, "the frame reached {delivered} sessions");
+}
+
+/// A bus that takes no publishes, as NATS when its connection is gone.
+#[derive(Clone, Default)]
+struct NoPublish(MemBus);
+
+impl Bus for NoPublish {
+    type Sub = <MemBus as Bus>::Sub;
+
+    fn request(
+        &self,
+        subject: String,
+        peer: Option<PeerId>,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Bytes, BusError>> + Send {
+        self.0.request(subject, peer, payload, timeout)
+    }
+
+    fn publish(
+        &self,
+        _subject: String,
+        _payload: Bytes,
+    ) -> impl Future<Output = Result<(), BusError>> + Send {
+        std::future::ready(Err(BusError::Unavailable))
+    }
+
+    fn subscribe(
+        &self,
+        subject: String,
+    ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
+        self.0.subscribe(subject)
+    }
+}
+
+/// Q-403: publishes the bus refuses (the eviction at sign-in, a relay to
+/// another node) are counted instead of vanishing.
+#[tokio::test]
+async fn failed_publishes_are_counted() {
+    let gw = Arc::new(Gateway::new(NoPublish::default(), LIMITS, metrics()));
+    let mut a = Client::connect(&gw);
+    a.authenticate().await;
+    assert_eq!(gw.metrics.publish_failed.get(), 1, "the eviction");
+    a.send(1, send(first(PeerId([3; 32])), false, b"x")).await;
+    a.sync().await;
+    assert_eq!(gw.metrics.publish_failed.get(), 2, "the relay");
 }
 
 /// An eviction is told from a relayed frame by its length alone.

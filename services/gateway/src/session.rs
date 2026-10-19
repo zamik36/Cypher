@@ -21,7 +21,7 @@ use rand::RngCore;
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::bus::{Bus, BusError, BusMsg};
 use crate::metrics::Metrics;
@@ -191,10 +191,9 @@ impl<B: Bus> Session<B> {
             .await
             .ok()?;
         let evict = peer_subject(&hex, me.device, Origin::Gateway);
-        self.gw
-            .bus
-            .publish(evict, Bytes::copy_from_slice(nonce))
-            .await;
+        if !self.publish(evict, Bytes::copy_from_slice(nonce)).await {
+            warn!("eviction not published: the device may stay signed in on another node");
+        }
         Some((relayed, kick))
     }
 
@@ -373,7 +372,7 @@ impl<B: Bus> Session<B> {
         }
         let subject = peer_subject(&to.peer.to_hex(), to.device, Origin::Gateway);
         if !want_ack {
-            self.gw.bus.publish(subject, relayed).await;
+            self.publish(subject, relayed).await;
             return;
         }
         let Ok(permit) = Arc::clone(&self.ack_permits).try_acquire_owned() else {
@@ -414,10 +413,7 @@ impl<B: Bus> Session<B> {
         }
         if let Some(reply) = msg.reply {
             let status = if ok { STATUS_DELIVERED } else { STATUS_BUSY };
-            self.gw
-                .bus
-                .publish(reply, Bytes::copy_from_slice(&[status]))
-                .await;
+            self.publish(reply, Bytes::copy_from_slice(&[status])).await;
         }
     }
 
@@ -441,11 +437,19 @@ impl<B: Bus> Session<B> {
             }
         };
         if let Some(reply) = msg.reply {
-            self.gw
-                .bus
-                .publish(reply, Bytes::copy_from_slice(&[status]))
-                .await;
+            self.publish(reply, Bytes::copy_from_slice(&[status])).await;
         }
+    }
+
+    /// Publishes on the bus, where nothing waits for an answer: a failure
+    /// is only counted. False when the bus did not take it.
+    async fn publish(&self, subject: String, payload: Bytes) -> bool {
+        let Err(error) = self.gw.bus.publish(subject, payload).await else {
+            return true;
+        };
+        self.gw.metrics.publish_failed.inc();
+        debug!(?error, "bus publish failed");
+        false
     }
 
     fn forward_to_signaling(&self, me: Addr, req_id: u32, request: Bytes) {

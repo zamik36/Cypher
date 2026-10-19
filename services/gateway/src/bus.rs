@@ -33,7 +33,12 @@ pub trait Bus: Send + Sync + 'static {
         timeout: Duration,
     ) -> impl Future<Output = Result<Bytes, BusError>> + Send;
 
-    fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send;
+    /// Hands `payload` to the bus. `Ok` means it was queued, not delivered.
+    fn publish(
+        &self,
+        subject: String,
+        payload: Bytes,
+    ) -> impl Future<Output = Result<(), BusError>> + Send;
 
     fn subscribe(
         &self,
@@ -69,8 +74,10 @@ impl Bus for async_nats::Client {
         }
     }
 
-    async fn publish(&self, subject: String, payload: Bytes) {
-        let _ = Self::publish(self, subject, payload).await;
+    async fn publish(&self, subject: String, payload: Bytes) -> Result<(), BusError> {
+        Self::publish(self, subject, payload)
+            .await
+            .map_err(|_| BusError::Unavailable)
     }
 
     async fn subscribe(&self, subject: String) -> Result<Self::Sub, BusError> {
@@ -190,7 +197,11 @@ pub(crate) mod mem {
                 .map_err(|_| BusError::Unavailable)
         }
 
-        fn publish(&self, subject: String, payload: Bytes) -> impl Future<Output = ()> + Send {
+        fn publish(
+            &self,
+            subject: String,
+            payload: Bytes,
+        ) -> impl Future<Output = Result<(), BusError>> + Send {
             let waiter = self.inner.lock().unwrap().replies.remove(&subject);
             match waiter {
                 Some(tx) => {
@@ -204,7 +215,7 @@ pub(crate) mod mem {
                     });
                 }
             }
-            std::future::ready(())
+            std::future::ready(Ok(()))
         }
 
         fn subscribe(
