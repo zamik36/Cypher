@@ -134,7 +134,7 @@ impl Policy {
         }
         let allowed = port == 443
             && host.parse::<IpAddr>().is_err()
-            && !host.starts_with('[')
+            && dns_name(&host)
             && self
                 .hosts
                 .iter()
@@ -146,6 +146,14 @@ impl Policy {
                 });
         allowed.then(|| Target::new(tls, host, port, path))
     }
+}
+
+/// Whether `host` is a DNS name: labels of letters, digits and hyphens,
+/// none empty. Anything else (brackets, control characters, `*`, a
+/// trailing dot) could neither be resolved as meant nor go into the JWT
+/// audience as is.
+fn dns_name(host: &str) -> bool {
+    !host.split('.').any(str::is_empty) && rustls_pki_types::DnsName::try_from(host).is_ok()
 }
 
 /// A checked endpoint.
@@ -463,6 +471,14 @@ mod tests {
             "https://fcm.googleapis.com/a b",
             "ftp://fcm.googleapis.com/x",
             "fcm.googleapis.com/x",
+            // Not DNS names, though they end like an allowed one (S-301).
+            "https://a\r\nx-injected.notify.windows.com/x",
+            "https://a..notify.windows.com/x",
+            "https://*.notify.windows.com/x",
+            "https://a\u{2028}.notify.windows.com/x",
+            "https://a\0.notify.windows.com/x",
+            "https://a\".notify.windows.com/x",
+            "https://fcm.googleapis.com./x",
         ] {
             assert!(!ok(bad), "{bad}");
         }
@@ -604,5 +620,117 @@ mod tests {
         let gone = Subscription { endpoint, ..sub };
         assert_eq!(web.send(&gone).await, Outcome::Gone);
         request.await.unwrap();
+    }
+}
+
+/// Randomised checks of the two parsers fed by anonymous clients: the
+/// module is private to the crate, so an external fuzz target cannot reach
+/// them. A fixed seed keeps failures reproducible.
+#[cfg(test)]
+mod properties {
+    use rand::rngs::StdRng;
+    use rand::{Rng as _, SeedableRng as _};
+
+    use super::*;
+
+    const PLAIN: &[&str] = &[
+        "https://",
+        "http://",
+        "fcm.googleapis.com",
+        "notify.windows.com",
+        "ntfy.sh",
+        "web.push.apple.com",
+        "evil.com",
+        ".",
+        ":",
+        "443",
+        "8443",
+        "@",
+        "/",
+        "::1",
+        "127.0.0.1",
+        "%2e",
+        "FCM",
+        "a",
+        "-",
+        ":443",
+        "xn--",
+    ];
+    /// NUL, tab, LF, CR, space, number sign, star, question mark, brackets,
+    /// backslash, e acute, line separator.
+    const CODES: &[u32] = &[0, 9, 10, 13, 32, 35, 42, 63, 91, 93, 92, 0xe9, 0x2028];
+
+    fn pieces() -> Vec<String> {
+        PLAIN
+            .iter()
+            .map(ToString::to_string)
+            .chain(
+                CODES
+                    .iter()
+                    .filter_map(|&c| char::from_u32(c))
+                    .map(String::from),
+            )
+            .collect()
+    }
+
+    fn endpoint(rng: &mut StdRng, pieces: &[String]) -> String {
+        (0..rng.gen_range(1..10))
+            .map(|_| {
+                pieces
+                    .get(rng.gen_range(0..pieces.len()))
+                    .map_or("", String::as_str)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn subscriptions_parse_only_what_they_wrote() {
+        let pieces = pieces();
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        for _ in 0..200_000 {
+            let mut raw = vec![0u8; rng.gen_range(0..120)];
+            rng.fill(raw.as_mut_slice());
+            if rng.gen_bool(0.5) {
+                let tail = endpoint(&mut rng, &pieces);
+                raw.truncate(81);
+                raw.extend_from_slice(tail.as_bytes());
+            }
+            match Subscription::from_bytes(&raw) {
+                Some(sub) => assert_eq!(sub.to_bytes(), raw),
+                None => assert!(
+                    raw.len() < 81
+                        || raw
+                            .get(81..)
+                            .is_some_and(|e| std::str::from_utf8(e).is_err())
+                ),
+            }
+        }
+    }
+
+    /// Whatever an endpoint holds, one that passes names a known push
+    /// service by DNS name, over HTTPS on port 443 (S-301).
+    #[test]
+    fn checked_endpoints_name_a_known_service_by_dns_name() {
+        let pieces = pieces();
+        let policy = Policy::new(&["push.example.org".into()]);
+        let mut rng = StdRng::seed_from_u64(0xe0d);
+        let mut bad = Vec::new();
+        for _ in 0..200_000 {
+            let e = endpoint(&mut rng, &pieces);
+            let Some(t) = policy.check(&e) else { continue };
+            let sound = t.tls
+                && t.port == 443
+                && t.host.parse::<IpAddr>().is_err()
+                && !t.host.split('.').any(str::is_empty)
+                && rustls_pki_types::DnsName::try_from(t.host.as_str()).is_ok()
+                && !t.path.chars().any(|c| c.is_ascii_control() || c == ' ');
+            if !sound {
+                bad.push(e);
+            }
+        }
+        bad.sort();
+        bad.dedup();
+        bad.truncate(8);
+        assert_eq!(bad, Vec::<String>::new());
     }
 }
