@@ -10,6 +10,8 @@
 
 mod harness;
 
+use std::hash::{DefaultHasher, Hasher};
+
 use bytes::Bytes;
 use cypher_core::{Command, Content, Event, FailReason, MediaKind, MessageStatus, Table, Vault};
 use cypher_crypto::IdentitySeed;
@@ -794,6 +796,37 @@ fn lossy_transfer_completes_through_retransmission() {
     w.advance(60_000);
     assert_eq!(w.clients[B].sinks[&file_id], data);
     assert!(w.has_event(A, |e| matches!(e, Event::TransferComplete { .. })));
+}
+
+/// The core decides alike on alike input: the same scenario, run twice,
+/// makes the same effects in the same order, byte for byte. Here several
+/// lossy transfers at once are retried, paused and resumed.
+#[test]
+fn the_same_inputs_make_the_same_effects() {
+    let run = || {
+        let mut w = paired();
+        w.trace = Some(DefaultHasher::new());
+        w.server.drop_chunks_every = Some(3);
+        let sent: Vec<(FileId, Vec<u8>)> = (0..4)
+            .map(|n| {
+                let data = pattern(600 * 1024 + n);
+                let id = offer_file(&mut w, A, B, data.clone(), "f.bin", MediaKind::File);
+                (id, data)
+            })
+            .collect();
+        for (file_id, _) in &sent {
+            w.command(B, Command::AcceptFile { file_id: *file_id });
+        }
+        w.advance(2_000);
+        w.disconnect(A);
+        w.connect(A);
+        w.advance(60_000);
+        for (file_id, data) in &sent {
+            assert_eq!(&w.clients[B].sinks[file_id], data);
+        }
+        w.trace.take().unwrap().finish()
+    };
+    assert_eq!(run(), run());
 }
 
 #[test]

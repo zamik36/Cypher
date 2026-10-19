@@ -2,6 +2,7 @@
 //! semantics of wire v2 and client drivers around real `Core` instances.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash};
 
 use bytes::Bytes;
 use cypher_core::link::Provision;
@@ -110,6 +111,8 @@ pub(crate) struct World {
     pub server_key: IdentityKeyPair,
     onion_ctx: Option<(usize, u64, ReplyKey)>,
     rng: Rng,
+    /// A hash of every effect the cores made, in order, once set.
+    pub trace: Option<DefaultHasher>,
 }
 
 impl World {
@@ -129,6 +132,7 @@ impl World {
             server_key: IdentitySeed([5; 32]).derive_identity(),
             onion_ctx: None,
             rng: Rng::seed_from_u64(1),
+            trace: None,
         };
         for _ in 0..n {
             let seed: [u8; 32] = rng.r#gen();
@@ -540,6 +544,7 @@ impl World {
 
     fn apply(&mut self, i: usize, effects: Vec<Effect>) {
         for effect in effects {
+            trace_effect(self.trace.as_mut(), i, &effect);
             let c = &mut self.clients[i];
             match effect {
                 Effect::Transmit(b) => {
@@ -1010,6 +1015,26 @@ impl World {
             _ => unreachable!(),
         }
     }
+}
+
+/// Adds an effect of client `i` to `trace`, if one is kept: bytes as they
+/// are, the rest as it prints.
+fn trace_effect(trace: Option<&mut DefaultHasher>, i: usize, effect: &Effect) {
+    let Some(trace) = trace else {
+        return;
+    };
+    i.hash(trace);
+    match effect {
+        Effect::Transmit(b) | Effect::Anonymous(b) => b.hash(trace),
+        Effect::Persist(StoreOp::Put { table, key, value }) => (table, key, value).hash(trace),
+        Effect::WriteChunk {
+            file_id,
+            offset,
+            data,
+        } => (file_id, offset, data).hash(trace),
+        other => format!("{other:?}").hash(trace),
+    }
+    std::mem::discriminant(effect).hash(trace);
 }
 
 /// Builds or takes in a history as a driver does, unless the driver is

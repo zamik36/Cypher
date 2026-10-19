@@ -174,9 +174,11 @@ pub struct Core<R> {
     /// One per device of a contact we talk to.
     sessions: HashMap<Addr, Session>,
     outbox: BTreeMap<MsgId, OutboxItem>,
-    outgoing: HashMap<FileId, Outgoing>,
-    incoming: HashMap<FileId, Incoming>,
-    pending: HashMap<u32, (Pending, u64)>,
+    // Maps the core walks to make effects are ordered: the same inputs make
+    // the same effects in the same order.
+    outgoing: BTreeMap<FileId, Outgoing>,
+    incoming: BTreeMap<FileId, Incoming>,
+    pending: BTreeMap<u32, (Pending, u64)>,
     /// Anonymous requests made before it was known how they can go: sent
     /// once the relay is up, or its wait is over.
     deferred: VecDeque<(ClientMsg, Pending)>,
@@ -190,10 +192,10 @@ pub struct Core<R> {
     /// When keys were last republished because the server's were not ours.
     last_resync: Option<u64>,
     /// When a fresh session was last started with a device of a contact.
-    last_repair: HashMap<Addr, u64>,
+    last_repair: BTreeMap<Addr, u64>,
     /// When a message carrying our unanswered first one reached a
     /// contact's device.
-    init_heard: HashMap<Addr, u64>,
+    init_heard: BTreeMap<Addr, u64>,
     /// Invites being joined by, while the host's devices answer.
     joining: HashMap<PeerId, Joining>,
     devices: Devices,
@@ -258,7 +260,7 @@ impl<R: CryptoRngCore> Core<R> {
             outbox,
             outgoing,
             incoming,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             deferred: VecDeque::new(),
             next_req: 0,
             conn: Conn::Offline,
@@ -267,8 +269,8 @@ impl<R: CryptoRngCore> Core<R> {
             last_inbox_fetch: 0,
             last_inbox_sweep: None,
             last_resync: None,
-            last_repair: HashMap::new(),
-            init_heard: HashMap::new(),
+            last_repair: BTreeMap::new(),
+            init_heard: BTreeMap::new(),
             joining: HashMap::new(),
             devices: own.devices,
             history: own.history,
@@ -379,9 +381,11 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.conn = Conn::Offline;
         self.anon.on_disconnected();
-        let pending: Vec<_> = self.pending.drain().map(|(_, (p, _))| p).collect();
+        let pending = std::mem::take(&mut self.pending)
+            .into_values()
+            .map(|(p, _)| p);
         let deferred: Vec<_> = self.deferred.drain(..).map(|(_, p)| p).collect();
-        for p in pending.into_iter().chain(deferred) {
+        for p in pending.chain(deferred) {
             self.fail_request(p, FailReason::Offline);
         }
         self.pause_transfers();
@@ -1152,7 +1156,7 @@ fn load_outbox(
     Ok(outbox)
 }
 
-type Transfers = (HashMap<FileId, Outgoing>, HashMap<FileId, Incoming>);
+type Transfers = (BTreeMap<FileId, Outgoing>, BTreeMap<FileId, Incoming>);
 
 /// Our saved prekeys, or a fresh set (`true`) when there are none.
 fn load_prekeys(
@@ -1225,7 +1229,7 @@ fn load_transfers(
     rows: &Rows,
     skipped: &mut Skipped,
 ) -> Result<Transfers, CoreError> {
-    let (mut outgoing, mut incoming) = (HashMap::new(), HashMap::new());
+    let (mut outgoing, mut incoming) = (BTreeMap::new(), BTreeMap::new());
     for (k, v) in rows {
         let Some(rec) = skipped.open::<TransferRecord>(vault, Table::Transfers, k, v)? else {
             continue;

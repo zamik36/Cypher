@@ -196,13 +196,12 @@ impl<R: CryptoRngCore> Core<R> {
     /// Offers still waiting for an answer, told again after a restart: the
     /// record survives, but whoever shows them to the user does not.
     pub(super) fn announce_pending_offers(&mut self) {
-        let mut pending: Vec<FileId> = self
+        let pending: Vec<FileId> = self
             .incoming
             .iter()
             .filter(|(_, inc)| inc.state == InState::Offered && !inc.kind.is_media())
             .map(|(file_id, _)| *file_id)
             .collect();
-        pending.sort_unstable_by_key(|id| *id.as_bytes());
         for file_id in pending {
             if let Some(inc) = self.incoming.get(&file_id) {
                 let offer = Event::TransferOffered {

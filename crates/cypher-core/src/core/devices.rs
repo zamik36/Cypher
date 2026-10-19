@@ -409,12 +409,13 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(list) = &self.devices.own else {
             return;
         };
-        let gone: Vec<Addr> = self
+        let mut gone: Vec<Addr> = self
             .sessions
             .keys()
             .filter(|a| a.peer == self.peer_id && !list.contains(a.device))
             .copied()
             .collect();
+        gone.sort_unstable();
         if gone.is_empty() {
             return;
         }
@@ -586,12 +587,13 @@ impl<R: CryptoRngCore> Core<R> {
         let Some(p) = self.peers.get(&peer) else {
             return;
         };
-        let gone: Vec<Addr> = self
+        let mut gone: Vec<Addr> = self
             .sessions
             .keys()
             .filter(|a| a.peer == peer && !p.lists(a.device))
             .copied()
             .collect();
+        gone.sort_unstable();
         let unreached: Vec<DeviceId> = self
             .outbox
             .values()

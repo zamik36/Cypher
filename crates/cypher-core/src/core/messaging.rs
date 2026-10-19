@@ -248,12 +248,13 @@ impl<R: CryptoRngCore> Core<R> {
             table: Table::Peers,
             key: peer.to_vec(),
         });
-        let devices: Vec<Addr> = self
+        let mut devices: Vec<Addr> = self
             .sessions
             .keys()
             .filter(|a| a.peer == *peer)
             .copied()
             .collect();
+        devices.sort_unstable();
         for addr in devices {
             self.sessions.remove(&addr);
             self.persist(StoreOp::Delete {
