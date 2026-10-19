@@ -262,8 +262,8 @@ mod tests {
             "not ready before it is set"
         );
 
-        let Ok(url) = std::env::var("CYPHER_TEST_NATS") else {
-            eprintln!("CYPHER_TEST_NATS unset; skipping the connected half");
+        // The connected half needs NATS.
+        let Some(url) = crate::testing::live_env("CYPHER_TEST_NATS") else {
             return;
         };
         let nats = async_nats::ConnectOptions::new()

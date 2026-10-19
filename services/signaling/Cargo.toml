@@ -37,5 +37,8 @@ hkdf.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+cypher-server-kit = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

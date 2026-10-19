@@ -1,6 +1,7 @@
 //! The request handler against a live Redis (`CYPHER_TEST_REDIS`); each test
-//! skips without it. Fresh random identities, links and inboxes keep runs
-//! independent of each other and of leftover state.
+//! skips without it locally and fails without it in CI. Fresh random
+//! identities, links and inboxes keep runs independent of each other and of
+//! leftover state.
 
 use bytes::Bytes;
 use cypher_crypto::inbox::{InboxKey, InboxOp, push_extra};
@@ -16,7 +17,7 @@ use crate::push::{Outcome, Subscription};
 use crate::store::Store;
 
 async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
-    let url = std::env::var("CYPHER_TEST_REDIS").ok()?;
+    let url = cypher_server_kit::testing::live_env("CYPHER_TEST_REDIS")?;
     Some(Handler {
         store: Store::connect(&url).await.unwrap(),
         signing_key: [7; 32],

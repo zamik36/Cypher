@@ -9,6 +9,8 @@ publish.workspace = true
 [features]
 # tokio-console: build with RUSTFLAGS="--cfg tokio_unstable" (see `just console`).
 console = ["dep:console-subscriber", "tokio/tracing"]
+# `testing::live_env` for the live-stack tests of other crates.
+test-util = []
 
 [dependencies]
 anyhow.workspace = true
