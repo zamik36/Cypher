@@ -127,16 +127,16 @@ struct Shared {
 }
 
 /// A client's address slot: taken (or refused), or still to be taken once
-/// the proxy names the client.
+/// the proxy at this address names the client.
 enum Admission {
     Admitted(Option<IpSlot>),
-    Deferred,
+    Deferred(IpAddr),
     Refused,
 }
 
 fn admit_early(upgrade: &Upgrade, slots: &Arc<IpSlots>, peer: Option<IpAddr>) -> Admission {
     match peer {
-        Some(ip) if upgrade.forwards_for(ip) => Admission::Deferred,
+        Some(ip) if upgrade.forwards_for(ip) => Admission::Deferred(ip),
         Some(ip) => slots
             .acquire(ip)
             .map_or(Admission::Refused, |slot| Admission::Admitted(Some(slot))),
@@ -144,14 +144,14 @@ fn admit_early(upgrade: &Upgrade, slots: &Arc<IpSlots>, peer: Option<IpAddr>) ->
     }
 }
 
-/// The admission once the upgrade named the client, if it was deferred.
-fn admit_late(early: Admission, client: Option<IpAddr>, slots: &Arc<IpSlots>) -> Admission {
-    match (early, client) {
-        (Admission::Deferred, Some(ip)) => slots
-            .acquire(ip)
+/// The admission once the upgrade is done: a deferred one counts the client
+/// the proxy `forwarded`, or the proxy itself when it named none.
+fn admit_late(early: Admission, forwarded: Option<IpAddr>, slots: &Arc<IpSlots>) -> Admission {
+    match early {
+        Admission::Deferred(proxy) => slots
+            .acquire(forwarded.unwrap_or(proxy))
             .map_or(Admission::Refused, |slot| Admission::Admitted(Some(slot))),
-        (Admission::Deferred, None) => Admission::Admitted(None),
-        (decided, _) => decided,
+        decided @ (Admission::Admitted(_) | Admission::Refused) => decided,
     }
 }
 
@@ -187,12 +187,11 @@ async fn accept_loop<H: Handler>(
         tokio::spawn(async move {
             let _permit = permit;
             let connection = async {
-                let from_proxy = matches!(early, Admission::Deferred);
+                let from_proxy = matches!(early, Admission::Deferred(_));
                 let Ok((stream, sink, forwarded)) = upgrade.apply(tcp, from_proxy).await else {
                     return;
                 };
-                let Admission::Admitted(_slot) = admit_late(early, forwarded.or(peer), &slots)
-                else {
+                let Admission::Admitted(_slot) = admit_late(early, forwarded, &slots) else {
                     handler.rejected();
                     return;
                 };
@@ -224,9 +223,22 @@ mod tests {
         peer: IpAddr,
         forwarded: Option<IpAddr>,
     ) -> Admission {
-        let early = admit_early(upgrade, slots, Some(peer));
-        let forwarded = forwarded.filter(|_| matches!(early, Admission::Deferred));
-        admit_late(early, forwarded.or(Some(peer)), slots)
+        admit_late(admit_early(upgrade, slots, Some(peer)), forwarded, slots)
+    }
+
+    /// A trusted proxy that names no client is counted as one client
+    /// itself; it gets no way around the per-address limit.
+    #[test]
+    fn a_proxy_naming_no_client_counts_as_its_own_address() {
+        let slots = IpSlots::new(1);
+        let ws = Upgrade::WebSocket("172.30.0.2".parse().unwrap());
+        let proxy = v4(172, 30, 0, 2);
+        let first = admit(&ws, &slots, proxy, None);
+        assert!(matches!(first, Admission::Admitted(Some(_))));
+        assert!(matches!(
+            admit(&ws, &slots, proxy, None),
+            Admission::Refused
+        ));
     }
 
     /// S-107: a host on a private network, but not the deployment's proxy,
