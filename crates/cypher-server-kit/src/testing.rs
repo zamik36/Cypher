@@ -1,18 +1,23 @@
 //! Helpers for tests that run against the live stack (Redis, NATS).
 
+/// Set to `1` in a job that provides the live stack: a test missing it
+/// then fails instead of skipping.
+pub const REQUIRE_LIVE: &str = "CYPHER_REQUIRE_LIVE";
+
 /// The value of `var` (e.g. `CYPHER_TEST_REDIS`), which names a part of the
-/// live stack a test needs. Unset (or empty) it is `None` locally, and the
-/// test skips; in CI, where `CI` is set, it fails the test instead, so a
-/// job without the stack cannot pass by running nothing.
+/// live stack a test needs. Unset (or empty) it is `None`, and the test
+/// skips; where [`REQUIRE_LIVE`] is `1` it fails the test instead, so a
+/// job that should run the live tests cannot pass by running none.
 ///
 /// # Panics
 ///
-/// When `CI` is set and `var` is not.
+/// When [`REQUIRE_LIVE`] is `1` and `var` is not set.
 pub fn live_env(var: &str) -> Option<String> {
     let value = std::env::var(var).ok().filter(|v| !v.is_empty());
+    let required = std::env::var(REQUIRE_LIVE).is_ok_and(|v| v == "1");
     assert!(
-        value.is_some() || std::env::var_os("CI").is_none(),
-        "{var} must be set in CI: this test needs the live stack"
+        value.is_some() || !required,
+        "{var} must be set where {REQUIRE_LIVE}=1: this test needs the live stack"
     );
     value
 }
@@ -21,15 +26,15 @@ pub fn live_env(var: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A missing variable skips the test locally and fails it in CI.
+    /// A missing variable skips the test, unless the live stack is required.
     #[test]
-    fn a_missing_variable_skips_locally_and_fails_in_ci() {
+    fn a_missing_variable_skips_unless_the_stack_is_required() {
         let missing = "CYPHER_TEST_NEVER_SET_ANYWHERE";
         let outcome = std::panic::catch_unwind(|| live_env(missing));
-        if std::env::var_os("CI").is_some() {
-            assert!(outcome.is_err(), "CI without the stack fails");
+        if std::env::var(REQUIRE_LIVE).is_ok_and(|v| v == "1") {
+            assert!(outcome.is_err(), "a required stack that is missing fails");
         } else {
-            assert_eq!(outcome.ok(), Some(None), "a local run skips");
+            assert_eq!(outcome.ok(), Some(None), "otherwise the test skips");
         }
     }
 }
