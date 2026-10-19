@@ -1,5 +1,6 @@
 mod commands;
 mod dto;
+mod ephemeral;
 mod media_scheme;
 mod session;
 #[cfg(target_os = "android")]

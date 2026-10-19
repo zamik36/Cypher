@@ -310,6 +310,26 @@ async fn commands_fail_cleanly_before_connecting() {
     assert_eq!(offline.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// A cancel that comes after `link_finish` took the wait, but before it
+/// started waiting, is not lost; a new wait starts uncancelled.
+#[tokio::test]
+async fn a_link_cancel_is_kept_until_the_wait_begins() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    let start = || json!({ "addr": "127.0.0.1:1", "name": "Laptop" });
+    desktop.call("link_start", start()).await.unwrap();
+    let (waiting, cancel) = desktop.state().linking.take().await.unwrap();
+    desktop.call("link_cancel", json!({})).await.unwrap();
+    tokio::time::timeout(WAIT, cancel.cancelled())
+        .await
+        .expect("the cancel waited for the finish");
+    drop(waiting);
+
+    desktop.call("link_start", start()).await.unwrap();
+    let (_waiting, fresh) = desktop.state().linking.take().await.unwrap();
+    assert!(!fresh.is_cancelled());
+    assert!(desktop.state().linking.take().await.is_none(), "taken once");
+}
+
 #[tokio::test]
 async fn qr_codes_are_png_data_uris() {
     let desktop = Desktop::new(cypher_tls::make_client_config());

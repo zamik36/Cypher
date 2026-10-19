@@ -13,6 +13,8 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
+use crate::ephemeral::Linking;
+
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) type CmdResult<T> = Result<T, String>;
@@ -88,9 +90,7 @@ pub(crate) struct AppState {
     pub voice: StdMutex<Option<Recorder>>,
     /// The last files dropped on the window.
     pub dropped: StdMutex<crate::commands::transfer::Dropped>,
-    /// This new device, waiting to be linked.
-    pub linking: Mutex<Option<cypher_client::Provisioning>>,
-    pub link_cancel: tokio::sync::Notify,
+    pub linking: Linking,
 }
 
 impl AppState {
@@ -104,8 +104,7 @@ impl AppState {
             offers: Offers::default(),
             voice: StdMutex::default(),
             dropped: StdMutex::default(),
-            linking: Mutex::default(),
-            link_cancel: tokio::sync::Notify::new(),
+            linking: Linking::default(),
         }
     }
 
