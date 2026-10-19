@@ -12,7 +12,10 @@ use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, Serve
 use rand::RngCore as _;
 use rand::rngs::OsRng;
 
-use crate::handler::{CAPABILITY_ONION, CAPABILITY_PUSH, Courier, Delivery, Handler, Pusher};
+use crate::handler::{
+    CAPABILITY_ONION, CAPABILITY_PUSH, Caller, Courier, Delivery, Handler, Pusher,
+    anonymous_allowed,
+};
 use crate::push::{Outcome, Subscription};
 use crate::store::Store;
 
@@ -29,8 +32,15 @@ async fn handler(relay_addr: Option<&str>) -> Option<Handler> {
     })
 }
 
+/// Asks `msg` as `peer` signed in at a gateway, or without one as no one in
+/// particular, as the onion path does once its filter let `msg` through.
 async fn ask(h: &Handler, peer: Option<PeerId>, msg: ClientMsg) -> ServerMsg {
-    let reply = h.handle(peer, Frame::new(9, msg).encode()).await;
+    let caller = peer.map_or(Caller::Onion, Caller::Session);
+    let reply = h.handle(caller, Frame::new(9, msg).encode()).await;
+    decode_reply(reply)
+}
+
+fn decode_reply(reply: Bytes) -> ServerMsg {
     let frame = Frame::<ServerMsg>::decode(reply).unwrap();
     assert_eq!(frame.req_id, 9, "replies echo the request id");
     frame.msg
@@ -592,7 +602,9 @@ async fn bootstrap_advertises_the_onion_relay_when_configured() {
 #[tokio::test]
 async fn undecodable_frames_get_bad_request() {
     let Some(h) = handler(None).await else { return };
-    let reply = h.handle(None, Bytes::from_static(&[0xEE, 1, 2])).await;
+    let reply = h
+        .handle(Caller::Onion, Bytes::from_static(&[0xEE, 1, 2]))
+        .await;
     let frame = Frame::<ServerMsg>::decode(reply).unwrap();
     assert_eq!(frame.req_id, 0);
     assert!(is_error(&frame.msg, ErrorCode::BadRequest));
@@ -1066,4 +1078,110 @@ async fn a_subscription_that_ends_is_an_error() {
     })
     .await
     .unwrap();
+}
+
+/// `sig.req` is the session path: a request on it without a valid peer
+/// header is refused, never answered as anonymous (S-111).
+#[tokio::test]
+async fn forwarded_requests_without_a_valid_peer_are_refused() {
+    let Some(mut h) = handler(None).await else {
+        return;
+    };
+    let (_, handed) = recording_courier(&mut h);
+    let owner = Inbox::random();
+    let sealed = ClientMsg::SendSealed {
+        to: PeerId(random32()),
+        device: DeviceId::FIRST,
+        token: random32(),
+        inbox: None,
+        item: Bytes::from_static(b"sealed"),
+    };
+    let mut short = PeerId(random32()).to_hex();
+    short.truncate(62);
+    for header in [None, Some(""), Some("zz"), Some(short.as_str())] {
+        for msg in [sealed.clone(), owner.fetch(), ClientMsg::PushKey] {
+            let reply = h
+                .handle_forwarded(header, Frame::new(9, msg).encode())
+                .await;
+            let reply = decode_reply(reply);
+            assert!(
+                is_error(&reply, ErrorCode::BadRequest),
+                "{header:?}: {reply:?}"
+            );
+        }
+    }
+    assert!(handed.lock().unwrap().is_empty(), "nothing was delivered");
+
+    let peer = PeerId(random32()).to_hex();
+    let reply = h
+        .handle_forwarded(Some(&peer), Frame::new(9, owner.fetch()).encode())
+        .await;
+    assert!(matches!(decode_reply(reply), ServerMsg::InboxBatch { .. }));
+}
+
+/// What the onion lets through: requests that name a blind inbox and
+/// introductions, nothing that needs an identity or is not a signaling
+/// request at all.
+#[test]
+fn only_requests_that_need_no_identity_pass_the_onion() {
+    let proof = Inbox::random().proof(InboxOp::Fetch, &[]);
+    let anonymous = [
+        put([1; 32]),
+        ClientMsg::InboxFetch {
+            proof,
+            close: false,
+        },
+        ClientMsg::InboxAck {
+            proof,
+            claim: [0; 16],
+        },
+        ClientMsg::PushKey,
+        Inbox::random().register("https://ntfy.sh/x", [4; 65]),
+        ClientMsg::PushUnregister { proof },
+        ClientMsg::FetchKeys {
+            peer: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+        },
+        fetch_devices(PeerId([1; 32])),
+        ClientMsg::ResolveLink {
+            link: LinkId::random(&mut OsRng),
+        },
+        ClientMsg::SendSealed {
+            to: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+            token: [0; 32],
+            inbox: None,
+            item: Bytes::new(),
+        },
+    ];
+    let identified = [
+        ClientMsg::PublishKeys {
+            base: Bytes::new(),
+            opks: Vec::new(),
+            replace_opks: false,
+        },
+        ClientMsg::PublishDevices { list: Bytes::new() },
+        ClientMsg::CreateLink,
+        ClientMsg::Bootstrap,
+        ClientMsg::Hello {
+            version: 4,
+            peer: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+        },
+        ClientMsg::Auth { signature: [0; 64] },
+        ClientMsg::Ping,
+        ClientMsg::Send {
+            to: PeerId([1; 32]),
+            device: DeviceId::FIRST,
+            want_ack: false,
+            body: Bytes::new(),
+        },
+        ClientMsg::SetAccess { hashes: Vec::new() },
+    ];
+    for msg in &anonymous {
+        assert!(anonymous_allowed(msg), "{msg:?}");
+    }
+    for msg in &identified {
+        assert!(!anonymous_allowed(msg), "{msg:?}");
+    }
 }

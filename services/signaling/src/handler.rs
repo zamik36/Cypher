@@ -8,7 +8,7 @@ use cypher_wire::{
 };
 use rand::RngCore;
 use tokio::sync::Semaphore;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::push::{Outcome, Subscription, WebPush};
 use crate::store::{PutOutcome, Store};
@@ -157,21 +157,81 @@ impl Pusher {
     }
 }
 
+/// Who a request comes from, as far as signaling knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// The identity signed in at the gateway that forwarded the request.
+    Session(PeerId),
+    /// No one in particular: the request came through the onion relay.
+    Onion,
+}
+
+/// Whether `msg` may come through the onion, from no one in particular:
+/// requests that name a blind inbox, and introductions, which are limited
+/// by what they ask for rather than by who asks. Requests that need an
+/// identity, and what is not a signaling request at all, are not.
+pub(crate) fn anonymous_allowed(msg: &ClientMsg) -> bool {
+    match msg {
+        ClientMsg::InboxPut { .. }
+        | ClientMsg::InboxFetch { .. }
+        | ClientMsg::InboxAck { .. }
+        | ClientMsg::PushKey
+        | ClientMsg::PushRegister { .. }
+        | ClientMsg::PushUnregister { .. }
+        | ClientMsg::FetchKeys { .. }
+        | ClientMsg::FetchDevices { .. }
+        | ClientMsg::ResolveLink { .. }
+        | ClientMsg::SendSealed { .. } => true,
+        ClientMsg::PublishKeys { .. }
+        | ClientMsg::PublishDevices { .. }
+        | ClientMsg::CreateLink
+        | ClientMsg::Bootstrap
+        | ClientMsg::Hello { .. }
+        | ClientMsg::Auth { .. }
+        | ClientMsg::Ping
+        | ClientMsg::Send { .. }
+        | ClientMsg::SetAccess { .. } => false,
+    }
+}
+
+/// The reply `code` to an encoded request, echoing its id when it has one.
+fn refuse(frame: Bytes, code: ErrorCode) -> Bytes {
+    let req_id = Frame::<ClientMsg>::decode(frame).map_or(0, |f| f.req_id);
+    Frame::new(req_id, error(code)).encode()
+}
+
 impl Handler {
-    /// Answers one client request. `peer` is the gateway-authenticated
-    /// identity, absent for anonymous (onion) requests.
-    pub(crate) async fn handle(&self, peer: Option<PeerId>, frame: Bytes) -> Bytes {
-        let (req_id, msg) = match Frame::<ClientMsg>::decode(frame) {
-            Ok(Frame { req_id, msg }) => (req_id, self.answer(peer, msg).await),
-            Err(_) => (0, error(ErrorCode::BadRequest)),
-        };
-        Frame::new(req_id, msg).encode()
+    /// Answers a request a gateway forwarded on `sig.req`, from the identity
+    /// its peer header names (`peer_hex`). Without a valid one it is
+    /// refused rather than taken as anonymous: only the onion is anonymous.
+    pub(crate) async fn handle_forwarded(&self, peer_hex: Option<&str>, frame: Bytes) -> Bytes {
+        if let Some(peer) = peer_hex.and_then(PeerId::from_hex) {
+            self.handle(Caller::Session(peer), frame).await
+        } else {
+            debug!("a forwarded request without a valid peer header");
+            refuse(frame, ErrorCode::BadRequest)
+        }
     }
 
-    async fn answer(&self, peer: Option<PeerId>, msg: ClientMsg) -> ServerMsg {
-        let result = match peer {
-            Some(peer) => self.answer_session(&peer, msg).await,
-            None => self.answer_anonymous(msg).await,
+    /// Answers one encoded request from `caller`.
+    pub(crate) async fn handle(&self, caller: Caller, frame: Bytes) -> Bytes {
+        match Frame::<ClientMsg>::decode(frame) {
+            Ok(frame) => self.handle_frame(caller, frame).await,
+            Err(_) => Frame::new(0, error(ErrorCode::BadRequest)).encode(),
+        }
+    }
+
+    /// Answers one decoded request from `caller`.
+    pub(crate) async fn handle_frame(&self, caller: Caller, frame: Frame<ClientMsg>) -> Bytes {
+        let Frame { req_id, msg } = frame;
+        Frame::new(req_id, self.answer(caller, msg).await).encode()
+    }
+
+    async fn answer(&self, caller: Caller, msg: ClientMsg) -> ServerMsg {
+        let result = match caller {
+            Caller::Session(peer) => self.answer_session(&peer, msg).await,
+            Caller::Onion if anonymous_allowed(&msg) => self.answer_anonymous(msg).await,
+            Caller::Onion => Ok(error(ErrorCode::Unauthorized)),
         };
         result.unwrap_or_else(|e| {
             warn!("redis error: {e}");
@@ -207,7 +267,9 @@ impl Handler {
             | ClientMsg::InboxAck { .. }
             | ClientMsg::PushKey
             | ClientMsg::PushRegister { .. }
-            | ClientMsg::PushUnregister { .. }) => self.answer_either(Some(*peer), msg).await,
+            | ClientMsg::PushUnregister { .. }) => {
+                self.answer_either(Caller::Session(*peer), msg).await
+            }
             ClientMsg::Hello { .. }
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
@@ -217,9 +279,8 @@ impl Handler {
         }
     }
 
-    /// A request through the onion relay, from no one in particular: inbox
-    /// and push requests, and introductions, which are limited by what they
-    /// ask for rather than by who asks.
+    /// A request through the onion relay, from no one in particular, of a
+    /// kind [`anonymous_allowed`] lets through.
     async fn answer_anonymous(&self, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
         match msg {
             ClientMsg::SendSealed {
@@ -242,26 +303,23 @@ impl Handler {
             | ClientMsg::InboxAck { .. }
             | ClientMsg::PushKey
             | ClientMsg::PushRegister { .. }
-            | ClientMsg::PushUnregister { .. }) => self.answer_either(None, msg).await,
+            | ClientMsg::PushUnregister { .. }) => self.answer_either(Caller::Onion, msg).await,
+            // Turned away by `anonymous_allowed` before they get here.
             ClientMsg::PublishKeys { .. }
             | ClientMsg::PublishDevices { .. }
             | ClientMsg::CreateLink
-            | ClientMsg::Bootstrap => Ok(error(ErrorCode::Unauthorized)),
-            ClientMsg::Hello { .. }
+            | ClientMsg::Bootstrap
+            | ClientMsg::Hello { .. }
             | ClientMsg::Auth { .. }
             | ClientMsg::Ping
             | ClientMsg::Send { .. }
-            | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::BadRequest)),
+            | ClientMsg::SetAccess { .. } => Ok(error(ErrorCode::Unauthorized)),
         }
     }
 
     /// Inbox and push requests, which name a blind inbox rather than an
     /// identity and are answered the same on either path.
-    async fn answer_either(
-        &self,
-        peer: Option<PeerId>,
-        msg: ClientMsg,
-    ) -> redis::RedisResult<ServerMsg> {
+    async fn answer_either(&self, caller: Caller, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
         match msg {
             ClientMsg::InboxPut { inbox, item } => self.inbox_put(&inbox, &item).await,
             ClientMsg::InboxFetch { proof, close } => {
@@ -284,27 +342,18 @@ impl Handler {
                     .await
                     .map(|()| ServerMsg::Done)
             }
-            msg => self.push_request(peer, msg).await,
+            msg => self.push_request(caller, msg).await,
         }
     }
 
-    async fn push_request(
-        &self,
-        peer: Option<PeerId>,
-        msg: ClientMsg,
-    ) -> redis::RedisResult<ServerMsg> {
-        match (msg, peer) {
+    async fn push_request(&self, caller: Caller, msg: ClientMsg) -> redis::RedisResult<ServerMsg> {
+        match (msg, caller) {
             (ClientMsg::PushKey, _) => Ok(self.push.as_ref().map_or_else(
                 || error(ErrorCode::Unavailable),
                 |push| ServerMsg::PushKey {
                     key: push.public_key(),
                 },
             )),
-            // Only anonymously: a session would tie the device's push
-            // address to its identity.
-            (ClientMsg::PushRegister { .. } | ClientMsg::PushUnregister { .. }, Some(_)) => {
-                Ok(error(ErrorCode::BadRequest))
-            }
             (
                 ClientMsg::PushRegister {
                     proof,
@@ -312,7 +361,7 @@ impl Handler {
                     p256dh,
                     auth,
                 },
-                None,
+                Caller::Onion,
             ) => {
                 let extra = push_extra(&endpoint, &p256dh, &auth);
                 if !proven(&proof, InboxOp::PushRegister, &extra) {
@@ -325,7 +374,7 @@ impl Handler {
                 };
                 self.push_register(&proof.inbox, &sub).await
             }
-            (ClientMsg::PushUnregister { proof }, None) => {
+            (ClientMsg::PushUnregister { proof }, Caller::Onion) => {
                 if !proven(&proof, InboxOp::PushUnregister, &[]) {
                     return Ok(error(ErrorCode::Unauthorized));
                 }
@@ -334,6 +383,8 @@ impl Handler {
                     .await
                     .map(|()| ServerMsg::Done)
             }
+            // Registering only anonymously: a session would tie the
+            // device's push address to its identity.
             _ => Ok(error(ErrorCode::BadRequest)),
         }
     }

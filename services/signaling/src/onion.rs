@@ -5,7 +5,7 @@ use cypher_crypto::onion;
 use cypher_wire::{ClientMsg, Frame};
 use rand::rngs::OsRng;
 
-use crate::handler::Handler;
+use crate::handler::{Caller, Handler, anonymous_allowed};
 use crate::keys::OnionKeys;
 
 /// Requests outside this window are rejected; inside it, the store
@@ -25,24 +25,11 @@ pub(crate) async fn handle(handler: &Handler, keys: &OnionKeys, blob: &[u8]) -> 
     {
         return None;
     }
-    let frame = Bytes::from(opened.frame);
-    let allowed = matches!(
-        Frame::<ClientMsg>::decode(frame.clone()).ok()?.msg,
-        ClientMsg::InboxPut { .. }
-            | ClientMsg::InboxFetch { .. }
-            | ClientMsg::InboxAck { .. }
-            | ClientMsg::PushKey
-            | ClientMsg::PushRegister { .. }
-            | ClientMsg::PushUnregister { .. }
-            | ClientMsg::FetchKeys { .. }
-            | ClientMsg::FetchDevices { .. }
-            | ClientMsg::ResolveLink { .. }
-            | ClientMsg::SendSealed { .. }
-    );
-    if !allowed {
+    let frame = Frame::<ClientMsg>::decode(Bytes::from(opened.frame)).ok()?;
+    if !anonymous_allowed(&frame.msg) {
         return None;
     }
-    let reply = handler.handle(None, frame).await;
+    let reply = handler.handle_frame(Caller::Onion, frame).await;
     Some(Bytes::from(onion::seal_response(
         &opened.reply,
         &reply,

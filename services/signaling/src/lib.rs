@@ -18,7 +18,6 @@ use cypher_server_kit::metrics::Metrics;
 use cypher_server_kit::{
     PEER_HEADER, SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT, SIG_QUEUE_GROUP, SIG_REQUEST_SUBJECT, secrets,
 };
-use cypher_types::PeerId;
 use futures::{Stream, StreamExt};
 use prometheus::IntCounter;
 use serde::Deserialize;
@@ -151,8 +150,12 @@ impl Service {
                 .headers
                 .as_ref()
                 .and_then(|h| h.get(PEER_HEADER))
-                .and_then(|v| PeerId::from_hex(v.as_str()));
-            Some(self.handler.handle(peer, msg.payload.clone()).await)
+                .map(async_nats::HeaderValue::as_str);
+            Some(
+                self.handler
+                    .handle_forwarded(peer, msg.payload.clone())
+                    .await,
+            )
         };
         if let Some(reply) = reply
             && let Err(e) = self.nats.publish(reply_to, reply).await
