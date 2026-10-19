@@ -33,7 +33,7 @@ pub(crate) async fn link_start(
     cypher_transport::split_host_port(addr).map_err(err)?;
     let waiting = cypher_client::provision(addr.to_owned(), state.tls(), &name);
     let offer = waiting.offer().to_owned();
-    *state.linking.lock().await = Some(waiting);
+    state.linking.start(waiting).await;
     Ok(offer)
 }
 
@@ -44,15 +44,14 @@ pub(crate) async fn link_finish(
     state: State<'_, AppState>,
     passphrase: String,
 ) -> CmdResult<(String, String)> {
-    let waiting = state
+    let (waiting, cancel) = state
         .linking
-        .lock()
-        .await
         .take()
+        .await
         .ok_or("not waiting to be linked")?;
     let linked = tokio::select! {
         linked = waiting.linked() => linked.map_err(err)?,
-        () = state.link_cancel.notified() => return Err("cancelled".to_owned()),
+        () = cancel.cancelled() => return Err("cancelled".to_owned()),
     };
     let unlocked = with_store(&state, move |s| s.adopt(linked, &passphrase)).await?;
     let nickname = unlocked.nickname.clone();
@@ -62,8 +61,7 @@ pub(crate) async fn link_finish(
 /// Stops waiting to be linked.
 #[tauri::command]
 pub(crate) async fn link_cancel(state: State<'_, AppState>) -> CmdResult<()> {
-    state.link_cancel.notify_waiters();
-    state.linking.lock().await.take();
+    state.linking.cancel().await;
     Ok(())
 }
 

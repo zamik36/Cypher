@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::SystemTime;
@@ -178,12 +178,7 @@ impl Worker {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
+        let file = open_sink(&path)?;
         if file.metadata()?.len() != len {
             file.set_len(len)?;
         }
@@ -222,6 +217,84 @@ impl Worker {
         read_exact_at(file, chunk, job.offset)?;
         Ok(buf)
     }
+}
+
+/// Opens the file a transfer is written to: created here, or one already
+/// there (a name the app reserved, a transfer resumed after a restart) that
+/// is a regular file with no other name. A link in its place, dangling or
+/// not, is refused rather than followed, and so is a hard link, so data
+/// never lands in a file elsewhere.
+fn open_sink(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    no_follow(&mut options);
+    // `create_new` fails on any existing entry and never follows a link.
+    match options.clone().create_new(true).open(path) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        created => return created,
+    }
+    let before = std::fs::symlink_metadata(path)?;
+    if !before.is_file() {
+        return Err(not_a_regular_file());
+    }
+    let file = options.open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || !same_file(&before, &opened) || !single_link(&opened) {
+        return Err(not_a_regular_file());
+    }
+    Ok(file)
+}
+
+fn not_a_regular_file() -> io::Error {
+    io::Error::other("the transfer's file is not a regular file of its own")
+}
+
+/// Opens a reparse point (a symlink) itself instead of its target, so the
+/// handle's metadata shows what the path is.
+#[cfg(windows)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_FLAG_OPEN_REPARSE_POINT` from `winbase.h`.
+    const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(OPEN_REPARSE_POINT);
+}
+
+/// A link at the path fails the open (`ELOOP`) instead of being followed;
+/// a FIFO put there cannot block it.
+#[cfg(unix)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn no_follow(_options: &mut OpenOptions) {}
+
+/// Whether the opened file is the one `symlink_metadata` saw at the path,
+/// not one swapped in between.
+#[cfg(unix)]
+fn same_file(checked: &Metadata, opened: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (checked.dev(), checked.ino()) == (opened.dev(), opened.ino())
+}
+
+/// The open did not follow a link ([`no_follow`]), so it is the same entry.
+#[cfg(not(unix))]
+fn same_file(_checked: &Metadata, _opened: &Metadata) -> bool {
+    true
+}
+
+/// A hard link would put the received data into a file elsewhere too.
+#[cfg(unix)]
+fn single_link(opened: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    opened.nlink() == 1
+}
+
+/// std exposes the Windows link count only through an unstable API.
+#[cfg(not(unix))]
+fn single_link(_opened: &Metadata) -> bool {
+    true
 }
 
 #[cfg(unix)]
@@ -343,6 +416,112 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// A name reserved beforehand (an empty file) is taken over and filled.
+    #[tokio::test]
+    async fn a_reserved_file_is_filled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (done_tx, mut done) = mpsc::unbounded_channel();
+        let io = FileIo::spawn(done_tx).unwrap();
+        let id = FileId([4; 16]);
+        let path = dir.path().join("report.pdf");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        io.submit(IoJob::Open {
+            file_id: id,
+            path: path.clone(),
+            len: 4,
+        });
+        io.submit(IoJob::Write {
+            file_id: id,
+            offset: 0,
+            data: Bytes::from_static(b"%PDF"),
+        });
+        io.submit(IoJob::Close {
+            file_id: id,
+            keep: true,
+        });
+        io.submit(IoJob::Barrier(IoDone::HistoryArrived { file_id: id }));
+        assert!(matches!(
+            done.recv().await.unwrap(),
+            IoDone::HistoryArrived { .. }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF");
+    }
+
+    /// A link put where a received file goes, dangling or not, is not
+    /// written through: nothing is created or changed at its target.
+    #[tokio::test]
+    async fn a_link_in_place_of_a_sink_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (done_tx, mut done) = mpsc::unbounded_channel();
+        let io = FileIo::spawn(done_tx).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let existing = outside.join("bashrc");
+        std::fs::write(&existing, b"keep").unwrap();
+        let missing = outside.join("autostart.desktop");
+
+        for (n, target) in [(5u8, &missing), (6, &existing)] {
+            let link = dir.path().join(format!("download-{n}"));
+            if let Err(e) = symlink(target, &link) {
+                eprintln!("no symlinks here ({e}); skipped");
+                return;
+            }
+            let id = FileId([n; 16]);
+            io.submit(IoJob::Open {
+                file_id: id,
+                path: link,
+                len: 8,
+            });
+            io.submit(IoJob::Barrier(IoDone::HistoryArrived { file_id: id }));
+            assert!(matches!(
+                done.recv().await.unwrap(),
+                IoDone::WriteFailed { file_id } if file_id == id
+            ));
+            assert!(matches!(
+                done.recv().await.unwrap(),
+                IoDone::HistoryArrived { .. }
+            ));
+        }
+        assert!(!missing.exists(), "created through a dangling link");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
+    }
+
+    /// A second name of a file elsewhere is not written through either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hard_link_in_place_of_a_sink_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (done_tx, mut done) = mpsc::unbounded_channel();
+        let io = FileIo::spawn(done_tx).unwrap();
+        let elsewhere = dir.path().join("bashrc");
+        std::fs::write(&elsewhere, b"keep").unwrap();
+        let link = dir.path().join("download");
+        std::fs::hard_link(&elsewhere, &link).unwrap();
+        let id = FileId([7; 16]);
+        io.submit(IoJob::Open {
+            file_id: id,
+            path: link,
+            len: 8,
+        });
+        io.submit(IoJob::Barrier(IoDone::HistoryArrived { file_id: id }));
+        assert!(matches!(
+            done.recv().await.unwrap(),
+            IoDone::WriteFailed { file_id } if file_id == id
+        ));
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
+    }
+
+    fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_file(target, link);
+    }
+
     /// A source edited after it was offered, even to the same length, is not
     /// read again: its chunks would reuse nonces with different data.
     #[tokio::test]
@@ -377,7 +556,7 @@ mod tests {
 
     fn read_job(
         file_id: FileId,
-        path: &std::path::Path,
+        path: &Path,
         source: SourceStamp,
         offset: u64,
         len: u32,
@@ -393,13 +572,7 @@ mod tests {
         }
     }
 
-    fn read(
-        file_id: FileId,
-        path: &std::path::Path,
-        source: SourceStamp,
-        offset: u64,
-        len: u32,
-    ) -> IoJob {
+    fn read(file_id: FileId, path: &Path, source: SourceStamp, offset: u64, len: u32) -> IoJob {
         IoJob::Read(read_job(file_id, path, source, offset, len))
     }
 }

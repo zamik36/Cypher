@@ -1,5 +1,6 @@
 mod commands;
 mod dto;
+mod ephemeral;
 mod media_scheme;
 mod session;
 #[cfg(target_os = "android")]
@@ -19,11 +20,6 @@ pub fn mobile_entry_point() {
     }
 }
 
-#[expect(
-    clippy::exit,
-    clippy::disallowed_methods,
-    reason = "tauri::generate_context! expands to process::exit for invalid embedded assets"
-)]
 pub fn run() -> tauri::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -85,15 +81,39 @@ pub fn run() -> tauri::Result<()> {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
+        .run(context())
+}
+
+/// The app's configuration, assets and access control, as built into it;
+/// the tests take the access control for their mock runtime.
+#[expect(
+    clippy::exit,
+    clippy::disallowed_methods,
+    reason = "tauri::generate_context! expands to process::exit for invalid embedded assets"
+)]
+fn context<R: Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
 }
 
 /// The commands and the media scheme, shared with the tests' mock runtime so
 /// they exercise exactly what the webview can reach.
 fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    // The tests also register a command `commands/names.rs` does not list,
+    // to see the access control refuse it.
+    let builder = builder
+        .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::handle);
+    #[cfg(not(test))]
+    let builder = builder.invoke_handler(app_commands!());
+    #[cfg(test)]
+    let builder = builder.invoke_handler(app_commands!(tests::unlisted_command,));
     builder
-        .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::handle)
-        .invoke_handler(tauri::generate_handler![
+}
+
+/// The handler of every app command (named in `commands/names.rs`), plus
+/// the `extra` ones given.
+macro_rules! app_commands {
+    ($($extra:tt)*) => {
+        tauri::generate_handler![
             identity::has_identity,
             identity::create_identity,
             identity::unlock_identity,
@@ -110,7 +130,6 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             identity::delete_conversation,
             settings::connect_to_gateway,
             settings::apply_anonymous_settings,
-            settings::get_nickname,
             settings::reconnect,
             settings::trust_server_key,
             link::create_link,
@@ -145,8 +164,11 @@ fn wire<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
             push::push_disable,
             shell::set_tray,
             shell::set_close_to_tray,
-        ])
+            $($extra)*
+        ]
+    };
 }
+use app_commands;
 
 /// `WebKitGTK` denies camera and microphone requests unless the embedder
 /// allows them; the other platforms ask the user themselves.
