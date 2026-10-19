@@ -1027,3 +1027,43 @@ async fn sealed_sends_go_only_through_the_onion() {
     assert!(is_error(&signed_in, ErrorCode::BadRequest));
     assert!(handed.lock().unwrap().is_empty());
 }
+
+/// A subscription that ends on its own stops the service with an error,
+/// and while it lasts each pool sheds what it has no permit for.
+#[tokio::test]
+async fn a_subscription_that_ends_is_an_error() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
+
+    let shed = prometheus::IntCounter::new("shed", "test").unwrap();
+    let (gate, handled) = (CancellationToken::new(), Arc::new(AtomicUsize::new(0)));
+    let (g, done) = (gate.clone(), Arc::clone(&handled));
+    let messages = futures::stream::iter([1, 2, 3]);
+    let ended = crate::serve("sig.test", messages, 1, &shed, move |_| {
+        let (g, done) = (g.clone(), Arc::clone(&done));
+        async move {
+            g.cancelled().await;
+            done.fetch_add(1, Ordering::SeqCst);
+        }
+    })
+    .await;
+    assert!(ended.to_string().contains("sig.test"), "{ended}");
+    assert_eq!(shed.get(), 2, "one permit: the first is handled, two shed");
+
+    let shutdown = CancellationToken::new();
+    crate::stopped(Some(ended), &shutdown).unwrap_err();
+    shutdown.cancel();
+    let ended = anyhow::anyhow!("closed while shutting down");
+    crate::stopped(Some(ended), &shutdown).unwrap();
+    crate::stopped(None, &CancellationToken::new()).unwrap();
+
+    gate.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while handled.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}

@@ -19,7 +19,7 @@ use cypher_server_kit::{
     PEER_HEADER, SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT, SIG_QUEUE_GROUP, SIG_REQUEST_SUBJECT, secrets,
 };
 use cypher_types::PeerId;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use prometheus::IntCounter;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
@@ -121,20 +121,19 @@ impl Service {
     }
 
     /// Handles `subject` until its subscription ends, at most `permits`
-    /// requests at once.
-    async fn serve(self: Arc<Self>, subject: &'static str, mut sub: Subscriber, permits: usize) {
-        let permits = Arc::new(Semaphore::new(permits));
-        while let Some(msg) = sub.next().await {
-            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-                self.shed.inc();
-                continue;
-            };
-            let service = Arc::clone(&self);
-            tokio::spawn(async move {
-                service.dispatch(subject, msg).await;
-                drop(permit);
-            });
-        }
+    /// requests at once; why it ended is returned.
+    async fn serve(
+        self: Arc<Self>,
+        subject: &'static str,
+        sub: Subscriber,
+        permits: usize,
+    ) -> anyhow::Error {
+        let service = Arc::clone(&self);
+        serve(subject, sub, permits, &self.shed, move |msg| {
+            let service = Arc::clone(&service);
+            async move { service.dispatch(subject, msg).await }
+        })
+        .await
     }
 
     async fn dispatch(&self, subject: &str, msg: Message) {
@@ -161,6 +160,36 @@ impl Service {
             warn!("failed to publish reply: {e}");
         }
     }
+}
+
+/// Hands each message of `sub` to its own task from `handle`, at most
+/// `permits` at once; what comes beyond is dropped and counted in `shed`.
+/// A NATS subscription ends only once its connection is gone for good, so
+/// its end is an error: the service stops instead of idling unseen.
+async fn serve<T, F, Fut>(
+    subject: &'static str,
+    mut sub: impl Stream<Item = T> + Unpin,
+    permits: usize,
+    shed: &IntCounter,
+    handle: F,
+) -> anyhow::Error
+where
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let permits = Arc::new(Semaphore::new(permits));
+    while let Some(msg) = sub.next().await {
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            shed.inc();
+            continue;
+        };
+        let task = handle(msg);
+        tokio::spawn(async move {
+            task.await;
+            drop(permit);
+        });
+    }
+    anyhow::anyhow!("the subscription to {subject} ended")
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -250,13 +279,22 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> anyhow::Result<
     let key_sets = service.subscribe(SIG_KEYS_SUBJECT).await?;
     registry.set_ready(service.nats.clone());
     info!("signaling ready");
-    tokio::select! {
-        () = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, sessions, SESSION_PERMITS) => {}
-        () = Arc::clone(&service).serve(SIG_ONION_SUBJECT, onion, ONION_PERMITS) => {}
-        () = Arc::clone(&service).serve(SIG_KEYS_SUBJECT, key_sets, KEY_SET_PERMITS) => {}
-        () = refresh_keys(Arc::clone(&service), shutdown.clone()) => {}
-        () = shutdown.cancelled() => {}
-    }
+    let ended = tokio::select! {
+        e = Arc::clone(&service).serve(SIG_REQUEST_SUBJECT, sessions, SESSION_PERMITS) => Some(e),
+        e = Arc::clone(&service).serve(SIG_ONION_SUBJECT, onion, ONION_PERMITS) => Some(e),
+        e = Arc::clone(&service).serve(SIG_KEYS_SUBJECT, key_sets, KEY_SET_PERMITS) => Some(e),
+        () = refresh_keys(Arc::clone(&service), shutdown.clone()) => None,
+        () = shutdown.cancelled() => None,
+    };
     let _ = service.nats.flush().await;
-    Ok(())
+    stopped(ended, &shutdown)
+}
+
+/// How `run` ends: a subscription that `ended` on its own is a failure,
+/// one that ended because of `shutdown` is not.
+fn stopped(ended: Option<anyhow::Error>, shutdown: &CancellationToken) -> anyhow::Result<()> {
+    match ended {
+        Some(e) if !shutdown.is_cancelled() => Err(e),
+        Some(_) | None => Ok(()),
+    }
 }
