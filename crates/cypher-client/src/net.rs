@@ -15,9 +15,9 @@ const OUTBOUND_FRAMES: usize = 256;
 /// reading, so a fast sender is slowed down by TCP instead of filling memory.
 const INBOUND_EVENTS: usize = 256;
 
-/// How long one write to the server may take. A server that stops reading
-/// for this long is treated as gone: the connection is dropped, which also
-/// frees a driver waiting to queue a frame for it.
+/// How long one write to the server, or the driver's wait to queue a frame
+/// for it, may take. A server that stops reading for this long is treated
+/// as gone and its connection is dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +130,23 @@ where
     let _ = events.send(attempt.event(NetKind::Down)).await;
 }
 
+/// Hands `frame` to the connection behind `out`. False when the connection
+/// did not take it within [`WRITE_TIMEOUT`]: it ended, or it stopped
+/// writing; either way the caller should drop it.
+pub(crate) async fn queue(out: &mpsc::Sender<Bytes>, frame: Bytes) -> bool {
+    queue_within(out, frame, WRITE_TIMEOUT).await
+}
+
+async fn queue_within(out: &mpsc::Sender<Bytes>, frame: Bytes, limit: Duration) -> bool {
+    match timeout(limit, out.reserve()).await {
+        Ok(Ok(room)) => {
+            room.send(frame);
+            true
+        }
+        Ok(Err(_)) | Err(_) => false,
+    }
+}
+
 /// Runs one write for at most [`WRITE_TIMEOUT`]; false when it failed.
 async fn write(op: impl Future<Output = Result<(), std::io::Error>>) -> bool {
     matches!(timeout(WRITE_TIMEOUT, op).await, Ok(Ok(())))
@@ -194,6 +211,20 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A frame waits for room only so long: a connection that takes none,
+    /// or has ended, is reported as unable to.
+    #[tokio::test]
+    async fn queueing_gives_up_on_a_connection_that_takes_nothing() {
+        let limit = Duration::from_millis(20);
+        let (out, mut taken) = mpsc::channel(1);
+        assert!(queue_within(&out, Bytes::from_static(b"a"), limit).await);
+        assert!(!queue_within(&out, Bytes::from_static(b"b"), limit).await);
+        assert_eq!(taken.recv().await, Some(Bytes::from_static(b"a")));
+        assert!(queue_within(&out, Bytes::from_static(b"c"), limit).await);
+        drop(taken);
+        assert!(!queue_within(&out, Bytes::from_static(b"d"), limit).await);
     }
 
     /// Dropping an attempt closes its socket at once, even while the driver

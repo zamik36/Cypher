@@ -309,9 +309,7 @@ impl Driver {
                 self.feed(Input::AnonymousFrame(frame)).await;
             }
             (Link::Relay, NetKind::Down) => {
-                self.relay.close();
-                self.relay_retry.pending = false;
-                self.relay_retry.schedule();
+                self.relay_down();
                 self.feed(Input::AnonymousChannel { up: false }).await;
             }
         }
@@ -323,6 +321,14 @@ impl Driver {
         self.gateway.close();
         self.gateway_retry.pending = false;
         self.gateway_retry.schedule();
+    }
+
+    /// Drops the relay connection and schedules the next attempt; the
+    /// caller tells the core.
+    fn relay_down(&mut self) {
+        self.relay.close();
+        self.relay_retry.pending = false;
+        self.relay_retry.schedule();
     }
 
     async fn on_io(&mut self, done: IoDone) {
@@ -454,7 +460,8 @@ impl Driver {
     /// server already considers delivered. If it cannot be committed, nothing
     /// after it runs: the core has moved past what is on disk.
     async fn apply(&mut self, effects: Vec<Effect>) {
-        let mut disconnected = false;
+        // Connections dropped along the way; the core hears of them last.
+        let (mut gateway_lost, mut relay_lost) = (false, false);
         for effect in effects {
             match effect {
                 Effect::Persist(op) => self.stage(op),
@@ -462,21 +469,13 @@ impl Driver {
                     if !self.flush().await {
                         return;
                     }
-                    // Waiting for room cannot deadlock with the reader that
-                    // waits for the driver: the server keeps reading while
-                    // its writes to us wait, and a write of ours that stalls
-                    // ends the connection, which ends this wait too.
-                    if let Some(gw) = &self.gateway.out {
-                        let _ = gw.send(frame).await;
-                    }
+                    gateway_lost |= self.send(Link::Gateway, frame).await;
                 }
                 Effect::Anonymous(frame) => {
                     if !self.flush().await {
                         return;
                     }
-                    if let Some(relay) = &self.relay.out {
-                        let _ = relay.send(frame).await;
-                    }
+                    relay_lost |= self.send(Link::Relay, frame).await;
                 }
                 Effect::Emit(event) => self.emit(event),
                 Effect::ReadChunk {
@@ -489,7 +488,7 @@ impl Driver {
                 Effect::Disconnect { reconnect } => {
                     self.reconnect = reconnect;
                     self.gateway_down();
-                    disconnected = true;
+                    gateway_lost = true;
                 }
                 effect @ (Effect::OpenSink { .. }
                 | Effect::WriteChunk { .. }
@@ -514,10 +513,43 @@ impl Driver {
                 }
             }
         }
-        if self.flush().await && disconnected {
-            // What the dropped connection would have reported; its own
-            // `Down` is stale by now and ignored.
+        if self.flush().await {
+            self.report_lost(gateway_lost, relay_lost).await;
+        }
+    }
+
+    /// Hands `frame` to the link's connection, if one is up. True when that
+    /// connection could not take it and was dropped; the caller tells the
+    /// core. Waiting for room cannot deadlock with the reader that waits for
+    /// the driver: the server keeps reading while its writes to us wait, and
+    /// a connection that takes no frame for a while is dropped.
+    async fn send(&mut self, link: Link, frame: Bytes) -> bool {
+        let connection = match link {
+            Link::Gateway => &self.gateway,
+            Link::Relay => &self.relay,
+        };
+        let Some(out) = &connection.out else {
+            return false;
+        };
+        if net::queue(out, frame).await {
+            return false;
+        }
+        tracing::warn!(?link, "connection took no frame, dropping it");
+        match link {
+            Link::Gateway => self.gateway_down(),
+            Link::Relay => self.relay_down(),
+        }
+        true
+    }
+
+    /// Tells the core what the connections the driver dropped would have
+    /// reported; their own `Down` is stale by now and ignored.
+    async fn report_lost(&mut self, gateway: bool, relay: bool) {
+        if gateway {
             Box::pin(self.feed(Input::Disconnected)).await;
+        }
+        if relay {
+            Box::pin(self.feed(Input::AnonymousChannel { up: false })).await;
         }
     }
 
@@ -956,6 +988,42 @@ mod tests {
             frames.push(frame);
         }
         assert_eq!(frames.last(), Some(&Bytes::from_static(b"frame")));
+    }
+
+    /// A connection that cannot take a frame is dropped, the core is told
+    /// as if it had gone down, and both links are dialed again.
+    #[tokio::test]
+    async fn a_connection_that_takes_no_frame_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut d, mut events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
+        let gateway = d.gateway.next();
+        let relay = d.relay.next();
+        let (gw_out, gw_taken) = mpsc::channel(16);
+        let (relay_out, relay_taken) = mpsc::channel(16);
+        d.on_net(NetEvent {
+            from: gateway,
+            kind: NetKind::Up(gw_out),
+        })
+        .await;
+        d.on_net(NetEvent {
+            from: relay,
+            kind: NetKind::Up(relay_out),
+        })
+        .await;
+        while events.try_recv().is_ok() {}
+        // Their pumps ended without the driver hearing of it yet.
+        drop((gw_taken, relay_taken));
+
+        d.apply(vec![
+            Effect::Transmit(Bytes::from_static(b"frame")),
+            Effect::Anonymous(Bytes::from_static(b"onion")),
+        ])
+        .await;
+        assert!(!d.gateway.is_up() && !d.relay.is_up());
+        assert!(!d.gateway.is_current(gateway) && !d.relay.is_current(relay));
+        assert!(matches!(events.try_recv(), Ok(Event::Disconnected)));
+        assert!(!d.failed && d.reconnect);
+        assert!(!d.gateway_retry.pending && !d.relay_retry.pending);
     }
 
     /// After another device took the session over the client stays offline;
