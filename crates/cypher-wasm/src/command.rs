@@ -351,6 +351,38 @@ mod tests {
         }
     }
 
+    /// A malformed id is refused in the words the desktop uses for it
+    /// (`apps/desktop/src-tauri/src/tests.rs`), wherever it appears.
+    #[test]
+    fn bad_ids_are_named_as_the_desktop_names_them() {
+        let refused = |command: serde_json::Value| prepare(command).unwrap_err().to_string();
+        let peer = "invalid peer id";
+        assert_eq!(
+            refused(json!({ "type": "remove_peer", "peer": "zz" })),
+            peer
+        );
+        assert_eq!(refused(json!({ "type": "block_peer", "peer": "" })), peer);
+        let message = "invalid message id";
+        let reply = json!({ "type": "send_text", "peer": PEER, "text": "x", "reply_to": "zz" });
+        assert_eq!(refused(reply), message);
+        assert_eq!(
+            refused(json!({ "type": "discard_outgoing", "msg_id": "zz" })),
+            message
+        );
+        // One bad id refuses the whole list (the desktop skips it instead).
+        let ids = json!({ "type": "mark_read", "peer": PEER, "ids": ["00".repeat(16), "zz"] });
+        assert_eq!(refused(ids), message);
+        let file = "invalid file id";
+        assert_eq!(
+            refused(json!({ "type": "cancel_transfer", "file_id": "zz" })),
+            file
+        );
+        assert_eq!(
+            refused(json!({ "type": "accept_file", "file_id": "ab".repeat(17) })),
+            file
+        );
+    }
+
     #[test]
     fn contacts_can_be_named_and_unnamed() {
         let rename = |alias: serde_json::Value| {
