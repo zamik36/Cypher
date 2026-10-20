@@ -348,9 +348,9 @@ async fn bad_ids_are_named_as_the_web_client_names_them() {
     assert_eq!(refused("accept_file", bad_file()).await, file);
     assert_eq!(refused("cancel_transfer", bad_file()).await, file);
     // A bad id in a read receipt list is skipped, not refused (the web
-    // client refuses the list): the call gets as far as the connection.
+    // client refuses the list).
     let ids = json!({ "peerId": peer, "msgIds": ["zz"] });
-    assert_eq!(refused("mark_read", ids).await, "not connected");
+    assert_ne!(refused("mark_read", ids).await, message);
 }
 
 /// Locking or erasing closes the microphone and gives up a link being

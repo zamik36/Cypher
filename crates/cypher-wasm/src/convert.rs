@@ -282,6 +282,9 @@ mod tests {
 
     const FILE: FileId = FileId([0xAB; 16]);
 
+    /// The serde shape of an effect: its tags, field names and number
+    /// types. Rendered through `serde_json`, so bytes show as arrays where
+    /// the worker gets a `Uint8Array` from `serde_wasm_bindgen`.
     fn shape(effect: &Effect) -> Option<Value> {
         js_effect(effect).map(|js| serde_json::to_value(js).unwrap())
     }
@@ -290,8 +293,9 @@ mod tests {
         "ab".repeat(16)
     }
 
-    /// The shapes the web worker reads (`Effect` in the generated `.d.ts`),
-    /// one per effect, so a renamed tag or field fails here first.
+    /// The tags, field names and number types the web worker reads
+    /// (`Effect` in the generated `.d.ts`), one per effect, so a renamed
+    /// tag or field fails here first.
     #[test]
     fn effects_keep_the_shape_the_worker_reads() {
         let golden = [

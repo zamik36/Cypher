@@ -468,13 +468,10 @@ async fn send_a_staged_copy(a: &mut Peer, b: &mut Peer) {
         .path()
         .join("outgoing")
         .join(format!("{}.bin", staged_id.to_hex()));
-    // The copy is removed by the same step that decides what to remember,
-    // so once it is gone that decision is in.
-    eventually("a staged copy is not kept", async || !copy.exists()).await;
-    assert!(
-        a.client.saved_file(staged_id).await.unwrap().is_none(),
-        "a staged copy is not remembered"
-    );
+    eventually("a staged copy is neither kept nor remembered", async || {
+        !copy.exists() && a.client.saved_file(staged_id).await.unwrap().is_none()
+    })
+    .await;
 }
 
 /// A platform that moves a received file (Android: into Downloads) says where.
