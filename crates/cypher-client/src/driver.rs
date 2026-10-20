@@ -9,10 +9,11 @@ use cypher_types::FileId;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
+use tokio::task::AbortHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::files::{ChunkRead, FileIo, IoDone, IoJob, SourceStamp};
-use crate::net::{self, Link, NetEvent};
+use crate::net::{self, Attempt, Link, NetEvent, NetKind};
 use crate::store::{FILES_TABLE, Op, SAVED_TABLE, Store};
 use crate::{Config, Request};
 
@@ -64,8 +65,8 @@ pub(crate) struct Driver {
     events: mpsc::UnboundedSender<Event>,
     files: HashMap<FileId, FileEntry>,
     vault: cypher_core::Vault,
-    gateway: Option<mpsc::Sender<Bytes>>,
-    relay: Option<mpsc::Sender<Bytes>>,
+    gateway: Connection,
+    relay: Connection,
     relay_addr: Option<String>,
     net_tx: mpsc::Sender<NetEvent>,
     gateway_retry: Retry,
@@ -76,6 +77,63 @@ pub(crate) struct Driver {
     failed: bool,
     #[cfg(feature = "tor")]
     tor: Option<Arc<crate::tor::Tor>>,
+}
+
+/// The driver's side of one link: its latest connection attempt.
+struct Connection {
+    link: Link,
+    /// The attempt the driver trusts; events from any other are stale.
+    epoch: u64,
+    /// Where frames go, once the attempt is up.
+    out: Option<mpsc::Sender<Bytes>>,
+    /// Stops the attempt's task, whether it is dialing or pumping.
+    task: Option<AbortHandle>,
+}
+
+impl Connection {
+    fn new(link: Link) -> Self {
+        Self {
+            link,
+            epoch: 0,
+            out: None,
+            task: None,
+        }
+    }
+
+    /// Drops the current attempt and numbers the next one.
+    fn next(&mut self) -> Attempt {
+        self.close();
+        Attempt {
+            link: self.link,
+            epoch: self.epoch,
+        }
+    }
+
+    fn is_current(&self, from: Attempt) -> bool {
+        from.link == self.link && from.epoch == self.epoch
+    }
+
+    fn is_up(&self) -> bool {
+        self.out.is_some()
+    }
+
+    /// Drops the current attempt: its task stops, its socket closes, and
+    /// whatever it reported but the driver has not handled yet is ignored.
+    fn close(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.out = None;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 struct Retry {
@@ -141,8 +199,8 @@ impl Driver {
             events,
             files: parts.files,
             vault: parts.vault,
-            gateway: None,
-            relay: None,
+            gateway: Connection::new(Link::Gateway),
+            relay: Connection::new(Link::Relay),
             relay_addr: None,
             net_tx,
             gateway_retry: Retry::new(),
@@ -220,34 +278,51 @@ impl Driver {
         }
     }
 
-    async fn on_net(&mut self, ev: NetEvent) {
-        match ev {
-            NetEvent::Up(Link::Gateway, tx) => {
+    /// Handles what a connection reported, unless the driver dropped that
+    /// connection since: a stale `Up` drops its sender, closing the socket.
+    async fn on_net(&mut self, NetEvent { from, kind }: NetEvent) {
+        let current = match from.link {
+            Link::Gateway => self.gateway.is_current(from),
+            Link::Relay => self.relay.is_current(from),
+        };
+        if !current {
+            return;
+        }
+        match (from.link, kind) {
+            (Link::Gateway, NetKind::Up(tx)) => {
                 self.gateway_retry.pending = false;
-                self.gateway = Some(tx);
+                self.gateway.out = Some(tx);
                 self.feed(Input::Connected).await;
             }
-            NetEvent::Frame(Link::Gateway, frame) => self.feed(Input::Frame(frame)).await,
-            NetEvent::Down(Link::Gateway) => {
-                self.gateway = None;
-                self.gateway_retry.pending = false;
-                self.gateway_retry.schedule();
+            (Link::Gateway, NetKind::Frame(frame)) => self.feed(Input::Frame(frame)).await,
+            (Link::Gateway, NetKind::Down) => {
+                self.gateway_down();
                 self.feed(Input::Disconnected).await;
             }
-            NetEvent::Up(Link::Relay, tx) => {
+            (Link::Relay, NetKind::Up(tx)) => {
                 self.relay_retry.pending = false;
                 self.relay_retry.backoff = MIN_BACKOFF;
-                self.relay = Some(tx);
+                self.relay.out = Some(tx);
                 self.feed(Input::AnonymousChannel { up: true }).await;
             }
-            NetEvent::Frame(Link::Relay, frame) => self.feed(Input::AnonymousFrame(frame)).await,
-            NetEvent::Down(Link::Relay) => {
-                self.relay = None;
+            (Link::Relay, NetKind::Frame(frame)) => {
+                self.feed(Input::AnonymousFrame(frame)).await;
+            }
+            (Link::Relay, NetKind::Down) => {
+                self.relay.close();
                 self.relay_retry.pending = false;
                 self.relay_retry.schedule();
                 self.feed(Input::AnonymousChannel { up: false }).await;
             }
         }
+    }
+
+    /// Drops the gateway connection and schedules the next attempt; the
+    /// caller tells the core.
+    fn gateway_down(&mut self) {
+        self.gateway.close();
+        self.gateway_retry.pending = false;
+        self.gateway_retry.schedule();
     }
 
     async fn on_io(&mut self, done: IoDone) {
@@ -326,17 +401,18 @@ impl Driver {
     }
 
     async fn on_tick(&mut self) {
-        if self.reconnect && self.gateway.is_none() && self.gateway_retry.due() {
+        if self.reconnect && !self.gateway.is_up() && self.gateway_retry.due() {
             self.gateway_retry.pending = true;
-            net::spawn(
-                Link::Gateway,
+            let attempt = self.gateway.next();
+            self.gateway.task = Some(net::spawn(
+                attempt,
                 self.config.gateway_addr.clone(),
                 Arc::clone(&self.config.tls),
                 self.net_tx.clone(),
-            );
+            ));
         }
         if let Some(addr) = self.relay_addr.clone()
-            && self.relay.is_none()
+            && !self.relay.is_up()
             && self.relay_retry.due()
         {
             self.relay_retry.pending = true;
@@ -345,32 +421,27 @@ impl Driver {
         self.feed(Input::Tick).await;
     }
 
-    #[cfg_attr(
-        not(feature = "tor"),
-        expect(
-            clippy::needless_pass_by_ref_mut,
-            reason = "the Tor build caches its client in self"
-        )
-    )]
     fn spawn_relay(&mut self, addr: String) {
+        let attempt = self.relay.next();
         #[cfg(feature = "tor")]
         if let Some(config) = &self.config.tor {
             let tor = self.tor.get_or_insert_with(|| {
                 crate::tor::Tor::new(config.clone(), self.config.data_dir.join("tor"))
             });
-            tor.spawn_relay(addr, Arc::clone(&self.config.tls), self.net_tx.clone());
+            let tls = Arc::clone(&self.config.tls);
+            self.relay.task = Some(tor.spawn_relay(attempt, addr, tls, self.net_tx.clone()));
             return;
         }
         #[cfg(not(feature = "tor"))]
         if self.config.tor.is_some() {
             tracing::warn!("built without Tor support; connecting to the relay directly");
         }
-        net::spawn(
-            Link::Relay,
+        self.relay.task = Some(net::spawn(
+            attempt,
             addr,
             Arc::clone(&self.config.tls),
             self.net_tx.clone(),
-        );
+        ));
     }
 
     async fn feed(&mut self, input: Input) {
@@ -386,6 +457,7 @@ impl Driver {
     /// server already considers delivered. If it cannot be committed, nothing
     /// after it runs: the core has moved past what is on disk.
     async fn apply(&mut self, effects: Vec<Effect>) {
+        let mut disconnected = false;
         for effect in effects {
             match effect {
                 Effect::Persist(op) => self.stage(op),
@@ -397,7 +469,7 @@ impl Driver {
                     // waits for the driver: the server keeps reading while
                     // its writes to us wait, and a write of ours that stalls
                     // ends the connection, which ends this wait too.
-                    if let Some(gw) = &self.gateway {
+                    if let Some(gw) = &self.gateway.out {
                         let _ = gw.send(frame).await;
                     }
                 }
@@ -405,7 +477,7 @@ impl Driver {
                     if !self.flush().await {
                         return;
                     }
-                    if let Some(relay) = &self.relay {
+                    if let Some(relay) = &self.relay.out {
                         let _ = relay.send(frame).await;
                     }
                 }
@@ -419,7 +491,8 @@ impl Driver {
                 } => self.read_chunk(file_id, index, offset, len, headroom).await,
                 Effect::Disconnect { reconnect } => {
                     self.reconnect = reconnect;
-                    self.gateway = None;
+                    self.gateway_down();
+                    disconnected = true;
                 }
                 effect @ (Effect::OpenSink { .. }
                 | Effect::WriteChunk { .. }
@@ -442,7 +515,11 @@ impl Driver {
                 }
             }
         }
-        self.flush().await;
+        if self.flush().await && disconnected {
+            // What the dropped connection would have reported; its own
+            // `Down` is stale by now and ignored.
+            Box::pin(self.feed(Input::Disconnected)).await;
+        }
     }
 
     /// File IO for a sink effect; `None` when the transfer's target is unknown.
@@ -533,8 +610,8 @@ impl Driver {
         self.failed = true;
         self.reconnect = false;
         self.relay_addr = None;
-        self.gateway = None;
-        self.relay = None;
+        self.gateway.close();
+        self.relay.close();
         let _ = self.events.send(Event::Warning {
             reason: FailReason::StorageFailed,
         });
@@ -679,8 +756,8 @@ mod tests {
             events,
             files: HashMap::new(),
             vault: cypher_core::Vault::new(seed.derive_storage_key()),
-            gateway: None,
-            relay: None,
+            gateway: Connection::new(Link::Gateway),
+            relay: Connection::new(Link::Relay),
             relay_addr: Some("localhost:2".into()),
             net_tx,
             gateway_retry: Retry::new(),
@@ -707,7 +784,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut d, _events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
         let (gateway, mut sent) = mpsc::channel(4);
-        d.gateway = Some(gateway);
+        d.gateway.out = Some(gateway);
         d.apply(vec![
             persist(),
             Effect::Transmit(Bytes::from_static(b"frame")),
@@ -726,8 +803,8 @@ mod tests {
         let (mut d, mut events) = driver(Store::detached());
         let (gateway, mut sent) = mpsc::channel(4);
         let (relay, mut anonymous) = mpsc::channel(4);
-        d.gateway = Some(gateway);
-        d.relay = Some(relay);
+        d.gateway.out = Some(gateway);
+        d.relay.out = Some(relay);
         d.apply(vec![
             persist(),
             Effect::Transmit(Bytes::from_static(b"frame")),
@@ -817,6 +894,42 @@ mod tests {
             d.store.get(SAVED_TABLE, recorded.to_vec()).await.unwrap(),
             None
         );
+    }
+
+    /// A connection the core dropped stops at once, and what it still
+    /// reports later reaches neither the core nor the connection that
+    /// replaced it.
+    #[tokio::test]
+    async fn a_late_event_from_a_dropped_connection_leaves_the_new_one_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut d, mut events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
+        let event = |from, kind| NetEvent { from, kind };
+
+        let first = d.gateway.next();
+        let pump = tokio::spawn(std::future::pending::<()>());
+        d.gateway.task = Some(pump.abort_handle());
+        let (old, _old_rx) = mpsc::channel(4);
+        d.on_net(event(first, NetKind::Up(old))).await;
+        d.apply(vec![Effect::Disconnect { reconnect: true }]).await;
+        assert!(pump.await.unwrap_err().is_cancelled(), "the old pump stops");
+        assert!(matches!(events.try_recv(), Ok(Event::Disconnected)));
+
+        let second = d.gateway.next();
+        let (new, mut sent) = mpsc::channel(16);
+        d.on_net(event(second, NetKind::Up(new))).await;
+        d.on_net(event(first, NetKind::Down)).await;
+        d.on_net(event(first, NetKind::Frame(Bytes::from_static(b"junk"))))
+            .await;
+        assert!(d.gateway.is_up(), "the new connection stays");
+        assert!(events.try_recv().is_err(), "the core heard of neither");
+
+        d.apply(vec![Effect::Transmit(Bytes::from_static(b"frame"))])
+            .await;
+        let mut frames = Vec::new();
+        while let Ok(frame) = sent.try_recv() {
+            frames.push(frame);
+        }
+        assert_eq!(frames.last(), Some(&Bytes::from_static(b"frame")));
     }
 
     /// After another device took the session over the client stays offline;

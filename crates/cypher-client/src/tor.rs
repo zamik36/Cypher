@@ -10,11 +10,12 @@ use arti_client::config::pt::TransportConfigBuilder;
 use arti_client::config::{BridgeConfigBuilder, CfgPath, TorClientConfigBuilder};
 use arti_client::{TorClient, TorClientConfig};
 use tokio::sync::{OnceCell, mpsc};
+use tokio::task::AbortHandle;
 use tokio::time::timeout;
 use tor_rtcompat::PreferredRuntime;
 
 use crate::TorConfig;
-use crate::net::{self, Link, NetEvent};
+use crate::net::{self, Attempt, NetEvent, NetKind};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -52,12 +53,14 @@ impl Tor {
     }
 
     /// Connects to `addr` over a Tor circuit, then runs TLS inside it.
+    /// Aborting the returned handle drops the attempt, connected or not.
     pub(crate) fn spawn_relay(
         self: &Arc<Self>,
+        attempt: Attempt,
         addr: String,
         tls: Arc<rustls::ClientConfig>,
         events: mpsc::Sender<NetEvent>,
-    ) {
+    ) -> AbortHandle {
         let tor = Arc::clone(self);
         tokio::spawn(async move {
             let conn = async {
@@ -69,13 +72,18 @@ impl Tor {
                 Ok::<_, BoxError>(cypher_transport::tls_over(stream, host, tls).await?)
             };
             match conn.await {
-                Ok(conn) => net::pump(Link::Relay, conn, events).await,
+                Ok(conn) => net::pump(attempt, conn, events).await,
                 Err(e) => {
                     tracing::warn!("tor relay connection failed: {e}");
-                    let _ = events.send(NetEvent::Down(Link::Relay)).await;
+                    let down = NetEvent {
+                        from: attempt,
+                        kind: NetKind::Down,
+                    };
+                    let _ = events.send(down).await;
                 }
             }
-        });
+        })
+        .abort_handle()
     }
 }
 

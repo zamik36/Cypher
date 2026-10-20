@@ -6,6 +6,7 @@ use cypher_transport::Conn;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 use tokio::time::timeout;
 
 const OUTBOUND_FRAMES: usize = 256;
@@ -25,10 +26,31 @@ pub(crate) enum Link {
     Relay,
 }
 
-pub(crate) enum NetEvent {
-    Up(Link, mpsc::Sender<Bytes>),
-    Frame(Link, Bytes),
-    Down(Link),
+/// One connection attempt on a link. The driver numbers its attempts and
+/// trusts only the latest, so a late event from a connection it already
+/// dropped cannot touch the one that replaced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Attempt {
+    pub link: Link,
+    pub epoch: u64,
+}
+
+/// Something that happened on a connection attempt.
+pub(crate) struct NetEvent {
+    pub from: Attempt,
+    pub kind: NetKind,
+}
+
+pub(crate) enum NetKind {
+    Up(mpsc::Sender<Bytes>),
+    Frame(Bytes),
+    Down,
+}
+
+impl Attempt {
+    fn event(self, kind: NetKind) -> NetEvent {
+        NetEvent { from: self, kind }
+    }
 }
 
 /// The queue network tasks report to the driver through.
@@ -37,33 +59,35 @@ pub(crate) fn inbound() -> (mpsc::Sender<NetEvent>, mpsc::Receiver<NetEvent>) {
 }
 
 /// Connects directly over TLS, then pumps frames until either side closes.
+/// Aborting the returned handle drops the attempt, connected or not.
 pub(crate) fn spawn(
-    link: Link,
+    attempt: Attempt,
     addr: String,
     tls: Arc<rustls::ClientConfig>,
     events: mpsc::Sender<NetEvent>,
-) {
+) -> AbortHandle {
     tokio::spawn(async move {
         match cypher_transport::connect_tls(&addr, tls).await {
-            Ok(conn) => pump(link, conn, events).await,
+            Ok(conn) => pump(attempt, conn, events).await,
             Err(e) => {
-                tracing::warn!(?link, %addr, "connect failed: {e}");
-                let _ = events.send(NetEvent::Down(link)).await;
+                tracing::warn!(link = ?attempt.link, %addr, "connect failed: {e}");
+                let _ = events.send(attempt.event(NetKind::Down)).await;
             }
         }
-    });
+    })
+    .abort_handle()
 }
 
 /// Moves frames between an established connection and the driver, until
 /// the server closes, the driver drops the sender handed to it, or a write
 /// stalls.
-pub(crate) async fn pump<S>(link: Link, conn: Conn<S>, events: mpsc::Sender<NetEvent>)
+pub(crate) async fn pump<S>(attempt: Attempt, conn: Conn<S>, events: mpsc::Sender<NetEvent>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut sink, mut stream) = conn.split();
     let (tx, mut rx) = mpsc::channel::<Bytes>(OUTBOUND_FRAMES);
-    if events.send(NetEvent::Up(link, tx)).await.is_err() {
+    if events.send(attempt.event(NetKind::Up(tx))).await.is_err() {
         return;
     }
     let mut writer = tokio::spawn(async move {
@@ -87,7 +111,7 @@ where
     let reader = async {
         while let Some(Ok(frame)) = stream.next().await {
             if events
-                .send(NetEvent::Frame(link, frame.freeze()))
+                .send(attempt.event(NetKind::Frame(frame.freeze())))
                 .await
                 .is_err()
             {
@@ -102,7 +126,7 @@ where
         _ = &mut writer => {}
     }
     writer.abort();
-    let _ = events.send(NetEvent::Down(link)).await;
+    let _ = events.send(attempt.event(NetKind::Down)).await;
 }
 
 /// Runs one write for at most [`WRITE_TIMEOUT`]; false when it failed.
@@ -123,11 +147,11 @@ mod tests {
         let frames = u16::try_from(4 * INBOUND_EVENTS).unwrap();
         let (client, server) = tokio::io::duplex(4096);
         let (events, mut inbox) = inbound();
-        tokio::spawn(pump(
-            Link::Gateway,
-            cypher_transport::framed(client),
-            events,
-        ));
+        let attempt = Attempt {
+            link: Link::Gateway,
+            epoch: 1,
+        };
+        tokio::spawn(pump(attempt, cypher_transport::framed(client), events));
         let mut sender = tokio::spawn(async move {
             let mut server = cypher_transport::framed(server);
             for n in 0..frames {
@@ -137,9 +161,14 @@ mod tests {
         });
 
         // Held for the whole test: dropping it closes the connection.
-        let Some(NetEvent::Up(Link::Gateway, _out)) = inbox.recv().await else {
+        let Some(NetEvent {
+            from,
+            kind: NetKind::Up(_out),
+        }) = inbox.recv().await
+        else {
             panic!("no Up first");
         };
+        assert_eq!(from, attempt);
         assert!(
             timeout(Duration::from_millis(300), &mut sender)
                 .await
@@ -147,7 +176,11 @@ mod tests {
             "the sender is held back while nobody reads"
         );
         for n in 0..frames {
-            let Some(NetEvent::Frame(Link::Gateway, frame)) = inbox.recv().await else {
+            let Some(NetEvent {
+                kind: NetKind::Frame(frame),
+                ..
+            }) = inbox.recv().await
+            else {
                 panic!("frame {n} missing");
             };
             assert_eq!(frame.get(..2), Some(n.to_be_bytes().as_slice()));
@@ -155,7 +188,10 @@ mod tests {
         sender.await.unwrap().unwrap();
         assert!(matches!(
             inbox.recv().await,
-            Some(NetEvent::Down(Link::Gateway))
+            Some(NetEvent {
+                kind: NetKind::Down,
+                ..
+            })
         ));
     }
 }

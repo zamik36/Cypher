@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::ClientError;
 use crate::driver::now_ms;
-use crate::net::{self, Link, NetEvent};
+use crate::net::{self, Attempt, Link, NetKind};
 
 const TICK: Duration = Duration::from_secs(1);
 const RECONNECT_AFTER: Duration = Duration::from_secs(2);
@@ -52,28 +52,29 @@ async fn run(
     mut done: oneshot::Sender<Result<Linked, ClientError>>,
 ) {
     let (events_tx, mut events) = net::inbound();
-    net::spawn(
-        Link::Gateway,
-        addr.clone(),
-        Arc::clone(&tls),
-        events_tx.clone(),
-    );
+    // One attempt at a time, each started once the last is down: none can
+    // be stale, so they all share one number.
+    let attempt = Attempt {
+        link: Link::Gateway,
+        epoch: 0,
+    };
+    net::spawn(attempt, addr.clone(), Arc::clone(&tls), events_tx.clone());
     let mut out: Option<mpsc::Sender<Bytes>> = None;
     let mut tick = tokio::time::interval(TICK);
     loop {
         let input = tokio::select! {
             () = done.closed() => return,
             _ = tick.tick() => Input::Tick,
-            event = events.recv() => match event {
-                Some(NetEvent::Up(_, sender)) => {
+            event = events.recv() => match event.map(|e| e.kind) {
+                Some(NetKind::Up(sender)) => {
                     out = Some(sender);
                     Input::Connected
                 }
-                Some(NetEvent::Frame(_, frame)) => Input::Frame(frame),
-                Some(NetEvent::Down(_)) => {
+                Some(NetKind::Frame(frame)) => Input::Frame(frame),
+                Some(NetKind::Down) => {
                     out = None;
                     tokio::time::sleep(RECONNECT_AFTER).await;
-                    net::spawn(Link::Gateway, addr.clone(), Arc::clone(&tls), events_tx.clone());
+                    net::spawn(attempt, addr.clone(), Arc::clone(&tls), events_tx.clone());
                     Input::Disconnected
                 }
                 None => return,
