@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import init, {
   Client,
+  conversationRange,
   historyRange,
   Identity,
   Provision,
@@ -443,10 +444,17 @@ async function mediaBlob(fileId: string): Promise<Blob> {
   return new Blob([bytes], { type: mime });
 }
 
+/** Every stored message with `peer`, whatever its date. */
+function conversation(peer: string): IDBKeyRange {
+  const [first, last] = conversationRange(peer);
+  return IDBKeyRange.bound(first, last);
+}
+
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
-  const [from, to] = historyRange(peer, before);
-  const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true), limit, true);
+  const range =
+    before === undefined ? conversation(peer) : IDBKeyRange.bound(...historyRange(peer, before), false, true);
+  const rows = await scan(db, "messages", range, limit, true);
   const statuses = await Promise.all(
     rows.map(([key]) => get<Uint8Array>(db, "message_status", key.subarray(key.length - 16))),
   );
@@ -664,8 +672,7 @@ const handlers: Handlers = {
   forgetPeer: (peer) =>
     serial(async () => {
       await run({ type: "remove_peer", peer });
-      const [from, to] = historyRange(peer, undefined);
-      await deleteRows(await scan(db, "messages", IDBKeyRange.bound(from, to, false, true)));
+      await deleteRows(await scan(db, "messages", conversation(peer)));
     }),
   deleteMessage: (peer, msgId, timestamp) =>
     serial(async () => {

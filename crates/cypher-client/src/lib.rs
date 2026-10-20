@@ -19,7 +19,7 @@ use std::sync::Arc;
 use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::{
     Command, Core, CoreError, Event, MediaKind, MessageStatus, Snapshot, StoredMessage, Table,
-    Vault, message_key,
+    Vault, message_key, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
-use store::{FILES_TABLE, SAVED_TABLE, Store};
+use store::{End, FILES_TABLE, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
@@ -490,8 +490,10 @@ impl Client {
         before_ms: Option<u64>,
         limit: usize,
     ) -> Result<Vec<StoredMessage>, ClientError> {
-        let from = message_key(&peer, 0, &MsgId([0; 16]));
-        let to = message_key(&peer, before_ms.unwrap_or(u64::MAX), &MsgId([0; 16]));
+        let (from, last) = peer_messages(&peer);
+        let to = before_ms.map_or(End::Through(last), |before| {
+            End::Before(message_key(&peer, before, &MsgId([0; MsgId::LEN])))
+        });
         let rows = self
             .store
             .range_desc(Table::Messages.name(), from, to, limit)
@@ -558,11 +560,15 @@ impl Client {
     /// saved. The saved files themselves stay where they are.
     pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
         self.command(Command::RemovePeer { peer }).await?;
-        let from = message_key(&peer, 0, &MsgId([0; 16]));
-        let to = message_key(&peer, u64::MAX, &MsgId([0xFF; 16]));
+        let (first, last) = peer_messages(&peer);
         let rows = self
             .store
-            .range_desc(Table::Messages.name(), from, to, usize::MAX)
+            .range_desc(
+                Table::Messages.name(),
+                first,
+                End::Through(last),
+                usize::MAX,
+            )
             .await?;
         let mut ops = Vec::with_capacity(rows.len() * 2);
         let mut media = Vec::new();
@@ -589,16 +595,16 @@ impl Client {
         let from = message_key(
             &peer,
             near_ms.saturating_sub(DELETE_WINDOW_MS),
-            &MsgId([0; 16]),
+            &MsgId([0; MsgId::LEN]),
         );
         let to = message_key(
             &peer,
             near_ms.saturating_add(DELETE_WINDOW_MS),
-            &MsgId([0xFF; 16]),
+            &MsgId([u8::MAX; MsgId::LEN]),
         );
         let (key, sealed) = self
             .store
-            .range_desc(Table::Messages.name(), from, to, usize::MAX)
+            .range_desc(Table::Messages.name(), from, End::Through(to), usize::MAX)
             .await?
             .into_iter()
             .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
@@ -686,4 +692,86 @@ async fn load_files(
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(dir: &Path) -> Config {
+        Config {
+            gateway_addr: "localhost:1".into(),
+            tls: cypher_tls::make_client_config(),
+            data_dir: dir.to_owned(),
+            require_onion: false,
+            tor: None,
+        }
+    }
+
+    fn text(peer: PeerId, sent_at_ms: u64, id: u8) -> StoredMessage {
+        StoredMessage {
+            msg_id: MsgId([id; MsgId::LEN]),
+            peer,
+            outgoing: false,
+            sent_at_ms,
+            status: MessageStatus::Delivered,
+            content: Content::Text {
+                text: format!("text {id}"),
+                reply_to: None,
+            },
+        }
+    }
+
+    async fn put(client: &Client, msg: &StoredMessage) {
+        let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+        let sealed = client.vault.seal(Table::Messages, &key, msg, &mut OsRng);
+        client
+            .store
+            .apply(vec![store::Op::Put(Table::Messages.name(), key, sealed)])
+            .await
+            .unwrap();
+    }
+
+    /// Rows a contact dated as far ahead as the format allows, stored before
+    /// the core clamped dates, are still shown and deleted with the rest.
+    #[tokio::test]
+    async fn a_conversation_dated_far_ahead_is_listed_and_forgotten_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (client, _events) = Client::start(
+            &IdentitySeed::generate(),
+            DeviceId::FIRST,
+            config(dir.path()),
+        )
+        .await
+        .unwrap();
+        let (peer, other) = (PeerId([4; 32]), PeerId([5; 32]));
+        for msg in [
+            text(peer, 1_000, 1),
+            text(peer, u64::MAX, 2),
+            text(peer, u64::MAX, u8::MAX),
+            text(other, 1_000, 3),
+        ] {
+            put(&client, &msg).await;
+        }
+
+        let shown: Vec<_> = client
+            .history(peer, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.msg_id)
+            .collect();
+        assert_eq!(
+            shown,
+            [MsgId([u8::MAX; 16]), MsgId([2; 16]), MsgId([1; 16])],
+            "newest first, the far-future ones included"
+        );
+        let older = client.history(peer, Some(u64::MAX), 10).await.unwrap();
+        assert_eq!(older.len(), 1, "paging back starts before the date given");
+
+        client.forget_peer(peer).await.unwrap();
+        assert!(client.history(peer, None, 10).await.unwrap().is_empty());
+        assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+        client.shutdown().await;
+    }
 }

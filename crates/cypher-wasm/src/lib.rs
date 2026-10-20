@@ -6,7 +6,7 @@ mod command;
 mod convert;
 mod history;
 
-use cypher_core::{Core, Effect, Input, Table, Vault, message_key, ui};
+use cypher_core::{Core, Effect, Input, Table, Vault, message_key, peer_messages, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
 use cypher_types::{DeviceId, MsgId};
 use js_sys::Array;
@@ -428,19 +428,29 @@ impl Client {
     }
 }
 
-/// `[from, to)` `IndexedDB` key bounds of a conversation, oldest first.
+/// `[from, to]` `IndexedDB` key bounds of a whole conversation, both
+/// included: every message with the peer lies between them, whatever its date.
+#[wasm_bindgen(js_name = conversationRange, unchecked_return_type = "[Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>]")]
+pub fn conversation_range(peer_hex: &str) -> Result<Array, JsError> {
+    let (first, last) = peer_messages(&peer(peer_hex)?);
+    Ok(key_bounds(&first, &last))
+}
+
+/// `[from, to)` `IndexedDB` key bounds of the part of a conversation sent
+/// before `before_ms`, oldest first.
 #[wasm_bindgen(js_name = historyRange, unchecked_return_type = "[Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>]")]
-pub fn history_range(peer_hex: &str, before_ms: Option<f64>) -> Result<Array, JsError> {
+pub fn history_range(peer_hex: &str, before_ms: f64) -> Result<Array, JsError> {
     let p = peer(peer_hex)?;
-    let before = before_ms.map_or(u64::MAX, now);
+    let (first, _) = peer_messages(&p);
+    let before = message_key(&p, now(before_ms), &MsgId([0; MsgId::LEN]));
+    Ok(key_bounds(&first, &before))
+}
+
+fn key_bounds(from: &[u8], to: &[u8]) -> Array {
     let bounds = Array::new();
-    bounds.push(&js_sys::Uint8Array::from(
-        message_key(&p, 0, &MsgId([0; 16])).as_slice(),
-    ));
-    bounds.push(&js_sys::Uint8Array::from(
-        message_key(&p, before, &MsgId([0; 16])).as_slice(),
-    ));
-    Ok(bounds)
+    bounds.push(&js_sys::Uint8Array::from(from));
+    bounds.push(&js_sys::Uint8Array::from(to));
+    bounds
 }
 
 /// JS timestamps (ms, a double) as core time; invalid values become 0.
