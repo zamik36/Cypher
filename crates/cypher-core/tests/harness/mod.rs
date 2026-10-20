@@ -29,8 +29,75 @@ struct Keys {
     opks: Vec<(u32, [u8; 32])>,
 }
 
+/// What the mock server does with a request a test wants to fail.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Fault {
+    /// Never answered nor passed on, as if lost on the way.
+    Ignore,
+    /// Answered with this error.
+    Error(ErrorCode),
+}
+
+/// Fails the next `times` requests that `matches` picks, over the session
+/// or through the relay alike.
+pub(crate) struct Rule {
+    pub matches: Box<dyn Fn(&ClientMsg) -> bool>,
+    pub fault: Fault,
+    pub times: usize,
+}
+
+impl Rule {
+    /// Fails every request `matches` picks.
+    pub(crate) fn always(matches: impl Fn(&ClientMsg) -> bool + 'static, fault: Fault) -> Self {
+        Self::times(usize::MAX, matches, fault)
+    }
+
+    /// Fails the next `times` requests `matches` picks.
+    pub(crate) fn times(
+        times: usize,
+        matches: impl Fn(&ClientMsg) -> bool + 'static,
+        fault: Fault,
+    ) -> Self {
+        Self {
+            matches: Box::new(matches),
+            fault,
+            times,
+        }
+    }
+}
+
+/// One effect of a `handle` call, as a test looks at it later.
+#[derive(Debug)]
+pub(crate) enum Seen {
+    /// A row written or deleted.
+    Persist {
+        table: u8,
+        key: Vec<u8>,
+    },
+    Transmit(Bytes),
+    Anonymous(Bytes),
+    Emit(Event),
+    ReadChunk(FileId),
+    Other,
+}
+
+/// The effects one `handle` call (or a restore) returned, in order, and
+/// the client's clock at the time.
+#[derive(Debug)]
+pub(crate) struct Batch {
+    pub client: usize,
+    pub at: u64,
+    pub effects: Vec<Seen>,
+}
+
 #[derive(Default)]
 pub(crate) struct Server {
+    /// Requests to fail, first match wins.
+    pub faults: Vec<Rule>,
+    /// Every request served, in order: who sent it, its id and what it was.
+    pub served: Vec<(usize, u32, ClientMsg)>,
+    /// `FetchDevices` requests served.
+    pub device_fetches: usize,
     online: HashMap<Addr, usize>,
     challenges: HashMap<usize, ([u8; 32], Addr)>,
     keys: HashMap<Addr, Keys>,
@@ -102,6 +169,31 @@ pub(crate) struct Client {
     /// How far this client's clock runs ahead of the world's.
     pub ahead: u64,
     inputs: VecDeque<Input>,
+    /// Request ids this core instance used: none may come twice.
+    req_ids: HashSet<u32>,
+}
+
+impl Client {
+    fn new(seed: [u8; 32], device: DeviceId, provision: Option<Provision>) -> Self {
+        Self {
+            seed,
+            device,
+            core: None,
+            provision,
+            kv: BTreeMap::new(),
+            sources: HashMap::new(),
+            sinks: HashMap::new(),
+            closed: HashMap::new(),
+            history_fails: false,
+            history_held: false,
+            on_start: Vec::new(),
+            events: Vec::new(),
+            connected: false,
+            ahead: 0,
+            inputs: VecDeque::new(),
+            req_ids: HashSet::new(),
+        }
+    }
 }
 
 pub(crate) struct World {
@@ -124,6 +216,8 @@ pub(crate) struct World {
     /// this device: `crash_rows` keeps only the rows persisted until then.
     pub crash_after_send: Option<(usize, Addr)>,
     pub crash_rows: Option<Kv>,
+    /// Every batch of effects the cores made, once set.
+    pub log: Option<Vec<Batch>>,
 }
 
 impl World {
@@ -147,26 +241,11 @@ impl World {
             transmitted: Vec::new(),
             crash_after_send: None,
             crash_rows: None,
+            log: None,
         };
         for _ in 0..n {
             let seed: [u8; 32] = rng.r#gen();
-            world.clients.push(Client {
-                seed,
-                device: DeviceId::FIRST,
-                core: None,
-                provision: None,
-                kv: BTreeMap::new(),
-                sources: HashMap::new(),
-                sinks: HashMap::new(),
-                closed: HashMap::new(),
-                history_fails: false,
-                history_held: false,
-                on_start: Vec::new(),
-                events: Vec::new(),
-                connected: false,
-                ahead: 0,
-                inputs: VecDeque::new(),
-            });
+            world.clients.push(Client::new(seed, DeviceId::FIRST, None));
         }
         for i in 0..n {
             world.boot(i);
@@ -180,23 +259,7 @@ impl World {
     /// the new client.
     pub(crate) fn add_device(&mut self, owner: usize, device: u32) -> usize {
         let seed = self.clients[owner].seed;
-        self.clients.push(Client {
-            seed,
-            device: DeviceId(device),
-            core: None,
-            provision: None,
-            kv: BTreeMap::new(),
-            sources: HashMap::new(),
-            sinks: HashMap::new(),
-            closed: HashMap::new(),
-            history_fails: false,
-            history_held: false,
-            on_start: Vec::new(),
-            events: Vec::new(),
-            connected: false,
-            ahead: 0,
-            inputs: VecDeque::new(),
-        });
+        self.clients.push(Client::new(seed, DeviceId(device), None));
         let i = self.clients.len() - 1;
         self.boot(i);
         self.connect(i);
@@ -208,23 +271,9 @@ impl World {
     /// client.
     pub(crate) fn provision(&mut self, name: &str) -> usize {
         let provision = Provision::new(name, self.now, &mut self.rng);
-        self.clients.push(Client {
-            seed: [0; 32],
-            device: provision.offer().device,
-            core: None,
-            provision: Some(provision),
-            kv: BTreeMap::new(),
-            sources: HashMap::new(),
-            sinks: HashMap::new(),
-            closed: HashMap::new(),
-            history_fails: false,
-            history_held: false,
-            on_start: Vec::new(),
-            events: Vec::new(),
-            connected: false,
-            ahead: 0,
-            inputs: VecDeque::new(),
-        });
+        let device = provision.offer().device;
+        self.clients
+            .push(Client::new([0; 32], device, Some(provision)));
         let i = self.clients.len() - 1;
         self.connect(i);
         self.run();
@@ -266,30 +315,73 @@ impl World {
         self.clients[i].core.as_ref().unwrap().peer_id()
     }
 
-    /// (Re)creates the core from the client's persisted key-value state.
-    pub(crate) fn boot(&mut self, i: usize) {
-        let c = &mut self.clients[i];
+    /// What a driver reads from client `i`'s store at startup.
+    pub(crate) fn snapshot(&self, i: usize) -> Snapshot {
+        let c = &self.clients[i];
         let pick = |t: Table| -> Vec<(Vec<u8>, Vec<u8>)> {
             c.kv.iter()
                 .filter(|((table, _), _)| *table == t as u8)
                 .map(|((_, k), v)| (k.clone(), v.clone()))
                 .collect()
         };
-        let snapshot = Snapshot {
+        Snapshot {
             meta: pick(Table::Meta),
             peers: pick(Table::Peers),
             sessions: pick(Table::Sessions),
             outbox: pick(Table::Outbox),
             transfers: pick(Table::Transfers),
-        };
+        }
+    }
+
+    /// (Re)creates the core from the client's persisted key-value state.
+    pub(crate) fn boot(&mut self, i: usize) {
+        let snapshot = self.snapshot(i);
         let rng = Rng::seed_from_u64(self.rng.r#gen());
+        let c = &mut self.clients[i];
         let (core, effects) =
             Core::restore(&IdentitySeed(c.seed), c.device, &snapshot, self.now, rng).unwrap();
         c.core = Some(core);
         c.connected = false;
+        c.req_ids.clear();
         let start = c.on_start.iter().cloned().map(Input::Command);
         c.inputs.extend(start);
+        self.record(i, self.now, &effects);
         self.apply(i, effects);
+    }
+
+    /// Keeps `effects` in the log, if one is kept.
+    fn record(&mut self, client: usize, at: u64, effects: &[Effect]) {
+        if let Some(log) = self.log.as_mut() {
+            log.push(Batch {
+                client,
+                at,
+                effects: effects.iter().map(seen).collect(),
+            });
+        }
+    }
+
+    /// Hands client `i` a command without running the world: what it
+    /// does happens at the next [`World::run`], alongside what others do.
+    pub(crate) fn queue(&mut self, i: usize, cmd: Command) {
+        self.clients[i].inputs.push_back(Input::Command(cmd));
+    }
+
+    /// The server forgets the keys `addr` published, as if it never had.
+    pub(crate) fn remove_keys(&mut self, addr: Addr) {
+        self.server.keys.remove(&addr);
+    }
+
+    /// The request inside an onion blob a client handed its relay, as
+    /// the relay would forward it; `None` for a key set request.
+    pub(crate) fn open_anonymous(&self, blob: &[u8]) -> Option<Frame<ClientMsg>> {
+        let (_, rest) = blob.split_at_checked(relay::CORR_LEN)?;
+        let (tag, payload) = rest.split_first()?;
+        if *tag != relay::TAG_ONION {
+            return None;
+        }
+        let (_, sealed) = onion::split_epoch(payload).ok()?;
+        let opened = onion::open_request(&self.onion_secret, sealed).ok()?;
+        Frame::<ClientMsg>::decode(Bytes::from(opened.frame)).ok()
     }
 
     pub(crate) fn connect(&mut self, i: usize) {
@@ -492,6 +584,11 @@ impl World {
         self.server.inboxes.get(inbox).map_or(0, Vec::len)
     }
 
+    /// The items waiting in `inbox`, as the server keeps them.
+    pub(crate) fn inbox_contents(&self, inbox: &[u8; 32]) -> &[Bytes] {
+        self.server.inboxes.get(inbox).map_or(&[], Vec::as_slice)
+    }
+
     pub(crate) fn texts(&self, i: usize) -> Vec<String> {
         self.clients[i]
             .events
@@ -524,11 +621,13 @@ impl World {
                 while let Some(input) = self.clients[i].inputs.pop_front() {
                     progressed = true;
                     let c = &mut self.clients[i];
+                    let at = self.now.saturating_add(c.ahead);
                     let effects = match (c.core.as_mut(), c.provision.as_mut()) {
-                        (Some(core), _) => core.handle(input, self.now.saturating_add(c.ahead)),
+                        (Some(core), _) => core.handle(input, at),
                         (None, Some(provision)) => provision.handle(input, self.now),
                         (None, None) => Vec::new(),
                     };
+                    self.record(i, at, &effects);
                     self.apply(i, effects);
                 }
             }
@@ -694,14 +793,20 @@ impl World {
         self.run();
     }
 
+    fn serve(&mut self, from: usize, raw: Bytes) {
+        let Ok(frame) = Frame::<ClientMsg>::decode(raw) else {
+            panic!("client sent malformed frame");
+        };
+        if !self.screen(from, frame.req_id, &frame.msg) {
+            self.answer(from, frame);
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "mock server: one flat arm per message kind"
     )]
-    fn serve(&mut self, from: usize, raw: Bytes) {
-        let Ok(Frame { req_id, msg }) = Frame::<ClientMsg>::decode(raw) else {
-            panic!("client sent malformed frame");
-        };
+    fn answer(&mut self, from: usize, Frame { req_id, msg }: Frame<ClientMsg>) {
         let reply = |msg| Frame::new(req_id, msg);
         let authed = self
             .server
@@ -915,6 +1020,29 @@ impl World {
         }
     }
 
+    /// Logs request `req_id` from client `from`, which must not reuse an
+    /// id, and fails it if a test said so; whether it was failed.
+    fn screen(&mut self, from: usize, req_id: u32, msg: &ClientMsg) -> bool {
+        assert!(
+            req_id == 0 || self.clients[from].req_ids.insert(req_id),
+            "client {from} used request id {req_id} twice"
+        );
+        self.server.served.push((from, req_id, msg.clone()));
+        let Some(rule) = self
+            .server
+            .faults
+            .iter_mut()
+            .find(|r| r.times > 0 && (r.matches)(msg))
+        else {
+            return false;
+        };
+        rule.times -= 1;
+        if let Fault::Error(code) = rule.fault {
+            self.respond(from, &Frame::new(req_id, ServerMsg::Error { code }));
+        }
+        true
+    }
+
     /// An invite looked up, or a device list or keys fetched: answered alike
     /// whoever asks.
     fn introduce(&mut self, msg: ClientMsg) -> ServerMsg {
@@ -932,12 +1060,15 @@ impl World {
                     None => not_found,
                 }
             }
-            ClientMsg::FetchDevices { peer } => match self.server.devices.get(&peer) {
-                Some(list) => ServerMsg::Devices {
-                    list: Bytes::from(list.encode()),
-                },
-                None => not_found,
-            },
+            ClientMsg::FetchDevices { peer } => {
+                self.server.device_fetches += 1;
+                match self.server.devices.get(&peer) {
+                    Some(list) => ServerMsg::Devices {
+                        list: Bytes::from(list.encode()),
+                    },
+                    None => not_found,
+                }
+            }
             ClientMsg::ResolveLink { link } => match self.server.links.get(link.as_str()) {
                 Some(peer) => ServerMsg::LinkResolved { peer: *peer },
                 None => not_found,
@@ -1076,6 +1207,28 @@ impl World {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+/// What the log keeps of `effect`.
+fn seen(effect: &Effect) -> Seen {
+    match effect {
+        Effect::Persist(StoreOp::Put { table, key, .. } | StoreOp::Delete { table, key }) => {
+            Seen::Persist {
+                table: *table as u8,
+                key: key.clone(),
+            }
+        }
+        Effect::Transmit(b) => Seen::Transmit(b.clone()),
+        Effect::Anonymous(b) => Seen::Anonymous(b.clone()),
+        Effect::Emit(e) => Seen::Emit(e.clone()),
+        Effect::ReadChunk { file_id, .. } => Seen::ReadChunk(*file_id),
+        Effect::OpenSink { .. }
+        | Effect::WriteChunk { .. }
+        | Effect::CloseSink { .. }
+        | Effect::BuildHistory { .. }
+        | Effect::ImportHistory { .. }
+        | Effect::Disconnect { .. } => Seen::Other,
     }
 }
 
