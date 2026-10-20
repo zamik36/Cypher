@@ -68,11 +68,29 @@ describe("applyEffects", () => {
     expect(log).toEqual([]);
   });
 
-  it("refuses an effect it does not know", async () => {
+  it("stores what came before an effect it does not know, then refuses it", async () => {
     const { log, sinks } = recorder();
     const unknown = { kind: "launch" } as unknown as Effect;
-    await expect(applyEffects([unknown], sinks)).rejects.toThrow("unknown effect");
-    expect(log).toEqual([]);
+    const applied = applyEffects([{ kind: "put", table: "meta", key: bytes(1), value: bytes(2) }, unknown], sinks);
+    await expect(applied).rejects.toThrow(StorageFailedError);
+    await expect(applied).rejects.toThrow("unknown effect");
+    expect(log).toEqual(["persist put:meta"]);
+  });
+
+  it("stores what came before a sink that failed, and runs nothing after it", async () => {
+    const { log, sinks } = recorder();
+    sinks.openSink = () => Promise.reject(new Error("no room in OPFS"));
+    await expect(
+      applyEffects(
+        [
+          { kind: "put", table: "transfers", key: bytes(1), value: bytes(2) },
+          { kind: "open_sink", file_id: "f", len: 1, sink: "download" },
+          { kind: "transmit", data: bytes(9) },
+        ],
+        sinks,
+      ),
+    ).rejects.toThrow("no room in OPFS");
+    expect(log).toEqual(["persist put:transfers"]);
   });
 
   it("routes every other effect in order without persisting empty batches", async () => {
@@ -166,5 +184,30 @@ describe("EffectApplier", () => {
     expect(applier.stopped).toBe(false);
     expect(stopped).not.toHaveBeenCalled();
     expect(log).toEqual(["persist put:outbox", "transmit 9", "event message"]);
+  });
+
+  it("stops for good when what came before a failed sink cannot be stored", async () => {
+    const { sinks } = recorder();
+    sinks.persist = () => Promise.reject(new DOMException("quota", "QuotaExceededError"));
+    sinks.closeSink = () => Promise.reject(new Error("gone"));
+    const stopped = vi.fn();
+    const applier = new EffectApplier(sinks, stopped);
+    await expect(
+      applier.apply([
+        { kind: "put", table: "transfers", key: bytes(1), value: bytes(2) },
+        { kind: "close_sink", file_id: "f", complete: true },
+      ]),
+    ).rejects.toThrow(StorageFailedError);
+    expect(applier.stopped).toBe(true);
+    expect(stopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops for good on an effect it does not know", async () => {
+    const { sinks } = recorder();
+    const stopped = vi.fn();
+    const applier = new EffectApplier(sinks, stopped);
+    await expect(applier.apply([{ kind: "launch" } as unknown as Effect])).rejects.toThrow(StorageFailedError);
+    expect(applier.stopped).toBe(true);
+    expect(stopped).toHaveBeenCalledTimes(1);
   });
 });

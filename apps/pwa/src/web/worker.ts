@@ -75,13 +75,28 @@ const sinks: EffectSinks = {
     for (const w of waiters) if (w(r)) waiters.delete(w);
   },
   readChunk: (request) => void readChunk(request),
-  openSink,
-  writeChunk: (fileId, offset, data) => openSinks.get(fileId)?.handle.write(data, { at: offset }),
-  closeSink,
+  openSink: (fileId, len, sink) => openSink(fileId, len, sink).catch((e: unknown) => sinkFailed(fileId, e)),
+  writeChunk: (fileId, offset, data) => {
+    try {
+      openSinks.get(fileId)?.handle.write(data, { at: offset });
+    } catch (e) {
+      sinkFailed(fileId, e);
+    }
+  },
+  closeSink: (fileId, complete) => closeSink(fileId, complete).catch((e: unknown) => sinkFailed(fileId, e)),
   buildHistory: (fileId, partial) => void runBuild(fileId, partial),
   importHistory: (fileId) => void runImport(fileId),
   disconnect: (reconnect) => gateway.restart(reconnect),
 };
+
+/**
+ * A transfer's file could not be written: the transfer is cancelled, as the
+ * native client does, instead of the rest of the effects being dropped.
+ */
+function sinkFailed(fileId: string, e: unknown) {
+  console.warn("writing a transfer failed", fileId, e);
+  void feed((c, now) => c.command({ type: "cancel_transfer", file_id: fileId }, now).effects);
+}
 
 /**
  * Storage failed under the core: it is ahead of what IndexedDB holds, so it
