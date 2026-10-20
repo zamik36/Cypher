@@ -8,6 +8,7 @@
     reason = "test code: panics are assertions and every fixture is small"
 )]
 
+mod behaviour;
 mod harness;
 
 use std::hash::{DefaultHasher, Hasher};
@@ -2044,25 +2045,8 @@ mod legacy {
     use cypher_types::{Addr, DeviceId, PeerId};
     use serde::{Deserialize, Serialize};
 
+    use crate::behaviour::rows::{Ad, Session};
     use crate::harness::World;
-
-    /// An inbox announcement: epoch, this epoch's and the next inbox, and
-    /// their access tokens.
-    type Ad = (u32, [[u8; 32]; 2], [[u8; 32]; 2]);
-
-    /// A session as stored now.
-    #[derive(Serialize, Deserialize)]
-    struct Session {
-        ratchet: Vec<u8>,
-        pending_init: Vec<u8>,
-        accepted_ephemerals: Vec<[u8; 32]>,
-        inbox: Option<Ad>,
-        hello_sent: bool,
-    }
-
-    impl Record for Session {
-        const VERSION: u8 = 2;
-    }
 
     /// A contact as stored now.
     #[derive(Serialize, Deserialize)]

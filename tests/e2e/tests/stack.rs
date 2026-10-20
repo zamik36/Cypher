@@ -1,5 +1,6 @@
 //! The user journey against gateway, signaling and relay in this process.
-//! Needs `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS`; skipped otherwise.
+//! Needs `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS`; skipped otherwise,
+//! unless `CYPHER_REQUIRE_LIVE=1`.
 
 use e2e::Stack;
 

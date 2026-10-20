@@ -1,7 +1,7 @@
 //! Every service metric that a dashboard or alert names is one the services
 //! export. Names drift silently otherwise: the first overview dashboard
 //! showed nothing for months. Needs `CYPHER_TEST_REDIS` and
-//! `CYPHER_TEST_NATS`; skipped otherwise.
+//! `CYPHER_TEST_NATS`; skipped otherwise, unless `CYPHER_REQUIRE_LIVE=1`.
 
 use std::collections::BTreeSet;
 use std::path::Path;

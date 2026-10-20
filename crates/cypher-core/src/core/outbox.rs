@@ -871,6 +871,35 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: if cfg!(miri) { 8 } else { 512 },
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// Every wait lies between half its base and the cap, in the upper
+        /// half of the doubled base; and a later attempt never waits less
+        /// than an earlier one could, until both reach the cap.
+        #[test]
+        fn retry_delays_grow_within_their_bounds(
+            base in proptest::sample::select(vec![RETRY_BUSY_MS, RETRY_FAILED_MS, RETRY_OFFLINE_MS]),
+            attempts in 0u32..64,
+            roll: u64,
+        ) {
+            let delay = retry_delay(base, attempts, roll);
+            let least = retry_delay(base, attempts, 0);
+            proptest::prop_assert!((base / 2..=MAX_RETRY_MS).contains(&delay));
+            proptest::prop_assert!((least..=least * 2 + 1).contains(&delay));
+            let next_least = retry_delay(base, attempts + 1, 0);
+            if next_least < MAX_RETRY_MS / 2 {
+                proptest::prop_assert!(next_least >= delay);
+            } else {
+                proptest::prop_assert!(next_least >= least);
+            }
+        }
+    }
+
     #[test]
     fn statuses_only_move_forward() {
         let order = [

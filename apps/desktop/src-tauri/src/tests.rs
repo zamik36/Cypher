@@ -2,7 +2,8 @@
 //! camelCase arguments the webview sends (`apps/desktop/src/tauri.ts`), so a
 //! renamed parameter or a command missing from the handler list fails here.
 //! The two-desktop scenario needs `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS`
-//! (see `tests/e2e`).
+//! (see `tests/e2e`): skipped without them, failed where
+//! `CYPHER_REQUIRE_LIVE=1`.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -324,6 +325,32 @@ async fn commands_fail_cleanly_before_connecting() {
     let note = media_request(&FileId([3; 16]).to_hex(), None);
     let offline = media_scheme::answer(desktop.app.handle(), &note).await;
     assert_eq!(offline.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// A malformed id is refused in the words the web client uses for it
+/// (`cypher-wasm`'s command tests), before the connection is looked at.
+#[tokio::test]
+async fn bad_ids_are_named_as_the_web_client_names_them() {
+    let desktop = Desktop::new(cypher_tls::make_client_config());
+    desktop.create("bob").await;
+    let refused = async |cmd: &str, args: Value| desktop.call(cmd, args).await.unwrap_err();
+    let peer = cypher_types::PeerId([1; 32]).to_hex();
+
+    let bad_peer = json!({ "peerId": "zz" });
+    assert_eq!(refused("accept_contact", bad_peer).await, "invalid peer id");
+    let message = "invalid message id";
+    let reply = json!({ "peerId": peer, "text": "x", "replyTo": "zz" });
+    assert_eq!(refused("send_message", reply).await, message);
+    let delete = json!({ "peerId": peer, "msgId": "zz", "timestamp": 0 });
+    assert_eq!(refused("delete_message", delete).await, message);
+    let file = "invalid file id";
+    let bad_file = || json!({ "fileId": "zz" });
+    assert_eq!(refused("accept_file", bad_file()).await, file);
+    assert_eq!(refused("cancel_transfer", bad_file()).await, file);
+    // A bad id in a read receipt list is skipped, not refused (the web
+    // client refuses the list).
+    let ids = json!({ "peerId": peer, "msgIds": ["zz"] });
+    assert_ne!(refused("mark_read", ids).await, message);
 }
 
 /// Locking or erasing closes the microphone and gives up a link being

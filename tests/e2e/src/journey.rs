@@ -14,8 +14,22 @@ use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 const WAIT: Duration = Duration::from_secs(20);
-/// Lets the IO thread flush a finished sink before the file is read back.
-const SETTLE: Duration = Duration::from_millis(200);
+/// How often [`eventually`] looks again.
+const POLL: Duration = Duration::from_millis(20);
+
+/// Waits until `check` holds, looking again every [`POLL`] for up to
+/// [`WAIT`]: for what a client finishes on its IO thread after the event
+/// that told of it.
+async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !check().await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: not within {WAIT:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
 
 /// Where clients connect: a gateway and the certificates they pin.
 #[derive(Clone)]
@@ -57,7 +71,7 @@ pub async fn run(target: &Target) {
     send_a_staged_copy(&mut a, &mut b).await;
     move_a_saved_file(&b, file_id).await;
     play_back_a_voice_note(&a, &mut b).await;
-    stream_a_video_note(&mut a, &b).await;
+    stream_a_video_note(&mut a, &mut b).await;
     register_for_push(&mut b).await;
     deliver_offline_through_the_inbox(target, &mut a, b).await;
     a.client.shutdown().await;
@@ -411,8 +425,10 @@ async fn send_a_file(a: &mut Peer, b: &mut Peer) -> FileId {
     let location = |p: &Path| Some(p.to_str().unwrap().to_owned());
     assert_eq!(b.client.saved_file(file_id).await.unwrap(), location(&dest));
     a.transfer_complete(file_id).await;
-    tokio::time::sleep(SETTLE).await;
-    assert_eq!(a.client.saved_file(file_id).await.unwrap(), location(&src));
+    eventually("the sender remembers where the file is", async || {
+        a.client.saved_file(file_id).await.unwrap() == location(&src)
+    })
+    .await;
     file_id
 }
 
@@ -447,16 +463,15 @@ async fn send_a_staged_copy(a: &mut Peer, b: &mut Peer) {
     b.transfer_complete(staged_id).await;
     assert_eq!(std::fs::read(&photo).unwrap(), b"from a content provider");
     a.transfer_complete(staged_id).await;
-    tokio::time::sleep(SETTLE).await;
     let copy = a
         .dir
         .path()
         .join("outgoing")
         .join(format!("{}.bin", staged_id.to_hex()));
-    assert!(
-        !copy.exists() && a.client.saved_file(staged_id).await.unwrap().is_none(),
-        "a staged copy is neither kept nor remembered"
-    );
+    eventually("a staged copy is neither kept nor remembered", async || {
+        !copy.exists() && a.client.saved_file(staged_id).await.unwrap().is_none()
+    })
+    .await;
 }
 
 /// A platform that moves a received file (Android: into Downloads) says where.
@@ -484,11 +499,12 @@ async fn play_back_a_voice_note(a: &Peer, b: &mut Peer) {
         .await
         .unwrap();
     b.transfer_complete(voice_id).await;
-    tokio::time::sleep(SETTLE).await;
-    assert_eq!(
-        std::fs::read(a.client.media_path(&voice_id)).unwrap(),
-        std::fs::read(b.client.media_path(&voice_id)).unwrap(),
-    );
+    eventually("both keep the same sealed copy", async || {
+        let ours = std::fs::read(a.client.media_path(&voice_id));
+        let theirs = std::fs::read(b.client.media_path(&voice_id));
+        ours.is_ok_and(|ours| theirs.is_ok_and(|theirs| ours == theirs))
+    })
+    .await;
     let played = b.client.media_range(voice_id, 0, None).await.unwrap();
     assert_eq!(played.total, voice_len);
     assert_eq!(played.bytes, voice, "receiver plays the recording");
@@ -503,7 +519,7 @@ async fn play_back_a_voice_note(a: &Peer, b: &mut Peer) {
     );
 }
 
-async fn stream_a_video_note(a: &mut Peer, b: &Peer) {
+async fn stream_a_video_note(a: &mut Peer, b: &mut Peer) {
     let recording = pattern(300 * 1024);
     let (_, note_id) = a
         .client
@@ -520,7 +536,8 @@ async fn stream_a_video_note(a: &mut Peer, b: &Peer) {
         .await
         .unwrap();
     a.transfer_complete(note_id).await;
-    tokio::time::sleep(SETTLE).await;
+    // Complete means closed on disk: the note can be read back at once.
+    b.transfer_complete(note_id).await;
     let mut got = Vec::new();
     while got.len() < recording.len() {
         let from = u64::try_from(got.len()).unwrap();
@@ -536,7 +553,10 @@ async fn stream_a_video_note(a: &mut Peer, b: &Peer) {
         .path()
         .join("outgoing")
         .join(format!("{}.bin", note_id.to_hex()));
-    assert!(!staged.exists(), "staged plaintext is deleted once sent");
+    eventually("staged plaintext is deleted once sent", async || {
+        !staged.exists()
+    })
+    .await;
 }
 
 /// The server hands out its push key and takes a subscription, through the
@@ -573,20 +593,38 @@ async fn deliver_offline_through_the_inbox(target: &Target, a: &mut Peer, b: Pee
     let late = b.client.send_text(a.client.peer_id(), "late".into(), None);
     assert!(matches!(late.await, Err(ClientError::Closed)));
     let (seed, dir) = (b.seed, b.dir);
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let queued = a
-        .client
-        .send_text(b_id, "пока тебя не было".into(), None)
-        .await
-        .unwrap();
-    a.wait(|e| match e {
-        Event::MessageStatus {
-            msg_id,
-            status: MessageStatus::Queued,
-        } if *msg_id == queued => Some(()),
-        _ => None,
-    })
-    .await;
+    // The gateway drops B's session a moment after B left; until then a
+    // message is still handed to it. Write again until one is left in B's
+    // inbox.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let sent = a
+            .client
+            .send_text(b_id, "пока тебя не было".into(), None)
+            .await
+            .unwrap();
+        let queued = a
+            .wait(|e| match e {
+                Event::MessageStatus { msg_id, status } if *msg_id == sent => match status {
+                    MessageStatus::Queued => Some(true),
+                    MessageStatus::Sent => Some(false),
+                    MessageStatus::Pending
+                    | MessageStatus::Delivered
+                    | MessageStatus::Read
+                    | MessageStatus::Failed => None,
+                },
+                _ => None,
+            })
+            .await;
+        if queued {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B's session outlived {WAIT:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
 
     let mut b = Peer::start(target, seed, dir).await;
     assert_eq!(b.text_from_peer().await, "пока тебя не было");

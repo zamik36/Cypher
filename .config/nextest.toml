@@ -32,3 +32,10 @@ default-filter = "not (package(cypher-core) & binary(scenarios))"
 [profile.miri-full]
 fail-fast = false
 slow-timeout = { period = "300s", terminate-after = 12 }
+# The nightly job runs ignored tests too, but not the scenarios' behaviour
+# checks: one of them is ignored because it pins a known bug (it fails until
+# the bug is fixed), and together they take about 50 s natively (the
+# scenarios Miri runs, about 40 s), which would double a job already near
+# its time limit. They pin what the core decides, not memory safety; the
+# code they reach is the code the other scenarios reach.
+default-filter = "not (package(cypher-core) & binary(scenarios) & test(/^behaviour::/))"
