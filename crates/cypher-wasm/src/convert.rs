@@ -270,3 +270,202 @@ pub(crate) fn pairs_from_js(rows: &Array) -> Result<Rows, JsError> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use cypher_core::FailReason;
+    use cypher_types::{FileId, PeerId};
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const FILE: FileId = FileId([0xAB; 16]);
+
+    fn shape(effect: &Effect) -> Option<Value> {
+        js_effect(effect).map(|js| serde_json::to_value(js).unwrap())
+    }
+
+    fn file_hex() -> String {
+        "ab".repeat(16)
+    }
+
+    /// The shapes the web worker reads (`Effect` in the generated `.d.ts`),
+    /// one per effect, so a renamed tag or field fails here first.
+    #[test]
+    fn effects_keep_the_shape_the_worker_reads() {
+        let golden = [
+            (
+                Effect::Transmit(Bytes::from_static(&[1, 2])),
+                json!({ "kind": "transmit", "data": [1, 2] }),
+            ),
+            (
+                Effect::Anonymous(Bytes::from_static(&[3])),
+                json!({ "kind": "anonymous", "data": [3] }),
+            ),
+            (
+                Effect::Persist(StoreOp::Put {
+                    table: Table::Outbox,
+                    key: vec![4],
+                    value: vec![5, 6],
+                }),
+                json!({ "kind": "put", "table": "outbox", "key": [4], "value": [5, 6] }),
+            ),
+            (
+                Effect::Persist(StoreOp::Delete {
+                    table: Table::Sessions,
+                    key: vec![7],
+                }),
+                json!({ "kind": "delete", "table": "sessions", "key": [7] }),
+            ),
+            (
+                Effect::Emit(Event::Connected),
+                json!({ "kind": "event", "channel": "connected", "payload": null }),
+            ),
+            (
+                Effect::Emit(Event::TransferComplete { file_id: FILE }),
+                json!({ "kind": "event", "channel": "file_complete", "payload": file_hex() }),
+            ),
+            (
+                Effect::Disconnect { reconnect: false },
+                json!({ "kind": "disconnect", "reconnect": false }),
+            ),
+        ];
+        for (effect, expected) in golden {
+            assert_eq!(shape(&effect), Some(expected), "{effect:?}");
+        }
+    }
+
+    /// The file effects, with ids as hex and offsets as JS numbers.
+    #[test]
+    fn file_effects_keep_the_shape_the_worker_reads() {
+        let golden = [
+            (
+                Effect::ReadChunk {
+                    file_id: FILE,
+                    index: 2,
+                    offset: 1 << 40,
+                    len: 4096,
+                    headroom: 16,
+                },
+                json!({
+                    "kind": "read_chunk", "file_id": file_hex(), "index": 2,
+                    "offset": 1_099_511_627_776.0, "len": 4096, "headroom": 16
+                }),
+            ),
+            (
+                Effect::WriteChunk {
+                    file_id: FILE,
+                    offset: 8,
+                    data: Bytes::from_static(&[9]),
+                },
+                json!({ "kind": "write_chunk", "file_id": file_hex(), "offset": 8.0, "data": [9] }),
+            ),
+            (
+                Effect::CloseSink {
+                    file_id: FILE,
+                    complete: true,
+                },
+                json!({ "kind": "close_sink", "file_id": file_hex(), "complete": true }),
+            ),
+            (
+                Effect::BuildHistory {
+                    file_id: FILE,
+                    partial: vec![FileId([1; 16])],
+                },
+                json!({
+                    "kind": "build_history", "file_id": file_hex(),
+                    "partial": ["01".repeat(16)]
+                }),
+            ),
+            (
+                Effect::ImportHistory { file_id: FILE },
+                json!({ "kind": "import_history", "file_id": file_hex() }),
+            ),
+        ];
+        for (effect, expected) in golden {
+            assert_eq!(shape(&effect), Some(expected), "{effect:?}");
+        }
+    }
+
+    #[test]
+    fn sinks_are_named_for_the_worker() {
+        for (sink, name) in [
+            (Sink::Download, "download"),
+            (Sink::Media, "media"),
+            (Sink::History, "history"),
+        ] {
+            let open = Effect::OpenSink {
+                file_id: FILE,
+                len: 10,
+                sink,
+            };
+            let expected = json!({
+                "kind": "open_sink", "file_id": file_hex(), "len": 10.0, "sink": name
+            });
+            assert_eq!(shape(&open), Some(expected));
+        }
+    }
+
+    /// A read's headroom beyond what a JS `u32` holds is clamped, not
+    /// wrapped.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_oversized_headroom_saturates() {
+        let read = Effect::ReadChunk {
+            file_id: FILE,
+            index: 0,
+            offset: 0,
+            len: 1,
+            headroom: usize::MAX,
+        };
+        let headroom = shape(&read).and_then(|v| v.get("headroom").cloned());
+        assert_eq!(headroom, Some(json!(u32::MAX)));
+    }
+
+    /// The outcomes the worker's pending link and join calls wait for come
+    /// as replies; other events have none.
+    #[test]
+    fn link_and_join_outcomes_become_replies() {
+        let link = "cypher://join/abc".to_owned();
+        let created = Event::LinkCreated { link: link.clone() };
+        assert_eq!(shape(&Effect::Emit(created.clone())), None);
+        let peer = PeerId([2; 32]);
+        let golden = [
+            (
+                created,
+                json!({ "kind": "reply", "op": "link_created", "value": link, "link": null }),
+            ),
+            (
+                Event::PeerAdded {
+                    peer,
+                    initiated_by_us: true,
+                },
+                json!({ "kind": "reply", "op": "joined", "value": peer.to_hex(), "link": null }),
+            ),
+            (
+                Event::JoinFailed {
+                    link: link.clone(),
+                    reason: FailReason::NotFound,
+                },
+                json!({ "kind": "reply", "op": "join_failed", "value": "NotFound", "link": link }),
+            ),
+            (
+                Event::Warning {
+                    reason: FailReason::Timeout,
+                },
+                json!({ "kind": "reply", "op": "warning", "value": "Timeout", "link": null }),
+            ),
+        ];
+        for (event, expected) in golden {
+            let js = reply(&event).map(|r| serde_json::to_value(r).unwrap());
+            assert_eq!(js, Some(expected), "{event:?}");
+        }
+        let theirs = Event::PeerAdded {
+            peer,
+            initiated_by_us: false,
+        };
+        assert!(reply(&theirs).is_none());
+        assert!(reply(&Event::Connected).is_none());
+    }
+}
