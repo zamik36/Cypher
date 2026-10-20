@@ -90,7 +90,9 @@ where
     if events.send(attempt.event(NetKind::Up(tx))).await.is_err() {
         return;
     }
-    let mut writer = tokio::spawn(async move {
+    // Runs inside this task rather than its own, so aborting the attempt
+    // stops the writes too.
+    let writer = async {
         while let Some(frame) = rx.recv().await {
             if !write(sink.feed(frame)).await {
                 return;
@@ -105,7 +107,7 @@ where
             }
         }
         let _ = write(sink.close()).await;
-    });
+    };
     // Waiting for room in `events` is what stops the reading: frames stay in
     // the socket, and the server's flow control slows the sender down.
     let reader = async {
@@ -123,9 +125,8 @@ where
     // the connection, like any frame in flight on it.
     tokio::select! {
         () = reader => {}
-        _ = &mut writer => {}
+        () = writer => {}
     }
-    writer.abort();
     let _ = events.send(attempt.event(NetKind::Down)).await;
 }
 
@@ -193,5 +194,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Dropping an attempt closes its socket at once, even while the driver
+    /// still holds the sender it was handed.
+    #[tokio::test]
+    async fn an_aborted_pump_closes_its_connection() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (events, mut inbox) = inbound();
+        let attempt = Attempt {
+            link: Link::Relay,
+            epoch: 3,
+        };
+        let pump = tokio::spawn(pump(attempt, cypher_transport::framed(client), events));
+        let Some(NetEvent {
+            kind: NetKind::Up(_out),
+            ..
+        }) = inbox.recv().await
+        else {
+            panic!("no Up first");
+        };
+
+        pump.abort();
+        let mut server = cypher_transport::framed(server);
+        let closed = timeout(Duration::from_secs(5), server.next()).await;
+        assert!(
+            matches!(closed, Ok(None | Some(Err(_)))),
+            "the server sees the connection end"
+        );
     }
 }
