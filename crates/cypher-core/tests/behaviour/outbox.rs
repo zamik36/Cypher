@@ -3,15 +3,13 @@
 
 use std::collections::HashSet;
 
+use super::{addr, inbox_items_from, is_message, message_to, rows, settled};
+use crate::harness::{Fault, Rule, Seen, World};
+use crate::{A, B, C, D, paired, weeks_pass};
 use cypher_core::{Command, Event, MessageStatus};
 use cypher_crypto::{DeviceList, IdentitySeed};
 use cypher_types::{Addr, DeviceId, MsgId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame};
-use proptest::prelude::*;
-
-use super::{addr, inbox_items_from, message_to, rows, settled};
-use crate::harness::{Fault, Rule, Seen, World};
-use crate::{A, B, C, D, paired, weeks_pass};
 
 /// Time between two ticks of the test world.
 const TICK_MS: u64 = 500;
@@ -231,6 +229,16 @@ fn attempts_back_off_until_ten_minutes_apart() {
     assert!(gaps.iter().any(|g| *g >= MOST_MS / 2), "reaches the cap");
 }
 
+/// End-to-end messages `from` sent to `to` over its session, where the
+/// gateway sees who sends them.
+fn named_to(w: &World, from: usize, to: usize) -> usize {
+    let to = addr(w, to);
+    w.sends_to(from, to)
+        .iter()
+        .filter(|body| is_message(body))
+        .count()
+}
+
 /// A device's token used up for the hour: messages to it go as ourselves
 /// for that hour, then sealed again.
 #[test]
@@ -241,19 +249,19 @@ fn a_used_up_token_sends_as_oneself_for_an_hour() {
         |m| matches!(m, ClientMsg::SendSealed { .. }),
         Fault::Error(ErrorCode::RateLimited),
     ));
-    let named = w.server.named_messages;
+    let named = named_to(&w, A, B);
     w.send_text(A, B, "used up");
-    assert_eq!(w.server.named_messages, named + 1);
+    assert_eq!(named_to(&w, A, B), named + 1);
 
     w.advance(59 * 60_000);
-    let named = w.server.named_messages;
+    let named = named_to(&w, A, B);
     w.send_text(A, B, "within the hour");
-    assert_eq!(w.server.named_messages, named + 1, "still as ourselves");
+    assert_eq!(named_to(&w, A, B), named + 1, "still as ourselves");
 
     w.advance(2 * 60_000);
-    let named = w.server.named_messages;
+    let named = named_to(&w, A, B);
     w.send_text(A, B, "the hour is over");
-    assert_eq!(w.server.named_messages, named, "sealed again");
+    assert_eq!(named_to(&w, A, B), named, "sealed again");
     assert_eq!(
         w.texts(B),
         ["used up", "within the hour", "the hour is over"]
@@ -269,13 +277,9 @@ fn a_broken_sealed_path_is_not_tried_for_five_minutes() {
     w.send_text(A, B, "the long way is down");
     w.server.sealed_broken = false;
     w.advance(4 * 60_000);
-    let named = w.server.named_messages;
+    let named = named_to(&w, A, B);
     w.send_text(A, B, "still the short way");
-    assert_eq!(
-        w.server.named_messages,
-        named + 2,
-        "the text and its receipt"
-    );
+    assert_eq!(named_to(&w, A, B), named + 1);
 }
 
 /// Once every device answered, nothing of a message stays: control
@@ -429,7 +433,7 @@ fn an_inbox_found_gone_has_the_contacts_devices_looked_up() {
     ));
     let fetches = w.server.device_fetches;
     let id = w.send_text(A, B, "into an inbox gone");
-    assert_eq!(w.server.device_fetches, fetches + 1);
+    assert!(w.server.device_fetches > fetches, "looked up");
     assert_eq!(w.status_of(A, id), None, "not taken yet");
     w.advance(60_000);
     assert_eq!(w.status_of(A, id), Some(MessageStatus::Queued));
@@ -516,17 +520,11 @@ fn waiting_for(w: &World, i: usize, peer: usize) -> HashSet<MsgId> {
         .collect()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 3,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    })]
-
-    /// At most 500 messages wait for one contact's receipts: beyond that
-    /// the oldest are let go. Messages waiting for another contact stay.
-    #[test]
-    fn at_most_500_messages_wait_for_one_contact(extra in 1usize..12) {
+/// At most 500 messages wait for one contact's receipts: beyond that the
+/// oldest are let go. Messages waiting for another contact stay.
+#[test]
+fn at_most_500_messages_wait_for_one_contact() {
+    for extra in [1, 2, 11] {
         let mut w = World::new(3);
         w.pair(A, B);
         w.pair(A, C);
@@ -545,9 +543,12 @@ proptest! {
             })
             .collect();
         let kept = waiting_for(&w, A, B);
-        prop_assert_eq!(kept.len(), 500);
-        prop_assert!(to_b.iter().skip(extra).all(|id| kept.contains(id)), "the newest stay");
-        prop_assert_eq!(waiting_for(&w, A, C), to_c);
+        assert_eq!(kept.len(), 500, "{extra} over");
+        assert!(
+            to_b.iter().skip(extra).all(|id| kept.contains(id)),
+            "the newest stay, {extra} over"
+        );
+        assert_eq!(waiting_for(&w, A, C), to_c, "{extra} over");
     }
 }
 

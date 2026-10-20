@@ -98,35 +98,32 @@ fn open_for(w: &World, to: Option<PeerId>, item: &[u8]) -> Option<Bytes> {
     clients(w, to).find_map(|i| open_item(w, i, item).map(|(_, body)| body))
 }
 
-/// What leaves a core carrying an end-to-end message: to whom (`None`: left
-/// in an inbox, whoever reads it) and the message.
+/// What leaves a core carrying an end-to-end message, over the session or
+/// through the relay alike: to whom (`None`: left in an inbox, whoever
+/// reads it) and the message.
 fn carried(w: &World, effect: &Seen) -> Result<Option<(Option<Addr>, Bytes)>, String> {
-    Ok(match effect {
-        Seen::Transmit(raw) => match Frame::<ClientMsg>::decode(raw.clone()) {
-            Ok(Frame {
-                msg: ClientMsg::Send {
-                    to, device, body, ..
-                },
-                ..
-            }) if is_message(&body) && clients(w, Some(to)).next().is_some() => {
-                Some((Some(Addr::new(to, device)), body))
-            }
-            _ => None,
-        },
-        Seen::Anonymous(blob) => match w.open_anonymous(blob).map(|f| f.msg) {
-            Some(ClientMsg::SendSealed {
-                to, device, item, ..
-            }) => {
-                let body = open_for(w, Some(to), &item).ok_or("a sealed send no one opens")?;
-                Some((Some(Addr::new(to, device)), body))
-            }
-            Some(ClientMsg::InboxPut { item, .. }) => Some((
-                None,
-                open_for(w, None, &item).ok_or("an item no one opens")?,
-            )),
-            _ => None,
-        },
+    let msg = match effect {
+        Seen::Transmit(raw) => Frame::<ClientMsg>::decode(raw.clone()).ok().map(|f| f.msg),
+        Seen::Anonymous(blob) => w.open_anonymous(blob).map(|f| f.msg),
         Seen::Persist { .. } | Seen::Emit(_) | Seen::ReadChunk(_) | Seen::Other => None,
+    };
+    Ok(match msg {
+        Some(ClientMsg::Send {
+            to, device, body, ..
+        }) if is_message(&body) && clients(w, Some(to)).next().is_some() => {
+            Some((Some(Addr::new(to, device)), body))
+        }
+        Some(ClientMsg::SendSealed {
+            to, device, item, ..
+        }) => {
+            let body = open_for(w, Some(to), &item).ok_or("a sealed send no one opens")?;
+            Some((Some(Addr::new(to, device)), body))
+        }
+        Some(ClientMsg::InboxPut { item, .. }) => Some((
+            None,
+            open_for(w, None, &item).ok_or("an item no one opens")?,
+        )),
+        _ => None,
     })
 }
 
@@ -181,7 +178,7 @@ fn check_restore_is_deterministic(w: &World, i: usize) -> Result<(), String> {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 24,
+        cases: if cfg!(miri) { 1 } else { 24 },
         failure_persistence: None,
         ..ProptestConfig::default()
     })]

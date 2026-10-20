@@ -3,8 +3,8 @@
 //! once; and what a contact can be sent, and forgetting one.
 
 use cypher_core::envelope::MAX_TEXT_LEN;
+use cypher_core::relay::RelayBody;
 use cypher_core::{Command, Event, FailReason, MessageStatus};
-use cypher_crypto::InitHeader;
 use cypher_types::{Addr, DeviceId, PeerId};
 
 use super::{addr, rows};
@@ -239,18 +239,23 @@ fn joining_fails_once_when_no_device_of_the_host_answers() {
     assert_eq!(join_outcome(&w, A), (0, vec![FailReason::NotFound]));
 }
 
-/// Both join each other's invite at the same moment, each starting a
-/// session: the device first in order (identity, then device id) keeps the
-/// one it started, the other takes it in place of its own. Nothing fails to
-/// decrypt and no session is started again.
-#[test]
-fn when_both_join_at_once_the_lower_device_keeps_its_session() {
+/// Two contacts who joined each other's invite at the same moment, each
+/// starting a session.
+fn crossing_joins() -> World {
     let mut w = World::new(2);
     let link_a = w.create_link(A);
     let link_b = w.create_link(B);
     w.queue(B, Command::JoinLink { link: link_a });
     w.queue(A, Command::JoinLink { link: link_b });
     w.run();
+    w
+}
+
+/// Both join each other's invite at the same moment, each starting a
+/// session: nothing fails to decrypt and no session is started again.
+#[test]
+fn when_both_join_at_once_one_session_is_kept() {
+    let mut w = crossing_joins();
     let fetches = w.server.key_fetches;
     w.send_text(A, B, "ping");
     w.send_text(B, A, "pong");
@@ -265,7 +270,15 @@ fn when_both_join_at_once_the_lower_device_keeps_its_session() {
             }
         )));
     }
+}
 
+/// The tie-break when both start a session at once: the device first in
+/// order (identity, then device id) keeps the one it started, and the other
+/// takes that one in place of its own. Read from the stored sessions, as
+/// nothing the user sees tells which one was kept.
+#[test]
+fn when_both_join_at_once_the_lower_device_keeps_its_session() {
+    let w = crossing_joins();
     let (low, high) = if (w.peer(A), w.clients[A].device) < (w.peer(B), w.clients[B].device) {
         (A, B)
     } else {
@@ -279,8 +292,13 @@ fn when_both_join_at_once_the_lower_device_keeps_its_session() {
     let low_peer = w.peer(low);
     let ephemerals: Vec<[u8; 32]> = delivered_bodies(&w)
         .into_iter()
-        .filter(|(from, body)| *from == low_peer && body.get(1) == Some(&1))
-        .map(|(_, body)| InitHeader::decode_prefix(&body[2..]).unwrap().0.ephemeral)
+        .filter(|(from, _)| *from == low_peer)
+        .filter_map(|(_, body)| match RelayBody::decode(&body) {
+            Ok(RelayBody::Message {
+                init: Some(init), ..
+            }) => Some(init.ephemeral),
+            _ => None,
+        })
         .collect();
     assert!(!ephemerals.is_empty(), "the lower device sent its init");
     assert_eq!(taken.accepted_ephemerals, ephemerals[..1]);

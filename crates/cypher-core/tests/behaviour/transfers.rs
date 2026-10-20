@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use bytes::Bytes;
 use cypher_core::envelope::FILE_CHUNK_SIZE;
+use cypher_core::relay::RelayBody;
 use cypher_core::{Command, Event, FailReason, MediaKind};
 use cypher_crypto::IdentitySeed;
 use cypher_types::{Addr, FileId};
@@ -66,10 +67,10 @@ fn completed(w: &World, i: usize, file_id: FileId) -> bool {
 
 /// The bodies of what `from` sent to client `to` over the session that
 /// `pick` chooses.
-fn bodies(w: &World, from: usize, to: usize, pick: fn(&[u8]) -> bool) -> Vec<Bytes> {
+fn bodies(w: &World, from: usize, to: usize, pick: fn(&Bytes) -> bool) -> Vec<Bytes> {
     w.sends_to(from, addr(w, to))
         .into_iter()
-        .filter(|b| pick(b))
+        .filter(pick)
         .collect()
 }
 
@@ -163,8 +164,11 @@ fn a_transfer_pauses_while_offline_and_goes_on_once_back() {
 }
 
 /// The index of a chunk body.
-fn chunk_index(body: &[u8]) -> u32 {
-    u32::from_le_bytes(body[17..21].try_into().unwrap())
+fn chunk_index(body: &Bytes) -> u32 {
+    match RelayBody::decode(body) {
+        Ok(RelayBody::Chunk { index, .. }) => index,
+        _ => panic!("not a chunk"),
+    }
 }
 
 /// The receiver coming back asks for the rest: each chunk it lacks is sent
@@ -198,10 +202,12 @@ fn a_receiver_back_online_gets_only_what_it_lacks() {
     w.run();
     let again: Vec<u32> = bodies(&w, A, B, is_chunk)[sent..]
         .iter()
-        .map(|b| chunk_index(b))
+        .map(chunk_index)
         .collect();
-    let lacked: Vec<u32> = (0..total).filter(|i| !had.contains(i)).collect();
-    assert_eq!(again, lacked);
+    let resent: BTreeSet<u32> = again.iter().copied().collect();
+    assert_eq!(resent.len(), again.len(), "each sent once: {again:?}");
+    let lacked: BTreeSet<u32> = (0..total).filter(|i| !had.contains(i)).collect();
+    assert_eq!(resent, lacked);
     assert_eq!(w.clients[B].sinks[&file_id], data);
 }
 

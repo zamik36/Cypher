@@ -1,9 +1,10 @@
 //! Requests to the server and what their failures mean: an error code, no
 //! answer in time, or the connection going while they wait.
 
+use bytes::Bytes;
 use cypher_core::{Command, Event, FailReason};
 use cypher_types::{Addr, DeviceId};
-use cypher_wire::{ClientMsg, ErrorCode, Frame};
+use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg};
 
 use super::{events_since, rows};
 use crate::harness::{Fault, Rule, Seen, World};
@@ -14,23 +15,40 @@ const TIMEOUT_MS: u64 = 15_000;
 /// Time between two ticks of the test world.
 const TICK_MS: u64 = 500;
 
-const CODES: [ErrorCode; 9] = [
-    ErrorCode::NotFound,
-    ErrorCode::BadRequest,
-    ErrorCode::RateLimited,
-    ErrorCode::Unauthorized,
-    ErrorCode::TooLarge,
-    ErrorCode::Unavailable,
-    ErrorCode::Internal,
-    ErrorCode::UnsupportedVersion,
-    ErrorCode::Conflict,
-];
+/// Every error code a client tells apart, as it decodes them off the wire:
+/// a code added there is covered here without being listed.
+fn codes() -> Vec<ErrorCode> {
+    let frame = Frame::new(
+        0,
+        ServerMsg::Error {
+            code: ErrorCode::NotFound,
+        },
+    )
+    .encode();
+    let mut codes = Vec::new();
+    for n in 0..=u8::MAX {
+        // The code is the frame's last two bytes.
+        let mut raw = frame.to_vec();
+        let at = raw.len() - 2;
+        raw[at..].copy_from_slice(&u16::from(n).to_le_bytes());
+        if let Ok(Frame {
+            msg: ServerMsg::Error { code },
+            ..
+        }) = Frame::<ServerMsg>::decode(Bytes::from(raw))
+            && !codes.contains(&code)
+        {
+            codes.push(code);
+        }
+    }
+    assert!(codes.len() >= 9, "{codes:?}");
+    codes
+}
 
 /// What a server error tells the user about the request it answers: the
 /// server's own trouble, retryable or not, or what the request asked for.
 #[test]
 fn server_errors_tell_the_user_what_they_mean() {
-    for code in CODES {
+    for code in codes() {
         let expected = match code {
             ErrorCode::NotFound => FailReason::NotFound,
             ErrorCode::Unauthorized => FailReason::Unauthorized,
@@ -337,7 +355,7 @@ fn without_word_of_the_relay_requests_go_over_the_session() {
 /// server has none or broke, and for the key also when it is busy.
 #[test]
 fn failed_push_requests_say_push_is_unavailable_only_when_it_is() {
-    for code in CODES {
+    for code in codes() {
         let mut w = paired();
         w.server.faults.push(Rule::always(
             |m| matches!(m, ClientMsg::PushKey),

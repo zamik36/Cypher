@@ -2,6 +2,10 @@
 //! `Core` into smaller machines cannot change it unnoticed: requests and
 //! their failures, messages on their way, invites, transfers, and
 //! properties over random runs.
+//!
+//! Timeouts, waits and limits are written out here rather than taken from
+//! the core on purpose: changing one changes behaviour, and these tests
+//! should say so.
 
 mod contacts;
 mod outbox;
@@ -12,6 +16,7 @@ mod transfers;
 
 use bytes::Bytes;
 use cypher_core::Event;
+use cypher_core::relay::RelayBody;
 use cypher_crypto::IdentitySeed;
 use cypher_types::{Addr, DeviceId, PeerId};
 use cypher_wire::ClientMsg;
@@ -52,18 +57,18 @@ fn inbox_items_from(w: &World, i: usize, epoch: u32, from: Addr) -> usize {
 }
 
 /// A frame body that carries an end-to-end message.
-fn is_message(body: &[u8]) -> bool {
-    body.first() == Some(&0)
+fn is_message(body: &Bytes) -> bool {
+    matches!(RelayBody::decode(body), Ok(RelayBody::Message { .. }))
 }
 
 /// A frame body that carries a file chunk.
-fn is_chunk(body: &[u8]) -> bool {
-    body.first() == Some(&1)
+fn is_chunk(body: &Bytes) -> bool {
+    matches!(RelayBody::decode(body), Ok(RelayBody::Chunk { .. }))
 }
 
 /// A frame body that acknowledges file chunks.
-fn is_ack(body: &[u8]) -> bool {
-    body.first() == Some(&2)
+fn is_ack(body: &Bytes) -> bool {
+    matches!(RelayBody::decode(body), Ok(RelayBody::Ack { .. }))
 }
 
 /// An end-to-end message sent over the session to `to`.
