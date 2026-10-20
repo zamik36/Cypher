@@ -499,16 +499,18 @@ impl Driver {
                     }
                 }
                 Effect::BuildHistory { file_id, partial } => {
-                    if self.flush().await {
-                        self.build_history(file_id, partial);
+                    if !self.flush().await {
+                        return;
                     }
+                    self.build_history(file_id, partial);
                 }
                 // Once the archive's sink, closed just before, is on disk.
                 Effect::ImportHistory { file_id } => {
-                    if self.flush().await {
-                        let arrived = IoDone::HistoryArrived { file_id };
-                        self.io.submit(IoJob::Barrier(arrived));
+                    if !self.flush().await {
+                        return;
                     }
+                    let arrived = IoDone::HistoryArrived { file_id };
+                    self.io.submit(IoJob::Barrier(arrived));
                 }
             }
         }
@@ -631,10 +633,7 @@ impl Driver {
             source: Some(source),
         }) = self.files.get(&file_id)
         else {
-            let effects = self
-                .core
-                .handle(Input::ChunkUnavailable { file_id }, now_ms());
-            return Box::pin(self.apply(effects)).await;
+            return Box::pin(self.feed(Input::ChunkUnavailable { file_id })).await;
         };
         self.io.submit(IoJob::Read(ChunkRead {
             file_id,
@@ -825,6 +824,36 @@ mod tests {
             events.try_recv().is_err(),
             "a stopped client handles no input"
         );
+    }
+
+    /// History work after a write that failed stops the batch like a frame
+    /// would: nothing after it runs.
+    #[tokio::test]
+    async fn a_failed_write_before_history_work_stops_the_batch() {
+        let file_id = FileId([1; 16]);
+        for history in [
+            Effect::BuildHistory {
+                file_id,
+                partial: Vec::new(),
+            },
+            Effect::ImportHistory { file_id },
+        ] {
+            let (mut d, mut events) = driver(Store::detached());
+            d.apply(vec![
+                persist(),
+                history,
+                Effect::Emit(Event::ContactsChanged),
+            ])
+            .await;
+            assert!(matches!(
+                events.try_recv(),
+                Ok(Event::Warning {
+                    reason: FailReason::StorageFailed
+                })
+            ));
+            assert!(matches!(events.try_recv(), Ok(Event::Disconnected)));
+            assert!(events.try_recv().is_err(), "nothing after it runs");
+        }
     }
 
     /// A received file is announced only once its sink is closed, and is
