@@ -19,7 +19,7 @@ use std::sync::Arc;
 use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::{
     Command, Core, CoreError, Event, MediaKind, MessageStatus, Snapshot, StoredMessage, Table,
-    Vault, message_key,
+    Vault, message_key, message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
-use store::{FILES_TABLE, SAVED_TABLE, Store};
+use store::{End, FILES_TABLE, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
@@ -65,6 +65,13 @@ pub enum ClientError {
     /// Nobody linked this device in time.
     #[error("the offer expired")]
     Expired,
+    /// Tor was asked for, but this build cannot reach the relay through it.
+    #[error("built without Tor support")]
+    TorUnavailable,
+    /// Tor was asked for, but the application installed no process-wide
+    /// rustls `CryptoProvider` for Arti to use.
+    #[error("Tor needs a process-wide rustls CryptoProvider; install one at startup")]
+    NoCryptoProvider,
 }
 
 #[derive(Clone)]
@@ -76,7 +83,11 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Never fall back to the identity-bearing session for inbox traffic.
     pub require_onion: bool,
-    /// Reach the onion relay through Tor (requires the `tor` feature).
+    /// Reach the onion relay through Tor. Needs the `tor` feature: without
+    /// it, [`Client::start`] fails with [`ClientError::TorUnavailable`].
+    /// Arti uses the process-wide rustls `CryptoProvider`, which the binary
+    /// installs in `main`; without one, [`Client::start`] fails with
+    /// [`ClientError::NoCryptoProvider`].
     pub tor: Option<TorConfig>,
 }
 
@@ -135,6 +146,23 @@ pub(crate) enum Request {
 /// stamps outgoing messages itself, a few milliseconds off the core.
 const DELETE_WINDOW_MS: u64 = 60_000;
 
+/// Whether a Tor config can be honoured: never by reaching the relay
+/// directly instead.
+fn check_tor(config: &Config) -> Result<(), ClientError> {
+    if config.tor.is_none() {
+        return Ok(());
+    }
+    if !cfg!(feature = "tor") {
+        return Err(ClientError::TorUnavailable);
+    }
+    // Left unset, rustls would pick a provider by itself the first time Arti
+    // asks; that choice belongs to the application.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        return Err(ClientError::NoCryptoProvider);
+    }
+    Ok(())
+}
+
 /// Store operations that go with deleting `msg` besides its own row: its
 /// status, a media note's key, where a file was saved. Returns the media
 /// note whose sealed copy must go too.
@@ -188,19 +216,29 @@ pub struct Client {
 }
 
 impl Client {
-    /// Restores persisted state for `seed` and starts connecting.
+    /// Restores persisted state for `seed` and starts connecting. Refuses a
+    /// Tor config the build cannot honour rather than reach the relay
+    /// directly.
     pub async fn start(
         seed: &IdentitySeed,
         device: DeviceId,
         config: Config,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), ClientError> {
+        check_tor(&config)?;
         let peer_id = seed.derive_identity().peer_id();
-        std::fs::create_dir_all(&config.data_dir)?;
         let hex = peer_id.to_hex();
-        let db = config
-            .data_dir
-            .join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
-        let store = Store::open(&db)?;
+        let dir = config.data_dir.clone();
+        let db = dir.join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
+        // Creating directories and opening SQLite block on the disk.
+        let store = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir)?;
+            Store::open(&db)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("opening the client's storage did not finish: {e}");
+            ClientError::Closed
+        })??;
 
         let snapshot = Snapshot {
             meta: store.scan(Table::Meta.name()).await?,
@@ -213,6 +251,8 @@ impl Client {
         let files = load_files(&store, &vault).await?;
         let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
 
+        // Unbounded by design: the driver emits from synchronous code, at the
+        // pace of the bounded network queue and the app's own requests.
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (req_tx, req_rx) = mpsc::channel(256);
         let stopped = Driver::spawn(
@@ -488,8 +528,10 @@ impl Client {
         before_ms: Option<u64>,
         limit: usize,
     ) -> Result<Vec<StoredMessage>, ClientError> {
-        let from = message_key(&peer, 0, &MsgId([0; 16]));
-        let to = message_key(&peer, before_ms.unwrap_or(u64::MAX), &MsgId([0; 16]));
+        let (from, last) = peer_messages(&peer);
+        let to = before_ms.map_or(End::Through(last), |before| {
+            End::Before(message_key(&peer, before, &MsgId([0; MsgId::LEN])))
+        });
         let rows = self
             .store
             .range_desc(Table::Messages.name(), from, to, limit)
@@ -556,11 +598,15 @@ impl Client {
     /// saved. The saved files themselves stay where they are.
     pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
         self.command(Command::RemovePeer { peer }).await?;
-        let from = message_key(&peer, 0, &MsgId([0; 16]));
-        let to = message_key(&peer, u64::MAX, &MsgId([0xFF; 16]));
+        let (first, last) = peer_messages(&peer);
         let rows = self
             .store
-            .range_desc(Table::Messages.name(), from, to, usize::MAX)
+            .range_desc(
+                Table::Messages.name(),
+                first,
+                End::Through(last),
+                usize::MAX,
+            )
             .await?;
         let mut ops = Vec::with_capacity(rows.len() * 2);
         let mut media = Vec::new();
@@ -584,19 +630,10 @@ impl Client {
         msg_id: MsgId,
         near_ms: u64,
     ) -> Result<(), ClientError> {
-        let from = message_key(
-            &peer,
-            near_ms.saturating_sub(DELETE_WINDOW_MS),
-            &MsgId([0; 16]),
-        );
-        let to = message_key(
-            &peer,
-            near_ms.saturating_add(DELETE_WINDOW_MS),
-            &MsgId([0xFF; 16]),
-        );
+        let (from, to) = message_window(&peer, near_ms, DELETE_WINDOW_MS);
         let (key, sealed) = self
             .store
-            .range_desc(Table::Messages.name(), from, to, usize::MAX)
+            .range_desc(Table::Messages.name(), from, End::Through(to), usize::MAX)
             .await?
             .into_iter()
             .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
@@ -684,4 +721,116 @@ async fn load_files(
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(dir: &Path) -> Config {
+        Config {
+            gateway_addr: "localhost:1".into(),
+            tls: cypher_tls::make_client_config(),
+            data_dir: dir.to_owned(),
+            require_onion: false,
+            tor: None,
+        }
+    }
+
+    fn text(peer: PeerId, sent_at_ms: u64, id: u8) -> StoredMessage {
+        StoredMessage {
+            msg_id: MsgId([id; MsgId::LEN]),
+            peer,
+            outgoing: false,
+            sent_at_ms,
+            status: MessageStatus::Delivered,
+            content: Content::Text {
+                text: format!("text {id}"),
+                reply_to: None,
+            },
+        }
+    }
+
+    async fn put(client: &Client, msg: &StoredMessage) {
+        let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+        let sealed = client.vault.seal(Table::Messages, &key, msg, &mut OsRng);
+        client
+            .store
+            .apply(vec![store::Op::Put(Table::Messages.name(), key, sealed)])
+            .await
+            .unwrap();
+    }
+
+    /// Asking for Tor never ends in a direct connection to the relay: a
+    /// build without Tor, or a process that chose no rustls provider for
+    /// Arti, refuses to start instead.
+    #[tokio::test]
+    async fn tor_is_honoured_or_the_client_does_not_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            tor: Some(TorConfig::default()),
+            ..config(dir.path())
+        };
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config.clone());
+        let nothing_opened = || {
+            let entries = std::fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(entries, 0, "nothing was opened");
+        };
+        if !cfg!(feature = "tor") {
+            assert!(matches!(start().await, Err(ClientError::TorUnavailable)));
+            return nothing_opened();
+        }
+        // Another test in this process may have chosen one already.
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            assert!(matches!(start().await, Err(ClientError::NoCryptoProvider)));
+            nothing_opened();
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+        let (client, _events) = start().await.unwrap();
+        client.shutdown().await;
+    }
+
+    /// Rows a contact dated as far ahead as the format allows, stored before
+    /// the core clamped dates, are still shown and deleted with the rest.
+    #[tokio::test]
+    async fn a_conversation_dated_far_ahead_is_listed_and_forgotten_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (client, _events) = Client::start(
+            &IdentitySeed::generate(),
+            DeviceId::FIRST,
+            config(dir.path()),
+        )
+        .await
+        .unwrap();
+        let (peer, other) = (PeerId([4; 32]), PeerId([5; 32]));
+        for msg in [
+            text(peer, 1_000, 1),
+            text(peer, u64::MAX, 2),
+            text(peer, u64::MAX, u8::MAX),
+            text(other, 1_000, 3),
+        ] {
+            put(&client, &msg).await;
+        }
+
+        let shown: Vec<_> = client
+            .history(peer, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.msg_id)
+            .collect();
+        assert_eq!(
+            shown,
+            [MsgId([u8::MAX; 16]), MsgId([2; 16]), MsgId([1; 16])],
+            "newest first, the far-future ones included"
+        );
+        let older = client.history(peer, Some(u64::MAX), 10).await.unwrap();
+        assert_eq!(older.len(), 1, "paging back starts before the date given");
+
+        client.forget_peer(peer).await.unwrap();
+        assert!(client.history(peer, None, 10).await.unwrap().is_empty());
+        assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+        client.shutdown().await;
+    }
 }

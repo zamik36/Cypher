@@ -24,7 +24,7 @@ enum Job {
     Range {
         table: &'static str,
         from: Vec<u8>,
-        to: Vec<u8>,
+        to: End,
         limit: usize,
         reply: oneshot::Sender<Result<Pairs, ClientError>>,
     },
@@ -39,6 +39,14 @@ enum Job {
         Vec<u8>,
         oneshot::Sender<Result<Option<Vec<u8>>, ClientError>>,
     ),
+}
+
+/// Where a range of keys ends.
+pub(crate) enum End {
+    /// Just before this key.
+    Before(Vec<u8>),
+    /// At this key, which is still part of the range.
+    Through(Vec<u8>),
 }
 
 pub(crate) enum Op {
@@ -88,6 +96,8 @@ impl Store {
                 "CREATE TABLE IF NOT EXISTS {name} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;"
             ))?;
         }
+        // Unbounded by design: every caller waits for its reply, so it holds
+        // at most one job per waiting task.
         let (tx, rx) = std_mpsc::channel();
         thread::Builder::new()
             .name("cypher-store".into())
@@ -115,12 +125,12 @@ impl Store {
         self.call(|reply| Job::Scan(table, reply)).await
     }
 
-    /// Keys in `[from, to)`, newest (largest) first.
+    /// Keys from `from` to `to`, newest (largest) first.
     pub(crate) async fn range_desc(
         &self,
         table: &'static str,
         from: Vec<u8>,
-        to: Vec<u8>,
+        to: End,
         limit: usize,
     ) -> Result<Pairs, ClientError> {
         self.call(|reply| Job::Range {
@@ -204,8 +214,12 @@ fn serve(mut conn: Connection, rx: &std_mpsc::Receiver<Job>) {
                 limit,
                 reply,
             } => {
+                let (op, to) = match to {
+                    End::Before(to) => ("<", to),
+                    End::Through(to) => ("<=", to),
+                };
                 let sql = format!(
-                    "SELECT k, v FROM {table} WHERE k >= ?1 AND k < ?2 ORDER BY k DESC LIMIT ?3"
+                    "SELECT k, v FROM {table} WHERE k >= ?1 AND k {op} ?2 ORDER BY k DESC LIMIT ?3"
                 );
                 let limit = i64::try_from(limit).unwrap_or(i64::MAX);
                 let _ = reply.send(query(&conn, &sql, params![from, to, limit]));
@@ -286,8 +300,20 @@ mod tests {
             .unwrap();
         store.apply(vec![Op::Delete(t, vec![1, 1])]).await.unwrap();
         assert_eq!(store.scan(t).await.unwrap().len(), 2);
-        let range = store.range_desc(t, vec![1], vec![2], 10).await.unwrap();
+        let range = store
+            .range_desc(t, vec![1], End::Before(vec![2, 1]), 10)
+            .await
+            .unwrap();
         assert_eq!(range, vec![(vec![1, 2], b"b".to_vec())]);
+        let range = store
+            .range_desc(t, vec![1], End::Through(vec![2, 1]), 10)
+            .await
+            .unwrap();
+        assert_eq!(range.len(), 2);
+        assert_eq!(
+            range.first().map(|(k, _)| k.as_slice()),
+            Some([2, 1].as_slice())
+        );
         assert_eq!(store.get(t, vec![2, 1]).await.unwrap(), Some(b"c".to_vec()));
         assert_eq!(store.get(t, vec![9]).await.unwrap(), None);
     }

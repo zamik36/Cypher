@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cypher_types::{Error, Result};
+use rustls::crypto::CryptoProvider;
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::{ClientConfig, ConfigBuilder, RootCertStore, ServerConfig, WantsVerifier};
 use tracing::debug;
 
 use crate::cert::SelfSignedCert;
@@ -19,9 +20,23 @@ use crate::reload::{PemCert, pem_reason};
 const PEM_ATTEMPTS: u32 = 30;
 const PEM_RETRY: Duration = Duration::from_secs(2);
 
-/// Ensure a process-level `CryptoProvider` is installed (idempotent).
-fn ensure_crypto_provider() {
-    let _ = default_provider().install_default();
+/// The crypto every config here is built with. The process-wide default
+/// is left to the binary: a library setting it would race whichever other
+/// provider the application or another dependency installs.
+fn provider() -> Arc<CryptoProvider> {
+    Arc::new(default_provider())
+}
+
+fn server_builder() -> Result<ConfigBuilder<ServerConfig, WantsVerifier>> {
+    ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| transport("TLS server config error", e))
+}
+
+fn client_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>> {
+    ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| transport("TLS client config error", e))
 }
 
 fn transport(context: &str, e: impl std::fmt::Display) -> Error {
@@ -37,8 +52,7 @@ fn server_config(
     certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<Arc<ServerConfig>> {
-    ensure_crypto_provider();
-    let config = ServerConfig::builder()
+    let config = server_builder()?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| transport("TLS server config error", e))?;
@@ -52,10 +66,9 @@ fn server_config_from_pem(
     cert_path: &str,
     key_path: &str,
 ) -> Result<(Arc<ServerConfig>, Arc<PemCert>)> {
-    ensure_crypto_provider();
     let cert = Arc::new(PemCert::load(cert_path, key_path)?);
     let resolver: Arc<dyn rustls::server::ResolvesServerCert> = Arc::<PemCert>::clone(&cert);
-    let config = ServerConfig::builder()
+    let config = server_builder()?
         .with_no_client_auth()
         .with_cert_resolver(resolver);
     Ok((Arc::new(config), cert))
@@ -105,8 +118,12 @@ async fn load_pem_with_retry(
 /// Tries `rustls-native-certs` first (Android, Windows, macOS, Linux) so that
 /// platform-trusted CAs are honoured, then adds `webpki-roots` as a baseline
 /// to guarantee coverage when the OS store is empty or unavailable.
+#[expect(
+    clippy::expect_used,
+    reason = "ring's default provider supports every default protocol version"
+)]
 pub fn make_client_config() -> Arc<ClientConfig> {
-    ensure_crypto_provider();
+    let builder = client_builder().expect("ring supports the default protocol versions");
     let mut roots = RootCertStore::empty();
 
     let native = rustls_native_certs::load_native_certs();
@@ -117,16 +134,11 @@ pub fn make_client_config() -> Arc<ClientConfig> {
     }
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
+    Arc::new(builder.with_root_certificates(roots).with_no_client_auth())
 }
 
 /// Client config pinning every certificate in a PEM bundle.
 pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
-    ensure_crypto_provider();
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
         let cert = cert.map_err(|e| transport("invalid certificate PEM", pem_reason(&e)))?;
@@ -138,7 +150,7 @@ pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
         return Err(Error::Transport("no certificate in PEM".into()));
     }
     Ok(Arc::new(
-        ClientConfig::builder()
+        client_builder()?
             .with_root_certificates(roots)
             .with_no_client_auth(),
     ))
@@ -390,5 +402,16 @@ MIIB
     #[test]
     fn system_client_config_builds() {
         make_client_config();
+    }
+
+    /// Configs carry their own provider: building them installs no
+    /// process-wide default, which is the binary's to choose.
+    #[test]
+    fn configs_leave_the_process_provider_alone() {
+        let pem = SelfSignedCert::generate(&["localhost"]).unwrap();
+        make_client_config_with_pem(&pem.cert_pem).unwrap();
+        make_client_config();
+        make_server_config_from_cert(pem).unwrap();
+        assert!(CryptoProvider::get_default().is_none());
     }
 }

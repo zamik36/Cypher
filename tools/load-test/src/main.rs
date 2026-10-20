@@ -40,6 +40,9 @@ struct Gateway {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // The process-wide TLS provider is the binary's choice; the configs
+    // cypher-tls builds carry their own. Nothing can have installed one yet.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     match run(Args::parse()).await {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,

@@ -1,8 +1,10 @@
 /// <reference lib="webworker" />
 import init, {
   Client,
+  conversationRange,
   historyRange,
   Identity,
+  messageWindow,
   Provision,
   qrSvg,
   waveformFromRms,
@@ -13,7 +15,7 @@ import init, {
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
-import { applyEffects, type EffectSinks, type Sink } from "./effects";
+import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
@@ -47,9 +49,10 @@ function serial<T>(task: () => Promise<T> | T): Promise<T> {
   return next;
 }
 
+/** Hands the core an input, unless it stopped after a storage failure. */
 function feed(call: (c: Client, now: number) => Effect[]): Promise<void> {
   return serial(async () => {
-    if (client) await apply(call(client, Date.now()));
+    if (client && !applier.stopped) await apply(call(client, Date.now()));
   });
 }
 
@@ -72,15 +75,45 @@ const sinks: EffectSinks = {
     for (const w of waiters) if (w(r)) waiters.delete(w);
   },
   readChunk: (request) => void readChunk(request),
-  openSink,
-  writeChunk: (fileId, offset, data) => openSinks.get(fileId)?.handle.write(data, { at: offset }),
-  closeSink,
+  openSink: (fileId, len, sink) => openSink(fileId, len, sink).catch((e: unknown) => sinkFailed(fileId, e)),
+  writeChunk: (fileId, offset, data) => {
+    try {
+      openSinks.get(fileId)?.handle.write(data, { at: offset });
+    } catch (e) {
+      sinkFailed(fileId, e);
+    }
+  },
+  closeSink: (fileId, complete) => closeSink(fileId, complete).catch((e: unknown) => sinkFailed(fileId, e)),
   buildHistory: (fileId, partial) => void runBuild(fileId, partial),
   importHistory: (fileId) => void runImport(fileId),
   disconnect: (reconnect) => gateway.restart(reconnect),
 };
 
-const apply = (effects: Effect[]) => applyEffects(effects, sinks);
+/**
+ * A transfer's file could not be written: the transfer is cancelled, as the
+ * native client does, instead of the rest of the effects being dropped.
+ */
+function sinkFailed(fileId: string, e: unknown) {
+  console.warn("writing a transfer failed", fileId, e);
+  void feed((c, now) => c.command({ type: "cancel_transfer", file_id: fileId }, now).effects);
+}
+
+/**
+ * Storage failed under the core: it is ahead of what IndexedDB holds, so it
+ * gets no input any more and nothing more leaves the device, as with the
+ * native driver. Connecting again restores a core from what is stored.
+ */
+function storageFailed() {
+  gateway.stop();
+  relay.stop();
+  sinks.reply({ kind: "reply", op: "warning", value: "StorageFailed" });
+  onEvent("error", "StorageFailed");
+  onEvent("disconnected", null);
+}
+
+/** Applies the current core's effects; replaced along with the core. */
+let applier = new EffectApplier(sinks, storageFailed);
+const apply = (effects: Effect[]) => applier.apply(effects);
 
 function onEvent(channel: string, payload: unknown) {
   for (const w of linkWaiters) if (w(channel, payload)) linkWaiters.delete(w);
@@ -150,10 +183,11 @@ class Link {
     this.connect();
   }
 
-  /** Detaches silently: the caller resets the core itself. */
+  /** Detaches silently, until the next `start`: the caller resets the core itself. */
   stop() {
     clearTimeout(this.timer);
     this.url = "";
+    this.lastUrl = "";
     const ws = this.ws;
     this.ws = null;
     ws?.close();
@@ -165,7 +199,7 @@ class Link {
     this.ws?.close();
   }
 
-  /** Connects again after `restart(false)`; does nothing while connected. */
+  /** Connects again after `restart(false)`; does nothing while connected or after `stop`. */
   resume() {
     if (this.url || !this.lastUrl) return;
     this.url = this.lastUrl;
@@ -369,11 +403,13 @@ async function startClient(): Promise<Client> {
   ]);
   client?.free();
   client = new Client(identity, { meta, peers, sessions, outbox, transfers }, Date.now());
+  applier = new EffectApplier(sinks, storageFailed);
   await apply(client.startupEffects());
   return client;
 }
 
 async function run(cmd: Record<string, unknown>) {
+  if (applier.stopped) throw new Error("StorageFailed");
   const { effects, ...ids } = requireClient().command(cmd, Date.now());
   await apply(effects);
   return ids;
@@ -425,10 +461,17 @@ async function mediaBlob(fileId: string): Promise<Blob> {
   return new Blob([bytes], { type: mime });
 }
 
+/** Every stored message with `peer`, whatever its date. */
+function conversation(peer: string): IDBKeyRange {
+  const [first, last] = conversationRange(peer);
+  return IDBKeyRange.bound(first, last);
+}
+
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
-  const [from, to] = historyRange(peer, before);
-  const rows = await scan(db, "messages", IDBKeyRange.bound(from, to, false, true), limit, true);
+  const range =
+    before === undefined ? conversation(peer) : IDBKeyRange.bound(...historyRange(peer, before), false, true);
+  const rows = await scan(db, "messages", range, limit, true);
   const statuses = await Promise.all(
     rows.map(([key]) => get<Uint8Array>(db, "message_status", key.subarray(key.length - 16))),
   );
@@ -646,15 +689,12 @@ const handlers: Handlers = {
   forgetPeer: (peer) =>
     serial(async () => {
       await run({ type: "remove_peer", peer });
-      const [from, to] = historyRange(peer, undefined);
-      await deleteRows(await scan(db, "messages", IDBKeyRange.bound(from, to, false, true)));
+      await deleteRows(await scan(db, "messages", conversation(peer)));
     }),
   deleteMessage: (peer, msgId, timestamp) =>
     serial(async () => {
-      const [, from] = historyRange(peer, Math.max(0, timestamp - DELETE_WINDOW_MS));
-      const [, to] = historyRange(peer, timestamp + DELETE_WINDOW_MS);
       const id = unhex(msgId);
-      const rows = await scan(db, "messages", IDBKeyRange.bound(from, to));
+      const rows = await scan(db, "messages", IDBKeyRange.bound(...messageWindow(peer, timestamp, DELETE_WINDOW_MS)));
       const row = rows.find(([key]) => key.subarray(key.length - 16).every((b, i) => b === id[i]));
       if (!row) throw new Error("NotFound");
       await run({ type: "discard_outgoing", msg_id: msgId });

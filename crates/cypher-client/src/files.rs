@@ -110,6 +110,9 @@ pub(crate) struct FileIo {
 
 impl FileIo {
     pub(crate) fn spawn(done: mpsc::UnboundedSender<IoDone>) -> io::Result<Self> {
+        // Unbounded by design: only the driver submits, one job per core
+        // effect, and received chunks are paced by the transfer window and
+        // the bounded network queue.
         let (tx, rx) = std_mpsc::channel();
         thread::Builder::new()
             .name("cypher-files".into())
