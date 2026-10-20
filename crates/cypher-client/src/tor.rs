@@ -56,7 +56,7 @@ impl Tor {
         self: &Arc<Self>,
         addr: String,
         tls: Arc<rustls::ClientConfig>,
-        events: mpsc::UnboundedSender<NetEvent>,
+        events: mpsc::Sender<NetEvent>,
     ) {
         let tor = Arc::clone(self);
         tokio::spawn(async move {
@@ -72,7 +72,7 @@ impl Tor {
                 Ok(conn) => net::pump(Link::Relay, conn, events).await,
                 Err(e) => {
                     tracing::warn!("tor relay connection failed: {e}");
-                    let _ = events.send(NetEvent::Down(Link::Relay));
+                    let _ = events.send(NetEvent::Down(Link::Relay)).await;
                 }
             }
         });

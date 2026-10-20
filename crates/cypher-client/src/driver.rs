@@ -67,7 +67,7 @@ pub(crate) struct Driver {
     gateway: Option<mpsc::Sender<Bytes>>,
     relay: Option<mpsc::Sender<Bytes>>,
     relay_addr: Option<String>,
-    net_tx: mpsc::UnboundedSender<NetEvent>,
+    net_tx: mpsc::Sender<NetEvent>,
     gateway_retry: Retry,
     relay_retry: Retry,
     reconnect: bool,
@@ -128,7 +128,9 @@ impl Driver {
         requests: mpsc::Receiver<Request>,
         initial: Vec<Effect>,
     ) -> std::io::Result<watch::Receiver<()>> {
-        let (net_tx, net_rx) = mpsc::unbounded_channel();
+        let (net_tx, net_rx) = net::inbound();
+        // Unbounded by design: it holds at most one result per job the
+        // driver itself handed to the IO thread or a history task.
         let (io_tx, io_rx) = mpsc::unbounded_channel();
         let driver = Self {
             core: parts.core,
@@ -163,7 +165,7 @@ impl Driver {
     async fn run(
         mut self,
         mut requests: mpsc::Receiver<Request>,
-        mut net_rx: mpsc::UnboundedReceiver<NetEvent>,
+        mut net_rx: mpsc::Receiver<NetEvent>,
         mut io_rx: mpsc::UnboundedReceiver<IoDone>,
         initial: Vec<Effect>,
     ) {
@@ -391,6 +393,10 @@ impl Driver {
                     if !self.flush().await {
                         return;
                     }
+                    // Waiting for room cannot deadlock with the reader that
+                    // waits for the driver: the server keeps reading while
+                    // its writes to us wait, and a write of ours that stalls
+                    // ends the connection, which ends this wait too.
                     if let Some(gw) = &self.gateway {
                         let _ = gw.send(frame).await;
                     }
@@ -656,7 +662,7 @@ mod tests {
         )
         .unwrap();
         let (events, events_rx) = mpsc::unbounded_channel();
-        let (net_tx, _) = mpsc::unbounded_channel();
+        let (net_tx, _) = net::inbound();
         let (io_tx, _) = mpsc::unbounded_channel();
         let driver = Driver {
             core,

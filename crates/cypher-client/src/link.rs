@@ -51,7 +51,7 @@ async fn run(
     tls: Arc<rustls::ClientConfig>,
     mut done: oneshot::Sender<Result<Linked, ClientError>>,
 ) {
-    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let (events_tx, mut events) = net::inbound();
     net::spawn(
         Link::Gateway,
         addr.clone(),

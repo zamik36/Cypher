@@ -213,6 +213,8 @@ impl Client {
         let files = load_files(&store, &vault).await?;
         let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
 
+        // Unbounded by design: the driver emits from synchronous code, at the
+        // pace of the bounded network queue and the app's own requests.
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (req_tx, req_rx) = mpsc::channel(256);
         let stopped = Driver::spawn(

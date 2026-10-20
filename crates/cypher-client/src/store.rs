@@ -88,6 +88,8 @@ impl Store {
                 "CREATE TABLE IF NOT EXISTS {name} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;"
             ))?;
         }
+        // Unbounded by design: every caller waits for its reply, so it holds
+        // at most one job per waiting task.
         let (tx, rx) = std_mpsc::channel();
         thread::Builder::new()
             .name("cypher-store".into())
