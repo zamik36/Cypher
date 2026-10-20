@@ -1,8 +1,11 @@
-//! Cypher wire protocol v3: the only messages the server infrastructure
-//! understands. Everything end-to-end lives inside opaque `body` fields.
+//! Cypher wire protocol v4 ([`PROTOCOL_VERSION`]): the only messages the
+//! server infrastructure understands. Everything end-to-end lives inside
+//! opaque `body` fields.
 //!
 //! Layout: `[kind u8][req_id u32 LE][fields...]`, little-endian integers,
-//! `u32`-prefixed byte strings. Decoding is zero-copy for payload fields.
+//! `u32`-prefixed byte strings and `u8`-prefixed short strings. Decoding is
+//! zero-copy for payload fields. Frames on the onion relay channel are in
+//! [`relay`].
 
 // Parses untrusted input: arithmetic must say how it handles overflow, and
 // every match must name each message kind so new ones cannot slip through.

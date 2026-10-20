@@ -9,7 +9,7 @@ just check        # Rust: rustfmt, clippy (workspace, desktop, wasm32), taplo, t
 just web-check    # фронтенд: tsc, ESLint, Prettier, vitest с порогом покрытия
 ```
 
-CI требует того же, плюс: покрытие, Miri, сквозные сценарии на живом стеке и нагрузку с порогами (`.github/workflows/ci.yml`).
+CI требует того же, плюс: покрытие, Miri, сквозные сценарии на живом стеке и нагрузку с порогами (`.github/workflows/ci.yml`). Перед push можно быстро прогнать `just prepush`: форматирование, typos, machete, cargo-deny и clippy, без тестов.
 
 Коммиты — небольшие и по одной теме; каждый собирается и проходит проверки сам по себе. Сообщение объясняет, что изменилось и почему.
 
@@ -41,8 +41,16 @@ CI требует того же, плюс: покрытие, Miri, сквозн�
 - `CYPHER_TEST_REDIS` — например, `redis://:pass@127.0.0.1:16379`.
 - `CYPHER_TEST_NATS` — например, `nats://127.0.0.1:24222`.
 - Для NATS с ACL из `deploy/nats.conf` — ещё `GATEWAY_NATS_PASSWORD`, `SIGNALING_NATS_PASSWORD` и `RELAY_NATS_PASSWORD`.
+- `CYPHER_REQUIRE_LIVE=1` — тесты signaling с Redis и тест метрик с NATS падают, если переменной стека нет, а не пропускаются. Так настроен job покрытия в CI: он не может пройти, не запустив их. Сквозные тесты `tests/e2e` и тест двух десктопов без стека пропускаются в любом случае.
 
-NATS нужен отдельный, без других запущенных сервисов: чужой signaling в той же очереди ответит на запросы теста.
+NATS нужен отдельный, без других запущенных сервисов: чужой signaling в той же очереди ответит на запросы теста. Тесты, которые поднимают стек в процессе, nextest запускает по одному (группа `live-stack` в `.config/nextest.toml`).
+
+## Windows
+
+- **Короткий `CARGO_TARGET_DIR`.** Сборка libopus (`opusic-sys`, cmake и MSVC) упирается в предел длины пути Windows (около 260 символов). Держите каталог сборки коротким, например `C:\t\cypher`.
+- **`bash` для `just`.** `just` выполняет рецепты через `bash` (`windows-shell` в `Justfile`). Windows ищет программу в `C:\Windows\System32` раньше, чем в `PATH`. Если стоит WSL, там лежит его `bash.exe`, и рецепты уходят в Linux, где нет вашего Rust: они падают с кодом 127, и порядок `PATH` этого не меняет. Запускайте `just` с явным Git Bash: `just --shell 'C:\Program Files\Git\bin\bash.exe' --shell-arg -cu <рецепт>` (удобно завести алиас). Без WSL хватает Git Bash в `PATH`.
+- **Живой стек.** Redis и NATS проще всего поднять в Docker (`just infra`) и задать переменные из раздела выше в той же оболочке, где запускаются тесты.
+- **Fuzzing.** libFuzzer на MSVC собирается с AddressSanitizer, и fuzz-цели при запуске ищут `clang_rt.asan_dynamic-x86_64.dll`. Добавьте в `PATH` каталог с ней из Visual Studio Build Tools: `…\VC\Tools\MSVC\<версия>\bin\Hostx64\x64`. Затем, например: `cd crates/cypher-wire/fuzz && cargo +nightly-2026-09-20 fuzz run fuzz_frames`.
 
 ## Покрытие — храповик
 

@@ -1,5 +1,12 @@
-//! Signaling: prekeys, share links and blind inboxes behind NATS
-//! request/reply. Stateless; all state lives in Redis.
+//! Signaling: prekeys, signed device lists, share links and blind inboxes
+//! behind NATS request/reply (`sig.req` from the gateway, `sig.onion` from
+//! the relay). It also issues the weekly onion keys and serves their signed
+//! set (`sig.keys`), hands sealed sends to the recipient's gateway
+//! (`peer.<id>.<device>.sealed`) and sends Web Push signals.
+//!
+//! Stateless; all state lives in Redis. On disk it keeps two secrets,
+//! created on first start: the long-term signing key that signs the onion
+//! keys (clients pin it) and, when push is configured, the VAPID key.
 
 mod handler;
 mod keys;

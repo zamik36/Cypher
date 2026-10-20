@@ -27,12 +27,13 @@ just build              # cargo build --workspace
 just build-release      # release-сборка
 ```
 
-Gateway и relay в разработке пишут самоподписанные сертификаты в `target/dev-certs`.
+Gateway и relay в разработке пишут самоподписанные сертификаты в `target/dev-certs`. Сервисы настраиваются переменными `P2P_*`; список с значениями по умолчанию — в [deploy.md](deploy.md#переменные-сервисов).
 
 ## Проверки
 
 ```bash
 just check              # lint + hygiene + test: всё, что CI требует от Rust
+just prepush            # быстрая проверка перед push, без тестов: fmt, taplo, typos, machete, cargo-deny, clippy
 just lint               # rustfmt, clippy (workspace, десктоп, wasm32)
 just hygiene            # taplo, typos, machete, каждая фича отдельно, cargo-deny
 just test               # nextest + doctest'ы
@@ -48,7 +49,7 @@ just e2e                # нативный сценарий против `just s
 just web-e2e            # Playwright на продакшен-сборке PWA (нужен `just wasm`)
 ```
 
-Тест стека в процессе входит в `just test` и `just cov`, если `CYPHER_TEST_REDIS` и `CYPHER_TEST_NATS` указывают на Redis и NATS, которыми не пользуются другие сервисы (см. [CONTRIBUTING.md](../CONTRIBUTING.md)).
+Тест стека в процессе входит в `just test` и `just cov`, если `CYPHER_TEST_REDIS` и `CYPHER_TEST_NATS` указывают на Redis и NATS, которыми не пользуются другие сервисы. Без них такие тесты пропускаются; с `CYPHER_REQUIRE_LIVE=1` часть из них падает, а не пропускается (см. [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ## Производительность
 
