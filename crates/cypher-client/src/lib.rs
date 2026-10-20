@@ -65,6 +65,9 @@ pub enum ClientError {
     /// Nobody linked this device in time.
     #[error("the offer expired")]
     Expired,
+    /// Tor was asked for, but this build cannot reach the relay through it.
+    #[error("built without Tor support")]
+    TorUnavailable,
 }
 
 #[derive(Clone)]
@@ -76,7 +79,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Never fall back to the identity-bearing session for inbox traffic.
     pub require_onion: bool,
-    /// Reach the onion relay through Tor (requires the `tor` feature).
+    /// Reach the onion relay through Tor. Needs the `tor` feature: without
+    /// it, [`Client::start`] fails with [`ClientError::TorUnavailable`].
     pub tor: Option<TorConfig>,
 }
 
@@ -188,12 +192,17 @@ pub struct Client {
 }
 
 impl Client {
-    /// Restores persisted state for `seed` and starts connecting.
+    /// Restores persisted state for `seed` and starts connecting. Refuses a
+    /// Tor config the build cannot honour rather than reach the relay
+    /// directly.
     pub async fn start(
         seed: &IdentitySeed,
         device: DeviceId,
         config: Config,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), ClientError> {
+        if config.tor.is_some() && !cfg!(feature = "tor") {
+            return Err(ClientError::TorUnavailable);
+        }
         let peer_id = seed.derive_identity().peer_id();
         std::fs::create_dir_all(&config.data_dir)?;
         let hex = peer_id.to_hex();
@@ -730,6 +739,26 @@ mod tests {
             .apply(vec![store::Op::Put(Table::Messages.name(), key, sealed)])
             .await
             .unwrap();
+    }
+
+    /// Asking for Tor never ends in a direct connection to the relay: a
+    /// build without Tor refuses to start instead.
+    #[tokio::test]
+    async fn tor_is_honoured_or_the_client_does_not_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            tor: Some(TorConfig::default()),
+            ..config(dir.path())
+        };
+        let started = Client::start(&IdentitySeed::generate(), DeviceId::FIRST, config).await;
+        if cfg!(feature = "tor") {
+            let (client, _events) = started.unwrap();
+            client.shutdown().await;
+        } else {
+            assert!(matches!(started, Err(ClientError::TorUnavailable)));
+            let entries = std::fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(entries, 0, "nothing was opened");
+        }
     }
 
     /// Rows a contact dated as far ahead as the format allows, stored before

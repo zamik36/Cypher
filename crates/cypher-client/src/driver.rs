@@ -432,10 +432,7 @@ impl Driver {
             self.relay.task = Some(tor.spawn_relay(attempt, addr, tls, self.net_tx.clone()));
             return;
         }
-        #[cfg(not(feature = "tor"))]
-        if self.config.tor.is_some() {
-            tracing::warn!("built without Tor support; connecting to the relay directly");
-        }
+        // Without the `tor` feature `Client::start` refused a Tor config.
         self.relay.task = Some(net::spawn(
             attempt,
             addr,
