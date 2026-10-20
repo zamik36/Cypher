@@ -226,12 +226,19 @@ impl Client {
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), ClientError> {
         check_tor(&config)?;
         let peer_id = seed.derive_identity().peer_id();
-        std::fs::create_dir_all(&config.data_dir)?;
         let hex = peer_id.to_hex();
-        let db = config
-            .data_dir
-            .join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
-        let store = Store::open(&db)?;
+        let dir = config.data_dir.clone();
+        let db = dir.join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
+        // Creating directories and opening SQLite block on the disk.
+        let store = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir)?;
+            Store::open(&db)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("opening the client's storage did not finish: {e}");
+            ClientError::Closed
+        })??;
 
         let snapshot = Snapshot {
             meta: store.scan(Table::Meta.name()).await?,
