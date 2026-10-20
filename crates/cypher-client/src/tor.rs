@@ -42,7 +42,8 @@ impl Tor {
     async fn client(&self) -> Result<&Arc<TorClient<PreferredRuntime>>, BoxError> {
         self.client
             .get_or_try_init(|| async {
-                let _ = rustls::crypto::ring::default_provider().install_default();
+                // Arti builds its own TLS configs from the process-wide
+                // provider; `Client::start` refused to run without one.
                 let config = build_config(&self.config, &self.dir)?;
                 let client = timeout(BOOTSTRAP_TIMEOUT, TorClient::create_bootstrapped(config))
                     .await
@@ -134,6 +135,8 @@ mod tests {
         if std::env::var("CYPHER_TOR_SMOKE").is_err() {
             return;
         }
+        // As the binary does at startup.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let tor = Tor::new(TorConfig::default(), dir.path().to_owned());
         let client = match tor.client().await {
@@ -146,7 +149,6 @@ mod tests {
     }
 
     fn cypher_tls_roots() -> Arc<rustls::ClientConfig> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Arc::new(

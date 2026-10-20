@@ -24,6 +24,10 @@ pub fn run() -> tauri::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    // Arti reaches the relay with TLS configs built from the process-wide
+    // provider; the app's own configs carry theirs. Installed once, here,
+    // before anything can use TLS.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     // First: a second launch hands its invite link to this one and quits.
     #[cfg(desktop)]

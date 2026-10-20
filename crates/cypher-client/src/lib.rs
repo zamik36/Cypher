@@ -68,6 +68,10 @@ pub enum ClientError {
     /// Tor was asked for, but this build cannot reach the relay through it.
     #[error("built without Tor support")]
     TorUnavailable,
+    /// Tor was asked for, but the application installed no process-wide
+    /// rustls `CryptoProvider` for Arti to use.
+    #[error("Tor needs a process-wide rustls CryptoProvider; install one at startup")]
+    NoCryptoProvider,
 }
 
 #[derive(Clone)]
@@ -81,6 +85,9 @@ pub struct Config {
     pub require_onion: bool,
     /// Reach the onion relay through Tor. Needs the `tor` feature: without
     /// it, [`Client::start`] fails with [`ClientError::TorUnavailable`].
+    /// Arti uses the process-wide rustls `CryptoProvider`, which the binary
+    /// installs in `main`; without one, [`Client::start`] fails with
+    /// [`ClientError::NoCryptoProvider`].
     pub tor: Option<TorConfig>,
 }
 
@@ -138,6 +145,23 @@ pub(crate) enum Request {
 /// How far around the UI's time a deleted message is looked for: the UI
 /// stamps outgoing messages itself, a few milliseconds off the core.
 const DELETE_WINDOW_MS: u64 = 60_000;
+
+/// Whether a Tor config can be honoured: never by reaching the relay
+/// directly instead.
+fn check_tor(config: &Config) -> Result<(), ClientError> {
+    if config.tor.is_none() {
+        return Ok(());
+    }
+    if !cfg!(feature = "tor") {
+        return Err(ClientError::TorUnavailable);
+    }
+    // Left unset, rustls would pick a provider by itself the first time Arti
+    // asks; that choice belongs to the application.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        return Err(ClientError::NoCryptoProvider);
+    }
+    Ok(())
+}
 
 /// Store operations that go with deleting `msg` besides its own row: its
 /// status, a media note's key, where a file was saved. Returns the media
@@ -200,9 +224,7 @@ impl Client {
         device: DeviceId,
         config: Config,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>), ClientError> {
-        if config.tor.is_some() && !cfg!(feature = "tor") {
-            return Err(ClientError::TorUnavailable);
-        }
+        check_tor(&config)?;
         let peer_id = seed.derive_identity().peer_id();
         std::fs::create_dir_all(&config.data_dir)?;
         let hex = peer_id.to_hex();
@@ -742,7 +764,8 @@ mod tests {
     }
 
     /// Asking for Tor never ends in a direct connection to the relay: a
-    /// build without Tor refuses to start instead.
+    /// build without Tor, or a process that chose no rustls provider for
+    /// Arti, refuses to start instead.
     #[tokio::test]
     async fn tor_is_honoured_or_the_client_does_not_start() {
         let dir = tempfile::tempdir().unwrap();
@@ -750,15 +773,24 @@ mod tests {
             tor: Some(TorConfig::default()),
             ..config(dir.path())
         };
-        let started = Client::start(&IdentitySeed::generate(), DeviceId::FIRST, config).await;
-        if cfg!(feature = "tor") {
-            let (client, _events) = started.unwrap();
-            client.shutdown().await;
-        } else {
-            assert!(matches!(started, Err(ClientError::TorUnavailable)));
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config.clone());
+        let nothing_opened = || {
             let entries = std::fs::read_dir(dir.path()).unwrap().count();
             assert_eq!(entries, 0, "nothing was opened");
+        };
+        if !cfg!(feature = "tor") {
+            assert!(matches!(start().await, Err(ClientError::TorUnavailable)));
+            return nothing_opened();
         }
+        // Another test in this process may have chosen one already.
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            assert!(matches!(start().await, Err(ClientError::NoCryptoProvider)));
+            nothing_opened();
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+        let (client, _events) = start().await.unwrap();
+        client.shutdown().await;
     }
 
     /// Rows a contact dated as far ahead as the format allows, stored before
