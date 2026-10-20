@@ -24,10 +24,23 @@ export interface EffectSinks {
   disconnect(reconnect: boolean): void;
 }
 
+/** A storage batch could not be made durable; nothing after it was applied. */
+export class StorageFailedError extends Error {
+  constructor(readonly reason: unknown) {
+    super(`storage failed: ${reason instanceof Error ? reason.message : String(reason)}`);
+    this.name = "StorageFailedError";
+  }
+}
+
+function assertNever(effect: never): never {
+  throw new Error(`unknown effect ${JSON.stringify(effect)}`);
+}
+
 /**
  * Applies effects strictly in order. Storage operations are batched, and a
  * batch is durable before anything that follows it leaves the device —
- * the same guarantee the native driver gives.
+ * the same guarantee the native driver gives. A batch that fails rejects
+ * with {@link StorageFailedError} and stops the rest.
  */
 export async function applyEffects(effects: Effect[], sinks: EffectSinks): Promise<void> {
   let batch: Op[] = [];
@@ -35,7 +48,11 @@ export async function applyEffects(effects: Effect[], sinks: EffectSinks): Promi
     if (batch.length === 0) return;
     const ops = batch;
     batch = [];
-    await sinks.persist(ops);
+    try {
+      await sinks.persist(ops);
+    } catch (e) {
+      throw new StorageFailedError(e);
+    }
   };
   for (const e of effects) {
     switch (e.kind) {
@@ -80,7 +97,43 @@ export async function applyEffects(effects: Effect[], sinks: EffectSinks): Promi
       case "disconnect":
         sinks.disconnect(e.reconnect);
         break;
+      default:
+        assertNever(e);
     }
   }
   await flush();
+}
+
+/**
+ * Applies the effects of one core, and stops for good once a storage batch
+ * failed: the core has then moved past what is stored, so anything computed
+ * from it could reuse ratchet keys after a restart. `onStorageFailed` runs
+ * once, when that happens; every later batch is refused without being looked
+ * at, and the core must not be fed any more ({@link stopped}).
+ */
+export class EffectApplier {
+  private failed = false;
+
+  constructor(
+    private readonly sinks: EffectSinks,
+    private readonly onStorageFailed: () => void,
+  ) {}
+
+  /** True once a storage batch failed. */
+  get stopped(): boolean {
+    return this.failed;
+  }
+
+  async apply(effects: Effect[]): Promise<void> {
+    if (this.failed) throw new StorageFailedError("stopped after an earlier failure");
+    try {
+      await applyEffects(effects, this.sinks);
+    } catch (e) {
+      if (e instanceof StorageFailedError) {
+        this.failed = true;
+        this.onStorageFailed();
+      }
+      throw e;
+    }
+  }
 }

@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Effect } from "../wasm/cypher_wasm.js";
-import { applyEffects, type EffectSinks } from "./effects";
+import { applyEffects, EffectApplier, type EffectSinks, StorageFailedError } from "./effects";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 
@@ -68,6 +68,13 @@ describe("applyEffects", () => {
     expect(log).toEqual([]);
   });
 
+  it("refuses an effect it does not know", async () => {
+    const { log, sinks } = recorder();
+    const unknown = { kind: "launch" } as unknown as Effect;
+    await expect(applyEffects([unknown], sinks)).rejects.toThrow("unknown effect");
+    expect(log).toEqual([]);
+  });
+
   it("routes every other effect in order without persisting empty batches", async () => {
     const { log, sinks } = recorder();
     await applyEffects(
@@ -97,5 +104,67 @@ describe("applyEffects", () => {
       "transmit 1",
       "disconnect true",
     ]);
+  });
+});
+
+describe("EffectApplier", () => {
+  const sendAndStore: Effect[] = [
+    { kind: "put", table: "outbox", key: bytes(1), value: bytes(2) },
+    { kind: "transmit", data: bytes(9) },
+    { kind: "event", channel: "message", payload: null },
+  ];
+
+  it("applies batches while storage works", async () => {
+    const { log, sinks } = recorder();
+    const stopped = vi.fn();
+    const applier = new EffectApplier(sinks, stopped);
+    await applier.apply(sendAndStore);
+    await applier.apply(sendAndStore);
+    expect(log).toEqual([
+      "persist put:outbox",
+      "transmit 9",
+      "event message",
+      "persist put:outbox",
+      "transmit 9",
+      "event message",
+    ]);
+    expect(applier.stopped).toBe(false);
+    expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("stops for good after a storage batch failed", async () => {
+    const { log, sinks } = recorder();
+    let storageWorks = false;
+    sinks.persist = (ops) => {
+      if (!storageWorks) return Promise.reject(new DOMException("quota", "QuotaExceededError"));
+      log.push(`persist ${ops.length}`);
+      return Promise.resolve();
+    };
+    const stopped = vi.fn();
+    const applier = new EffectApplier(sinks, stopped);
+
+    await expect(applier.apply(sendAndStore)).rejects.toThrow(StorageFailedError);
+    expect(applier.stopped).toBe(true);
+    expect(stopped).toHaveBeenCalledTimes(1);
+
+    // Storage working again does not matter: the core is past what was stored.
+    storageWorks = true;
+    await expect(applier.apply(sendAndStore)).rejects.toThrow(StorageFailedError);
+    expect(log).toEqual([]);
+    expect(stopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps going after a failure that is not storage", async () => {
+    const { log, sinks } = recorder();
+    sinks.openSink = () => Promise.reject(new Error("no room in OPFS"));
+    const stopped = vi.fn();
+    const applier = new EffectApplier(sinks, stopped);
+    await expect(applier.apply([{ kind: "open_sink", file_id: "f", len: 1, sink: "download" }])).rejects.toThrow(
+      "no room in OPFS",
+    );
+    await applier.apply(sendAndStore);
+    expect(applier.stopped).toBe(false);
+    expect(stopped).not.toHaveBeenCalled();
+    expect(log).toEqual(["persist put:outbox", "transmit 9", "event message"]);
   });
 });

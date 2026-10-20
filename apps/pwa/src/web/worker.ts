@@ -13,7 +13,7 @@ import init, {
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
-import { applyEffects, type EffectSinks, type Sink } from "./effects";
+import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
@@ -47,9 +47,10 @@ function serial<T>(task: () => Promise<T> | T): Promise<T> {
   return next;
 }
 
+/** Hands the core an input, unless it stopped after a storage failure. */
 function feed(call: (c: Client, now: number) => Effect[]): Promise<void> {
   return serial(async () => {
-    if (client) await apply(call(client, Date.now()));
+    if (client && !applier.stopped) await apply(call(client, Date.now()));
   });
 }
 
@@ -80,7 +81,22 @@ const sinks: EffectSinks = {
   disconnect: (reconnect) => gateway.restart(reconnect),
 };
 
-const apply = (effects: Effect[]) => applyEffects(effects, sinks);
+/**
+ * Storage failed under the core: it is ahead of what IndexedDB holds, so it
+ * gets no input any more and nothing more leaves the device, as with the
+ * native driver. Connecting again restores a core from what is stored.
+ */
+function storageFailed() {
+  gateway.stop();
+  relay.stop();
+  sinks.reply({ kind: "reply", op: "warning", value: "StorageFailed" });
+  onEvent("error", "StorageFailed");
+  onEvent("disconnected", null);
+}
+
+/** Applies the current core's effects; replaced along with the core. */
+let applier = new EffectApplier(sinks, storageFailed);
+const apply = (effects: Effect[]) => applier.apply(effects);
 
 function onEvent(channel: string, payload: unknown) {
   for (const w of linkWaiters) if (w(channel, payload)) linkWaiters.delete(w);
@@ -369,11 +385,13 @@ async function startClient(): Promise<Client> {
   ]);
   client?.free();
   client = new Client(identity, { meta, peers, sessions, outbox, transfers }, Date.now());
+  applier = new EffectApplier(sinks, storageFailed);
   await apply(client.startupEffects());
   return client;
 }
 
 async function run(cmd: Record<string, unknown>) {
+  if (applier.stopped) throw new Error("StorageFailed");
   const { effects, ...ids } = requireClient().command(cmd, Date.now());
   await apply(effects);
   return ids;
