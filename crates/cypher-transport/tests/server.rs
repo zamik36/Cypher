@@ -94,14 +94,22 @@ async fn connections_beyond_the_limit_are_refused_and_counted() {
     assert_eq!(server.echo.rejected.load(Ordering::SeqCst), 1);
 
     drop(first);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut third = connect_tls(&server.addr, Arc::clone(&server.client))
-        .await
-        .unwrap();
-    assert!(
-        echo_roundtrip(&mut third, b"three").await,
-        "permit is released on close"
-    );
+    // The server sees the close a moment later; until then it still refuses.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let served = match connect_tls(&server.addr, Arc::clone(&server.client)).await {
+            Ok(mut conn) => echo_roundtrip(&mut conn, b"three").await,
+            Err(_) => false,
+        };
+        if served {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "permit is released on close"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
