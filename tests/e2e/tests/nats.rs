@@ -1,15 +1,16 @@
 //! The NATS permissions in `deploy/nats.conf`, against a live server with
 //! that file. Needs `CYPHER_TEST_NATS` and the service passwords; skipped
-//! otherwise.
+//! otherwise, unless `CYPHER_REQUIRE_LIVE=1`.
 
 use std::time::Duration;
 
+use cypher_server_kit::testing::live_env;
 use cypher_server_kit::{NatsConfig, connect_nats};
 use futures::StreamExt as _;
 
 fn user(name: &str) -> Option<NatsConfig> {
     Some(NatsConfig {
-        url: std::env::var("CYPHER_TEST_NATS").ok()?,
+        url: live_env("CYPHER_TEST_NATS")?,
         user: Some(name.to_owned()),
         password: std::env::var(format!("{}_NATS_PASSWORD", name.to_uppercase())).ok(),
         token: None,

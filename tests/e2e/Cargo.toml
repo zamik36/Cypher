@@ -12,7 +12,7 @@ cypher-core.workspace = true
 cypher-crypto.workspace = true
 cypher-types.workspace = true
 cypher-tls.workspace = true
-cypher-server-kit.workspace = true
+cypher-server-kit = { workspace = true, features = ["test-util"] }
 gateway = { path = "../../services/gateway" }
 signaling = { path = "../../services/signaling" }
 relay = { path = "../../services/relay" }

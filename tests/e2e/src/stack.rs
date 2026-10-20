@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use cypher_server_kit::NatsConfig;
+use cypher_server_kit::testing::live_env;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -46,12 +47,14 @@ pub struct Stack {
 
 impl Stack {
     /// Starts the stack when `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS` name
-    /// the backing stores. NATS credentials, if the server enforces the
-    /// per-service ACL, come from `{GATEWAY,SIGNALING,RELAY}_NATS_PASSWORD`.
+    /// the backing stores; without them `None`, so the test skips, unless
+    /// `CYPHER_REQUIRE_LIVE=1` asks for the live stack and the test fails
+    /// instead. NATS credentials, if the server enforces the per-service
+    /// ACL, come from `{GATEWAY,SIGNALING,RELAY}_NATS_PASSWORD`.
     pub async fn from_env() -> Option<Self> {
-        let redis_url = std::env::var("CYPHER_TEST_REDIS").ok()?;
-        let nats_url = std::env::var("CYPHER_TEST_NATS").ok()?;
-        Some(Self::start(redis_url, &nats_url).await)
+        let redis_url = live_env("CYPHER_TEST_REDIS");
+        let nats_url = live_env("CYPHER_TEST_NATS");
+        Some(Self::start(redis_url?, &nats_url?).await)
     }
 
     async fn start(redis_url: String, nats_url: &str) -> Self {

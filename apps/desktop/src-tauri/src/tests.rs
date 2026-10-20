@@ -2,7 +2,8 @@
 //! camelCase arguments the webview sends (`apps/desktop/src/tauri.ts`), so a
 //! renamed parameter or a command missing from the handler list fails here.
 //! The two-desktop scenario needs `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS`
-//! (see `tests/e2e`).
+//! (see `tests/e2e`): skipped without them, failed where
+//! `CYPHER_REQUIRE_LIVE=1`.
 
 use std::collections::BTreeSet;
 use std::future::Future;
