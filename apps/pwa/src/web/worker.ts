@@ -4,6 +4,7 @@ import init, {
   conversationRange,
   historyRange,
   Identity,
+  messageWindow,
   Provision,
   qrSvg,
   waveformFromRms,
@@ -676,10 +677,8 @@ const handlers: Handlers = {
     }),
   deleteMessage: (peer, msgId, timestamp) =>
     serial(async () => {
-      const [, from] = historyRange(peer, Math.max(0, timestamp - DELETE_WINDOW_MS));
-      const [, to] = historyRange(peer, timestamp + DELETE_WINDOW_MS);
       const id = unhex(msgId);
-      const rows = await scan(db, "messages", IDBKeyRange.bound(from, to));
+      const rows = await scan(db, "messages", IDBKeyRange.bound(...messageWindow(peer, timestamp, DELETE_WINDOW_MS)));
       const row = rows.find(([key]) => key.subarray(key.length - 16).every((b, i) => b === id[i]));
       if (!row) throw new Error("NotFound");
       await run({ type: "discard_outgoing", msg_id: msgId });

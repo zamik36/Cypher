@@ -19,7 +19,7 @@ use std::sync::Arc;
 use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::{
     Command, Core, CoreError, Event, MediaKind, MessageStatus, Snapshot, StoredMessage, Table,
-    Vault, message_key, peer_messages,
+    Vault, message_key, message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -630,16 +630,7 @@ impl Client {
         msg_id: MsgId,
         near_ms: u64,
     ) -> Result<(), ClientError> {
-        let from = message_key(
-            &peer,
-            near_ms.saturating_sub(DELETE_WINDOW_MS),
-            &MsgId([0; MsgId::LEN]),
-        );
-        let to = message_key(
-            &peer,
-            near_ms.saturating_add(DELETE_WINDOW_MS),
-            &MsgId([u8::MAX; MsgId::LEN]),
-        );
+        let (from, to) = message_window(&peer, near_ms, DELETE_WINDOW_MS);
         let (key, sealed) = self
             .store
             .range_desc(Table::Messages.name(), from, End::Through(to), usize::MAX)

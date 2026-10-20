@@ -139,6 +139,24 @@ pub fn peer_messages(peer: &PeerId) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+/// The first and the last [`message_key`] of messages with `peer` sent
+/// within `window_ms` of `at_ms`, both inclusive: where to look for one
+/// message whose time is known only roughly.
+pub fn message_window(peer: &PeerId, at_ms: u64, window_ms: u64) -> (Vec<u8>, Vec<u8>) {
+    (
+        message_key(
+            peer,
+            at_ms.saturating_sub(window_ms),
+            &MsgId([0; MsgId::LEN]),
+        ),
+        message_key(
+            peer,
+            at_ms.saturating_add(window_ms),
+            &MsgId([u8::MAX; MsgId::LEN]),
+        ),
+    )
+}
+
 /// At-rest encryption for every record the core persists. Records are bound
 /// to their `(table, key)` through the AEAD associated data, so a storage
 /// attacker cannot swap values between keys.
@@ -397,6 +415,28 @@ mod tests {
                 assert!(key < first || key > last);
             }
         }
+    }
+
+    #[test]
+    fn a_message_window_holds_both_of_its_ends_and_nothing_past_them() {
+        let p = PeerId([7; 32]);
+        let inside = |(first, last): &(Vec<u8>, Vec<u8>), at, id| {
+            let key = message_key(&p, at, &MsgId(id));
+            *first <= key && key <= *last
+        };
+        let window = message_window(&p, 1_000, 10);
+        for (at, id) in [(990, [0; 16]), (1_000, [9; 16]), (1_010, [0xFF; 16])] {
+            assert!(inside(&window, at, id), "{at}");
+        }
+        for (at, id) in [(989, [0xFF; 16]), (1_011, [0; 16])] {
+            assert!(!inside(&window, at, id), "{at}");
+        }
+        assert!(inside(&message_window(&p, 5, 10), 0, [0; 16]));
+        assert!(inside(
+            &message_window(&p, u64::MAX - 5, 10),
+            u64::MAX,
+            [0xFF; 16]
+        ));
     }
 
     #[test]

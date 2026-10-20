@@ -6,7 +6,9 @@ mod command;
 mod convert;
 mod history;
 
-use cypher_core::{Core, Effect, Input, Table, Vault, message_key, peer_messages, ui};
+use cypher_core::{
+    Core, Effect, Input, Table, Vault, message_key, message_window, peer_messages, ui,
+};
 use cypher_crypto::{IdentitySeed, identity_file};
 use cypher_types::{DeviceId, MsgId};
 use js_sys::Array;
@@ -444,6 +446,15 @@ pub fn history_range(peer_hex: &str, before_ms: f64) -> Result<Array, JsError> {
     let (first, _) = peer_messages(&p);
     let before = message_key(&p, now(before_ms), &MsgId([0; MsgId::LEN]));
     Ok(key_bounds(&first, &before))
+}
+
+/// `[from, to]` `IndexedDB` key bounds of the messages with a peer sent
+/// within `window_ms` of `at_ms`, both included: where to look for one
+/// message whose time is known only roughly.
+#[wasm_bindgen(js_name = messageWindow, unchecked_return_type = "[Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>]")]
+pub fn message_window_range(peer_hex: &str, at_ms: f64, window_ms: f64) -> Result<Array, JsError> {
+    let (first, last) = message_window(&peer(peer_hex)?, now(at_ms), now(window_ms));
+    Ok(key_bounds(&first, &last))
 }
 
 fn key_bounds(from: &[u8], to: &[u8]) -> Array {
