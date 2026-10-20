@@ -48,7 +48,7 @@ NATS нужен отдельный, без других запущенных с�
 ## Windows
 
 - **Короткий `CARGO_TARGET_DIR`.** Сборка libopus (`opusic-sys`, cmake и MSVC) упирается в предел длины пути Windows (около 260 символов). Держите каталог сборки коротким, например `C:\t\cypher`.
-- **`bash` для `just`.** `just` выполняет рецепты через `bash` (`windows-shell` в `justfile`). Windows ищет программу в `C:\Windows\System32` раньше, чем в `PATH`. Если стоит WSL, там лежит его `bash.exe`, и рецепты уходят в Linux, где нет вашего Rust: они падают с кодом 127, и порядок `PATH` этого не меняет. Запускайте `just` с явным Git Bash: `just --shell 'C:\Program Files\Git\bin\bash.exe' --shell-arg -cu <рецепт>` (удобно завести алиас). Без WSL хватает Git Bash в `PATH`.
+- **`bash` для `just`.** `just` выполняет рецепты через `bash` (`windows-shell` в `Justfile`). Windows ищет программу в `C:\Windows\System32` раньше, чем в `PATH`. Если стоит WSL, там лежит его `bash.exe`, и рецепты уходят в Linux, где нет вашего Rust: они падают с кодом 127, и порядок `PATH` этого не меняет. Запускайте `just` с явным Git Bash: `just --shell 'C:\Program Files\Git\bin\bash.exe' --shell-arg -cu <рецепт>` (удобно завести алиас). Без WSL хватает Git Bash в `PATH`.
 - **Живой стек.** Redis и NATS проще всего поднять в Docker (`just infra`) и задать переменные из раздела выше в той же оболочке, где запускаются тесты.
 - **Fuzzing.** libFuzzer на MSVC собирается с AddressSanitizer, и fuzz-цели при запуске ищут `clang_rt.asan_dynamic-x86_64.dll`. Добавьте в `PATH` каталог с ней из Visual Studio Build Tools: `…\VC\Tools\MSVC\<версия>\bin\Hostx64\x64`. Затем, например: `cd crates/cypher-wire/fuzz && cargo +nightly-2026-09-20 fuzz run fuzz_frames`.
 
