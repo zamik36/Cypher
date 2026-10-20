@@ -333,3 +333,52 @@ fn forgetting_a_contact_leaves_the_others() {
     w.send_text(A, C, "still here");
     assert_eq!(w.texts(C), ["still here"]);
 }
+
+/// When a contact's message says it was sent: a clock a little ahead of
+/// ours is believed, one further ahead is held to ten minutes past ours.
+#[test]
+fn a_date_ahead_of_ours_is_held_to_ten_minutes() {
+    let mut w = paired();
+    for (ahead, dated) in [(5 * 60_000, 5 * 60_000), (30 * 60_000, 10 * 60_000)] {
+        w.clients[B].ahead = ahead;
+        let id = w.send_text(B, A, "from ahead");
+        w.clients[B].ahead = 0;
+        let sent_at = w.clients[A].events.iter().find_map(|e| match e {
+            Event::Message(m) if m.msg_id == id => Some(m.sent_at_ms),
+            _ => None,
+        });
+        assert_eq!(sent_at, Some(w.now + dated), "{ahead} ms ahead");
+    }
+}
+
+/// A new name reaches the contacts already greeted, as news of a name,
+/// not as a request; a contact this side blocked is not told.
+#[test]
+fn a_new_name_skips_blocked_contacts_and_is_no_request() {
+    let mut w = World::new(3);
+    w.pair(A, B);
+    w.pair(A, C);
+    let (a, c) = (w.peer(A), w.peer(C));
+    w.command(A, Command::BlockPeer { peer: c });
+    w.command(
+        A,
+        Command::SetProfileName {
+            name: Some("Alice".into()),
+        },
+    );
+    assert_eq!(w.contact_name(B, a).as_deref(), Some("Alice"));
+    assert!(!w.has_event(B, |e| matches!(e, Event::ContactRequest { .. })));
+    assert_eq!(w.contact_name(C, a), None, "blocked, so not told");
+}
+
+/// A message from a device the contact's list has does not have their
+/// devices looked up again.
+#[test]
+fn a_message_from_a_listed_device_looks_nothing_up() {
+    let mut w = paired();
+    w.advance(60 * 60_000);
+    let fetches = w.server.device_fetches;
+    w.send_text(B, A, "from a device you know");
+    w.send_text(A, B, "and back");
+    assert_eq!(w.server.device_fetches, fetches);
+}

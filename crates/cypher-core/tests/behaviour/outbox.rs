@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 
 use cypher_core::{Command, Event, MessageStatus};
+use cypher_crypto::{DeviceList, IdentitySeed};
 use cypher_types::{Addr, DeviceId, MsgId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame};
 use proptest::prelude::*;
@@ -343,6 +344,121 @@ fn a_device_without_keys_is_no_longer_a_target() {
     let row = rows::outbox_row(&w, A, id).expect("its receipts' record");
     assert!(row.targets.is_empty());
     assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
+}
+
+/// A message the server never took for any device of the contact, all of
+/// them taken off the contact's list meanwhile, leaves nothing behind: not
+/// even a record of it. (The contact's inbox is "gone" each time, so the
+/// sender looks up their devices and finds the new list.)
+#[test]
+fn a_message_no_device_took_leaves_no_record() {
+    let mut w = settled();
+    let b = w.peer(B);
+    w.server.faults.push(Rule::always(
+        move |m| matches!(m, ClientMsg::SendSealed { to, .. } if *to == b),
+        Fault::Error(ErrorCode::NotFound),
+    ));
+    w.server.faults.push(Rule::always(
+        move |m| matches!(m, ClientMsg::Send { to, .. } if *to == b),
+        Fault::Error(ErrorCode::Internal),
+    ));
+    let id = w.send_text(A, B, "to nobody");
+    assert_eq!(w.status_of(A, id), None, "not taken yet");
+    assert!(rows::outbox_row(&w, A, id).is_some());
+
+    let identity = IdentitySeed(w.clients[B].seed).derive_identity();
+    let version = w.server.devices[&b].version() + 1;
+    let elsewhere = DeviceList::sign(&identity, version, [DeviceId(3)]).unwrap();
+    w.server.devices.insert(b, elsewhere);
+    w.advance(60 * 60_000);
+    assert!(rows::outbox_row(&w, A, id).is_none());
+}
+
+/// A device a contact took off their list is no longer written to: what
+/// waited for it stops waiting. What waits for a device of the same number
+/// of another contact still does.
+#[test]
+fn a_device_taken_off_a_contacts_list_is_no_longer_waited_for() {
+    let mut w = World::new(3);
+    let a2 = w.add_device(A, 2);
+    let c2 = w.add_device(C, 2);
+    w.pair(A, B);
+    w.pair(C, B);
+    w.advance(60 * 60_000);
+    w.disconnect(a2);
+    w.disconnect(c2);
+    let to_a = w.send_text(B, A, "to A");
+    let to_c = w.send_text(B, C, "to C");
+    let waits_for_2 = |w: &World, id| {
+        rows::outbox_row(w, B, id).is_some_and(|row| {
+            row.targets
+                .iter()
+                .any(|t| t.device == DeviceId(2) && t.awaiting)
+        })
+    };
+    assert!(waits_for_2(&w, to_a) && waits_for_2(&w, to_c));
+
+    let a = w.peer(A);
+    let identity = IdentitySeed(w.clients[A].seed).derive_identity();
+    let shorter = w.server.devices[&a]
+        .without(&identity, DeviceId(2))
+        .unwrap();
+    w.server.devices.insert(a, shorter);
+    w.advance(60 * 60_000);
+    assert!(!waits_for_2(&w, to_a), "A's second device is gone");
+    assert!(waits_for_2(&w, to_c), "C's second device is still listed");
+}
+
+/// The inbox of a contact's device away is gone: the message is tried
+/// again later, and the contact's devices are looked up, as the device may
+/// have been taken off their list.
+#[test]
+fn an_inbox_found_gone_has_the_contacts_devices_looked_up() {
+    let mut w = settled();
+    w.disconnect(B);
+    w.advance(60 * 60_000);
+    let fetches = w.server.device_fetches;
+    w.send_text(A, B, "into the inbox");
+    assert_eq!(w.server.device_fetches, fetches, "not for an inbox there");
+
+    w.advance(60 * 60_000);
+    w.server.faults.push(Rule::times(
+        1,
+        |m| matches!(m, ClientMsg::InboxPut { .. } | ClientMsg::SendSealed { .. }),
+        Fault::Error(ErrorCode::NotFound),
+    ));
+    let fetches = w.server.device_fetches;
+    let id = w.send_text(A, B, "into an inbox gone");
+    assert_eq!(w.server.device_fetches, fetches + 1);
+    assert_eq!(w.status_of(A, id), None, "not taken yet");
+    w.advance(60_000);
+    assert_eq!(w.status_of(A, id), Some(MessageStatus::Queued));
+}
+
+/// The second device's receipt for a message both got tells the user
+/// nothing new, yet the message stops waiting for it.
+#[test]
+fn a_second_devices_receipt_is_kept_but_not_told_again() {
+    let mut w = World::new(2);
+    let b2 = w.add_device(B, 2);
+    w.pair(B, A);
+    w.advance(60 * 60_000);
+    w.disconnect(b2);
+    let id = w.send_text(A, B, "to both of B's");
+    w.connect(b2);
+    w.advance(10_000);
+    assert!(shows(&w, b2, id));
+    let told = w.clients[A]
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::MessageStatus { msg_id, status: MessageStatus::Delivered }
+                if *msg_id == id)
+        })
+        .count();
+    assert_eq!(told, 1, "delivered is told once");
+    let row = rows::outbox_row(&w, A, id).expect("its receipts' record");
+    assert!(row.targets.is_empty(), "both devices answered");
 }
 
 /// Blocking a contact, or forgetting one, drops what waits for them:
