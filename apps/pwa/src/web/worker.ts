@@ -183,10 +183,11 @@ class Link {
     this.connect();
   }
 
-  /** Detaches silently: the caller resets the core itself. */
+  /** Detaches silently, until the next `start`: the caller resets the core itself. */
   stop() {
     clearTimeout(this.timer);
     this.url = "";
+    this.lastUrl = "";
     const ws = this.ws;
     this.ws = null;
     ws?.close();
@@ -198,7 +199,7 @@ class Link {
     this.ws?.close();
   }
 
-  /** Connects again after `restart(false)`; does nothing while connected. */
+  /** Connects again after `restart(false)`; does nothing while connected or after `stop`. */
   resume() {
     if (this.url || !this.lastUrl) return;
     this.url = this.lastUrl;
