@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use cypher_core::relay::{self, RelayBody};
-use cypher_core::{Event, FailReason, Table, session_key};
+use cypher_core::{Command, Event, FailReason, Table, session_key};
 use cypher_crypto::{IdentitySeed, InitHeader, handshake};
 use cypher_types::{Addr, DeviceId};
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
@@ -287,19 +287,19 @@ fn restart_from_b(w: &mut World) -> (Bytes, InitHeader) {
     init
 }
 
-/// Hands `frame` to A, which must change nothing: its session with `with`
-/// stays as it is, and it neither answers nor tells.
-fn refused_by_a(w: &mut World, with: Addr, frame: Bytes) {
+/// Hands `frame` to client `to`, which must change nothing: its session
+/// with `with` stays as it is, and it neither answers nor tells.
+fn refused_by(w: &mut World, to: usize, with: Addr, frame: Bytes) {
     let row = (Table::Sessions as u8, session_key(with));
-    let session = w.clients[A].kv[&row].clone();
-    let events = w.clients[A].events.len();
-    let sent = |w: &World| w.transmitted.iter().filter(|(i, _)| *i == A).count();
+    let session = w.clients[to].kv[&row].clone();
+    let events = w.clients[to].events.len();
+    let sent = |w: &World| w.transmitted.iter().filter(|(i, _)| *i == to).count();
     let transmitted = sent(w);
-    w.inject(A, frame);
+    w.inject(to, frame);
 
-    assert!(w.clients[A].kv[&row] == session, "the session stays");
+    assert!(w.clients[to].kv[&row] == session, "the session stays");
     assert_eq!(sent(w), transmitted, "nothing answered");
-    assert_eq!(events_since(w, A, events), [], "nothing told");
+    assert_eq!(events_since(w, to, events), [], "nothing told");
 }
 
 /// B starts seventeen sessions with A in turn, each from A's signed
@@ -321,7 +321,7 @@ fn an_init_replayed_after_its_session_forgot_it_is_refused() {
         !remembered.contains(&init.ephemeral),
         "the session forgot it"
     );
-    refused_by_a(&mut w, b, frame);
+    refused_by(&mut w, A, b, frame);
 }
 
 /// Inits a stranger C makes from A's published keys, each starting a
@@ -374,4 +374,37 @@ fn a_stranger_flooding_inits_does_not_lock_out_contacts() {
     );
     assert_eq!(w.texts(A).last().map(String::as_str), Some("still here"));
     assert!(!warned(&w, A, from));
+}
+
+/// Both join each other's invite at once, each starting a session: the
+/// lower device keeps its own and turns the other's init away. Once the
+/// two have talked on the kept session, that init handed to the lower
+/// device again is refused as well, and the session stays.
+#[test]
+fn the_init_turned_away_when_both_joined_at_once_stays_refused() {
+    let mut w = World::new(2);
+    let link_a = w.create_link(A);
+    let link_b = w.create_link(B);
+    w.queue(B, Command::JoinLink { link: link_a });
+    w.queue(A, Command::JoinLink { link: link_b });
+    w.run();
+    let (low, high) = if (w.peer(A), w.clients[A].device) < (w.peer(B), w.clients[B].device) {
+        (A, B)
+    } else {
+        (B, A)
+    };
+    let turned_away = w
+        .server
+        .delivered
+        .iter()
+        .find(|(to, raw)| *to == low && init_in(&w, low, raw).is_some())
+        .map(|(_, raw)| raw.clone())
+        .expect("the higher device's init");
+    w.send_text(A, B, "ping");
+    w.send_text(B, A, "pong");
+    assert_eq!(w.texts(B), ["ping"]);
+    assert_eq!(w.texts(A), ["pong"]);
+
+    let high_addr = addr(&w, high);
+    refused_by(&mut w, low, high_addr, turned_away);
 }

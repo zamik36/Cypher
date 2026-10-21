@@ -634,16 +634,17 @@ impl<R: CryptoRngCore> Core<R> {
         let pt = ratchet.decrypt(header, ct, b"", &mut self.rng)?;
 
         // Both sides started a session at once: the lower device keeps its
-        // own and ignores the other's.
-        if self
+        // own and ignores the other's. Spent either way, so that a copy of
+        // it is refused once ours is confirmed.
+        let keep_ours = self
             .sessions
             .get(&sender)
             .is_some_and(Session::is_unconfirmed_initiator)
-            && (self.peer_id, self.device) < (from, from_device)
-        {
+            && (self.peer_id, self.device) < (from, from_device);
+        self.spend_init(init, request);
+        if keep_ours {
             return Err(CoreError::Conflict);
         }
-        self.spend_init(init, request);
 
         if !own {
             self.meet(from, init.identity_dh);
