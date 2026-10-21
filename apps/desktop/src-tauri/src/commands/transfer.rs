@@ -58,7 +58,9 @@ pub(crate) async fn browse_and_send<R: Runtime>(
     send_all(&app, &client, peer, picked).await
 }
 
-/// Sends `files` to `peer` in order; the cards of the files sent.
+/// Sends `files` to `peer` in order; the cards of the files sent. A file
+/// that cannot be sent does not stop the others, whose cards the UI needs
+/// to follow them: its error is the answer only when no file went.
 pub(crate) async fn send_all<R: Runtime>(
     app: &AppHandle<R>,
     client: &Client,
@@ -66,13 +68,22 @@ pub(crate) async fn send_all<R: Runtime>(
     files: Vec<FilePath>,
 ) -> CmdResult<Vec<TransferInfo>> {
     let mut sent = Vec::with_capacity(files.len());
+    let mut failed = None;
     for file in files {
-        let (msg_id, file_id, file_name, total_size) = send_pick(app, client, peer, file).await?;
-        sent.push(TransferInfo::outgoing(
-            msg_id, file_id, file_name, total_size,
-        ));
+        match send_pick(app, client, peer, file).await {
+            Ok((msg_id, file_id, file_name, total_size)) => sent.push(TransferInfo::outgoing(
+                msg_id, file_id, file_name, total_size,
+            )),
+            Err(e) => {
+                tracing::warn!(error = %e, "a file of a batch was not sent");
+                failed.get_or_insert(e);
+            }
+        }
     }
-    Ok(sent)
+    match failed {
+        Some(e) if sent.is_empty() => Err(e),
+        _ => Ok(sent),
+    }
 }
 
 /// Files dropped on the window, held for the UI to send to the open chat:

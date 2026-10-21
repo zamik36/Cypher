@@ -1171,3 +1171,51 @@ async fn refuse_to_open_a_program(a: &Desktop, b: &Desktop, b_id: &str) {
         Err("unsafe_type".to_owned())
     );
 }
+
+/// Batch sends, staged copies, waiting for replies and the session's
+/// lifecycle, driven against a client that is up but offline (no stack).
+mod offline {
+    use tauri_plugin_dialog::FilePath;
+
+    use super::*;
+    use crate::commands::transfer::send_all;
+
+    /// A desktop with an identity and a client for a gateway nobody runs.
+    async fn offline_desktop() -> Desktop {
+        let desktop = Desktop::new(cypher_tls::make_client_config());
+        desktop.create("alice").await;
+        desktop.connect("127.0.0.1:1").await;
+        desktop
+    }
+
+    /// A file that cannot be sent costs neither the others nor their cards;
+    /// when none can be, its error is the answer.
+    #[tokio::test]
+    async fn a_failed_file_keeps_the_cards_of_the_others() {
+        let desktop = offline_desktop().await;
+        let client = desktop.state().client().await.unwrap();
+        let peer = cypher_types::PeerId([1; 32]);
+        let file = |name: &str| desktop.dir.path().join(name);
+        std::fs::write(file("first.txt"), b"one").unwrap();
+        std::fs::write(file("second.txt"), b"two").unwrap();
+        let batch = vec![
+            FilePath::Path(file("first.txt")),
+            FilePath::Path(file("gone.txt")),
+            FilePath::Path(file("second.txt")),
+        ];
+
+        let handle = desktop.app.handle();
+        let sent = send_all(handle, &client, peer, batch).await.unwrap();
+        let sent = serde_json::to_value(sent).unwrap();
+        let names: Vec<&str> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|card| card["file_name"].as_str())
+            .collect();
+        assert_eq!(names, ["first.txt", "second.txt"]);
+
+        let none = vec![FilePath::Path(file("gone.txt"))];
+        send_all(handle, &client, peer, none).await.unwrap_err();
+    }
+}
