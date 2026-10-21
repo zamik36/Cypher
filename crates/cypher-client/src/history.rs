@@ -389,4 +389,206 @@ mod tests {
         assert!(note(&kept) == mine, "the kept note stays");
         assert_eq!(new.rows(Table::Media).len(), 2);
     }
+
+    /// The archive both clients take in from the same fixture
+    /// (`apps/pwa/src/web/history.test.ts` runs it through the web import).
+    /// `CYPHER_BLESS=1` writes it anew after a deliberate change.
+    const FIXTURE_PATH: &str = "tests/fixtures/history_import.txt";
+
+    type Item = (&'static str, Vec<u8>, Vec<u8>);
+
+    /// The fixture's content, built the same way every time: the receiving
+    /// device's state before, the archive, and what it must hold after.
+    #[derive(Default)]
+    struct Fixture {
+        archive: Vec<u8>,
+        writer: Writer,
+        before: Vec<Item>,
+        after: Vec<Item>,
+    }
+
+    fn fixture_vault() -> Vault {
+        Vault::new(cypher_crypto::IdentitySeed([5; 32]).derive_storage_key())
+    }
+
+    fn fixture_note(id: u8) -> MediaKey {
+        MediaKey::from_desc(&FileDesc {
+            file_id: FileId([id; 16]),
+            name: "voice".into(),
+            mime: "audio/ogg".into(),
+            size: 10,
+            chunk_size: 64 * 1024,
+            key: [id; 32],
+            inline: None,
+        })
+    }
+
+    /// Notes: A is new here, where a transfer that broke off left a copy;
+    /// B is kept here already, under its own row and copy; C's bytes do not
+    /// have the length its row says.
+    fn fixture_notes(
+        fx: &mut Fixture,
+        vault: &Vault,
+        rng: &mut (impl rand::RngCore + rand::CryptoRng),
+    ) {
+        let len = usize::try_from(fixture_note(0).sealed_len()).unwrap();
+        let mut seal = |id: u8| vault.seal(Table::Media, &[id; 16], &fixture_note(id), rng);
+        let (note_a, note_b, mine_b, note_c) = (seal(0xA), seal(0xB), seal(0xB), seal(0xC));
+        for (id, row, bytes) in [
+            (0xA, &note_a, len),
+            (0xB, &note_b, len),
+            (0xC, &note_c, len + 1),
+        ] {
+            fx.writer
+                .row(&mut fx.archive, Table::Media, &[id; 16], row)
+                .unwrap();
+            fx.writer
+                .blob(&mut fx.archive, &FileId([id; 16]), bytes as u64);
+            fx.archive.resize(fx.archive.len() + bytes, id << 4 | 1);
+        }
+        fx.before.push(("note", vec![0xA; 16], vec![0; len]));
+        fx.before.push(("media", vec![0xB; 16], mine_b.clone()));
+        fx.before.push(("note", vec![0xB; 16], vec![0xB2; len]));
+        fx.after.push(("media", vec![0xA; 16], note_a));
+        fx.after.push(("media", vec![0xB; 16], mine_b));
+        fx.after.push(("note", vec![0xA; 16], vec![0xA1; len]));
+        fx.after.push(("note", vec![0xB; 16], vec![0xB2; len]));
+    }
+
+    /// Messages: the first is here already, the fourth is another
+    /// profile's; and the status of the second.
+    fn fixture_messages(
+        fx: &mut Fixture,
+        vault: &Vault,
+        rng: &mut (impl rand::RngCore + rand::CryptoRng),
+    ) {
+        let stranger = Vault::new([6; 32]);
+        for n in 1..=4u8 {
+            let msg = text(n);
+            let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+            let sealer = if n == 4 { &stranger } else { vault };
+            let value = sealer.seal(Table::Messages, &key, &msg, rng);
+            fx.writer
+                .row(&mut fx.archive, Table::Messages, &key, &value)
+                .unwrap();
+            match n {
+                1 => {
+                    let mine = vault.seal(Table::Messages, &key, &msg, rng);
+                    fx.before.push(("messages", key.clone(), mine.clone()));
+                    fx.after.push(("messages", key, mine));
+                }
+                4 => {}
+                _ => fx.after.push(("messages", key, value)),
+            }
+        }
+        let status = vault.seal(Table::MessageStatus, &[2; 16], &MessageStatus::Read, rng);
+        fx.writer
+            .row(&mut fx.archive, Table::MessageStatus, &[2; 16], &status)
+            .unwrap();
+        fx.after.push(("message_status", vec![2; 16], status));
+    }
+
+    fn fixture() -> Fixture {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let vault = fixture_vault();
+        let mut fx = Fixture::default();
+        Writer::header(&mut fx.archive);
+        fixture_notes(&mut fx, &vault, &mut rng);
+        fixture_messages(&mut fx, &vault, &mut rng);
+        fx.writer.end(&mut fx.archive);
+        fx
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    /// One line per item: `mnemonic`, `archive`, then `before` and `after`
+    /// rows (`table key value`) and note copies (`note file_id bytes`).
+    fn render(fx: &Fixture) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::from(
+            "# History archive both clients take in alike; written by\n\
+             # crates/cypher-client/src/history.rs (CYPHER_BLESS=1), read by\n\
+             # apps/pwa/src/web/history.test.ts as well.\n",
+        );
+        let mnemonic = cypher_crypto::IdentitySeed([5; 32]).to_mnemonic();
+        let _ = writeln!(out, "mnemonic {mnemonic}");
+        let _ = writeln!(out, "archive {}", hex(&fx.archive));
+        for (when, items) in [("before", &fx.before), ("after", &fx.after)] {
+            for (what, key, value) in items {
+                let _ = writeln!(out, "{when} {what} {} {}", hex(key), hex(value));
+            }
+        }
+        out
+    }
+
+    /// Sets up the receiving device as the fixture says it was.
+    fn fixture_device(fx: &Fixture) -> Device {
+        let device = Device::new();
+        fs::create_dir_all(&device.media).unwrap();
+        for (what, key, value) in &fx.before {
+            match *what {
+                "note" => {
+                    let id = FileId(key.as_slice().try_into().unwrap());
+                    fs::write(device.media_path()(&id), value).unwrap();
+                }
+                "media" => device.put(Table::Media, key.clone(), value.clone()),
+                _ => device.put(Table::Messages, key.clone(), value.clone()),
+            }
+        }
+        device
+    }
+
+    #[test]
+    fn both_clients_take_in_the_shared_archive_alike() {
+        let fx = fixture();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_PATH);
+        if std::env::var_os("CYPHER_BLESS").is_some() {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, render(&fx)).unwrap();
+        }
+        assert!(
+            fs::read_to_string(&path).unwrap() == render(&fx),
+            "the fixture is out of date: CYPHER_BLESS=1"
+        );
+
+        let device = fixture_device(&fx);
+        let archive = device.media.with_file_name("history.bin");
+        fs::write(&archive, &fx.archive).unwrap();
+        import(
+            &device.store,
+            &fixture_vault(),
+            device.media_path(),
+            &archive,
+        )
+        .unwrap();
+
+        let expected = |what: &str| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let mut rows: Vec<_> = fx
+                .after
+                .iter()
+                .filter(|(when, _, _)| *when == what)
+                .map(|(_, key, value)| (key.clone(), value.clone()))
+                .collect();
+            rows.sort();
+            rows
+        };
+        for table in [Table::Messages, Table::MessageStatus, Table::Media] {
+            assert_eq!(device.rows(table), expected(table.name()), "{table:?}");
+        }
+        for (id, copy) in expected("note") {
+            let id = FileId(id.as_slice().try_into().unwrap());
+            assert!(
+                fs::read(device.media_path()(&id)).unwrap() == copy,
+                "{id:?}"
+            );
+        }
+        assert!(!device.media_path()(&FileId([0xC; 16])).exists());
+    }
 }
