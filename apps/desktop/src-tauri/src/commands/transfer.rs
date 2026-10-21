@@ -181,22 +181,43 @@ pub(crate) async fn send_bytes(
     let name = ipc::header(headers, "x-name")?;
     let mime = ipc::header(headers, "x-mime")?;
     let data = ipc::bytes(request.body(), MAX_SENT_BYTES, "file")?;
+    // Before anything is written: without a client, nothing is staged.
+    let client = state.client().await?;
     let dir = state.paths().data.join("staging");
     tokio::fs::create_dir_all(&dir).await.map_err(err)?;
     let staged = dir.join(staging_name());
-    tokio::fs::write(&staged, &data).await.map_err(err)?;
-    let (msg_id, file_id) = state
-        .client()
-        .await?
-        .send_staged_file(peer, &staged, &name, &mime)
-        .await
-        .map_err(err)?;
+    if let Err(e) = tokio::fs::write(&staged, &data).await {
+        discard(&staged).await;
+        return Err(err(e));
+    }
+    let (msg_id, file_id) = send_staged(&client, peer, &staged, &name, &mime).await?;
     Ok(TransferInfo::outgoing(
         msg_id,
         file_id,
         name,
         data.len() as u64,
     ))
+}
+
+/// Sends `staged`, a copy made only for sending, which the client takes
+/// over and deletes once sent; if sending fails, the copy is deleted here.
+async fn send_staged(
+    client: &Client,
+    peer: PeerId,
+    staged: &Path,
+    name: &str,
+    mime: &str,
+) -> CmdResult<(MsgId, FileId)> {
+    let sent = client.send_staged_file(peer, staged, name, mime).await;
+    if sent.is_err() {
+        discard(staged).await;
+    }
+    sent.map_err(err)
+}
+
+/// Deletes what is left of a staged copy; one already gone is fine.
+async fn discard(staged: &Path) {
+    let _ = tokio::fs::remove_file(staged).await;
 }
 
 /// Sends one picked file: a path as it is, a `content://` pick (Android)
@@ -239,11 +260,15 @@ async fn send_content<R: Runtime>(
     })
     .await
     .map_err(err)??;
-    let size = tokio::fs::metadata(&staged.path).await.map_err(err)?.len();
-    let (msg_id, file_id) = client
-        .send_staged_file(peer, Path::new(&staged.path), &staged.name, &staged.mime)
-        .await
-        .map_err(err)?;
+    let path = Path::new(&staged.path);
+    let size = match tokio::fs::metadata(path).await {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            discard(path).await;
+            return Err(err(e));
+        }
+    };
+    let (msg_id, file_id) = send_staged(client, peer, path, &staged.name, &staged.mime).await?;
     Ok((msg_id, file_id, staged.name, size))
 }
 

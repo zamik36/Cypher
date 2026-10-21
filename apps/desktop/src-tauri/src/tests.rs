@@ -1218,4 +1218,39 @@ mod offline {
         let none = vec![FilePath::Path(file("gone.txt"))];
         send_all(handle, &client, peer, none).await.unwrap_err();
     }
+
+    /// A pasted file is staged as a copy only for sending: whether it went
+    /// or not, no copy stays in the app's folder.
+    #[tokio::test]
+    async fn a_pasted_file_leaves_no_staged_copy() {
+        let unconnected = Desktop::new(cypher_tls::make_client_config());
+        unconnected.create("alice").await;
+        let refused = paste(&unconnected).await.unwrap_err();
+        assert_eq!(refused, "not connected");
+        assert_eq!(staged(&unconnected), 0, "a copy outlived a failed send");
+
+        let desktop = offline_desktop().await;
+        paste(&desktop).await.unwrap();
+        assert_eq!(staged(&desktop), 0, "the client took the copy over");
+    }
+
+    /// Pastes a few bytes as a picture for a peer, as the webview does.
+    async fn paste(desktop: &Desktop) -> Result<Value, Value> {
+        let headers: HeaderMap = [
+            ("x-peer", cypher_types::PeerId([1; 32]).to_hex()),
+            ("x-name", "a.png".to_owned()),
+            ("x-mime", "image%2Fpng".to_owned()),
+        ]
+        .iter()
+        .map(|(k, v)| (k.parse().unwrap(), HeaderValue::from_str(v).unwrap()))
+        .collect();
+        let body = InvokeBody::Raw(b"pasted".to_vec());
+        desktop.invoke("send_bytes", body, headers).await
+    }
+
+    /// How many staged copies are in the app's folder.
+    fn staged(desktop: &Desktop) -> usize {
+        let dir = desktop.dir.path().join("data").join("staging");
+        std::fs::read_dir(dir).map_or(0, Iterator::count)
+    }
 }
