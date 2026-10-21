@@ -157,12 +157,18 @@ pub fn message_window(peer: &PeerId, at_ms: u64, window_ms: u64) -> (Vec<u8>, Ve
     )
 }
 
-/// The key of the status row of the message stored under `message_key`:
-/// the message's id, which ends every [`message_key`].
-pub fn status_key(message_key: &[u8]) -> &[u8] {
-    message_key
-        .get(message_key.len().saturating_sub(MsgId::LEN)..)
-        .unwrap_or_default()
+/// How long every [`message_key`] is: peer, date, message id.
+pub const MESSAGE_KEY_LEN: usize = PeerId::LEN + 8 + MsgId::LEN;
+
+/// The id of the message stored under `key`, which ends every
+/// [`message_key`]; `None` for a key of another length. The message's
+/// status row is keyed by it.
+pub fn message_id(key: &[u8]) -> Option<MsgId> {
+    if key.len() != MESSAGE_KEY_LEN {
+        return None;
+    }
+    let (_, id) = key.split_last_chunk::<{ MsgId::LEN }>()?;
+    Some(MsgId(*id))
 }
 
 /// What deleting one stored message takes, for drivers to carry out.
@@ -184,18 +190,18 @@ pub struct MessageDeletion {
 /// content would name stays unknown.
 pub fn message_deletion(key: &[u8], msg: Option<&StoredMessage>) -> MessageDeletion {
     let mut out = MessageDeletion {
-        ops: vec![
-            StoreOp::Delete {
-                table: Table::Messages,
-                key: key.to_vec(),
-            },
-            StoreOp::Delete {
-                table: Table::MessageStatus,
-                key: status_key(key).to_vec(),
-            },
-        ],
+        ops: vec![StoreOp::Delete {
+            table: Table::Messages,
+            key: key.to_vec(),
+        }],
         ..MessageDeletion::default()
     };
+    if let Some(id) = message_id(key) {
+        out.ops.push(StoreOp::Delete {
+            table: Table::MessageStatus,
+            key: id.to_vec(),
+        });
+    }
     let Some(msg) = msg else {
         return out;
     };
@@ -612,8 +618,12 @@ mod tests {
     #[test]
     fn a_status_row_is_keyed_by_the_id_ending_its_message_key() {
         let key = message_key(&PeerId([1; 32]), 7, &MsgId([9; 16]));
-        assert_eq!(status_key(&key), [9; 16]);
-        assert_eq!(status_key(&[1, 2]), [1, 2]);
+        assert_eq!(message_id(&key), Some(MsgId([9; 16])));
+        for len in [0, 16, MESSAGE_KEY_LEN - 1, MESSAGE_KEY_LEN + 1] {
+            assert_eq!(message_id(&vec![9; len]), None, "{len}");
+        }
+        let d = message_deletion(&[9; 16], None);
+        assert_eq!(d.ops.len(), 1, "no status row for a key that names none");
     }
 
     #[test]

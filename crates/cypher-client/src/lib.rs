@@ -20,7 +20,7 @@ use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::ui::{self, UiConversation};
 use cypher_core::{
     Command, Core, CoreError, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
-    message_deletion, message_key, message_window, peer_messages,
+    message_deletion, message_id, message_key, message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -657,7 +657,7 @@ impl Client {
             .range_desc(Table::Messages.into(), from, End::Through(to), usize::MAX)
             .await?
             .into_iter()
-            .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
+            .find(|(key, _)| message_id(key) == Some(msg_id))
             .ok_or(ClientError::NotFound)?;
         let msg = self.vault.open_message(&key, &sealed)?;
         self.command(Command::DiscardOutgoing { msg_id }).await?;

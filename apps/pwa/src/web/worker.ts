@@ -4,10 +4,10 @@ import init, {
   conversationRange,
   historyRange,
   Identity,
+  messageId,
   messageWindow,
   Provision,
   qrSvg,
-  statusKey,
   unreadWindow,
   waveformFromRms,
   type Effect,
@@ -471,7 +471,7 @@ async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
   const range =
     before === undefined ? conversation(peer) : IDBKeyRange.bound(...historyRange(peer, before), false, true);
-  const [rows = []] = await messageRows(db, [range], limit, statusKey);
+  const [rows = []] = await messageRows(db, [range], limit, messageId);
   return rows.map(([key, value, status]) => c.openMessage(key, value, status));
 }
 
@@ -659,7 +659,7 @@ const handlers: Handlers = {
     const c = requireClient();
     const peers = await scan(db, "peers");
     const ranges = peers.map(([key]) => conversation(hex(key)));
-    return c.chatList(peers, await messageRows(db, ranges, unreadWindow(), statusKey));
+    return c.chatList(peers, await messageRows(db, ranges, unreadWindow(), messageId));
   },
   forgetPeer: (peer) =>
     serial(async () => {
@@ -668,9 +668,11 @@ const handlers: Handlers = {
     }),
   deleteMessage: (peer, msgId, timestamp) =>
     serial(async () => {
-      const id = unhex(msgId);
       const rows = await scan(db, "messages", IDBKeyRange.bound(...messageWindow(peer, timestamp, DELETE_WINDOW_MS)));
-      const row = rows.find(([key]) => key.subarray(key.length - 16).every((b, i) => b === id[i]));
+      const row = rows.find(([key]) => {
+        const id = messageId(key);
+        return id !== undefined && hex(id) === msgId;
+      });
       if (!row) throw new Error("NotFound");
       await run({ type: "discard_outgoing", msg_id: msgId });
       const msg = requireClient().openMessage(row[0], row[1], undefined) as StoredView;

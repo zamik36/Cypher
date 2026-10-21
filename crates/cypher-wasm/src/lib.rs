@@ -487,9 +487,9 @@ fn deletion(vault: &Vault, key: &[u8], value: &[u8]) -> cypher_core::MessageDele
 }
 
 /// The key of the status row of the message stored under `key`.
-#[wasm_bindgen(js_name = statusKey, unchecked_return_type = "Uint8Array<ArrayBuffer>")]
-pub fn status_key(key: &[u8]) -> Vec<u8> {
-    cypher_core::status_key(key).to_vec()
+#[wasm_bindgen(js_name = messageId, unchecked_return_type = "Uint8Array<ArrayBuffer> | undefined")]
+pub fn message_id(key: &[u8]) -> Option<Vec<u8>> {
+    cypher_core::message_id(key).map(MsgId::to_vec)
 }
 
 /// How many of a contact's latest messages `chatList` wants.
@@ -664,7 +664,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             status.0,
-            cypher_core::status_key(&key),
+            cypher_core::message_id(&key).map(MsgId::to_vec).unwrap(),
             "keyed as the driver looks it up"
         );
 

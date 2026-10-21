@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
-use cypher_core::{CoreError, StoreOp, Table, status_key};
+use cypher_core::{CoreError, StoreOp, Table, message_id};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 
@@ -440,9 +440,12 @@ fn messages(
             query(conn, sql, params![from, to, limit])?
                 .into_iter()
                 .map(|(key, value)| {
-                    let found = status
-                        .query_row(params![status_key(&key)], |r| r.get(0))
-                        .optional()?;
+                    let found = match message_id(&key) {
+                        Some(id) => status
+                            .query_row(params![id.as_bytes()], |r| r.get(0))
+                            .optional()?,
+                        None => None,
+                    };
                     Ok((key, value, found))
                 })
                 .collect()

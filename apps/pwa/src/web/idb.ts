@@ -91,7 +91,7 @@ export async function messageRows(
   db: IDBDatabase,
   ranges: IDBKeyRange[],
   limit: number,
-  statusKey: (key: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>,
+  statusKey: (key: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer> | undefined,
 ): Promise<MessageRow[][]> {
   const tx = db.transaction(["messages", "message_status"], "readonly");
   const messages = tx.objectStore("messages");
@@ -108,10 +108,13 @@ export async function messageRows(
         undefined,
       ];
       rows.push(row);
-      const status = statuses.get(statusKey(row[0]));
-      status.onsuccess = () => {
-        if (status.result !== undefined) row[2] = new Uint8Array(status.result as ArrayBuffer);
-      };
+      const key = statusKey(row[0]);
+      if (key) {
+        const status = statuses.get(key);
+        status.onsuccess = () => {
+          if (status.result !== undefined) row[2] = new Uint8Array(status.result as ArrayBuffer);
+        };
+      }
       cursor.continue();
     };
     return rows;
