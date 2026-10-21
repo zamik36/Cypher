@@ -25,6 +25,21 @@ pub(crate) struct TransferInfo {
     status: &'static str,
 }
 
+impl TransferInfo {
+    /// The card of a file this device just offered: active, nothing sent yet.
+    fn outgoing(msg_id: MsgId, file_id: FileId, file_name: String, total_size: u64) -> Self {
+        Self {
+            file_id: file_id.to_hex(),
+            msg_id: msg_id.to_hex(),
+            file_name,
+            total_size,
+            progress: 0.0,
+            direction: "send",
+            status: "active",
+        }
+    }
+}
+
 /// The backend owns path selection: the webview can never make the client
 /// read an arbitrary file.
 #[tauri::command]
@@ -40,20 +55,24 @@ pub(crate) async fn browse_and_send<R: Runtime>(
     });
     let picked = rx.await.map_err(err)?;
     let client = state.client().await?;
-    let mut out = Vec::with_capacity(picked.len());
-    for file in picked {
-        let (msg_id, file_id, file_name, total_size) = send_pick(&app, &client, peer, file).await?;
-        out.push(TransferInfo {
-            file_id: file_id.to_hex(),
-            msg_id: msg_id.to_hex(),
-            file_name,
-            total_size,
-            progress: 0.0,
-            direction: "send",
-            status: "active",
-        });
+    send_all(&app, &client, peer, picked).await
+}
+
+/// Sends `files` to `peer` in order; the cards of the files sent.
+pub(crate) async fn send_all<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &Client,
+    peer: PeerId,
+    files: Vec<FilePath>,
+) -> CmdResult<Vec<TransferInfo>> {
+    let mut sent = Vec::with_capacity(files.len());
+    for file in files {
+        let (msg_id, file_id, file_name, total_size) = send_pick(app, client, peer, file).await?;
+        sent.push(TransferInfo::outgoing(
+            msg_id, file_id, file_name, total_size,
+        ));
     }
-    Ok(out)
+    Ok(sent)
 }
 
 /// Files dropped on the window, held for the UI to send to the open chat:
@@ -116,25 +135,14 @@ pub(crate) async fn send_dropped<R: Runtime>(
         std::mem::take(&mut dropped.paths)
     };
     let client = state.client().await?;
-    let mut out = Vec::with_capacity(paths.len());
+    let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         // Folders and the like are skipped, not fatal.
-        if !tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
-            continue;
+        if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+            files.push(FilePath::Path(path));
         }
-        let (msg_id, file_id, file_name, total_size) =
-            send_pick(&app, &client, peer, FilePath::Path(path)).await?;
-        out.push(TransferInfo {
-            file_id: file_id.to_hex(),
-            msg_id: msg_id.to_hex(),
-            file_name,
-            total_size,
-            progress: 0.0,
-            direction: "send",
-            status: "active",
-        });
     }
-    Ok(out)
+    send_all(&app, &client, peer, files).await
 }
 
 /// A fresh name for a staged copy.
@@ -172,15 +180,12 @@ pub(crate) async fn send_bytes(
         .send_staged_file(peer, &staged, &name, &mime)
         .await
         .map_err(err)?;
-    Ok(TransferInfo {
-        file_id: file_id.to_hex(),
-        msg_id: msg_id.to_hex(),
-        file_name: name,
-        total_size: data.len() as u64,
-        progress: 0.0,
-        direction: "send",
-        status: "active",
-    })
+    Ok(TransferInfo::outgoing(
+        msg_id,
+        file_id,
+        name,
+        data.len() as u64,
+    ))
 }
 
 /// Sends one picked file: a path as it is, a `content://` pick (Android)
