@@ -506,8 +506,12 @@ function deleteRows(rows: Row[]) {
 const offering: Offering = {
   run,
   keep: async (fileId, file) => {
-    sources.set(fileId, file);
     await put(db, "files", fileId, file);
+    sources.set(fileId, file);
+  },
+  drop: async (fileId) => {
+    sources.delete(fileId);
+    await remove(db, "files", fileId);
   },
 };
 

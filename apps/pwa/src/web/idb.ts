@@ -148,8 +148,9 @@ export async function remove(db: IDBDatabase, table: string, key: IDBValidKey): 
   await done(tx);
 }
 
+/** Stores one value; resolves once it is durable. */
 export async function put(db: IDBDatabase, table: string, key: IDBValidKey, value: unknown): Promise<void> {
-  const tx = db.transaction(table, "readwrite");
+  const tx = db.transaction(table, "readwrite", { durability: "strict" });
   tx.objectStore(table).put(value, key);
   await done(tx);
 }
