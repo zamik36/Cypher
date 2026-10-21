@@ -633,4 +633,51 @@ mod tests {
         let (k, v, _) = row(&vault, PeerId([1; 32]), 3, None);
         assert_eq!(deletion(&vault, &k, &v).ops.len(), 2);
     }
+
+    /// The status row the core writes when a message is read is the one
+    /// the chat list applies to that message, and it outranks the status
+    /// kept with the message.
+    #[test]
+    fn a_status_the_core_writes_is_the_one_the_chat_list_reads() {
+        use cypher_core::{Command, Effect, Input, Snapshot, StoreOp};
+        let seed = IdentitySeed([3; 32]);
+        let vault = Vault::new(seed.derive_storage_key());
+        let (mut core, _) =
+            Core::restore(&seed, DeviceId::FIRST, &Snapshot::default(), 1, OsRng).unwrap();
+        let peer = PeerId([1; 32]);
+        let (key, value, _) = row(&vault, peer, 7, None);
+        let read = Command::MarkRead {
+            peer,
+            ids: vec![MsgId([7; 16])],
+        };
+        let status = core
+            .handle(Input::Command(read), 2)
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::Persist(StoreOp::Put {
+                    table: Table::MessageStatus,
+                    key,
+                    value,
+                }) => Some((key, value)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            status.0,
+            cypher_core::status_key(&key),
+            "keyed as the driver looks it up"
+        );
+
+        let peers = [(ByteBuf::from(peer.to_vec()), ByteBuf::from(vec![0; 40]))];
+        let unread = |status: Option<Vec<u8>>| {
+            let rows = [vec![(
+                key.clone(),
+                value.clone(),
+                status.map(ByteBuf::from),
+            )]];
+            chat_entries(&vault, &peers, &rows).unwrap()[0].unread
+        };
+        assert_eq!(unread(None), 1);
+        assert_eq!(unread(Some(status.1)), 0);
+    }
 }

@@ -1062,4 +1062,31 @@ mod tests {
         assert!(!client.config.media_path(&FileId([7; 16])).exists());
         client.shutdown().await;
     }
+
+    /// The status row the core writes when a message is read reaches the
+    /// store under the key history looks it up by.
+    #[tokio::test]
+    async fn a_status_the_core_writes_is_the_one_history_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        put(&client, &text(peer, 1, 1)).await;
+        let read = Command::MarkRead {
+            peer,
+            ids: vec![MsgId([1; 16])],
+        };
+        client.command(read).await.unwrap();
+        let mut status = MessageStatus::Delivered;
+        for _ in 0..100 {
+            status = client.history(peer, None, 1).await.unwrap()[0].status;
+            if status == MessageStatus::Read {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(status, MessageStatus::Read);
+        let statuses = keys(&client, Table::MessageStatus.into()).await;
+        assert_eq!(statuses, [vec![1; 16]]);
+        client.shutdown().await;
+    }
 }
