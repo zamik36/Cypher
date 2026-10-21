@@ -13,12 +13,14 @@ import init, {
   type Effect,
   type ReadChunk,
   type Reply,
-  type Op,
+  type Row,
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, messageRows, openDb, put, remove, scan, STORES } from "./idb";
+import { deleteRows as deleteStoredRows } from "./deletion";
 import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
+import { offerFile, type Offering } from "./outgoing";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -432,7 +434,7 @@ async function sendMedia(
   const inline = blob.size <= MAX_INLINE_BYTES ? new Uint8Array(await blob.arrayBuffer()) : undefined;
   const name = `${kind === "voice" ? "voice" : "note"}.${mime.includes("mp4") ? "mp4" : mime.includes("ogg") ? "ogg" : "webm"}`;
   return serial(async () => {
-    const { msgId, fileId } = await run({
+    const cmd = {
       type: "send_file",
       peer,
       name,
@@ -443,14 +445,10 @@ async function sendMedia(
       waveform,
       poster: extra.poster,
       inline,
-    });
-    if (!msgId || !fileId) throw new Error("media rejected");
-    if (!inline) {
-      const file = new File([blob], name, { type: mime });
-      sources.set(fileId, file);
-      await put(db, "files", fileId, file);
-    }
-    return { msg_id: msgId, file_id: fileId, duration_ms: durationMs, ...(waveform && { waveform }) };
+    };
+    const ids = await offerFile(offering, cmd, inline ? undefined : new File([blob], name, { type: mime }));
+    if (!ids) throw new Error("media rejected");
+    return { msg_id: ids.msgId, file_id: ids.fileId, duration_ms: durationMs, ...(waveform && { waveform }) };
   });
 }
 
@@ -494,25 +492,24 @@ function forget() {
 /** How far around the UI's time a deleted message is looked for. */
 const DELETE_WINDOW_MS = 60_000;
 
-/** Deletes stored messages with their statuses, media notes and kept files. */
-async function deleteRows(rows: Awaited<ReturnType<typeof scan>>) {
+/** Deletes stored messages as the core says each one goes. */
+function deleteRows(rows: Row[]) {
   const c = requireClient();
-  const media: string[] = [];
-  const received: string[] = [];
-  const ops: Op[] = [];
-  for (const [key, value] of rows) {
-    const deletion = c.messageDeletion(key, value);
-    ops.push(...deletion.ops);
-    if (deletion.note) media.push(deletion.note);
-    if (deletion.file) received.push(deletion.file);
-  }
-  await applyOps(db, ops);
-  const [sealed, plain] = await Promise.all([sinkDir("media"), sinkDir("download")]);
-  await Promise.all([
-    ...media.map((id) => sealed.removeEntry(id).catch(() => undefined)),
-    ...received.map((id) => plain.removeEntry(id).catch(() => undefined)),
-  ]);
+  return deleteStoredRows(rows, {
+    deletion: (key, value) => c.messageDeletion(key, value),
+    apply: (ops) => applyOps(db, ops),
+    remove: async (sink, fileId) => (await sinkDir(sink)).removeEntry(fileId).catch(() => undefined),
+  });
 }
+
+/** Offers a file through the core, keeping its bytes as the transfer's source. */
+const offering: Offering = {
+  run,
+  keep: async (fileId, file) => {
+    sources.set(fileId, file);
+    await put(db, "files", fileId, file);
+  },
+};
 
 /** The fields of a decrypted message the worker itself reads. */
 interface StoredView {
@@ -628,18 +625,17 @@ const handlers: Handlers = {
     serial(async () => {
       const sent = [];
       for (const file of files) {
-        const { msgId, fileId } = await run({
+        const cmd = {
           type: "send_file",
           peer,
           name: file.name,
           mime: file.type || "application/octet-stream",
           size: file.size,
           kind: "file",
-        });
-        if (!msgId || !fileId) continue;
-        sources.set(fileId, file);
-        await put(db, "files", fileId, file);
-        sent.push({ msg_id: msgId, file_id: fileId, file_name: file.name, total_size: file.size });
+        };
+        const ids = await offerFile(offering, cmd, file);
+        if (!ids) continue;
+        sent.push({ msg_id: ids.msgId, file_id: ids.fileId, file_name: file.name, total_size: file.size });
       }
       return sent;
     }),
