@@ -236,13 +236,17 @@ pub(crate) async fn await_event<T>(
     await_event_within(REPLY_TIMEOUT, rx, pick).await
 }
 
-/// [`await_event`], giving up after `wait`.
+/// [`await_event`], giving up after `wait`. Events skipped because the
+/// receiver fell behind may have held the reply: waiting goes on, since the
+/// reply may still come, but a wait that then runs out says it missed
+/// events (`lagged`) rather than that no reply came (`timed out`).
 pub(crate) async fn await_event_within<T>(
     wait: Duration,
     rx: &mut broadcast::Receiver<Event>,
     mut pick: impl FnMut(&Event) -> Option<CmdResult<T>>,
 ) -> CmdResult<T> {
-    tokio::time::timeout(wait, async {
+    let mut lagged = false;
+    let waited = tokio::time::timeout(wait, async {
         loop {
             match rx.recv().await {
                 Ok(event) => {
@@ -250,13 +254,16 @@ pub(crate) async fn await_event_within<T>(
                         return result;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                 Err(broadcast::error::RecvError::Closed) => return Err("client stopped".to_owned()),
             }
         }
     })
-    .await
-    .unwrap_or_else(|_| Err("timed out".to_owned()))
+    .await;
+    waited.unwrap_or_else(|_| {
+        let reason = if lagged { "lagged" } else { "timed out" };
+        Err(reason.to_owned())
+    })
 }
 
 /// System trust roots, unless development certificates are pinned: by the

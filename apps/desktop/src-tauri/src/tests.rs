@@ -1253,4 +1253,32 @@ mod offline {
         let dir = desktop.dir.path().join("data").join("staging");
         std::fs::read_dir(dir).map_or(0, Iterator::count)
     }
+
+    /// Falling behind the client's events is told apart from no reply
+    /// coming, and a reply after it is still taken.
+    #[tokio::test]
+    async fn missed_events_are_not_a_plain_timeout() {
+        let (events, mut rx) = tokio::sync::broadcast::channel(1);
+        let done = |id: u8| Event::TransferComplete {
+            file_id: FileId([id; 16]),
+        };
+        let wait = Duration::from_millis(200);
+        let never = |_: &Event| None::<session::CmdResult<()>>;
+        let reply = |e: &Event| (*e == done(9)).then_some(Ok(()));
+
+        let quiet = session::await_event_within(wait, &mut rx, never).await;
+        assert_eq!(quiet, Err("timed out".to_owned()));
+
+        for id in 1..=3 {
+            events.send(done(id)).unwrap();
+        }
+        let behind = session::await_event_within(wait, &mut rx, never).await;
+        assert_eq!(behind, Err("lagged".to_owned()));
+
+        for id in [1, 2, 9] {
+            events.send(done(id)).unwrap();
+        }
+        let late = session::await_event_within(wait, &mut rx, reply).await;
+        assert_eq!(late, Ok(()));
+    }
 }
