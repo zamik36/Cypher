@@ -237,11 +237,11 @@ impl Client {
         })??;
 
         let snapshot = Snapshot {
-            meta: store.scan(Table::Meta.name()).await?,
-            peers: store.scan(Table::Peers.name()).await?,
-            sessions: store.scan(Table::Sessions.name()).await?,
-            outbox: store.scan(Table::Outbox.name()).await?,
-            transfers: store.scan(Table::Transfers.name()).await?,
+            meta: store.scan(Table::Meta.into()).await?,
+            peers: store.scan(Table::Peers.into()).await?,
+            sessions: store.scan(Table::Sessions.into()).await?,
+            outbox: store.scan(Table::Outbox.into()).await?,
+            transfers: store.scan(Table::Transfers.into()).await?,
         };
         let vault = Vault::new(seed.derive_storage_key());
         let files = load_files(&store, &vault).await?;
@@ -465,7 +465,7 @@ impl Client {
     ) -> Result<MediaSlice, ClientError> {
         let raw = self
             .store
-            .get(Table::Media.name(), file_id.to_vec())
+            .get(Table::Media.into(), file_id.to_vec())
             .await?
             .ok_or(ClientError::NotFound)?;
         let key = self.vault.open_media(&file_id, &raw)?;
@@ -530,13 +530,13 @@ impl Client {
         });
         let rows = self
             .store
-            .range_desc(Table::Messages.name(), from, to, limit)
+            .range_desc(Table::Messages.into(), from, to, limit)
             .await?;
         let mut out = Vec::with_capacity(rows.len());
         for (key, value) in rows {
             let status = self
                 .store
-                .get(Table::MessageStatus.name(), status_key(&key).to_vec())
+                .get(Table::MessageStatus.into(), status_key(&key).to_vec())
                 .await?;
             let msg = self
                 .vault
@@ -552,7 +552,7 @@ impl Client {
     pub async fn contacts(&self) -> Result<Vec<Contact>, ClientError> {
         Ok(self
             .store
-            .scan(Table::Peers.name())
+            .scan(Table::Peers.into())
             .await?
             .into_iter()
             .filter_map(|(key, sealed)| {
@@ -573,7 +573,7 @@ impl Client {
     /// A contact row that cannot be read still lists its contact, unnamed.
     pub async fn conversations(&self) -> Result<Vec<UiConversation>, ClientError> {
         let mut out = Vec::new();
-        for (key, sealed) in self.store.scan(Table::Peers.name()).await? {
+        for (key, sealed) in self.store.scan(Table::Peers.into()).await? {
             let Some(peer) = PeerId::from_bytes(&key) else {
                 continue;
             };
@@ -607,7 +607,7 @@ impl Client {
         let rows = self
             .store
             .range_desc(
-                Table::Messages.name(),
+                Table::Messages.into(),
                 first,
                 End::Through(last),
                 usize::MAX,
@@ -636,7 +636,7 @@ impl Client {
         let (from, to) = message_window(&peer, near_ms, DELETE_WINDOW_MS);
         let (key, sealed) = self
             .store
-            .range_desc(Table::Messages.name(), from, End::Through(to), usize::MAX)
+            .range_desc(Table::Messages.into(), from, End::Through(to), usize::MAX)
             .await?
             .into_iter()
             .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
@@ -671,9 +671,9 @@ impl Client {
     pub async fn clear_history(&self) -> Result<(), ClientError> {
         self.store
             .apply(vec![
-                store::Op::Clear(Table::Messages.name()),
-                store::Op::Clear(Table::MessageStatus.name()),
-                store::Op::Clear(Table::Media.name()),
+                store::Op::Clear(Table::Messages.into()),
+                store::Op::Clear(Table::MessageStatus.into()),
+                store::Op::Clear(Table::Media.into()),
                 store::Op::Clear(SAVED_TABLE),
             ])
             .await?;
@@ -761,7 +761,7 @@ mod tests {
         let sealed = client.vault.seal(Table::Messages, &key, msg, &mut OsRng);
         client
             .store
-            .apply(vec![store::Op::Put(Table::Messages.name(), key, sealed)])
+            .apply(vec![store::Op::Put(Table::Messages.into(), key, sealed)])
             .await
             .unwrap();
     }
@@ -792,7 +792,7 @@ mod tests {
             client
                 .vault
                 .seal(Table::MessageStatus, msg_id.as_bytes(), &status, &mut OsRng);
-        let op = store::Op::Put(Table::MessageStatus.name(), msg_id.to_vec(), sealed);
+        let op = store::Op::Put(Table::MessageStatus.into(), msg_id.to_vec(), sealed);
         client.store.apply(vec![op]).await.unwrap();
     }
 
@@ -810,7 +810,7 @@ mod tests {
         let sealed = client
             .vault
             .seal(Table::Media, file_id.as_bytes(), &key, &mut OsRng);
-        let op = store::Op::Put(Table::Media.name(), file_id.to_vec(), sealed);
+        let op = store::Op::Put(Table::Media.into(), file_id.to_vec(), sealed);
         client.store.apply(vec![op]).await.unwrap();
         let path = client.config.media_path(&file_id);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -833,7 +833,7 @@ mod tests {
         path
     }
 
-    async fn keys(client: &Client, table: &'static str) -> Vec<Vec<u8>> {
+    async fn keys(client: &Client, table: store::StoreTable) -> Vec<Vec<u8>> {
         let rows = client.store.scan(table).await.unwrap();
         rows.into_iter().map(|(k, _)| k).collect()
     }
@@ -896,15 +896,15 @@ mod tests {
             .unwrap();
         let ids = |n: &[u8]| n.iter().map(|&n| vec![n; 16]).collect::<Vec<_>>();
         assert_eq!(
-            keys(&client, Table::MessageStatus.name()).await,
+            keys(&client, Table::MessageStatus.into()).await,
             ids(&[2, 3, 4, 5])
         );
         assert_eq!(client.history(peer, None, 10).await.unwrap().len(), 3);
 
         client.forget_peer(peer).await.unwrap();
         assert!(client.history(peer, None, 10).await.unwrap().is_empty());
-        assert_eq!(keys(&client, Table::MessageStatus.name()).await, ids(&[5]));
-        assert!(keys(&client, Table::Media.name()).await.is_empty());
+        assert_eq!(keys(&client, Table::MessageStatus.into()).await, ids(&[5]));
+        assert!(keys(&client, Table::Media.into()).await.is_empty());
         assert!(!client.config.media_path(&FileId([3; 16])).exists());
         assert!(keys(&client, SAVED_TABLE).await.is_empty());
         assert!(saved.exists(), "a saved file stays where it is");

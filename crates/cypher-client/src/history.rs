@@ -31,7 +31,7 @@ fn each_row(
     let mut after = Vec::new();
     loop {
         let page = store
-            .blocking_after(table.name(), after, PAGE)
+            .blocking_after(table.into(), after, PAGE)
             .map_err(other)?;
         for (key, value) in &page {
             row(key, value)?;
@@ -201,7 +201,7 @@ impl<M: Fn(&FileId) -> PathBuf> Importer<'_, M> {
                 file: None,
             });
         } else {
-            let op = Op::PutIfAbsent(table.name(), key.to_vec(), value.to_vec());
+            let op = Op::PutIfAbsent(table.into(), key.to_vec(), value.to_vec());
             self.ops.push(op);
         }
         Ok(())
@@ -249,7 +249,7 @@ impl<M: Fn(&FileId) -> PathBuf> Importer<'_, M> {
             fs::rename(tmp, (self.media_path)(&note.file_id))?;
         }
         if note.fits {
-            let op = Op::PutIfAbsent(Table::Media.name(), note.key, note.value);
+            let op = Op::PutIfAbsent(Table::Media.into(), note.key, note.value);
             self.ops.push(op);
         }
         Ok(())
@@ -289,13 +289,13 @@ mod tests {
 
         fn put(&self, table: Table, key: Vec<u8>, value: Vec<u8>) {
             self.store
-                .blocking_apply(vec![Op::Put(table.name(), key, value)])
+                .blocking_apply(vec![Op::Put(table.into(), key, value)])
                 .unwrap();
         }
 
         fn rows(&self, table: Table) -> Vec<(Vec<u8>, Vec<u8>)> {
             self.store
-                .blocking_after(table.name(), Vec::new(), 1000)
+                .blocking_after(table.into(), Vec::new(), 1000)
                 .unwrap()
         }
     }

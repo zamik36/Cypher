@@ -12,30 +12,135 @@ use tokio::sync::oneshot;
 use crate::ClientError;
 
 /// Driver-owned table: file id → local path of a transfer.
-pub(crate) const FILES_TABLE: &str = "driver_files";
+pub(crate) const FILES_TABLE: StoreTable = StoreTable::Files;
 /// Driver-owned table: file id → where a finished file was saved.
-pub(crate) const SAVED_TABLE: &str = "driver_saved";
+pub(crate) const SAVED_TABLE: StoreTable = StoreTable::Saved;
 
 use cypher_core::Rows as Pairs;
 
+/// A table of the store: one the core keeps its state in, or one of the
+/// driver's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreTable {
+    Core(Table),
+    Files,
+    Saved,
+}
+
+impl From<Table> for StoreTable {
+    fn from(table: Table) -> Self {
+        Self::Core(table)
+    }
+}
+
+/// Every statement the store runs on one table. Table names cannot be SQL
+/// parameters, so each table has its own constant text; values always are
+/// parameters.
+struct Sql {
+    create: &'static str,
+    scan: &'static str,
+    range_before: &'static str,
+    range_through: &'static str,
+    after: &'static str,
+    get: &'static str,
+    put: &'static str,
+    put_if_absent: &'static str,
+    delete: &'static str,
+    clear: &'static str,
+}
+
+macro_rules! sql {
+    ($name:literal) => {
+        Sql {
+            create: concat!(
+                "CREATE TABLE IF NOT EXISTS ",
+                $name,
+                " (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID"
+            ),
+            scan: concat!("SELECT k, v FROM ", $name),
+            range_before: concat!(
+                "SELECT k, v FROM ",
+                $name,
+                " WHERE k >= ?1 AND k < ?2 ORDER BY k DESC LIMIT ?3"
+            ),
+            range_through: concat!(
+                "SELECT k, v FROM ",
+                $name,
+                " WHERE k >= ?1 AND k <= ?2 ORDER BY k DESC LIMIT ?3"
+            ),
+            after: concat!(
+                "SELECT k, v FROM ",
+                $name,
+                " WHERE k > ?1 ORDER BY k LIMIT ?2"
+            ),
+            get: concat!("SELECT v FROM ", $name, " WHERE k = ?1"),
+            put: concat!("INSERT OR REPLACE INTO ", $name, " (k, v) VALUES (?1, ?2)"),
+            put_if_absent: concat!("INSERT OR IGNORE INTO ", $name, " (k, v) VALUES (?1, ?2)"),
+            delete: concat!("DELETE FROM ", $name, " WHERE k = ?1"),
+            clear: concat!("DELETE FROM ", $name),
+        }
+    };
+}
+
+const META: Sql = sql!("meta");
+const PEERS: Sql = sql!("peers");
+const OUTBOX: Sql = sql!("outbox");
+const TRANSFERS: Sql = sql!("transfers");
+const MESSAGES: Sql = sql!("messages");
+const MESSAGE_STATUS: Sql = sql!("message_status");
+const MEDIA: Sql = sql!("media");
+const SESSIONS: Sql = sql!("sessions");
+const FILES: Sql = sql!("driver_files");
+const SAVED: Sql = sql!("driver_saved");
+
+impl StoreTable {
+    const ALL: [Self; 10] = [
+        Self::Core(Table::Meta),
+        Self::Core(Table::Peers),
+        Self::Core(Table::Outbox),
+        Self::Core(Table::Transfers),
+        Self::Core(Table::Messages),
+        Self::Core(Table::MessageStatus),
+        Self::Core(Table::Media),
+        Self::Core(Table::Sessions),
+        Self::Files,
+        Self::Saved,
+    ];
+
+    fn sql(self) -> &'static Sql {
+        match self {
+            Self::Core(Table::Meta) => &META,
+            Self::Core(Table::Peers) => &PEERS,
+            Self::Core(Table::Outbox) => &OUTBOX,
+            Self::Core(Table::Transfers) => &TRANSFERS,
+            Self::Core(Table::Messages) => &MESSAGES,
+            Self::Core(Table::MessageStatus) => &MESSAGE_STATUS,
+            Self::Core(Table::Media) => &MEDIA,
+            Self::Core(Table::Sessions) => &SESSIONS,
+            Self::Files => &FILES,
+            Self::Saved => &SAVED,
+        }
+    }
+}
+
 enum Job {
     Apply(Vec<Op>, oneshot::Sender<Result<(), ClientError>>),
-    Scan(&'static str, oneshot::Sender<Result<Pairs, ClientError>>),
+    Scan(StoreTable, oneshot::Sender<Result<Pairs, ClientError>>),
     Range {
-        table: &'static str,
+        table: StoreTable,
         from: Vec<u8>,
         to: End,
         limit: usize,
         reply: oneshot::Sender<Result<Pairs, ClientError>>,
     },
     After {
-        table: &'static str,
+        table: StoreTable,
         after: Vec<u8>,
         limit: usize,
         reply: oneshot::Sender<Result<Pairs, ClientError>>,
     },
     Get(
-        &'static str,
+        StoreTable,
         Vec<u8>,
         oneshot::Sender<Result<Option<Vec<u8>>, ClientError>>,
     ),
@@ -50,18 +155,18 @@ pub(crate) enum End {
 }
 
 pub(crate) enum Op {
-    Put(&'static str, Vec<u8>, Vec<u8>),
+    Put(StoreTable, Vec<u8>, Vec<u8>),
     /// Kept only where the key is free: what is stored stays.
-    PutIfAbsent(&'static str, Vec<u8>, Vec<u8>),
-    Delete(&'static str, Vec<u8>),
-    Clear(&'static str),
+    PutIfAbsent(StoreTable, Vec<u8>, Vec<u8>),
+    Delete(StoreTable, Vec<u8>),
+    Clear(StoreTable),
 }
 
 impl From<StoreOp> for Op {
     fn from(op: StoreOp) -> Self {
         match op {
-            StoreOp::Put { table, key, value } => Self::Put(table.name(), key, value),
-            StoreOp::Delete { table, key } => Self::Delete(table.name(), key),
+            StoreOp::Put { table, key, value } => Self::Put(table.into(), key, value),
+            StoreOp::Delete { table, key } => Self::Delete(table.into(), key),
         }
     }
 }
@@ -87,14 +192,8 @@ impl Store {
             return Err(CoreError::NewerStorage.into());
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        for name in Table::ALL
-            .iter()
-            .map(|t| t.name())
-            .chain([FILES_TABLE, SAVED_TABLE])
-        {
-            conn.execute_batch(&format!(
-                "CREATE TABLE IF NOT EXISTS {name} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;"
-            ))?;
+        for table in StoreTable::ALL {
+            conn.execute(table.sql().create, [])?;
         }
         // Unbounded by design: every caller waits for its reply, so it holds
         // at most one job per waiting task.
@@ -121,14 +220,14 @@ impl Store {
         self.call(|reply| Job::Apply(ops, reply)).await
     }
 
-    pub(crate) async fn scan(&self, table: &'static str) -> Result<Pairs, ClientError> {
+    pub(crate) async fn scan(&self, table: StoreTable) -> Result<Pairs, ClientError> {
         self.call(|reply| Job::Scan(table, reply)).await
     }
 
     /// Keys from `from` to `to`, newest (largest) first.
     pub(crate) async fn range_desc(
         &self,
-        table: &'static str,
+        table: StoreTable,
         from: Vec<u8>,
         to: End,
         limit: usize,
@@ -145,7 +244,7 @@ impl Store {
 
     pub(crate) async fn get(
         &self,
-        table: &'static str,
+        table: StoreTable,
         key: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, ClientError> {
         self.call(|reply| Job::Get(table, key, reply)).await
@@ -155,7 +254,7 @@ impl Store {
     /// thread that may block (never one running async tasks).
     pub(crate) fn blocking_after(
         &self,
-        table: &'static str,
+        table: StoreTable,
         after: Vec<u8>,
         limit: usize,
     ) -> Result<Pairs, ClientError> {
@@ -201,11 +300,7 @@ fn serve(mut conn: Connection, rx: &std_mpsc::Receiver<Job>) {
                 let _ = reply.send(apply(&mut conn, &ops));
             }
             Job::Scan(table, reply) => {
-                let _ = reply.send(query(
-                    &conn,
-                    &format!("SELECT k, v FROM {table}"),
-                    params![],
-                ));
+                let _ = reply.send(query(&conn, table.sql().scan, params![]));
             }
             Job::Range {
                 table,
@@ -214,15 +309,12 @@ fn serve(mut conn: Connection, rx: &std_mpsc::Receiver<Job>) {
                 limit,
                 reply,
             } => {
-                let (op, to) = match to {
-                    End::Before(to) => ("<", to),
-                    End::Through(to) => ("<=", to),
+                let (sql, to) = match to {
+                    End::Before(to) => (table.sql().range_before, to),
+                    End::Through(to) => (table.sql().range_through, to),
                 };
-                let sql = format!(
-                    "SELECT k, v FROM {table} WHERE k >= ?1 AND k {op} ?2 ORDER BY k DESC LIMIT ?3"
-                );
                 let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-                let _ = reply.send(query(&conn, &sql, params![from, to, limit]));
+                let _ = reply.send(query(&conn, sql, params![from, to, limit]));
             }
             Job::After {
                 table,
@@ -230,14 +322,13 @@ fn serve(mut conn: Connection, rx: &std_mpsc::Receiver<Job>) {
                 limit,
                 reply,
             } => {
-                let sql = format!("SELECT k, v FROM {table} WHERE k > ?1 ORDER BY k LIMIT ?2");
                 let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-                let _ = reply.send(query(&conn, &sql, params![after, limit]));
+                let _ = reply.send(query(&conn, table.sql().after, params![after, limit]));
             }
             Job::Get(table, key, reply) => {
-                let sql = format!("SELECT v FROM {table} WHERE k = ?1");
                 let res = conn
-                    .query_row(&sql, params![key], |r| r.get(0))
+                    .prepare_cached(table.sql().get)
+                    .and_then(|mut stmt| stmt.query_row(params![key], |r| r.get(0)))
                     .optional()
                     .map_err(ClientError::from);
                 let _ = reply.send(res);
@@ -251,23 +342,17 @@ fn apply(conn: &mut Connection, ops: &[Op]) -> Result<(), ClientError> {
     for op in ops {
         match op {
             Op::Put(table, k, v) => {
-                tx.prepare_cached(&format!(
-                    "INSERT OR REPLACE INTO {table} (k, v) VALUES (?1, ?2)"
-                ))?
-                .execute(params![k, v])?;
+                tx.prepare_cached(table.sql().put)?.execute(params![k, v])?;
             }
             Op::PutIfAbsent(table, k, v) => {
-                tx.prepare_cached(&format!(
-                    "INSERT OR IGNORE INTO {table} (k, v) VALUES (?1, ?2)"
-                ))?
-                .execute(params![k, v])?;
+                tx.prepare_cached(table.sql().put_if_absent)?
+                    .execute(params![k, v])?;
             }
             Op::Delete(table, k) => {
-                tx.prepare_cached(&format!("DELETE FROM {table} WHERE k = ?1"))?
-                    .execute(params![k])?;
+                tx.prepare_cached(table.sql().delete)?.execute(params![k])?;
             }
             Op::Clear(table) => {
-                tx.execute(&format!("DELETE FROM {table}"), [])?;
+                tx.execute(table.sql().clear, [])?;
             }
         }
     }
@@ -289,7 +374,7 @@ mod tests {
     async fn batches_scans_and_ranges() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("db")).unwrap();
-        let t = Table::Messages.name();
+        let t = StoreTable::from(Table::Messages);
         store
             .apply(vec![
                 Op::Put(t, vec![1, 1], b"a".to_vec()),
@@ -322,7 +407,7 @@ mod tests {
     async fn pages_in_key_order_and_keeps_what_is_stored() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("db")).unwrap();
-        let t = Table::Messages.name();
+        let t = StoreTable::from(Table::Messages);
         let worker = store.clone();
         let pages = tokio::task::spawn_blocking(move || {
             worker
@@ -344,6 +429,44 @@ mod tests {
             vec![(vec![1], b"a".to_vec()), (vec![2], b"live".to_vec())]
         );
         assert_eq!(pages.1, vec![(vec![3], b"c".to_vec())]);
+    }
+
+    /// Each table's statements name it as the rest of the code does.
+    #[test]
+    fn each_table_has_its_own_statements() {
+        for table in StoreTable::ALL {
+            let sql = table.sql();
+            let name = match table {
+                StoreTable::Core(t) => t.name(),
+                StoreTable::Files => "driver_files",
+                StoreTable::Saved => "driver_saved",
+            };
+            for text in [
+                sql.create,
+                sql.scan,
+                sql.range_before,
+                sql.range_through,
+                sql.after,
+                sql.get,
+                sql.put,
+                sql.put_if_absent,
+                sql.delete,
+                sql.clear,
+            ] {
+                assert!(
+                    text.contains(&format!(" {name} ")) || text.ends_with(&format!(" {name}")),
+                    "{text}"
+                );
+            }
+        }
+        let core: Vec<Table> = StoreTable::ALL
+            .into_iter()
+            .filter_map(|t| match t {
+                StoreTable::Core(t) => Some(t),
+                StoreTable::Files | StoreTable::Saved => None,
+            })
+            .collect();
+        assert_eq!(core, Table::ALL, "every core table is created");
     }
 
     #[test]

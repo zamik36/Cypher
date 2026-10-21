@@ -820,7 +820,10 @@ mod tests {
         .await;
         assert_eq!(sent.try_recv().unwrap(), Bytes::from_static(b"frame"));
         assert_eq!(
-            d.store.get("meta", b"k".to_vec()).await.unwrap(),
+            d.store
+                .get(Table::Meta.into(), b"k".to_vec())
+                .await
+                .unwrap(),
             Some(b"v".to_vec())
         );
         assert!(!d.failed);
