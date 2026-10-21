@@ -7,16 +7,16 @@ import init, {
   messageWindow,
   Provision,
   qrSvg,
+  statusKey,
   unreadWindow,
   waveformFromRms,
   type Effect,
-  type MessageRow,
   type ReadChunk,
   type Reply,
   type Op,
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
+import { applyOps, clear, get, messageRows, openDb, put, remove, scan, STORES } from "./idb";
 import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
@@ -469,20 +469,11 @@ function conversation(peer: string): IDBKeyRange {
   return IDBKeyRange.bound(first, last);
 }
 
-/** Up to `limit` messages in `range`, newest first, each with its status row. */
-async function messageRows(range: IDBKeyRange, limit: number): Promise<MessageRow[]> {
-  const rows = await scan(db, "messages", range, limit, true);
-  const statuses = await Promise.all(
-    rows.map(([key]) => get<Uint8Array<ArrayBuffer>>(db, "message_status", key.subarray(key.length - 16))),
-  );
-  return rows.map(([key, value], i) => [key, value, statuses[i]]);
-}
-
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
   const range =
     before === undefined ? conversation(peer) : IDBKeyRange.bound(...historyRange(peer, before), false, true);
-  const rows = await messageRows(range, limit);
+  const [rows = []] = await messageRows(db, [range], limit, statusKey);
   return rows.map(([key, value, status]) => c.openMessage(key, value, status));
 }
 
@@ -667,8 +658,8 @@ const handlers: Handlers = {
   conversations: async () => {
     const c = requireClient();
     const peers = await scan(db, "peers");
-    const recent = await Promise.all(peers.map(([key]) => messageRows(conversation(hex(key)), unreadWindow())));
-    return c.chatList(peers, recent);
+    const ranges = peers.map(([key]) => conversation(hex(key)));
+    return c.chatList(peers, await messageRows(db, ranges, unreadWindow(), statusKey));
   },
   forgetPeer: (peer) =>
     serial(async () => {

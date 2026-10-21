@@ -1,5 +1,5 @@
 /** Minimal promise wrapper over IndexedDB for the worker's key-value tables. */
-import type { Op, Row } from "../wasm/cypher_wasm.js";
+import type { MessageRow, Op, Row } from "../wasm/cypher_wasm.js";
 
 export const STORES = [
   "meta",
@@ -80,6 +80,44 @@ export async function scan(
     };
   });
   return rows;
+}
+
+/**
+ * Up to `limit` rows of `messages` in each of `ranges`, newest first, each
+ * with the row `statusKey` names in `message_status`: one transaction for
+ * them all, rather than one per row.
+ */
+export async function messageRows(
+  db: IDBDatabase,
+  ranges: IDBKeyRange[],
+  limit: number,
+  statusKey: (key: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>,
+): Promise<MessageRow[][]> {
+  const tx = db.transaction(["messages", "message_status"], "readonly");
+  const messages = tx.objectStore("messages");
+  const statuses = tx.objectStore("message_status");
+  const out = ranges.map((range) => {
+    const rows: MessageRow[] = [];
+    const req = messages.openCursor(range, "prev");
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor || rows.length >= limit) return;
+      const row: MessageRow = [
+        new Uint8Array(cursor.key as ArrayBuffer),
+        new Uint8Array(cursor.value as ArrayBuffer),
+        undefined,
+      ];
+      rows.push(row);
+      const status = statuses.get(statusKey(row[0]));
+      status.onsuccess = () => {
+        if (status.result !== undefined) row[2] = new Uint8Array(status.result as ArrayBuffer);
+      };
+      cursor.continue();
+    };
+    return rows;
+  });
+  await done(tx);
+  return out;
 }
 
 /**

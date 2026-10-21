@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Row } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, insertMissing, openDb, put, remove, scan } from "./idb";
+import { applyOps, clear, get, insertMissing, messageRows, openDb, put, remove, scan } from "./idb";
 
 const key = (...b: number[]) => new Uint8Array(b);
 const rows = (list: [Uint8Array, Uint8Array][]) => list.map(([k, v]) => [[...k], [...v]]);
@@ -83,6 +83,31 @@ describe("idb", () => {
     expect(rows(await scan(db, "messages", range, 2, true)).map(([k]) => k)).toEqual([
       [7, 4],
       [7, 3],
+    ]);
+  });
+
+  it("reads the latest messages of several ranges with their statuses in one go", async () => {
+    await applyOps(db, [
+      ...[1, 2, 3].flatMap((peer) =>
+        [1, 2, 3].map((i) => ({ kind: "put" as const, table: "messages", key: key(peer, i), value: key(peer, i) })),
+      ),
+      { kind: "put", table: "message_status", key: key(2), value: key(42) },
+    ]);
+    const span = (peer: number) => IDBKeyRange.bound(key(peer), key(peer, 9));
+    // The status row of a message is named by its key's last byte here.
+    const statusKey = (k: Uint8Array<ArrayBuffer>) => k.subarray(k.length - 1);
+    const got = await messageRows(db, [span(1), span(3), span(5)], 2, statusKey);
+    const shown = got.map((list) => list.map(([k, , s]) => [[...k], s ? [...s] : null]));
+    expect(shown).toEqual([
+      [
+        [[1, 3], null],
+        [[1, 2], [42]],
+      ],
+      [
+        [[3, 3], null],
+        [[3, 2], [42]],
+      ],
+      [],
     ]);
   });
 

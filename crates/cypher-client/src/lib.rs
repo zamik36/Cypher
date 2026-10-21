@@ -20,7 +20,7 @@ use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::ui::{self, UiConversation};
 use cypher_core::{
     Command, Core, CoreError, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
-    message_deletion, message_key, message_window, peer_messages, status_key,
+    message_deletion, message_key, message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
-use store::{End, FILES_TABLE, SAVED_TABLE, Store};
+use store::{End, FILES_TABLE, MessageRow, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
@@ -528,22 +528,12 @@ impl Client {
         let to = before_ms.map_or(End::Through(last), |before| {
             End::Before(message_key(&peer, before, &MsgId([0; MsgId::LEN])))
         });
-        let rows = self
-            .store
-            .range_desc(Table::Messages.into(), from, to, limit)
-            .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for (key, value) in rows {
-            let status = self
-                .store
-                .get(Table::MessageStatus.into(), status_key(&key).to_vec())
-                .await?;
-            let msg = self
-                .vault
-                .open_message_with_status(&key, &value, status.as_deref())?;
-            out.push(msg);
-        }
-        Ok(out)
+        let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
+        blocking(move || {
+            let rows = store.blocking_messages(vec![(from, to)], limit)?;
+            open_messages(&vault, rows.first().map_or(&[], Vec::as_slice))
+        })
+        .await
     }
 
     /// Peers with an established session.
@@ -572,16 +562,34 @@ impl Client {
     /// Every conversation as the chat list shows it, the most recent first.
     /// A contact row that cannot be read still lists its contact, unnamed.
     pub async fn conversations(&self) -> Result<Vec<UiConversation>, ClientError> {
-        let mut out = Vec::new();
-        for (key, sealed) in self.store.scan(Table::Peers.into()).await? {
-            let Some(peer) = PeerId::from_bytes(&key) else {
-                continue;
-            };
-            let contact = self.vault.open_contact(&key, &sealed).unwrap_or_default();
-            let recent = self.history(peer, None, ui::UNREAD_WINDOW).await?;
-            out.push(ui::summary(&peer, contact, &recent));
-        }
-        Ok(ui::chat_list(out))
+        let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
+        blocking(move || {
+            let contacts: Vec<_> = store
+                .blocking_scan(Table::Peers.into())?
+                .into_iter()
+                .filter_map(|(key, sealed)| {
+                    let peer = PeerId::from_bytes(&key)?;
+                    Some((peer, vault.open_contact(&key, &sealed).unwrap_or_default()))
+                })
+                .collect();
+            let spans = contacts
+                .iter()
+                .map(|(peer, _)| {
+                    let (first, last) = peer_messages(peer);
+                    (first, End::Through(last))
+                })
+                .collect();
+            let recent = store.blocking_messages(spans, ui::UNREAD_WINDOW)?;
+            let entries = contacts
+                .into_iter()
+                .zip(&recent)
+                .map(|((peer, contact), rows)| {
+                    Ok(ui::summary(&peer, contact, &open_messages(&vault, rows)?))
+                })
+                .collect::<Result<_, ClientError>>()?;
+            Ok(ui::chat_list(entries))
+        })
+        .await
     }
 
     /// Sets the name this user goes by; contacts receive it encrypted.
@@ -702,6 +710,26 @@ impl Client {
     async fn send(&self, req: Request) -> Result<(), ClientError> {
         self.tx.send(req).await.map_err(|_| ClientError::Closed)
     }
+}
+
+/// Opens message rows read with their status rows.
+fn open_messages(vault: &Vault, rows: &[MessageRow]) -> Result<Vec<StoredMessage>, ClientError> {
+    rows.iter()
+        .map(|(key, value, status)| {
+            Ok(vault.open_message_with_status(key, value, status.as_deref())?)
+        })
+        .collect()
+}
+
+/// Runs disk work or decryption in bulk on a thread that may block, off the
+/// async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, ClientError> + Send + 'static,
+) -> Result<T, ClientError> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| {
+        tracing::error!("blocking work did not finish: {e}");
+        ClientError::Closed
+    })?
 }
 
 async fn load_files(

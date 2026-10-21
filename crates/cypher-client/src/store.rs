@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
-use cypher_core::{CoreError, StoreOp, Table};
+use cypher_core::{CoreError, StoreOp, Table, status_key};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 
@@ -139,12 +139,20 @@ enum Job {
         limit: usize,
         reply: oneshot::Sender<Result<Pairs, ClientError>>,
     },
+    Messages {
+        spans: Vec<(Vec<u8>, End)>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<Vec<MessageRow>>, ClientError>>,
+    },
     Get(
         StoreTable,
         Vec<u8>,
         oneshot::Sender<Result<Option<Vec<u8>>, ClientError>>,
     ),
 }
+
+/// A message row, its value and the row of its latest status, if any.
+pub(crate) type MessageRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
 
 /// Where a range of keys ends.
 pub(crate) enum End {
@@ -266,6 +274,26 @@ impl Store {
         })
     }
 
+    /// [`Store::scan`] for a thread that may block.
+    pub(crate) fn blocking_scan(&self, table: StoreTable) -> Result<Pairs, ClientError> {
+        self.call_blocking(|reply| Job::Scan(table, reply))
+    }
+
+    /// Up to `limit` messages of each span `(from, to)`, newest first, each
+    /// with the row of its status: one job for them all, for a thread that
+    /// may block.
+    pub(crate) fn blocking_messages(
+        &self,
+        spans: Vec<(Vec<u8>, End)>,
+        limit: usize,
+    ) -> Result<Vec<Vec<MessageRow>>, ClientError> {
+        self.call_blocking(|reply| Job::Messages {
+            spans,
+            limit,
+            reply,
+        })
+    }
+
     /// [`Store::apply`] for a thread that may block.
     pub(crate) fn blocking_apply(&self, ops: Vec<Op>) -> Result<(), ClientError> {
         if ops.is_empty() {
@@ -325,6 +353,13 @@ fn serve(mut conn: Connection, rx: &std_mpsc::Receiver<Job>) {
                 let limit = i64::try_from(limit).unwrap_or(i64::MAX);
                 let _ = reply.send(query(&conn, table.sql().after, params![after, limit]));
             }
+            Job::Messages {
+                spans,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(messages(&conn, spans, limit));
+            }
             Job::Get(table, key, reply) => {
                 let res = conn
                     .prepare_cached(table.sql().get)
@@ -358,6 +393,35 @@ fn apply(conn: &mut Connection, ops: &[Op]) -> Result<(), ClientError> {
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Each span's messages, newest first, with their status rows.
+fn messages(
+    conn: &Connection,
+    spans: Vec<(Vec<u8>, End)>,
+    limit: usize,
+) -> Result<Vec<Vec<MessageRow>>, ClientError> {
+    let messages = StoreTable::from(Table::Messages).sql();
+    let mut status = conn.prepare_cached(StoreTable::from(Table::MessageStatus).sql().get)?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    spans
+        .into_iter()
+        .map(|(from, to)| {
+            let (sql, to) = match to {
+                End::Before(to) => (messages.range_before, to),
+                End::Through(to) => (messages.range_through, to),
+            };
+            query(conn, sql, params![from, to, limit])?
+                .into_iter()
+                .map(|(key, value)| {
+                    let found = status
+                        .query_row(params![status_key(&key)], |r| r.get(0))
+                        .optional()?;
+                    Ok((key, value, found))
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn query(conn: &Connection, sql: &str, args: impl rusqlite::Params) -> Result<Pairs, ClientError> {
@@ -467,6 +531,44 @@ mod tests {
             })
             .collect();
         assert_eq!(core, Table::ALL, "every core table is created");
+    }
+
+    #[tokio::test]
+    async fn messages_come_with_their_status_rows_in_one_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db")).unwrap();
+        let (m, s) = (Table::Messages.into(), Table::MessageStatus.into());
+        let key = |peer: u8, id: u8| [vec![peer; 32], vec![id; 8], vec![id; 16]].concat();
+        let mut ops = Vec::new();
+        for peer in [1, 2] {
+            for id in 1..=3 {
+                ops.push(Op::Put(m, key(peer, id), vec![peer, id]));
+            }
+        }
+        ops.push(Op::Put(s, vec![2; 16], b"read".to_vec()));
+        store.apply(ops).await.unwrap();
+
+        let worker = store.clone();
+        let spans = vec![
+            (key(1, 0), End::Through(key(1, 9))),
+            (key(2, 0), End::Before(key(2, 3))),
+        ];
+        let got = tokio::task::spawn_blocking(move || worker.blocking_messages(spans, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        let shown: Vec<Vec<_>> = got
+            .into_iter()
+            .map(|rows| rows.into_iter().map(|(_, v, s)| (v, s)).collect())
+            .collect();
+        let read = Some(b"read".to_vec());
+        assert_eq!(
+            shown,
+            [
+                vec![(vec![1, 3], None), (vec![1, 2], read.clone())],
+                vec![(vec![2, 2], read), (vec![2, 1], None)],
+            ]
+        );
     }
 
     #[test]

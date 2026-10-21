@@ -481,6 +481,12 @@ fn chat_entries(
     Ok(entries)
 }
 
+/// The key of the status row of the message stored under `key`.
+#[wasm_bindgen(js_name = statusKey, unchecked_return_type = "Uint8Array<ArrayBuffer>")]
+pub fn status_key(key: &[u8]) -> Vec<u8> {
+    cypher_core::status_key(key).to_vec()
+}
+
 /// How many of a contact's latest messages `chatList` wants.
 #[wasm_bindgen(js_name = unreadWindow)]
 pub fn unread_window() -> usize {
