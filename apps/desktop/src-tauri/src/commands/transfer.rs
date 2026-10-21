@@ -257,7 +257,8 @@ async fn send_content<R: Runtime>(
             .stage(&uri)
     })
     .await
-    .map_err(err)??;
+    .map_err(err)?
+    .map_err(err)?;
     let path = Path::new(&staged.path);
     let size = match tokio::fs::metadata(path).await {
         Ok(meta) => meta.len(),
@@ -315,6 +316,7 @@ async fn open_location<R: Runtime>(app: AppHandle<R>, location: String) -> CmdRe
     })
     .await
     .map_err(err)?
+    .map_err(err)
 }
 
 #[cfg(not(target_os = "android"))]

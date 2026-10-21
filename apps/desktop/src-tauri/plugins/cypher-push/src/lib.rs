@@ -9,7 +9,7 @@ use tauri::plugin::{Builder, TauriPlugin};
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub use android::{Push, Subscribed};
+pub use android::{Error, Push, Subscribed};
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("cypher-push")

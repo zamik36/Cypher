@@ -8,7 +8,7 @@ use tauri::plugin::{Builder, TauriPlugin};
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub use android::{Files, Staged};
+pub use android::{Error, Files, Staged};
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("cypher-files")

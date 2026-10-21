@@ -71,7 +71,8 @@ async fn subscribe<R: Runtime>(
     let answer =
         tauri::async_runtime::spawn_blocking(move || app.state::<Push<R>>().subscribe(&vapid))
             .await
-            .map_err(err)??;
+            .map_err(err)?
+            .map_err(err)?;
     if answer.status != "ok" {
         return Ok(None);
     }
@@ -102,7 +103,7 @@ async fn unsubscribe<R: Runtime>(app: AppHandle<R>) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || app.state::<Push<R>>().unsubscribe())
         .await
         .map_err(err)?
-        .map_err(Into::into)
+        .map_err(err)
 }
 
 #[cfg(not(target_os = "android"))]
