@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use cypher_core::history::{self, Item, Reader, Writer};
+use cypher_core::history::{Import, Reader, Step, Writer};
 use cypher_core::{Table, Vault};
 use cypher_types::FileId;
 
@@ -111,20 +111,6 @@ pub(crate) fn build(
     Ok(size)
 }
 
-/// A voice or video note read from the archive, written beside where it
-/// goes until it is whole.
-struct Note {
-    file_id: FileId,
-    key: Vec<u8>,
-    value: Vec<u8>,
-    /// Bytes of it still to come, once its blob started.
-    left: Option<u64>,
-    /// Its length is the one its key says.
-    fits: bool,
-    /// Where it is being written; `None` when this device keeps it already.
-    file: Option<(File, PathBuf)>,
-}
-
 /// Takes in the archive at `path`: the rows this store does not have yet,
 /// each only if this profile sealed it, and the notes of the media rows.
 pub(crate) fn import(
@@ -135,9 +121,9 @@ pub(crate) fn import(
 ) -> io::Result<()> {
     let mut archive = File::open(path)?;
     let mut reader = Reader::new();
+    let mut import = Import::new(vault.clone());
     let mut importer = Importer {
         store,
-        vault,
         media_path,
         ops: Vec::with_capacity(PAGE),
         note: None,
@@ -150,34 +136,54 @@ pub(crate) fn import(
         }
         reader.push(piece.get(..n).unwrap_or_default());
         while let Some(item) = reader.next_item().map_err(other)? {
-            importer.take(item)?;
+            if let Some(step) = import.take(item) {
+                importer.step(step)?;
+            }
+            if let Some(done) = import.finished_note() {
+                importer.step(done)?;
+            }
         }
     }
     reader.finish().map_err(other)?;
     store.blocking_apply(importer.ops).map_err(other)
 }
 
-/// What an import has read so far and not yet stored.
+/// Carries out what [`Import`] says: rows go to the store a page at a
+/// time, notes to where they are kept.
 struct Importer<'a, M> {
     store: &'a Store,
-    vault: &'a Vault,
     media_path: M,
     ops: Vec<Op>,
-    note: Option<Note>,
+    /// The note being written beside where it goes, until it is whole.
+    note: Option<(File, PathBuf)>,
 }
 
 impl<M: Fn(&FileId) -> PathBuf> Importer<'_, M> {
-    fn take(&mut self, item: Item<'_>) -> io::Result<()> {
-        match item {
-            Item::Row { table, key, value } => self.row(table, key, value)?,
-            Item::BlobStart { file_id, len } => self.blob_start(file_id, len)?,
-            Item::BlobData(data) => self.blob_data(data)?,
-            Item::End => {}
-        }
-        if self.note.as_ref().is_some_and(|n| n.left == Some(0))
-            && let Some(note) = self.note.take()
-        {
-            self.finish_note(note)?;
+    fn step(&mut self, step: Step<'_>) -> io::Result<()> {
+        match step {
+            Step::Row { table, key, value } => {
+                let op = Op::PutIfAbsent(table.into(), key.to_vec(), value.to_vec());
+                self.ops.push(op);
+            }
+            Step::NoteStart { file_id } => self.note_start(&file_id)?,
+            Step::NoteData(data) => {
+                if let Some((file, _)) = &mut self.note {
+                    file.write_all(data)?;
+                }
+            }
+            Step::NoteEnd {
+                file_id,
+                key,
+                value,
+            } => {
+                if let Some((file, tmp)) = self.note.take() {
+                    file.sync_all()?;
+                    drop(file);
+                    fs::rename(tmp, (self.media_path)(&file_id))?;
+                }
+                self.ops
+                    .push(Op::PutIfAbsent(Table::Media.into(), key, value));
+            }
         }
         if self.ops.len() >= PAGE {
             let ops = std::mem::take(&mut self.ops);
@@ -186,72 +192,17 @@ impl<M: Fn(&FileId) -> PathBuf> Importer<'_, M> {
         Ok(())
     }
 
-    fn row(&mut self, table: Table, key: &[u8], value: &[u8]) -> io::Result<()> {
-        if !history::check_row(self.vault, table, key, value) {
-            return Ok(());
-        }
-        if table == Table::Media {
-            let id = <[u8; 16]>::try_from(key).map_err(other)?;
-            self.note = Some(Note {
-                file_id: FileId(id),
-                key: key.to_vec(),
-                value: value.to_vec(),
-                left: None,
-                fits: false,
-                file: None,
-            });
-        } else {
-            let op = Op::PutIfAbsent(table.into(), key.to_vec(), value.to_vec());
-            self.ops.push(op);
-        }
-        Ok(())
-    }
-
-    /// Where the note is written, unless this device has it already or it
-    /// does not fit its key.
-    fn blob_start(&mut self, file_id: FileId, len: u64) -> io::Result<()> {
-        let Some(note) = self.note.as_mut().filter(|n| n.file_id == file_id) else {
-            return Ok(());
-        };
-        note.fits = self
-            .vault
-            .open_media(&note.file_id, &note.value)
-            .is_ok_and(|m| m.sealed_len() == len);
-        note.left = Some(len);
-        let target = (self.media_path)(&note.file_id);
-        if !note.fits || target.exists() {
+    /// Where the note is written, unless this device has it already.
+    fn note_start(&mut self, file_id: &FileId) -> io::Result<()> {
+        let target = (self.media_path)(file_id);
+        if target.exists() {
             return Ok(());
         }
         if let Some(dir) = target.parent() {
             fs::create_dir_all(dir)?;
         }
         let tmp = target.with_extension("tmp");
-        note.file = Some((File::create(&tmp)?, tmp));
-        Ok(())
-    }
-
-    fn blob_data(&mut self, data: &[u8]) -> io::Result<()> {
-        let Some(note) = self.note.as_mut() else {
-            return Ok(());
-        };
-        if let Some((file, _)) = &mut note.file {
-            file.write_all(data)?;
-        }
-        note.left = note.left.map(|left| left.saturating_sub(data.len() as u64));
-        Ok(())
-    }
-
-    /// The note is whole: it takes its place, and only then its row.
-    fn finish_note(&mut self, note: Note) -> io::Result<()> {
-        if let Some((file, tmp)) = note.file {
-            file.sync_all()?;
-            drop(file);
-            fs::rename(tmp, (self.media_path)(&note.file_id))?;
-        }
-        if note.fits {
-            let op = Op::PutIfAbsent(Table::Media.into(), note.key, note.value);
-            self.ops.push(op);
-        }
+        self.note = Some((File::create(&tmp)?, tmp));
         Ok(())
     }
 }

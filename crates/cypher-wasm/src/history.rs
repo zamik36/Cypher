@@ -4,12 +4,12 @@
 
 use cypher_core::Table;
 use cypher_core::Vault;
-use cypher_core::history::{self, Item, Reader, Writer};
+use cypher_core::history::{Import, Reader, Step, Writer};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::command::{file, file_size};
-use crate::convert::{js_number, to_js};
+use crate::convert::to_js;
 use crate::js_err;
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -17,12 +17,17 @@ const TS_TYPES: &str = r#"
 /** A table the history archive carries, as its `IndexedDB` store is named. */
 export type HistoryTable = "messages" | "message_status" | "media";
 
-/** What the history reader found next. */
-export type HistoryItem =
+/**
+ * What to do next while taking in an archive: store a row unless its key is
+ * taken; write a note (`note_start`, `note_data`) where notes are kept unless
+ * its media row is stored already; once it is whole (`note_end`), store that
+ * row unless its key is taken.
+ */
+export type HistoryStep =
   | { kind: "row"; table: HistoryTable; key: Uint8Array<ArrayBuffer>; value: Uint8Array<ArrayBuffer> }
-  | { kind: "blob"; file_id: string; len: number }
-  | { kind: "data"; data: Uint8Array<ArrayBuffer> }
-  | { kind: "end" };
+  | { kind: "note_start"; file_id: string; key: Uint8Array<ArrayBuffer> }
+  | { kind: "note_data"; data: Uint8Array<ArrayBuffer> }
+  | { kind: "note_end"; key: Uint8Array<ArrayBuffer>; value: Uint8Array<ArrayBuffer> };
 "#;
 
 fn carried(name: &str) -> Option<Table> {
@@ -76,17 +81,19 @@ impl HistoryWriter {
     }
 }
 
-/// Reads an archive pushed to it in pieces, yielding only rows this profile
-/// sealed.
+/// Reads an archive pushed to it in pieces and says what to do with it
+/// ([`Import`]): only rows this profile sealed, only whole notes.
 #[wasm_bindgen]
 pub struct HistoryReader {
     reader: Reader,
-    vault: Vault,
+    import: Import,
+    /// A note that became whole with the step handed out last.
+    finished: Option<Step<'static>>,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum JsItem<'a> {
+enum JsStep<'a> {
     Row {
         table: &'static str,
         #[serde(with = "serde_bytes")]
@@ -94,22 +101,45 @@ enum JsItem<'a> {
         #[serde(with = "serde_bytes")]
         value: &'a [u8],
     },
-    Blob {
+    NoteStart {
         file_id: String,
-        len: f64,
+        #[serde(with = "serde_bytes")]
+        key: &'a [u8],
     },
-    Data {
+    NoteData {
         #[serde(with = "serde_bytes")]
         data: &'a [u8],
     },
-    End,
+    NoteEnd {
+        #[serde(with = "serde_bytes")]
+        key: &'a [u8],
+        #[serde(with = "serde_bytes")]
+        value: &'a [u8],
+    },
+}
+
+fn step_to_js(step: &Step<'_>) -> Result<JsValue, JsError> {
+    to_js(&match step {
+        Step::Row { table, key, value } => JsStep::Row {
+            table: table.name(),
+            key,
+            value,
+        },
+        Step::NoteStart { file_id } => JsStep::NoteStart {
+            file_id: file_id.to_hex(),
+            key: file_id.as_bytes(),
+        },
+        Step::NoteData(data) => JsStep::NoteData { data },
+        Step::NoteEnd { key, value, .. } => JsStep::NoteEnd { key, value },
+    })
 }
 
 impl HistoryReader {
     pub(crate) fn new(vault: Vault) -> Self {
         Self {
             reader: Reader::new(),
-            vault,
+            import: Import::new(vault),
+            finished: None,
         }
     }
 }
@@ -120,33 +150,26 @@ impl HistoryReader {
         self.reader.push(piece);
     }
 
-    /// The next item, or `undefined` until more is pushed. Rows this
-    /// profile did not seal under their key are passed over.
-    #[wasm_bindgen(js_name = next, unchecked_return_type = "HistoryItem | undefined")]
-    pub fn next_item(&mut self) -> Result<JsValue, JsError> {
+    /// The next step, or `undefined` until more is pushed.
+    #[wasm_bindgen(js_name = next, unchecked_return_type = "HistoryStep | undefined")]
+    pub fn next_step(&mut self) -> Result<JsValue, JsError> {
+        if let Some(done) = self.finished.take() {
+            return step_to_js(&done);
+        }
         loop {
             let Some(item) = self.reader.next_item().map_err(js_err)? else {
                 return Ok(JsValue::UNDEFINED);
             };
-            let item = match item {
-                Item::Row { table, key, value } => {
-                    if !history::check_row(&self.vault, table, key, value) {
-                        continue;
-                    }
-                    JsItem::Row {
-                        table: table.name(),
-                        key,
-                        value,
-                    }
+            let step = self.import.take(item);
+            let finished = self.import.finished_note();
+            match (step, finished) {
+                (Some(step), finished) => {
+                    self.finished = finished;
+                    return step_to_js(&step);
                 }
-                Item::BlobStart { file_id, len } => JsItem::Blob {
-                    file_id: file_id.to_hex(),
-                    len: js_number(len),
-                },
-                Item::BlobData(data) => JsItem::Data { data },
-                Item::End => JsItem::End,
-            };
-            return to_js(&item);
+                (None, Some(done)) => return step_to_js(&done),
+                (None, None) => {}
+            }
         }
     }
 

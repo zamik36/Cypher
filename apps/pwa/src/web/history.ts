@@ -89,21 +89,10 @@ export async function buildHistory(
   }
 }
 
-/** A note read from the archive, written where it goes until it is whole. */
-interface Note {
-  fileId: string;
-  row: Row;
-  left: number;
-  /** Its length is the one its row says. */
-  fits: boolean;
-  /** Where it is written; none when this device keeps it already. */
-  file?: { handle: FileSystemSyncAccessHandle; at: number };
-}
-
 /**
- * Takes in the archive `fileId`: the rows these stores do not have yet,
- * each only if this profile sealed it, and the notes of the media rows,
- * each stored before its row.
+ * Takes in the archive `fileId` as the core's import says: the rows these
+ * stores do not have yet, each only if this profile sealed it, and the
+ * notes of the media rows, each stored before its row.
  */
 export async function importHistory(db: IDBDatabase, client: Client, dirs: HistoryDirs, fileId: string): Promise<void> {
   const archive = await (await dirs.history.getFileHandle(fileId)).getFile();
@@ -118,42 +107,40 @@ export async function importHistory(db: IDBDatabase, client: Client, dirs: Histo
     }
     if (row) pending.push(row);
   };
-  let note: Note | undefined;
+  /** The note being written; none when this device keeps it already. */
+  let note: { handle: FileSystemSyncAccessHandle; at: number } | undefined;
   try {
     for (let from = 0; from < archive.size; from += SLICE) {
       reader.push(new Uint8Array(await archive.slice(from, from + SLICE).arrayBuffer()));
-      for (let item = reader.next(); item; item = reader.next()) {
-        if (item.kind === "row" && item.table === "media") {
-          note = { fileId: hex(item.key), row: [item.key, item.value], left: 0, fits: false };
-        } else if (item.kind === "row") {
-          await store(item.table, [item.key, item.value]);
-        } else if (item.kind === "blob" && note?.fileId === item.file_id) {
-          note.left = item.len;
-          note.fits = client.noteLen(item.file_id, note.row[1]) === item.len;
-          // A row here means the note is here, whole: it was stored first.
-          const kept = (await get(db, "media", note.row[0])) !== undefined;
-          if (note.fits && !kept) {
-            const file = await dirs.media.getFileHandle(item.file_id, { create: true });
-            const handle = await file.createSyncAccessHandle();
-            handle.truncate(0);
-            note.file = { handle, at: 0 };
+      for (let step = reader.next(); step; step = reader.next()) {
+        switch (step.kind) {
+          case "row":
+            await store(step.table, [step.key, step.value]);
+            break;
+          case "note_start": {
+            // A row here means the note is here, whole: it was stored first.
+            if ((await get(db, "media", step.key)) !== undefined) break;
+            const file = await dirs.media.getFileHandle(step.file_id, { create: true });
+            note = { handle: await file.createSyncAccessHandle(), at: 0 };
+            note.handle.truncate(0);
+            break;
           }
-        } else if (item.kind === "data" && note) {
-          if (note.file) note.file.at += note.file.handle.write(item.data, { at: note.file.at });
-          note.left -= item.data.length;
-        }
-        if (note && item.kind !== "row" && note.left === 0) {
-          note.file?.handle.flush();
-          note.file?.handle.close();
-          if (note.fits) await store("media", note.row);
-          note = undefined;
+          case "note_data":
+            if (note) note.at += note.handle.write(step.data, { at: note.at });
+            break;
+          case "note_end":
+            note?.handle.flush();
+            note?.handle.close();
+            note = undefined;
+            await store("media", [step.key, step.value]);
+            break;
         }
       }
     }
     reader.finish();
     await store("messages");
   } finally {
-    note?.file?.handle.close();
+    note?.handle.close();
     reader.free();
   }
 }

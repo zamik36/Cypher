@@ -326,6 +326,119 @@ impl Reader {
     }
 }
 
+/// What a driver taking in an archive does next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step<'a> {
+    /// A message or status row: stored unless its key is taken.
+    Row {
+        table: Table,
+        key: &'a [u8],
+        value: &'a [u8],
+    },
+    /// A voice or video note starts, its bytes follow as [`Step::NoteData`].
+    /// It is written where notes are kept unless this device keeps it
+    /// already: its media row, keyed by `file_id`, is stored.
+    NoteStart {
+        file_id: FileId,
+    },
+    NoteData(&'a [u8]),
+    /// The note is whole: once it is in its place, its media row is stored
+    /// unless the key is taken. A row here thus always means a whole note.
+    NoteEnd {
+        file_id: FileId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+}
+
+/// A note whose media row was read: its blob comes next.
+#[derive(Debug)]
+struct NoteIn {
+    file_id: FileId,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    /// Bytes of it still to come, once its blob started.
+    left: Option<u64>,
+    /// Its length is the one its row says.
+    fits: bool,
+}
+
+/// Takes in an archive [`Item`] by [`Item`] for a driver: only rows this
+/// profile sealed under their key, and only notes as long as their row
+/// says. Both clients take an archive in through it, so they keep the same
+/// rows and notes.
+pub struct Import {
+    vault: Vault,
+    note: Option<NoteIn>,
+}
+
+impl Import {
+    pub fn new(vault: Vault) -> Self {
+        Self { vault, note: None }
+    }
+
+    /// What to do with `item`, if anything. Ask [`Import::finished_note`]
+    /// after each item.
+    pub fn take<'a>(&mut self, item: Item<'a>) -> Option<Step<'a>> {
+        match item {
+            Item::Row { table, key, value } => {
+                if !check_row(&self.vault, table, key, value) {
+                    return None;
+                }
+                if table != Table::Media {
+                    return Some(Step::Row { table, key, value });
+                }
+                let id = <[u8; 16]>::try_from(key).ok()?;
+                self.note = Some(NoteIn {
+                    file_id: FileId(id),
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    left: None,
+                    fits: false,
+                });
+                None
+            }
+            Item::BlobStart { file_id, len } => {
+                let note = self.note.as_mut().filter(|n| n.file_id == file_id)?;
+                note.fits = self
+                    .vault
+                    .open_media(&file_id, &note.value)
+                    .is_ok_and(|m| m.sealed_len() == len);
+                note.left = Some(len);
+                note.fits.then_some(Step::NoteStart { file_id })
+            }
+            Item::BlobData(data) => {
+                let note = self.note.as_mut()?;
+                let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+                note.left = note.left.map(|left| left.saturating_sub(len));
+                note.fits.then_some(Step::NoteData(data))
+            }
+            Item::End => None,
+        }
+    }
+
+    /// The note that the last item taken made whole, if it is one to keep.
+    pub fn finished_note(&mut self) -> Option<Step<'static>> {
+        if self.note.as_ref()?.left != Some(0) {
+            return None;
+        }
+        let note = self.note.take()?;
+        note.fits.then_some(Step::NoteEnd {
+            file_id: note.file_id,
+            key: note.key,
+            value: note.value,
+        })
+    }
+}
+
+impl std::fmt::Debug for Import {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Import")
+            .field("note", &self.note)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Whether a row from an archive is one this profile sealed, under the key
 /// it is stored at: the importer keeps only these.
 pub fn check_row(vault: &Vault, table: Table, key: &[u8], value: &[u8]) -> bool {
@@ -554,5 +667,81 @@ mod tests {
         );
         assert!(!check_row(&vault, Table::MessageStatus, &[1; 15], &sealed));
         assert!(!check_row(&vault, Table::Peers, &[1; 32], &sealed));
+    }
+
+    /// What an import does with an archive, fed `piece` bytes at a time:
+    /// `R` row, `S` note start, `D` note bytes, `E` note end.
+    fn steps(vault: &Vault, bytes: &[u8], piece: usize) -> (String, Vec<u8>) {
+        let (mut r, mut import) = (Reader::new(), Import::new(vault.clone()));
+        let (mut trace, mut note) = (String::new(), Vec::new());
+        let mut record = |step: Step<'_>, trace: &mut String| match step {
+            Step::Row { .. } => trace.push('R'),
+            Step::NoteStart { file_id } => {
+                assert_eq!(file_id, FileId([9; 16]));
+                trace.push('S');
+            }
+            Step::NoteData(data) => {
+                if !trace.ends_with('D') {
+                    trace.push('D');
+                }
+                note.extend_from_slice(data);
+            }
+            Step::NoteEnd { key, value, .. } => {
+                assert!(check_row(vault, Table::Media, &key, &value));
+                trace.push('E');
+            }
+        };
+        for chunk in bytes.chunks(piece) {
+            r.push(chunk);
+            while let Some(item) = r.next_item().unwrap() {
+                if let Some(step) = import.take(item) {
+                    record(step, &mut trace);
+                }
+                if let Some(done) = import.finished_note() {
+                    record(done, &mut trace);
+                }
+            }
+        }
+        r.finish().unwrap();
+        (trace, note)
+    }
+
+    #[test]
+    fn an_import_writes_a_note_before_its_row_whatever_the_pieces() {
+        let vault = Vault::new([5; 32]);
+        let (bytes, blob) = archive(&vault);
+        for piece in [1, 7, 1000, bytes.len()] {
+            assert_eq!(
+                steps(&vault, &bytes, piece),
+                ("SDERRR".into(), blob.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn an_import_keeps_only_this_profiles_rows_and_notes_of_the_right_length() {
+        let vault = Vault::new([5; 32]);
+        let (bytes, _) = archive(&Vault::new([6; 32]));
+        assert_eq!(steps(&vault, &bytes, 64), (String::new(), Vec::new()));
+
+        // A note one byte longer than its row says is passed over, row and all.
+        let media = MediaKey::from_desc(&FileDesc {
+            file_id: FileId([9; 16]),
+            name: "voice".into(),
+            mime: "audio/ogg".into(),
+            size: 10,
+            chunk_size: 64 * 1024,
+            key: [3; 32],
+            inline: None,
+        });
+        let (mut out, mut w) = (Vec::new(), Writer::default());
+        Writer::header(&mut out);
+        let sealed = vault.seal(Table::Media, &[9; 16], &media, &mut OsRng);
+        w.row(&mut out, Table::Media, &[9; 16], &sealed).unwrap();
+        let len = media.sealed_len() + 1;
+        w.blob(&mut out, &media.file_id, len);
+        out.resize(out.len() + usize::try_from(len).unwrap(), 0);
+        w.end(&mut out);
+        assert_eq!(steps(&vault, &out, 64), (String::new(), Vec::new()));
     }
 }
