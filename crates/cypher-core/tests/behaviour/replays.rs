@@ -9,7 +9,7 @@ use cypher_types::Addr;
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
 
 use super::{addr, events_since, is_message, open_item};
-use crate::harness::{Seen, World};
+use crate::harness::{Fault, Rule, Seen, World};
 use crate::{A, B, paired};
 
 /// A world where the two have talked back and forth, each turn on a new
@@ -146,6 +146,43 @@ fn copies_of_messages_already_read_are_no_news() {
     for (i, from) in [A, B].into_iter().zip(events) {
         assert!(!warned(&w, i, from), "client {i}");
     }
+}
+
+/// B reads an inbox item from A, but the server never hears B's ack; then
+/// B's session with A is replaced by a fresh one. The item handed out again
+/// is a copy of one read in the old session: no news either.
+#[test]
+fn copies_from_a_session_since_replaced_are_no_news() {
+    let mut w = paired();
+    w.disconnect(B);
+    w.send_text(A, B, "while you were away");
+    w.server.faults.push(Rule::always(
+        |m| matches!(m, ClientMsg::InboxAck { .. }),
+        Fault::Ignore,
+    ));
+    w.connect(B);
+    w.run();
+    assert_eq!(w.texts(B), ["while you were away"]);
+    let (a, last) = (addr(&w, A), last_message_from(&w, A));
+    let fetches = w.server.key_fetches;
+    w.inject(B, over_session(a, altered(&last)));
+    assert!(w.server.key_fetches > fetches, "a fresh session");
+
+    let (from, fetches) = (w.clients[B].events.len(), w.server.key_fetches);
+    let reads = |w: &World| {
+        w.server
+            .served
+            .iter()
+            .filter(|(i, _, m)| *i == B && matches!(m, ClientMsg::InboxFetch { .. }))
+            .count()
+    };
+    let before = reads(&w);
+    w.advance(10 * 60_000);
+    assert!(reads(&w) > before, "the inbox was read again");
+
+    assert!(!warned(&w, B, from));
+    assert_eq!(w.server.key_fetches, fetches, "no session started again");
+    assert_eq!(w.texts(B), ["while you were away"]);
 }
 
 /// A copy of a message already read, altered on the way, is no copy: it

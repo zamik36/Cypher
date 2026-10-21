@@ -334,6 +334,23 @@ fn copies_are_known_for_the_last_messages_decrypted() {
     );
 }
 
+/// A session that replaces another takes over which messages the old one
+/// decrypted: a copy of one is a duplicate there too, and changes nothing.
+#[test]
+fn a_new_session_knows_the_copies_of_the_one_it_replaces() {
+    let (mut a, mut b) = establish(false);
+    let read = send(&mut a, b"read in the old session");
+    recv(&mut b, &read).unwrap();
+    let (mut a2, mut b2) = establish(false);
+    b2.inherit_decrypted(&mut b);
+
+    let before = b2.to_bytes();
+    assert_eq!(recv(&mut b2, &read), Err(CryptoError::Duplicate));
+    assert_eq!(*b2.to_bytes(), *before, "state untouched");
+    let fresh = send(&mut a2, b"new session");
+    assert_eq!(recv(&mut b2, &fresh).unwrap(), b"new session");
+}
+
 /// Which messages were decrypted is not saved: once restored, a copy of
 /// one fails like any message whose key is spent.
 #[test]

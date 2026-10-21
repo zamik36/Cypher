@@ -240,6 +240,18 @@ impl Ratchet {
         Ok((header, ct))
     }
 
+    /// Takes over which messages `older`, the session this one replaces with
+    /// the same device, decrypted: a copy of one is a
+    /// [`CryptoError::Duplicate`] here too. What this session decrypted
+    /// counts as the more recent. Only for the same device: a digest does
+    /// not name the session it was read in.
+    pub fn inherit_decrypted(&mut self, older: &mut Self) {
+        let newer = std::mem::replace(&mut self.decrypted, std::mem::take(&mut older.decrypted));
+        for digest in newer.order {
+            self.decrypted.insert(digest);
+        }
+    }
+
     /// Decrypts a message and moves the session on. On any error the
     /// session is left exactly as it was.
     ///
@@ -257,7 +269,7 @@ impl Ratchet {
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, CryptoError> {
         let aad = self.aad(header, extra_aad);
-        let digest = message_digest(&aad, ciphertext);
+        let digest = message_digest(header, extra_aad, ciphertext);
         if self.decrypted.contains(&digest) {
             return Err(CryptoError::Duplicate);
         }
@@ -471,14 +483,18 @@ fn skip_chain(
     Ok(ck)
 }
 
-/// What tells one message from any other: a hash of everything it was
-/// authenticated over (its associated data, header included, and its
-/// ciphertext). Not secret: both parts travel in the clear.
-fn message_digest(aad: &[u8], ciphertext: &[u8]) -> [u8; 32] {
-    let aad_len = u64::try_from(aad.len()).unwrap_or(u64::MAX);
+/// What tells one message from any other: a hash of what travels of it
+/// (header and ciphertext) and the associated data the caller adds. The
+/// session's own identities are left out, so that a session that replaces
+/// another with the same device still knows its copies; the identities
+/// order differently depending on which side started the session. Not
+/// secret: all of it is in the clear.
+fn message_digest(header: &Header, extra_aad: &[u8], ciphertext: &[u8]) -> [u8; 32] {
+    let extra_len = u64::try_from(extra_aad.len()).unwrap_or(u64::MAX);
     Sha256::new()
-        .chain_update(aad_len.to_le_bytes())
-        .chain_update(aad)
+        .chain_update(header.encode())
+        .chain_update(extra_len.to_le_bytes())
+        .chain_update(extra_aad)
         .chain_update(ciphertext)
         .finalize()
         .into()
