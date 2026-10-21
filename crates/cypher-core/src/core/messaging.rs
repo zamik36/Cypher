@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use cypher_crypto::{DeviceList, Header, InitHeader, PrekeyBundle, handshake};
+use cypher_crypto::{
+    CryptoError, DeviceList, Header, InitHeader, PrekeyBundle, Ratchet, handshake,
+};
 use cypher_types::{Addr, DeviceId, MsgId, PeerId};
 use cypher_wire::ClientMsg;
 use rand_core::CryptoRngCore;
@@ -27,6 +29,32 @@ const MAX_PENDING_REQUESTS: usize = 20;
 /// key, which drivers range over to show and to delete a conversation, so
 /// a date anywhere up to `u64::MAX` would hide the row from both.
 const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
+
+/// What came of decrypting a message that arrived.
+enum Opened {
+    /// Its plaintext, read for the first time.
+    New(Vec<u8>),
+    /// A byte-for-byte copy of one the session already read: an inbox item
+    /// handed out again after its ack was lost, or a frame replayed.
+    Copy,
+}
+
+impl Opened {
+    /// Decrypts a message in `ratchet`, telling a copy of one already read
+    /// from a failure.
+    fn decrypt(
+        ratchet: &mut Ratchet,
+        header: &Header,
+        ct: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, CoreError> {
+        match ratchet.decrypt(header, ct, b"", rng) {
+            Ok(pt) => Ok(Self::New(pt)),
+            Err(CryptoError::Duplicate) => Ok(Self::Copy),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
 
 /// An invite being joined by, while the host's devices answer one by one.
 pub(super) struct Joining {
@@ -496,8 +524,10 @@ impl<R: CryptoRngCore> Core<R> {
             None => self.decrypt_existing(sender, header, ct),
         };
         let plaintext = match result {
-            Ok(pt) => Zeroizing::new(pt),
-            Err(CoreError::Conflict) => return,
+            Ok(Opened::New(pt)) => Zeroizing::new(pt),
+            // Nothing in the session moved, and nothing is owed: what the
+            // message asked for (a receipt) went out when it was first read.
+            Ok(Opened::Copy) | Err(CoreError::Conflict) => return,
             Err(_) => {
                 self.emit(Event::Warning {
                     reason: FailReason::DecryptFailed,
@@ -538,11 +568,13 @@ impl<R: CryptoRngCore> Core<R> {
         sender: Addr,
         header: &Header,
         ct: &[u8],
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> Result<Opened, CoreError> {
         let session = self.sessions.get_mut(&sender).ok_or(CoreError::Crypto)?;
-        let pt = session.ratchet.decrypt(header, ct, b"", &mut self.rng)?;
-        session.pending_init = None;
-        Ok(pt)
+        let opened = Opened::decrypt(&mut session.ratchet, header, ct, &mut self.rng)?;
+        if matches!(opened, Opened::New(_)) {
+            session.pending_init = None;
+        }
+        Ok(opened)
     }
 
     fn accept_init(
@@ -551,7 +583,7 @@ impl<R: CryptoRngCore> Core<R> {
         init: &InitHeader,
         header: &Header,
         ct: &[u8],
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> Result<Opened, CoreError> {
         let Addr {
             peer: from,
             device: from_device,
@@ -559,7 +591,7 @@ impl<R: CryptoRngCore> Core<R> {
         if let Some(s) = self.sessions.get_mut(&sender)
             && s.accepted_ephemerals.contains(&init.ephemeral)
         {
-            return Ok(s.ratchet.decrypt(header, ct, b"", &mut self.rng)?);
+            return Opened::decrypt(&mut s.ratchet, header, ct, &mut self.rng);
         }
 
         let own = from == self.peer_id;
@@ -617,7 +649,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.sessions.insert(sender, fresh);
         self.requeue_for(sender);
         self.send_hello(sender);
-        Ok(pt)
+        Ok(Opened::New(pt))
     }
 
     /// Someone new is a request until their `Hello` names one of our

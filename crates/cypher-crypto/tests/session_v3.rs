@@ -224,7 +224,7 @@ fn chain_skipped_only_via_previous_counter() {
 }
 
 #[test]
-fn tampering_does_not_desync_and_replay_fails() {
+fn tampering_does_not_desync_and_a_replay_is_a_duplicate() {
     let (mut a, mut b) = establish(false);
     let m = send(&mut a, b"payload");
 
@@ -236,7 +236,33 @@ fn tampering_does_not_desync_and_replay_fails() {
     assert_eq!(recv(&mut b, &bad_header), Err(CryptoError::Aead));
 
     assert_eq!(recv(&mut b, &m).unwrap(), b"payload");
-    assert_eq!(recv(&mut b, &m), Err(CryptoError::Aead));
+    assert_eq!(recv(&mut b, &m), Err(CryptoError::Duplicate));
+}
+
+/// A message decrypted on each kind of path: in order, out of order from
+/// the skipped store, on a chain since left behind, on the current chain.
+/// A copy of any of them is a duplicate, and the session does not move.
+#[test]
+fn a_copy_of_a_decrypted_message_is_a_duplicate_and_changes_nothing() {
+    let (mut a, mut b) = establish(true);
+    let late = send(&mut a, b"late");
+    let in_order = send(&mut a, b"in order");
+    assert_eq!(recv(&mut b, &in_order).unwrap(), b"in order");
+    assert_eq!(recv(&mut b, &late).unwrap(), b"late");
+    let reply = send(&mut b, b"reply");
+    assert_eq!(recv(&mut a, &reply).unwrap(), b"reply");
+    let current = send(&mut a, b"current chain");
+    assert_eq!(recv(&mut b, &current).unwrap(), b"current chain");
+
+    for copy in [&late, &in_order, &current] {
+        let before = b.to_bytes();
+        assert_eq!(recv(&mut b, copy), Err(CryptoError::Duplicate));
+        assert_eq!(*b.to_bytes(), *before, "state untouched");
+    }
+    let next = send(&mut a, b"next");
+    assert_eq!(recv(&mut b, &next).unwrap(), b"next");
+    let back = send(&mut b, b"back");
+    assert_eq!(recv(&mut a, &back).unwrap(), b"back");
 }
 
 /// A message altered in any part (a copy of one read, or one never read),
@@ -288,6 +314,17 @@ fn altered_messages_fail_and_change_nothing() {
     assert_eq!(*b.to_bytes(), *before, "other context: state untouched");
 
     assert_eq!(recv(&mut b, &fresh).unwrap(), b"fresh");
+}
+
+/// Which messages were decrypted is not saved: once restored, a copy of
+/// one fails like any message whose key is spent.
+#[test]
+fn a_restored_session_does_not_know_its_copies() {
+    let (mut a, mut b) = establish(false);
+    let read = send(&mut a, b"read");
+    assert_eq!(recv(&mut b, &read).unwrap(), b"read");
+    let mut restored = Ratchet::from_bytes(&b.to_bytes()).unwrap();
+    assert_eq!(recv(&mut restored, &read), Err(CryptoError::Aead));
 }
 
 #[test]
@@ -448,7 +485,7 @@ proptest! {
                     let (msg, body) = queue.remove(pick % queue.len());
                     prop_assert_eq!(recv(receiver, &msg).unwrap(), body);
                     if dup {
-                        prop_assert!(recv(receiver, &msg).is_err());
+                        prop_assert_eq!(recv(receiver, &msg), Err(CryptoError::Duplicate));
                     }
                 }
             }

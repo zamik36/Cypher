@@ -1,7 +1,9 @@
-//! Messages altered on the way, whether read before or never: one that
-//! does not decrypt warns and starts the session afresh.
+//! Messages that come again: an exact copy of one already read is no news
+//! and changes nothing, while one altered on the way, or never read, that
+//! does not decrypt still warns and starts the session afresh.
 
 use bytes::Bytes;
+use cypher_core::relay::RelayBody;
 use cypher_core::{Event, FailReason};
 use cypher_types::Addr;
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
@@ -90,6 +92,48 @@ fn altered(body: &Bytes) -> Bytes {
         *last ^= 1;
     }
     Bytes::from(raw)
+}
+
+/// The server hands every frame it delivered so far to its recipient once
+/// more: the inits that started the session, greetings, receipts and texts,
+/// over the session and sealed, from chains long left behind and from the
+/// current one. Neither side hears of it, nor answers, nor fetches keys,
+/// and the two go on talking both ways.
+#[test]
+fn copies_of_messages_already_read_are_no_news() {
+    let mut w = talked();
+    let delivered = w.server.delivered.clone();
+    let inits = delivered
+        .iter()
+        .filter(|(_, raw)| {
+            matches!(
+                Frame::<ServerMsg>::decode(raw.clone()).map(|f| f.msg),
+                Ok(ServerMsg::Recv { body, .. })
+                    if matches!(RelayBody::decode(&body), Ok(RelayBody::Message { init: Some(_), .. }))
+            )
+        })
+        .count();
+    assert!(inits > 0, "the inits are among the copies");
+    let events = [w.clients[A].events.len(), w.clients[B].events.len()];
+    let (fetches, transmitted) = (w.server.key_fetches, w.transmitted.len());
+
+    for (to, raw) in delivered {
+        w.inject(to, raw);
+    }
+
+    for (i, from) in [A, B].into_iter().zip(events) {
+        assert_eq!(events_since(&w, i, from), [], "client {i} told nothing");
+    }
+    assert_eq!(w.server.key_fetches, fetches, "no session started again");
+    assert_eq!(w.transmitted.len(), transmitted, "nothing answered");
+
+    w.send_text(A, B, "still here");
+    w.send_text(B, A, "me too");
+    assert_eq!(w.texts(B), ["one", "two", "three", "still here"]);
+    assert_eq!(w.texts(A), ["one", "two", "three", "me too"]);
+    for (i, from) in [A, B].into_iter().zip(events) {
+        assert!(!warned(&w, i, from), "client {i}");
+    }
 }
 
 /// A copy of a message already read, altered on the way, is no copy: it

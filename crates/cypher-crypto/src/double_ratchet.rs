@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -16,6 +17,12 @@ pub const MAX_SKIP: u32 = 1000;
 
 /// Most skipped keys retained per session; the oldest are evicted first.
 const MAX_STORED_SKIPPED: usize = 2000;
+
+/// Messages a session remembers having decrypted, so that a copy of one
+/// coming again (an inbox item handed out again after its ack was lost, a
+/// frame replayed) is known as such rather than failing as if the session
+/// had drifted apart. Two full inbox batches from one device; 4 KiB.
+const MAX_DECRYPTED: usize = 128;
 
 const SNAPSHOT_VERSION: u8 = 2;
 const AAD_CONTEXT: &[u8] = b"cypher/v2";
@@ -111,6 +118,9 @@ pub struct Ratchet {
     nr: u32,
     pn: u32,
     skipped: SkippedKeys,
+    /// Digests of the last [`MAX_DECRYPTED`] messages decrypted, oldest
+    /// first. In memory only: not part of the snapshot.
+    decrypted: VecDeque<[u8; 32]>,
 }
 
 struct Step {
@@ -150,6 +160,7 @@ impl Ratchet {
             nr: 0,
             pn: 0,
             skipped: SkippedKeys::default(),
+            decrypted: VecDeque::new(),
         })
     }
 
@@ -166,6 +177,7 @@ impl Ratchet {
             nr: 0,
             pn: 0,
             skipped: SkippedKeys::default(),
+            decrypted: VecDeque::new(),
         }
     }
 
@@ -201,6 +213,15 @@ impl Ratchet {
         Ok((header, ct))
     }
 
+    /// Decrypts a message and moves the session on. On any error the
+    /// session is left exactly as it was.
+    ///
+    /// A byte-for-byte copy of one of the last [`MAX_DECRYPTED`] messages
+    /// decrypted fails with [`CryptoError::Duplicate`]: its key is spent, and
+    /// it carries nothing new. Only an exact copy does: a message at a spent
+    /// position that differs in any byte fails authentication, as it may
+    /// come from a peer whose state went back in time, which only a fresh
+    /// session repairs.
     pub fn decrypt(
         &mut self,
         header: &Header,
@@ -209,17 +230,30 @@ impl Ratchet {
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, CryptoError> {
         let aad = self.aad(header, extra_aad);
+        let digest = message_digest(&aad, ciphertext);
+        if self.decrypted.contains(&digest) {
+            return Err(CryptoError::Duplicate);
+        }
         let key = (header.dh, header.n);
         if let Some(mk) = self.skipped.get(&key) {
             let pt = open(mk, &aad, ciphertext)?;
             self.skipped.remove(&key);
+            self.remember_decrypted(digest);
             return Ok(pt);
         }
 
         let plan = self.plan(header, rng)?;
         let pt = open(&plan.mk, &aad, ciphertext)?;
         self.commit(header, plan);
+        self.remember_decrypted(digest);
         Ok(pt)
+    }
+
+    fn remember_decrypted(&mut self, digest: [u8; 32]) {
+        if self.decrypted.len() >= MAX_DECRYPTED {
+            self.decrypted.pop_front();
+        }
+        self.decrypted.push_back(digest);
     }
 
     fn plan(&self, h: &Header, rng: &mut impl CryptoRngCore) -> Result<Plan, CryptoError> {
@@ -329,6 +363,7 @@ impl Ratchet {
             nr: s.nr,
             pn: s.pn,
             skipped,
+            decrypted: VecDeque::new(),
         })
     }
 }
@@ -414,6 +449,19 @@ fn skip_chain(
         *ck = next;
     }
     Ok(ck)
+}
+
+/// What tells one message from any other: a hash of everything it was
+/// authenticated over (its associated data, header included, and its
+/// ciphertext). Not secret: both parts travel in the clear.
+fn message_digest(aad: &[u8], ciphertext: &[u8]) -> [u8; 32] {
+    let aad_len = u64::try_from(aad.len()).unwrap_or(u64::MAX);
+    Sha256::new()
+        .chain_update(aad_len.to_le_bytes())
+        .chain_update(aad)
+        .chain_update(ciphertext)
+        .finalize()
+        .into()
 }
 
 fn open(mk: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
