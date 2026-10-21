@@ -30,6 +30,13 @@ const MAX_PENDING_REQUESTS: usize = 20;
 /// a date anywhere up to `u64::MAX` would hide the row from both.
 const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
 
+// A session knows a copy among the messages it decrypted last. Greetings,
+// receipts and syncs take room there as texts do, so it holds several
+// inbox batches: one handed out again after its ack was lost still finds
+// its items there.
+const _: () =
+    assert!(cypher_crypto::double_ratchet::MAX_DECRYPTED >= 4 * cypher_wire::MAX_INBOX_BATCH);
+
 /// What came of decrypting a message that arrived.
 enum Opened {
     /// Its plaintext, read for the first time.

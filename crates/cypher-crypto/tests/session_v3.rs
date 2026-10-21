@@ -3,7 +3,7 @@
     reason = "test helpers fail loudly on broken fixtures"
 )]
 
-use cypher_crypto::double_ratchet::MAX_SKIP;
+use cypher_crypto::double_ratchet::{MAX_DECRYPTED, MAX_SKIP};
 use cypher_crypto::handshake::{self, InitHeader};
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
@@ -314,6 +314,24 @@ fn altered_messages_fail_and_change_nothing() {
     assert_eq!(*b.to_bytes(), *before, "other context: state untouched");
 
     assert_eq!(recv(&mut b, &fresh).unwrap(), b"fresh");
+}
+
+/// A session knows copies of the last [`MAX_DECRYPTED`] messages it
+/// decrypted; a copy of an older one fails like any spent key.
+#[test]
+#[cfg_attr(miri, ignore = "hundreds of messages; minutes under Miri")]
+fn copies_are_known_for_the_last_messages_decrypted() {
+    let (mut a, mut b) = establish(false);
+    let sent: Vec<_> = (0..=MAX_DECRYPTED).map(|_| send(&mut a, b"x")).collect();
+    for m in &sent {
+        recv(&mut b, m).unwrap();
+    }
+    assert_eq!(recv(&mut b, &sent[0]), Err(CryptoError::Aead), "forgotten");
+    assert_eq!(recv(&mut b, &sent[1]), Err(CryptoError::Duplicate));
+    assert_eq!(
+        recv(&mut b, &sent[MAX_DECRYPTED]),
+        Err(CryptoError::Duplicate)
+    );
 }
 
 /// Which messages were decrypted is not saved: once restored, a copy of
