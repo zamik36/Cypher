@@ -4,11 +4,12 @@
 
 use bytes::Bytes;
 use cypher_core::relay::RelayBody;
-use cypher_core::{Event, FailReason};
+use cypher_core::{Event, FailReason, Table, session_key};
+use cypher_crypto::InitHeader;
 use cypher_types::Addr;
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
 
-use super::{addr, events_since, is_message, open_item};
+use super::{addr, events_since, is_message, open_item, rows};
 use crate::harness::{Fault, Rule, Seen, World};
 use crate::{A, B, paired};
 
@@ -248,4 +249,64 @@ fn after_a_restart_a_copy_warns_and_starts_afresh() {
 
     assert!(warned(&w, B, from));
     assert!(w.server.key_fetches > fetches, "a session started afresh");
+}
+
+/// The init a frame delivered to client `to` carries, if any.
+fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
+    let body = match Frame::<ServerMsg>::decode(raw.clone()).ok()?.msg {
+        ServerMsg::Recv { body, .. } => body,
+        ServerMsg::RecvSealed { item } => open_item(w, to, &item)?.1,
+        _ => return None,
+    };
+    match RelayBody::decode(&body).ok()? {
+        RelayBody::Message { init, .. } => init,
+        _ => None,
+    }
+}
+
+/// B starts seventeen sessions with A in turn, each from A's signed
+/// prekey alone, so that A's session with B no longer remembers the first
+/// init among the inits it accepted. That init, handed to A again, is
+/// refused: A's session stays as it is, and A neither answers nor tells.
+#[test]
+fn an_init_replayed_after_its_session_forgot_it_is_refused() {
+    let mut w = paired();
+    w.exhaust_opks(A);
+    let (a, b) = (addr(&w, A), addr(&w, B));
+    let mut first = None;
+    for _ in 0..17 {
+        let (start, fetches) = (w.server.delivered.len(), w.server.key_fetches);
+        let last = last_message_from(&w, A);
+        w.inject(B, over_session(a, altered(&last)));
+        assert!(w.server.key_fetches > fetches, "B starts a fresh session");
+        let init = w.server.delivered[start..]
+            .iter()
+            .find_map(|(to, raw)| {
+                (*to == A)
+                    .then(|| init_in(&w, A, raw))
+                    .flatten()
+                    .map(|init| (raw.clone(), init))
+            })
+            .expect("an init reached A");
+        assert_eq!(init.1.opk_id, None, "from the signed prekey alone");
+        first.get_or_insert(init);
+        w.advance(10 * 60_000);
+    }
+    let (frame, init) = first.unwrap();
+    let remembered = rows::session(&w, A, b).unwrap().accepted_ephemerals;
+    assert!(
+        !remembered.contains(&init.ephemeral),
+        "the session forgot it"
+    );
+
+    let row = (Table::Sessions as u8, session_key(b));
+    let session = w.clients[A].kv[&row].clone();
+    let events = w.clients[A].events.len();
+    let sent = |w: &World| w.transmitted.iter().filter(|(i, _)| *i == A).count();
+    let transmitted = sent(&w);
+    w.inject(A, frame);
+
+    assert!(w.clients[A].kv[&row] == session, "the session stays");
+    assert_eq!(sent(&w), transmitted, "nothing answered");
+    assert_eq!(events_since(&w, A, events), [], "nothing told");
 }

@@ -600,6 +600,12 @@ impl<R: CryptoRngCore> Core<R> {
         {
             return Opened::decrypt(&mut s.ratchet, header, ct, &mut self.rng);
         }
+        // Accepted before, yet its session no longer knows it (replaced
+        // since, or the init forgotten among later ones): a copy, not a
+        // session to start again.
+        if self.prekeys.accepted_init(init.spk_id, &init.ephemeral) {
+            return Ok(Opened::Copy);
+        }
 
         let own = from == self.peer_id;
         if !own
@@ -609,12 +615,7 @@ impl<R: CryptoRngCore> Core<R> {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
-        let known = self.prekeys.spk(init.spk_id).is_some()
-            && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
-        if !known {
-            self.resync_prekeys();
-            return Err(CoreError::Crypto);
-        }
+        self.check_init_prekeys(init)?;
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
@@ -642,8 +643,9 @@ impl<R: CryptoRngCore> Core<R> {
         }
         if let Some(id) = init.opk_id {
             self.prekeys.take_opk(id);
-            self.persist_prekeys();
         }
+        self.prekeys.remember_init(init.spk_id, init.ephemeral);
+        self.persist_prekeys();
 
         if !own {
             self.meet(from, init.identity_dh);
@@ -657,6 +659,24 @@ impl<R: CryptoRngCore> Core<R> {
         self.requeue_for(sender);
         self.send_hello(sender);
         Ok(Opened::New(pt))
+    }
+
+    /// Whether a new init can be taken on the prekeys it names. Prekeys we
+    /// lack (our saved state fell behind what the server hands out) make us
+    /// publish fresh ones. Every init accepted on a prekey is remembered
+    /// while it is kept; once that is full, no more are taken until it
+    /// rotates.
+    fn check_init_prekeys(&mut self, init: &InitHeader) -> Result<(), CoreError> {
+        let known = self.prekeys.spk(init.spk_id).is_some()
+            && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
+        if !known {
+            self.resync_prekeys();
+            return Err(CoreError::Crypto);
+        }
+        if !self.prekeys.has_room_for_init(init.spk_id) {
+            return Err(CoreError::Conflict);
+        }
+        Ok(())
     }
 
     /// Someone new is a request until their `Hello` names one of our

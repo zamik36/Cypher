@@ -517,6 +517,15 @@ impl World {
             .collect();
     }
 
+    /// The server has none of client `i`'s one-time prekeys left: whoever
+    /// fetches its keys gets the signed prekey alone.
+    pub(crate) fn exhaust_opks(&mut self, i: usize) {
+        let addr = Addr::new(self.peer(i), self.clients[i].device);
+        if let Some(keys) = self.server.keys.get_mut(&addr) {
+            keys.opks.clear();
+        }
+    }
+
     /// Makes the server answer `FetchKeys` for `of` with the bundle `with`
     /// published (validly signed, by whoever `with` is).
     pub(crate) fn serve_keys_of(&mut self, of: Addr, with: Addr) {
