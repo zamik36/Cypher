@@ -46,6 +46,8 @@ pub(crate) struct Prekeys {
     /// Inits accepted per signed prekey from each sender that was a request
     /// at the time. In memory only.
     request_inits: BTreeMap<(u32, PeerId), u16>,
+    /// Read from a record that did not remember inits yet.
+    unseeded: bool,
 }
 
 impl Prekeys {
@@ -59,6 +61,7 @@ impl Prekeys {
             spk_inits: BTreeSet::new(),
             prev_spk_inits: BTreeSet::new(),
             request_inits: BTreeMap::new(),
+            unseeded: false,
         }
     }
 
@@ -206,6 +209,7 @@ impl Prekeys {
             next_opk_id: self.next_opk_id,
             spk_inits: self.spk_inits.iter().copied().collect(),
             prev_spk_inits: self.prev_spk_inits.iter().copied().collect(),
+            from_v1: false,
         }
     }
 
@@ -225,6 +229,27 @@ impl Prekeys {
             spk_inits: r.spk_inits.iter().copied().collect(),
             prev_spk_inits: r.prev_spk_inits.iter().copied().collect(),
             request_inits: BTreeMap::new(),
+            unseeded: r.from_v1,
+        }
+    }
+
+    /// Whether these prekeys come from a record that did not remember the
+    /// inits accepted; asked once.
+    pub(crate) fn take_unseeded(&mut self) -> bool {
+        std::mem::take(&mut self.unseeded)
+    }
+
+    /// Takes inits accepted before they were remembered with the prekeys
+    /// (on which prekey is not known) as accepted on both kept, as far as
+    /// there is room.
+    pub(crate) fn seed_inits(&mut self, ephemerals: &[[u8; 32]]) {
+        for set in [&mut self.spk_inits, &mut self.prev_spk_inits] {
+            for e in ephemerals {
+                if set.len() >= MAX_INITS_PER_SPK {
+                    break;
+                }
+                set.insert(*e);
+            }
         }
     }
 }
@@ -238,13 +263,16 @@ pub(crate) struct PrekeysRecord {
     next_opk_id: u32,
     spk_inits: Vec<[u8; 32]>,
     prev_spk_inits: Vec<[u8; 32]>,
+    /// Upgraded from version 1, which did not remember inits. Not stored.
+    #[serde(skip)]
+    from_v1: bool,
 }
 
 impl crate::Record for PrekeysRecord {
     const VERSION: u8 = 2;
 
-    /// Version 1 did not remember the inits accepted: none are known, and
-    /// those accepted before the update are covered by their sessions only.
+    /// Version 1 did not remember the inits accepted: the core takes those
+    /// its sessions remember instead.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
         if version != 1 {
             return Err(CoreError::Storage);
@@ -258,6 +286,7 @@ impl crate::Record for PrekeysRecord {
             next_opk_id: v1.next_opk_id,
             spk_inits: Vec::new(),
             prev_spk_inits: Vec::new(),
+            from_v1: true,
         })
     }
 }
@@ -415,7 +444,9 @@ mod tests {
         };
         let body = postcard::to_allocvec(&v1).unwrap();
         let upgraded = <PrekeysRecord as crate::Record>::upgrade(1, &body).unwrap();
-        let restored = Prekeys::from_record(&upgraded);
+        let mut restored = Prekeys::from_record(&upgraded);
+        assert!(restored.take_unseeded() && !restored.take_unseeded());
+        assert!(!Prekeys::from_record(&pk.to_record()).take_unseeded());
         assert_eq!(restored.spk.secret_bytes(), pk.spk.secret_bytes());
         assert_eq!(restored.opks.len(), pk.opks.len());
         assert_eq!(restored.next_opk_id, pk.next_opk_id);

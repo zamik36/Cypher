@@ -1,9 +1,10 @@
 //! Rows a client stores, read back in the form the core writes them now,
 //! to check what is kept, not only what is shown.
 
-use cypher_core::{MessageStatus, Record, Table, Vault, session_key};
+use cypher_core::{MessageStatus, Record, StoreOp, Table, Vault, session_key};
 use cypher_crypto::IdentitySeed;
 use cypher_types::{Addr, DeviceId, MsgId, PeerId};
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::harness::World;
@@ -61,6 +62,58 @@ struct Links {
 
 impl Record for Links {
     const VERSION: u8 = 1;
+}
+
+/// The prekeys as version 2 stores them.
+#[derive(Serialize, Deserialize)]
+struct Prekeys {
+    spk: (u32, [u8; 32]),
+    spk_created_ms: u64,
+    prev_spk: Option<(u32, [u8; 32])>,
+    opks: Vec<(u32, [u8; 32])>,
+    next_opk_id: u32,
+    spk_inits: Vec<[u8; 32]>,
+    prev_spk_inits: Vec<[u8; 32]>,
+}
+
+impl Record for Prekeys {
+    const VERSION: u8 = 2;
+}
+
+/// The prekeys as version 1 stored them, without the inits accepted.
+#[derive(Serialize, Deserialize)]
+struct PrekeysV1 {
+    spk: (u32, [u8; 32]),
+    spk_created_ms: u64,
+    prev_spk: Option<(u32, [u8; 32])>,
+    opks: Vec<(u32, [u8; 32])>,
+    next_opk_id: u32,
+}
+
+impl Record for PrekeysV1 {
+    const VERSION: u8 = 1;
+}
+
+/// Rewrites client `i`'s prekeys as version 1 stored them, as if the app
+/// had just been updated.
+pub(crate) fn store_prekeys_as_v1(w: &mut World, i: usize) {
+    let key = b"prekeys".to_vec();
+    let row = (Table::Meta as u8, key.clone());
+    let vault = vault(w, i);
+    let now: Prekeys = vault
+        .open(Table::Meta, &key, &w.clients[i].kv[&row])
+        .unwrap();
+    let old = PrekeysV1 {
+        spk: now.spk,
+        spk_created_ms: now.spk_created_ms,
+        prev_spk: now.prev_spk,
+        opks: now.opks,
+        next_opk_id: now.next_opk_id,
+    };
+    let StoreOp::Put { value, .. } = vault.put(Table::Meta, key, &old, &mut OsRng) else {
+        unreachable!("a put")
+    };
+    w.clients[i].kv.insert(row, value);
 }
 
 fn vault(w: &World, i: usize) -> Vault {

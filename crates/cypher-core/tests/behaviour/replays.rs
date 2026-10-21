@@ -324,6 +324,29 @@ fn an_init_replayed_after_its_session_forgot_it_is_refused() {
     refused_by(&mut w, A, b, frame);
 }
 
+/// A was updated from a version whose prekeys did not remember the inits
+/// accepted. The inits its sessions remember are taken as accepted, so one
+/// of them handed to A again, once its session has forgotten it, is still
+/// refused.
+#[test]
+fn inits_accepted_before_the_update_stay_refused() {
+    let mut w = paired();
+    w.exhaust_opks(A);
+    let b = addr(&w, B);
+    let (frame, init) = restart_from_b(&mut w);
+    rows::store_prekeys_as_v1(&mut w, A);
+    w.restart(A);
+    for _ in 0..16 {
+        restart_from_b(&mut w);
+    }
+    let remembered = rows::session(&w, A, b).unwrap().accepted_ephemerals;
+    assert!(
+        !remembered.contains(&init.ephemeral),
+        "the session forgot it"
+    );
+    refused_by(&mut w, A, b, frame);
+}
+
 /// Inits a stranger C makes from A's published keys, each starting a
 /// session afresh, as frames A gets from C.
 fn inits_from_stranger(w: &World, n: usize) -> Vec<Bytes> {
