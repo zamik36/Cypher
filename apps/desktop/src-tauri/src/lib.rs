@@ -33,7 +33,34 @@ pub fn run() -> tauri::Result<()> {
         .setup(setup)
         .on_page_load(|webview, _| allow_user_media(webview))
         .on_webview_event(on_webview_event)
-        .run(context())
+        .build(context())?
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                shut_down(app);
+            }
+        });
+    Ok(())
+}
+
+/// How long the app waits on exit for the client to stop.
+const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// On exit: closes the microphone, stops the client, so its storage is
+/// flushed and its connections closed, and drops the unlocked identity;
+/// a stop that hangs does not hold the exit beyond [`EXIT_GRACE`]. Blocks:
+/// called from the event loop, outside the async runtime.
+fn shut_down<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(state) = app.try_state::<session::AppState>() else {
+        return;
+    };
+    tauri::async_runtime::block_on(async {
+        if tokio::time::timeout(EXIT_GRACE, state.lock())
+            .await
+            .is_err()
+        {
+            tracing::warn!("the client did not stop before exit");
+        }
+    });
 }
 
 /// Logs as `RUST_LOG` asks; an error, not a panic, when logging is

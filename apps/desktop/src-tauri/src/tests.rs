@@ -1190,6 +1190,20 @@ mod offline {
         crate::init_logging().unwrap_err();
     }
 
+    /// When the app exits, its client stops and the identity leaves memory.
+    #[tokio::test]
+    async fn exiting_stops_the_client() {
+        let desktop = offline_desktop().await;
+        let client = desktop.state().client().await.unwrap();
+        let app = desktop.app.handle().clone();
+        tokio::task::spawn_blocking(move || crate::shut_down(&app))
+            .await
+            .unwrap();
+        let after = client.command(cypher_core::Command::TrustServerKey).await;
+        assert!(matches!(after, Err(cypher_client::ClientError::Closed)));
+        assert!(is_locked(&desktop).await);
+    }
+
     /// A desktop with an identity and a client for a gateway nobody runs.
     async fn offline_desktop() -> Desktop {
         let desktop = Desktop::new(cypher_tls::make_client_config());
