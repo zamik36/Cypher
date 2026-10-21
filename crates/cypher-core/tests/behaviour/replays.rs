@@ -3,15 +3,16 @@
 //! does not decrypt still warns and starts the session afresh.
 
 use bytes::Bytes;
-use cypher_core::relay::RelayBody;
+use cypher_core::relay::{self, RelayBody};
 use cypher_core::{Event, FailReason, Table, session_key};
-use cypher_crypto::InitHeader;
-use cypher_types::Addr;
+use cypher_crypto::{IdentitySeed, InitHeader, handshake};
+use cypher_types::{Addr, DeviceId};
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
+use rand::rngs::OsRng;
 
 use super::{addr, events_since, is_message, open_item, rows};
 use crate::harness::{Fault, Rule, Seen, World};
-use crate::{A, B, paired};
+use crate::{A, B, C, paired};
 
 /// A world where the two have talked back and forth, each turn on a new
 /// ratchet chain, so that the frames delivered so far span chains long
@@ -264,6 +265,43 @@ fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
     }
 }
 
+/// B's session with A fails to decrypt, so B starts a fresh one; a while
+/// later, so that the next may start too. The frame with B's init that
+/// reached A, and that init.
+fn restart_from_b(w: &mut World) -> (Bytes, InitHeader) {
+    let a = addr(w, A);
+    let (start, fetches) = (w.server.delivered.len(), w.server.key_fetches);
+    let last = last_message_from(w, A);
+    w.inject(B, over_session(a, altered(&last)));
+    assert!(w.server.key_fetches > fetches, "B starts a fresh session");
+    let init = w.server.delivered[start..]
+        .iter()
+        .find_map(|(to, raw)| {
+            (*to == A)
+                .then(|| init_in(w, A, raw))
+                .flatten()
+                .map(|init| (raw.clone(), init))
+        })
+        .expect("an init reached A");
+    w.advance(10 * 60_000);
+    init
+}
+
+/// Hands `frame` to A, which must change nothing: its session with `with`
+/// stays as it is, and it neither answers nor tells.
+fn refused_by_a(w: &mut World, with: Addr, frame: Bytes) {
+    let row = (Table::Sessions as u8, session_key(with));
+    let session = w.clients[A].kv[&row].clone();
+    let events = w.clients[A].events.len();
+    let sent = |w: &World| w.transmitted.iter().filter(|(i, _)| *i == A).count();
+    let transmitted = sent(w);
+    w.inject(A, frame);
+
+    assert!(w.clients[A].kv[&row] == session, "the session stays");
+    assert_eq!(sent(w), transmitted, "nothing answered");
+    assert_eq!(events_since(w, A, events), [], "nothing told");
+}
+
 /// B starts seventeen sessions with A in turn, each from A's signed
 /// prekey alone, so that A's session with B no longer remembers the first
 /// init among the inits it accepted. That init, handed to A again, is
@@ -272,41 +310,68 @@ fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
 fn an_init_replayed_after_its_session_forgot_it_is_refused() {
     let mut w = paired();
     w.exhaust_opks(A);
-    let (a, b) = (addr(&w, A), addr(&w, B));
-    let mut first = None;
-    for _ in 0..17 {
-        let (start, fetches) = (w.server.delivered.len(), w.server.key_fetches);
-        let last = last_message_from(&w, A);
-        w.inject(B, over_session(a, altered(&last)));
-        assert!(w.server.key_fetches > fetches, "B starts a fresh session");
-        let init = w.server.delivered[start..]
-            .iter()
-            .find_map(|(to, raw)| {
-                (*to == A)
-                    .then(|| init_in(&w, A, raw))
-                    .flatten()
-                    .map(|init| (raw.clone(), init))
-            })
-            .expect("an init reached A");
-        assert_eq!(init.1.opk_id, None, "from the signed prekey alone");
-        first.get_or_insert(init);
-        w.advance(10 * 60_000);
+    let b = addr(&w, B);
+    let (frame, init) = restart_from_b(&mut w);
+    assert_eq!(init.opk_id, None, "from the signed prekey alone");
+    for _ in 0..16 {
+        restart_from_b(&mut w);
     }
-    let (frame, init) = first.unwrap();
     let remembered = rows::session(&w, A, b).unwrap().accepted_ephemerals;
     assert!(
         !remembered.contains(&init.ephemeral),
         "the session forgot it"
     );
+    refused_by_a(&mut w, b, frame);
+}
 
-    let row = (Table::Sessions as u8, session_key(b));
-    let session = w.clients[A].kv[&row].clone();
-    let events = w.clients[A].events.len();
-    let sent = |w: &World| w.transmitted.iter().filter(|(i, _)| *i == A).count();
-    let transmitted = sent(&w);
-    w.inject(A, frame);
+/// Inits a stranger C makes from A's published keys, each starting a
+/// session afresh, as frames A gets from C.
+fn inits_from_stranger(w: &World, n: usize) -> Vec<Bytes> {
+    let identity = IdentitySeed(w.clients[C].seed).derive_identity();
+    let bundle = w.bundle_of(addr(w, A));
+    (0..n)
+        .map(|_| {
+            let (mut ratchet, init) =
+                handshake::initiate(&identity, DeviceId::FIRST, &bundle, &mut OsRng).unwrap();
+            let (header, ct) = ratchet.encrypt(b"let me in", b"").unwrap();
+            let body = relay::message_body(Some(&init), &header, &ct);
+            over_session(
+                Addr::new(identity.peer_id(), DeviceId::FIRST),
+                Bytes::from(body),
+            )
+        })
+        .collect()
+}
 
-    assert!(w.clients[A].kv[&row] == session, "the session stays");
-    assert_eq!(sent(&w), transmitted, "nothing answered");
-    assert_eq!(events_since(&w, A, events), [], "nothing told");
+/// A stranger floods A with inits, each validly made from A's keys. Only
+/// so many are taken from one stranger; A says it turns the next away.
+/// A contact whose session needs starting again is not held back.
+#[test]
+fn a_stranger_flooding_inits_does_not_lock_out_contacts() {
+    let mut w = World::new(3);
+    w.pair(A, B);
+    for (n, frame) in inits_from_stranger(&w, 33).into_iter().enumerate() {
+        let from = w.clients[A].events.len();
+        w.inject(A, frame);
+        let turned_away = events_since(&w, A, from).iter().any(|e| {
+            matches!(
+                e,
+                Event::Warning {
+                    reason: FailReason::Rejected
+                }
+            )
+        });
+        assert_eq!(turned_away, n >= 32, "init {n}");
+    }
+
+    let from = w.clients[A].events.len();
+    restart_from_b(&mut w);
+    w.send_text(A, B, "after the flood");
+    w.send_text(B, A, "still here");
+    assert_eq!(
+        w.texts(B).last().map(String::as_str),
+        Some("after the flood")
+    );
+    assert_eq!(w.texts(A).last().map(String::as_str), Some("still here"));
+    assert!(!warned(&w, A, from));
 }

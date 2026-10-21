@@ -615,7 +615,9 @@ impl<R: CryptoRngCore> Core<R> {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
-        self.check_init_prekeys(init)?;
+        // Someone not (yet) taken as a contact.
+        let request = (!own && self.peers.get(&from).is_none_or(|p| p.request)).then_some(from);
+        self.check_init_prekeys(init, request.as_ref())?;
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
@@ -641,11 +643,7 @@ impl<R: CryptoRngCore> Core<R> {
         {
             return Err(CoreError::Conflict);
         }
-        if let Some(id) = init.opk_id {
-            self.prekeys.take_opk(id);
-        }
-        self.prekeys.remember_init(init.spk_id, init.ephemeral);
-        self.persist_prekeys();
+        self.spend_init(init, request);
 
         if !own {
             self.meet(from, init.identity_dh);
@@ -661,22 +659,50 @@ impl<R: CryptoRngCore> Core<R> {
         Ok(Opened::New(pt))
     }
 
-    /// Whether a new init can be taken on the prekeys it names. Prekeys we
-    /// lack (our saved state fell behind what the server hands out) make us
-    /// publish fresh ones. Every init accepted on a prekey is remembered
-    /// while it is kept; once that is full, no more are taken until it
-    /// rotates.
-    fn check_init_prekeys(&mut self, init: &InitHeader) -> Result<(), CoreError> {
+    /// Whether a new init can be taken on the prekeys it names, from
+    /// `request` if the sender is not a contact yet. Prekeys we lack (our
+    /// saved state fell behind what the server hands out) make us publish
+    /// fresh ones. An init refused for the limits on remembered inits is
+    /// told: someone is being turned away.
+    fn check_init_prekeys(
+        &mut self,
+        init: &InitHeader,
+        request: Option<&PeerId>,
+    ) -> Result<(), CoreError> {
         let known = self.prekeys.spk(init.spk_id).is_some()
             && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
         if !known {
             self.resync_prekeys();
             return Err(CoreError::Crypto);
         }
-        if !self.prekeys.has_room_for_init(init.spk_id) {
+        if !self.prekeys.may_init(init.spk_id, request) {
+            self.emit(Event::Warning {
+                reason: FailReason::Rejected,
+            });
             return Err(CoreError::Conflict);
         }
         Ok(())
+    }
+
+    /// Spends what an authenticated init used: its one-time prekey, and a
+    /// place among the inits remembered, so that a copy of it is refused
+    /// later. Saved before anything goes out; a prekey that filled up is
+    /// rotated and published.
+    fn spend_init(&mut self, init: &InitHeader, request: Option<PeerId>) {
+        if let Some(id) = init.opk_id {
+            self.prekeys.take_opk(id);
+        }
+        let rotated = self.prekeys.remember_init(
+            init.spk_id,
+            init.ephemeral,
+            request,
+            self.now,
+            &mut self.rng,
+        );
+        self.persist_prekeys();
+        if rotated {
+            self.publish_keys(false);
+        }
     }
 
     /// Someone new is a request until their `Hello` names one of our

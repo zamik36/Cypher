@@ -517,6 +517,13 @@ impl World {
             .collect();
     }
 
+    /// The signed bundle of `addr` the server hands out, without a one-time
+    /// prekey.
+    pub(crate) fn bundle_of(&self, addr: Addr) -> PrekeyBundle {
+        let base = &self.server.keys[&addr].base;
+        PrekeyBundle::decode(&[&base[..], &[0]].concat()).unwrap()
+    }
+
     /// The server has none of client `i`'s one-time prekeys left: whoever
     /// fetches its keys gets the signed prekey alone.
     pub(crate) fn exhaust_opks(&mut self, i: usize) {
