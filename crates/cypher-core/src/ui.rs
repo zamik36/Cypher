@@ -5,6 +5,7 @@ use cypher_types::{FileId, MsgId, PeerId};
 use serde::Serialize;
 
 use crate::api::{Content, Event, FailReason, MediaKind, MessageStatus, StoredMessage};
+use crate::store::ContactInfo;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UiFile {
@@ -334,6 +335,55 @@ pub fn safety_number(own: &PeerId, peer: &PeerId) -> String {
     cypher_crypto::fingerprint::safety_number(own.as_bytes(), peer.as_bytes())
 }
 
+/// How many of a contact's latest messages the chat list counts unread ones
+/// among; it shows "99+" anyway.
+pub const UNREAD_WINDOW: usize = 100;
+
+/// A contact as the chat list shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiConversation {
+    pub peer_id: String,
+    /// The name the user gave this contact.
+    pub alias: Option<String>,
+    /// The name they go by, as they last sent it.
+    pub name: Option<String>,
+    /// Wrote without one of our invites; not accepted yet.
+    pub request: bool,
+    pub blocked: bool,
+    /// When the latest message was sent; 0 without one.
+    pub last_message_at: u64,
+    pub last: Option<UiMessage>,
+    /// Incoming messages not yet read, among the latest [`UNREAD_WINDOW`].
+    pub unread: usize,
+}
+
+/// The chat-list entry of `peer`, from its contact row and its latest
+/// messages, newest first; only the first [`UNREAD_WINDOW`] count.
+pub fn summary(peer: &PeerId, contact: ContactInfo, recent: &[StoredMessage]) -> UiConversation {
+    let recent = recent.get(..UNREAD_WINDOW).unwrap_or(recent);
+    let last = recent.first();
+    UiConversation {
+        peer_id: peer.to_hex(),
+        alias: contact.alias,
+        name: contact.name,
+        request: contact.request,
+        blocked: contact.blocked,
+        last_message_at: last.map_or(0, |m| m.sent_at_ms),
+        last: last.map(message),
+        unread: recent
+            .iter()
+            .filter(|m| !m.outgoing && m.status != MessageStatus::Read)
+            .count(),
+    }
+}
+
+/// The chat list: the most recent conversation first, ties in the order
+/// given.
+pub fn chat_list(mut entries: Vec<UiConversation>) -> Vec<UiConversation> {
+    entries.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
+    entries
+}
+
 fn profile(peer: &PeerId, name: Option<String>) -> UiPayload {
     UiPayload::Profile {
         peer: peer.to_hex(),
@@ -653,5 +703,86 @@ mod tests {
         ] {
             assert!(event(&e).is_none(), "{e:?}");
         }
+    }
+
+    /// `n` messages, newest first: every third one ours, every fourth read.
+    fn recent(n: u64) -> Vec<StoredMessage> {
+        (0..n)
+            .rev()
+            .map(|at| StoredMessage {
+                sent_at_ms: at,
+                status: if at % 4 == 0 {
+                    MessageStatus::Read
+                } else {
+                    MessageStatus::Delivered
+                },
+                ..stored(
+                    at % 3 == 0,
+                    Content::Text {
+                        text: at.to_string(),
+                        reply_to: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn unread_among(msgs: &[StoredMessage]) -> usize {
+        msgs.iter()
+            .filter(|m| !m.outgoing && m.status != MessageStatus::Read)
+            .count()
+    }
+
+    #[test]
+    fn a_conversation_shows_its_latest_message_and_counts_unread_ones_within_the_window() {
+        let peer = PeerId([9; 32]);
+        let contact = ContactInfo {
+            alias: Some("Al".into()),
+            name: Some("Alice".into()),
+            request: true,
+            blocked: false,
+        };
+        let msgs = recent(250);
+        let entry = summary(&peer, contact.clone(), &msgs);
+        assert_eq!(entry.peer_id, peer.to_hex());
+        assert_eq!((entry.alias, entry.name), (contact.alias, contact.name));
+        assert_eq!((entry.request, entry.blocked), (true, false));
+        let newest = msgs.first().unwrap();
+        assert_eq!(entry.last_message_at, newest.sent_at_ms);
+        assert_eq!(
+            entry.last.map(|m| m.text),
+            Some(newest.sent_at_ms.to_string())
+        );
+        let window = &msgs[..UNREAD_WINDOW];
+        assert_eq!(entry.unread, unread_among(window));
+        assert!(
+            entry.unread < unread_among(&msgs),
+            "older ones are not counted"
+        );
+
+        let empty = summary(&peer, ContactInfo::default(), &[]);
+        assert_eq!((empty.last_message_at, empty.unread), (0, 0));
+        assert!(empty.last.is_none() && empty.alias.is_none());
+    }
+
+    #[test]
+    fn the_chat_list_puts_the_latest_conversation_first() {
+        let at =
+            |peer: u8, n: u64| summary(&PeerId([peer; 32]), ContactInfo::default(), &recent(n));
+        let list = chat_list(vec![at(1, 5), at(2, 0), at(3, 9), at(4, 5)]);
+        let order: Vec<_> = list
+            .iter()
+            .map(|c| c.peer_id.get(..2).unwrap().to_owned())
+            .collect();
+        assert_eq!(order, ["03", "01", "04", "02"], "ties keep their order");
+        let json = serde_json::to_value(list.last().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "peer_id": "02".repeat(32), "alias": null, "name": null, "request": false,
+                "blocked": false, "last_message_at": 0, "last": null, "unread": 0
+            }),
+            "the fields both clients' chat lists read"
+        );
     }
 }

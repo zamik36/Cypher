@@ -149,6 +149,18 @@ pub(crate) fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// [`to_js`], with `None` as `null` rather than `undefined`: the shape the
+/// desktop's JSON gives the same values.
+pub(crate) fn to_js_with_nulls<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
+    value
+        .serialize(
+            &serde_wasm_bindgen::Serializer::new()
+                .serialize_maps_as_objects(true)
+                .serialize_missing_as_null(true),
+        )
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
 pub(crate) fn effects_to_js(effects: &[Effect]) -> Result<Array, JsError> {
     let out = Array::new();
     for effect in effects {

@@ -7,8 +7,10 @@ import init, {
   messageWindow,
   Provision,
   qrSvg,
+  unreadWindow,
   waveformFromRms,
   type Effect,
+  type MessageRow,
   type ReadChunk,
   type Reply,
   type Op,
@@ -467,15 +469,21 @@ function conversation(peer: string): IDBKeyRange {
   return IDBKeyRange.bound(first, last);
 }
 
+/** Up to `limit` messages in `range`, newest first, each with its status row. */
+async function messageRows(range: IDBKeyRange, limit: number): Promise<MessageRow[]> {
+  const rows = await scan(db, "messages", range, limit, true);
+  const statuses = await Promise.all(
+    rows.map(([key]) => get<Uint8Array<ArrayBuffer>>(db, "message_status", key.subarray(key.length - 16))),
+  );
+  return rows.map(([key, value], i) => [key, value, statuses[i]]);
+}
+
 async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
   const range =
     before === undefined ? conversation(peer) : IDBKeyRange.bound(...historyRange(peer, before), false, true);
-  const rows = await scan(db, "messages", range, limit, true);
-  const statuses = await Promise.all(
-    rows.map(([key]) => get<Uint8Array>(db, "message_status", key.subarray(key.length - 16))),
-  );
-  return rows.map(([key, value], i) => c.openMessage(key, value, statuses[i]));
+  const rows = await messageRows(range, limit);
+  return rows.map(([key, value, status]) => c.openMessage(key, value, status));
 }
 
 /** Stops talking to the network and drops every key from memory. */
@@ -515,15 +523,9 @@ async function deleteRows(rows: Awaited<ReturnType<typeof scan>>) {
   ]);
 }
 
-/** How far back unread messages are counted; the list shows "99+" anyway. */
-const UNREAD_WINDOW = 100;
-
 /** The fields of a decrypted message the worker itself reads. */
 interface StoredView {
-  timestamp: number;
-  outgoing: boolean;
-  status: string;
-  file: { file_id: string; kind: string } | null;
+  file: { file_id: string } | null;
 }
 
 type Handlers = { [M in Method]: (...args: Parameters<Methods[M]>) => Promise<ReturnType<Methods[M]>> };
@@ -665,24 +667,8 @@ const handlers: Handlers = {
   conversations: async () => {
     const c = requireClient();
     const peers = await scan(db, "peers");
-    const out = await Promise.all(
-      peers.map(async ([key, value]) => {
-        const peer_id = hex(key);
-        const recent = (await history(peer_id, UNREAD_WINDOW)) as StoredView[];
-        const last = recent[0] ?? null;
-        return {
-          peer_id,
-          alias: c.contactAlias(key, value) ?? null,
-          name: c.contactName(key, value) ?? null,
-          request: (c.contactFlags(key, value) & 1) !== 0,
-          blocked: (c.contactFlags(key, value) & 2) !== 0,
-          last_message_at: last?.timestamp ?? 0,
-          last,
-          unread: recent.filter((m) => !m.outgoing && m.status !== "read").length,
-        };
-      }),
-    );
-    return out.sort((a, b) => b.last_message_at - a.last_message_at);
+    const recent = await Promise.all(peers.map(([key]) => messageRows(conversation(hex(key)), unreadWindow())));
+    return c.chatList(peers, recent);
   },
   forgetPeer: (peer) =>
     serial(async () => {

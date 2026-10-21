@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cypher_core::envelope::MAX_INLINE_LEN;
+use cypher_core::ui::{self, UiConversation};
 use cypher_core::{
     Command, Core, CoreError, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
     message_deletion, message_key, message_window, peer_messages, status_key,
@@ -566,6 +567,21 @@ impl Client {
                 })
             })
             .collect())
+    }
+
+    /// Every conversation as the chat list shows it, the most recent first.
+    /// A contact row that cannot be read still lists its contact, unnamed.
+    pub async fn conversations(&self) -> Result<Vec<UiConversation>, ClientError> {
+        let mut out = Vec::new();
+        for (key, sealed) in self.store.scan(Table::Peers.name()).await? {
+            let Some(peer) = PeerId::from_bytes(&key) else {
+                continue;
+            };
+            let contact = self.vault.open_contact(&key, &sealed).unwrap_or_default();
+            let recent = self.history(peer, None, ui::UNREAD_WINDOW).await?;
+            out.push(ui::summary(&peer, contact, &recent));
+        }
+        Ok(ui::chat_list(out))
     }
 
     /// Sets the name this user goes by; contacts receive it encrypted.
