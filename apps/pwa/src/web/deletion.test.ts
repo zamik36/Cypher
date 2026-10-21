@@ -42,8 +42,8 @@ describe("deleteRows", () => {
     expect(trace).toContain("remove media n2");
   });
 
-  it("deletes received files kept in OPFS too", async () => {
+  it("leaves received files where they are, as the native client does", async () => {
     const { trace } = await run();
-    expect(trace).toContain("remove download f3");
+    expect(trace.filter((t) => t.startsWith("remove download"))).toEqual([]);
   });
 });

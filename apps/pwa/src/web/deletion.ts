@@ -12,17 +12,19 @@ export interface Deleting {
   remove(sink: Sink, fileId: string): Promise<void>;
 }
 
-/** Deletes stored messages with their statuses, media notes and kept files. */
+/**
+ * Deletes stored messages with their statuses and the sealed copies of their
+ * voice and video notes. Files received stay in `downloads`: deleting a
+ * conversation never deletes the user's files.
+ */
 export async function deleteRows(rows: Row[], d: Deleting): Promise<void> {
   const notes: string[] = [];
-  const received: string[] = [];
   const ops: Op[] = [];
   for (const [key, value] of rows) {
     const deletion = d.deletion(key, value);
     ops.push(...deletion.ops);
     if (deletion.note) notes.push(deletion.note);
-    if (deletion.file) received.push(deletion.file);
   }
   await d.apply(ops);
-  await Promise.all([...notes.map((id) => d.remove("media", id)), ...received.map((id) => d.remove("download", id))]);
+  await Promise.all(notes.map((id) => d.remove("media", id)));
 }
