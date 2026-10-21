@@ -274,6 +274,23 @@ impl Store {
         })
     }
 
+    /// [`Store::range_desc`] for a thread that may block.
+    pub(crate) fn blocking_range(
+        &self,
+        table: StoreTable,
+        from: Vec<u8>,
+        to: End,
+        limit: usize,
+    ) -> Result<Pairs, ClientError> {
+        self.call_blocking(|reply| Job::Range {
+            table,
+            from,
+            to,
+            limit,
+            reply,
+        })
+    }
+
     /// [`Store::scan`] for a thread that may block.
     pub(crate) fn blocking_scan(&self, table: StoreTable) -> Result<Pairs, ClientError> {
         self.call_blocking(|reply| Job::Scan(table, reply))
