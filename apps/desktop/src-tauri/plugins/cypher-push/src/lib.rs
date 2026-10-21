@@ -13,13 +13,15 @@ pub use android::{Error, Push, Subscribed};
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("cypher-push")
-        .setup(|_app, _api| {
+        .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
                 use tauri::Manager;
-                let handle = _api.register_android_plugin("app.cypher.push", "PushPlugin")?;
-                _app.manage(Push(handle));
+                let handle = api.register_android_plugin("app.cypher.push", "PushPlugin")?;
+                app.manage(Push(handle));
             }
+            #[cfg(not(target_os = "android"))]
+            let _ = (app, api);
             Ok(())
         })
         .build()

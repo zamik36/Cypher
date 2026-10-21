@@ -73,11 +73,13 @@ async fn preview<R: Runtime>(app: &AppHandle<R>, client: &Client, id: &str) -> R
 }
 
 /// The picture at `location` with its type, if it is one.
-async fn picture<R: Runtime>(_app: &AppHandle<R>, location: String) -> Option<(String, Vec<u8>)> {
+async fn picture<R: Runtime>(app: &AppHandle<R>, location: String) -> Option<(String, Vec<u8>)> {
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
     #[cfg(target_os = "android")]
     if location.starts_with("content://") {
         use tauri_plugin_cypher_files::Files;
-        let app = _app.clone();
+        let app = app.clone();
         let jpeg = tauri::async_runtime::spawn_blocking(move || {
             app.state::<Files<R>>().thumbnail(&location, THUMBNAIL_PX)
         })

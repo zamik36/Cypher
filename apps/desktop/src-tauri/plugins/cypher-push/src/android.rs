@@ -32,6 +32,10 @@ struct SubscribeArgs<'a> {
 }
 
 #[derive(Deserialize)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "the Kotlin side answers with an empty object, which a unit struct does not take"
+)]
 struct Done {}
 
 impl<R: Runtime> Push<R> {

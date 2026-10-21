@@ -3,7 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, Manager, Runtime, State};
+#[cfg(desktop)]
+use tauri::Manager;
+use tauri::{AppHandle, Runtime, State};
 
 use crate::session::CmdResult;
 
@@ -98,10 +100,16 @@ pub(crate) fn on_close<R: Runtime>(window: &tauri::Window<R>, event: &tauri::Win
 }
 
 /// Words the tray in the UI's language; `tooltip` carries the unread count.
+#[cfg_attr(
+    desktop,
+    expect(
+        clippy::needless_pass_by_value,
+        reason = "#[tauri::command] takes owned arguments"
+    )
+)]
 #[expect(
-    clippy::needless_pass_by_value,
     clippy::unnecessary_wraps,
-    reason = "#[tauri::command] takes owned arguments and returns a result"
+    reason = "#[tauri::command] returns a result"
 )]
 #[tauri::command]
 pub(crate) fn set_tray<R: Runtime>(
