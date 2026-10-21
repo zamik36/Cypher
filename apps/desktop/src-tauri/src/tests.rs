@@ -1182,6 +1182,14 @@ mod offline {
     use super::*;
     use crate::commands::transfer::send_all;
 
+    /// Logging set up twice is an error the app warns about and goes on
+    /// from, not a panic.
+    #[test]
+    fn a_second_logger_is_refused_not_a_panic() {
+        let _first = crate::init_logging();
+        crate::init_logging().unwrap_err();
+    }
+
     /// A desktop with an identity and a client for a gateway nobody runs.
     async fn offline_desktop() -> Desktop {
         let desktop = Desktop::new(cypher_tls::make_client_config());

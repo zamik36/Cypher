@@ -21,14 +21,31 @@ pub fn mobile_entry_point() {
 }
 
 pub fn run() -> tauri::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    if let Err(e) = init_logging() {
+        // Whoever set it up still gets this.
+        tracing::warn!(error = %e, "logging was already set up; keeping it");
+    }
     // Arti reaches the relay with TLS configs built from the process-wide
     // provider; the app's own configs carry theirs. Installed once, here,
     // before anything can use TLS.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    wire(with_plugins())
+        .setup(setup)
+        .on_page_load(|webview, _| allow_user_media(webview))
+        .on_webview_event(on_webview_event)
+        .run(context())
+}
 
+/// Logs as `RUST_LOG` asks; an error, not a panic, when logging is
+/// already set up.
+fn init_logging() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+}
+
+/// The builder with the platform's plugins and the app's own.
+fn with_plugins() -> tauri::Builder<tauri::Wry> {
     // First: a second launch hands its invite link to this one and quits.
     #[cfg(desktop)]
     let builder =
@@ -44,48 +61,52 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .on_window_event(shell::on_close);
-    wire(builder)
+    builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_cypher_files::init())
         .plugin(tauri_plugin_cypher_push::init())
-        .setup(|app| {
-            let paths = session::Paths::resolve(app.handle())?;
-            app.manage(session::AppState::new(paths, session::tls_from_env()?));
-            app.manage(shell::CloseToTray::default());
-            #[cfg(desktop)]
-            shell::install_tray(app)?;
-            // Installers register cypher:// themselves; a dev build points
-            // it at itself so invite links can be tried.
-            #[cfg(all(desktop, debug_assertions))]
-            {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                let _ = app.deep_link().register_all();
-            }
-            Ok(())
-        })
-        .on_page_load(|webview, _| allow_user_media(webview))
-        .on_webview_event(|webview, event| {
-            let tauri::WebviewEvent::DragDrop(drag) = event else {
-                return;
-            };
-            let app = webview.app_handle();
-            match drag {
-                tauri::DragDropEvent::Enter { .. } => {
-                    let _ = app.emit("cypher://files_dragging", true);
-                }
-                tauri::DragDropEvent::Drop { paths, .. } => {
-                    let _ = app.emit("cypher://files_dragging", false);
-                    transfer::files_dropped(app, paths.clone());
-                }
-                tauri::DragDropEvent::Leave => {
-                    let _ = app.emit("cypher://files_dragging", false);
-                }
-                _ => {}
-            }
-        })
-        .run(context())
+}
+
+/// The app's state, from where the platform keeps the app's files, and on
+/// desktops the tray.
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let paths = session::Paths::resolve(app.handle())?;
+    app.manage(session::AppState::new(paths, session::tls_from_env()?));
+    app.manage(shell::CloseToTray::default());
+    #[cfg(desktop)]
+    shell::install_tray(app)?;
+    // Installers register cypher:// themselves; a dev build points it at
+    // itself so invite links can be tried.
+    #[cfg(all(desktop, debug_assertions))]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        let _ = app.deep_link().register_all();
+    }
+    Ok(())
+}
+
+/// Files dragged over the window: the UI shows where to drop them, and a
+/// drop is held for the open chat.
+fn on_webview_event<R: Runtime>(webview: &tauri::Webview<R>, event: &tauri::WebviewEvent) {
+    let tauri::WebviewEvent::DragDrop(drag) = event else {
+        return;
+    };
+    let app = webview.app_handle();
+    match drag {
+        tauri::DragDropEvent::Enter { .. } => {
+            let _ = app.emit("cypher://files_dragging", true);
+        }
+        tauri::DragDropEvent::Drop { paths, .. } => {
+            let _ = app.emit("cypher://files_dragging", false);
+            transfer::files_dropped(app, paths.clone());
+        }
+        tauri::DragDropEvent::Leave => {
+            let _ = app.emit("cypher://files_dragging", false);
+        }
+        _ => {}
+    }
 }
 
 /// The app's configuration, assets and access control, as built into it;
