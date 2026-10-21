@@ -192,12 +192,19 @@ impl<M: Fn(&FileId) -> PathBuf> Importer<'_, M> {
         Ok(())
     }
 
-    /// Where the note is written, unless this device has it already.
+    /// Where the note is written, unless this device keeps it already: its
+    /// media row is there. An import stores that row only once the note is
+    /// whole; a live transfer stores it when it starts and deletes it if it
+    /// breaks off, so a copy without a row is a leftover and is written over.
     fn note_start(&mut self, file_id: &FileId) -> io::Result<()> {
-        let target = (self.media_path)(file_id);
-        if target.exists() {
+        let kept = self
+            .store
+            .blocking_get(Table::Media.into(), file_id.to_vec())
+            .map_err(other)?;
+        if kept.is_some() {
             return Ok(());
         }
+        let target = (self.media_path)(file_id);
         if let Some(dir) = target.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -360,5 +367,26 @@ mod tests {
         fs::write(&archive, b"CYHX\x01").unwrap();
         assert!(import(&new.store, &vault, new.media_path(), &archive).is_err());
         assert!(import(&new.store, &vault, new.media_path(), &old.media).is_err());
+    }
+
+    /// A note counts as kept by its media row, written only once the note
+    /// was whole: a leftover copy without one (from a transfer that broke
+    /// off) is replaced by the archive's whole note, never listed as it is.
+    #[test]
+    fn a_note_is_kept_by_its_row_not_by_a_leftover_copy() {
+        let vault = Vault::new([8; 32]);
+        let (old, new) = (Device::new(), Device::new());
+        let (left_over, copy) = put_note(&old, &vault, 7, 1_000);
+        let (kept, _) = put_note(&old, &vault, 8, 10);
+        fs::create_dir_all(&new.media).unwrap();
+        fs::write(new.media_path()(&left_over), vec![0; copy.len()]).unwrap();
+        let (_, mine) = put_note(&new, &vault, 8, 10);
+        fs::write(new.media_path()(&kept), &mine).unwrap();
+
+        hand_over(&old, &new, &vault, &[]).unwrap();
+        let note = |id| fs::read(new.media_path()(id)).unwrap();
+        assert!(note(&left_over) == copy, "the leftover is replaced");
+        assert!(note(&kept) == mine, "the kept note stays");
+        assert_eq!(new.rows(Table::Media).len(), 2);
     }
 }

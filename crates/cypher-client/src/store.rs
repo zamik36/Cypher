@@ -291,6 +291,15 @@ impl Store {
         })
     }
 
+    /// [`Store::get`] for a thread that may block.
+    pub(crate) fn blocking_get(
+        &self,
+        table: StoreTable,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ClientError> {
+        self.call_blocking(|reply| Job::Get(table, key, reply))
+    }
+
     /// [`Store::scan`] for a thread that may block.
     pub(crate) fn blocking_scan(&self, table: StoreTable) -> Result<Pairs, ClientError> {
         self.call_blocking(|reply| Job::Scan(table, reply))
