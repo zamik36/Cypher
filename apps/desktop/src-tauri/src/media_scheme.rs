@@ -14,6 +14,7 @@ use cypher_types::FileId;
 use tauri::http::{Request, Response, StatusCode, header};
 use tauri::{AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
+use crate::commands::media::MAX_VIDEO_NOTE_BYTES;
 use crate::session::AppState;
 
 pub(crate) const SCHEME: &str = "cypher-media";
@@ -111,7 +112,12 @@ pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Respon
         .and_then(|v| v.to_str().ok())
         .map(parse_range);
     let result = match range {
-        None => read_all(client, file_id).await.map(|s| (s, false)),
+        None => match read_all(client, file_id).await {
+            Ok(Some(whole)) => Ok((whole, false)),
+            // Media elements ask by range and never get here.
+            Ok(None) => return status(StatusCode::PAYLOAD_TOO_LARGE),
+            Err(e) => Err(e),
+        },
         Some(Some(Range::From(start, end))) => arrived(client, file_id, start, end)
             .await
             .map(|s| (s, true)),
@@ -125,6 +131,11 @@ pub(crate) async fn serve(client: &Client, request: &Request<Vec<u8>>) -> Respon
         Err(_) => status(StatusCode::NOT_FOUND),
     }
 }
+
+/// Largest note read whole into memory, for a request without a range: the
+/// largest video note this app sends. A peer may send far larger "notes";
+/// those play by ranges only.
+const MAX_WHOLE_BYTES: u64 = MAX_VIDEO_NOTE_BYTES as u64;
 
 /// How long a request waits for bytes of a note still being received.
 const ARRIVAL_WAIT: Duration = Duration::from_secs(30);
@@ -148,14 +159,19 @@ async fn arrived(
     }
 }
 
-async fn read_all(client: &Client, file_id: FileId) -> Result<MediaSlice, ClientError> {
+/// The whole note; `None`, before the rest is read, when it is larger than
+/// [`MAX_WHOLE_BYTES`].
+async fn read_all(client: &Client, file_id: FileId) -> Result<Option<MediaSlice>, ClientError> {
     let mut slice = arrived(client, file_id, 0, None).await?;
+    if slice.total > MAX_WHOLE_BYTES {
+        return Ok(None);
+    }
     while slice.end + 1 < slice.total {
         let next = arrived(client, file_id, slice.end + 1, None).await?;
         slice.bytes.extend_from_slice(&next.bytes);
         slice.end = next.end;
     }
-    Ok(slice)
+    Ok(Some(slice))
 }
 
 async fn suffix(client: &Client, file_id: FileId, len: u64) -> Result<MediaSlice, ClientError> {

@@ -22,7 +22,7 @@ use crate::session::{AppState, CmdResult, err};
 /// Shorter presses are treated as accidental taps and discarded.
 const MIN_VOICE_MS: u32 = 500;
 /// A 60 s round video at the recorder's bitrate is well under this.
-const MAX_VIDEO_NOTE_BYTES: usize = 32 << 20;
+pub(crate) const MAX_VIDEO_NOTE_BYTES: usize = 32 << 20;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct MediaSent {

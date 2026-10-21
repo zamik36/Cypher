@@ -647,6 +647,7 @@ async fn two_desktops_against_in_process_stack() {
     chat(&a, &b, &a_id, &b_id).await;
     send_a_voice_note(&a, &b, &a_id, &b_id).await;
     play_a_video_note(&a, &b, &b_id).await;
+    huge_notes_play_only_by_ranges(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
     accept_two_files_of_one_name(&a, &b, &b_id).await;
     refuse_to_open_a_program(&a, &b, &b_id).await;
@@ -1354,4 +1355,33 @@ mod offline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+}
+
+/// A "note" larger than any this app sends is not read whole into memory
+/// for a request without a range; ranges still serve it.
+async fn huge_notes_play_only_by_ranges(a: &Desktop, b: &Desktop, b_id: &str) {
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let kind = cypher_core::MediaKind::VideoNote {
+        duration_ms: 1000,
+        poster: vec![0xFF, 0xD8],
+    };
+    let huge = vec![7; (32 << 20) + (1 << 20)];
+    let client = a.state().client().await.unwrap();
+    let sent = client.send_media(peer, huge, "huge.webm", "video/webm", kind);
+    let file = sent.await.unwrap().1.to_hex();
+    let serve = |request| async move { media_scheme::answer(b.app.handle(), &request).await };
+
+    // Unknown (404) until the transfer starts on the receiving side.
+    let whole = eventually(|| async {
+        let status = serve(media_request(&file, None)).await.status();
+        (status != StatusCode::NOT_FOUND).then_some(status)
+    })
+    .await;
+    assert_eq!(whole, StatusCode::PAYLOAD_TOO_LARGE);
+    let first = serve(media_request(&file, Some("bytes=0-9"))).await;
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(first.body().as_slice(), [7; 10]);
+    a.call("cancel_transfer", json!({ "fileId": file }))
+        .await
+        .unwrap();
 }
