@@ -570,12 +570,17 @@ async fn other_webviews_and_remote_pages_cannot_call_the_app() {
 }
 
 #[tokio::test]
-async fn qr_codes_are_png_data_uris() {
+async fn qr_codes_are_svg_data_uris() {
     let desktop = Desktop::new(cypher_tls::make_client_config());
     let uri = desktop
         .call("generate_qr", json!({ "linkId": "cypher-link" }))
         .await;
-    assert!(text(&uri.unwrap()).starts_with("data:image/png;base64,"));
+    let uri = text(&uri.unwrap());
+    let b64 = uri.strip_prefix("data:image/svg+xml;base64,").unwrap();
+    let svg = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    assert!(String::from_utf8(svg).unwrap().contains("<svg"));
 }
 
 #[tokio::test]
@@ -1082,11 +1087,7 @@ async fn send_picked_files(a: &Desktop, b_id: &str) {
 /// A pasted picture goes from memory, a dropped one by the path the drop
 /// gave; once kept, both show through the preview route, a text file not.
 async fn send_and_preview_pictures(a: &Desktop, b: &Desktop, b_id: &str) {
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::GrayImage::from_pixel(8, 8, image::Luma([200]))
-        .write_to(&mut png, image::ImageFormat::Png)
-        .unwrap();
-    let png = png.into_inner();
+    let png = GRAY_PNG.to_vec();
     let headers: HeaderMap = [
         ("x-peer", b_id.to_owned()),
         ("x-name", "%D1%84%D0%BE%D1%82%D0%BE.png".to_owned()),
@@ -1356,6 +1357,15 @@ mod offline {
         }
     }
 }
+
+/// An 8×8 light-gray PNG.
+const GRAY_PNG: [u8; 71] = [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0xE1, 0x64, 0xE1,
+    0x57, 0x00, 0x00, 0x00, 0x0E, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x38, 0x01, 0x05, 0x0C,
+    0x94, 0x31, 0x00, 0x08, 0xB1, 0x32, 0x01, 0xB5, 0xC0, 0xAB, 0x65, 0x00, 0x00, 0x00, 0x00, 0x49,
+    0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
 
 /// A "note" larger than any this app sends is not read whole into memory
 /// for a request without a range; ranges still serve it.
