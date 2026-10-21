@@ -375,12 +375,11 @@ impl Client {
     }
 
     /// What deleting the message stored under `key` takes: the store
-    /// operations, the note whose sealed copy goes too, and the file whose
-    /// saved copy it named. Fails when the row cannot be read.
+    /// operations, the note whose sealed copy goes too, and the file it
+    /// names. A row that cannot be read still goes, with its status.
     #[wasm_bindgen(js_name = messageDeletion, unchecked_return_type = "MessageDeletion")]
     pub fn message_deletion(&self, key: &[u8], value: &[u8]) -> Result<JsValue, JsError> {
-        let msg = self.vault.open_message(key, value).map_err(js_err)?;
-        convert::deletion_to_js(&cypher_core::message_deletion(key, Some(&msg)))
+        convert::deletion_to_js(&deletion(&self.vault, key, value))
     }
 
     /// Decrypts a sealed voice or video note: `record` is its row from the
@@ -479,6 +478,12 @@ fn chat_entries(
         entries.push(ui::summary(&peer, contact, &msgs));
     }
     Ok(entries)
+}
+
+/// What deleting the message row `key`, `value` takes, readable or not.
+fn deletion(vault: &Vault, key: &[u8], value: &[u8]) -> cypher_core::MessageDeletion {
+    let msg = vault.open_message(key, value).ok();
+    cypher_core::message_deletion(key, msg.as_ref())
 }
 
 /// The key of the status row of the message stored under `key`.
@@ -603,5 +608,29 @@ mod tests {
         ));
         let stranger = [vec![row(&Vault::new([2; 32]), a, 1, None)], Vec::new()];
         chat_entries(&vault, &peers, &stranger).unwrap_err();
+    }
+
+    /// The web client deletes a row it cannot read with its status, as the
+    /// native one does, instead of giving up the whole conversation.
+    #[test]
+    fn a_row_that_cannot_be_read_is_deleted_with_its_status() {
+        let vault = Vault::new([1; 32]);
+        let key = message_key(&PeerId([1; 32]), 5, &MsgId([7; 16]));
+        let d = deletion(&vault, &key, b"not sealed here");
+        let tables: Vec<_> = d
+            .ops
+            .iter()
+            .map(|op| match op {
+                cypher_core::StoreOp::Delete { table, key } => (*table, key.clone()),
+                cypher_core::StoreOp::Put { .. } => panic!("a deletion puts nothing"),
+            })
+            .collect();
+        assert_eq!(
+            tables,
+            [(Table::Messages, key), (Table::MessageStatus, vec![7; 16])]
+        );
+        assert_eq!((d.note, d.file), (None, None));
+        let (k, v, _) = row(&vault, PeerId([1; 32]), 3, None);
+        assert_eq!(deletion(&vault, &k, &v).ops.len(), 2);
     }
 }

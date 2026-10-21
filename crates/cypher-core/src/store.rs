@@ -179,23 +179,26 @@ pub struct MessageDeletion {
 }
 
 /// What deleting the message stored under `key` takes; `msg` is what the
-/// row holds, `None` when it cannot be read. A row that cannot be read goes
-/// alone.
+/// row holds, `None` when it cannot be read. A row that cannot be read
+/// still goes with its status, both found by the key alone; what its
+/// content would name stays unknown.
 pub fn message_deletion(key: &[u8], msg: Option<&StoredMessage>) -> MessageDeletion {
     let mut out = MessageDeletion {
-        ops: vec![StoreOp::Delete {
-            table: Table::Messages,
-            key: key.to_vec(),
-        }],
+        ops: vec![
+            StoreOp::Delete {
+                table: Table::Messages,
+                key: key.to_vec(),
+            },
+            StoreOp::Delete {
+                table: Table::MessageStatus,
+                key: status_key(key).to_vec(),
+            },
+        ],
         ..MessageDeletion::default()
     };
     let Some(msg) = msg else {
         return out;
     };
-    out.ops.push(StoreOp::Delete {
-        table: Table::MessageStatus,
-        key: status_key(key).to_vec(),
-    });
     match &msg.content {
         Content::File { file_id, kind, .. } if kind.is_media() => {
             out.ops.push(StoreOp::Delete {
@@ -522,11 +525,12 @@ mod tests {
         assert_eq!((d.note, d.file), (Some(FileId([3; 16])), None));
 
         let d = message_deletion(&key, Some(&stored(file(MediaKind::File))));
-        assert_eq!(deleted(&d), [row.clone(), status]);
+        assert_eq!(deleted(&d), [row.clone(), status.clone()]);
         assert_eq!((d.note, d.file), (None, Some(FileId([3; 16]))));
 
         let d = message_deletion(&key, None);
-        assert_eq!(deleted(&d), [row]);
+        assert_eq!(deleted(&d), [row, status], "found by the key alone");
+        assert_eq!((d.note, d.file), (None, None));
     }
 
     #[test]

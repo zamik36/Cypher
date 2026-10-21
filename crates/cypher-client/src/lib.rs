@@ -1046,6 +1046,7 @@ mod tests {
             b"x".to_vec(),
         ));
         client.store.apply(ops).await.unwrap();
+        put_status(&client, MsgId([9; 16]), MessageStatus::Read).await;
         let voice = MediaKind::Voice {
             duration_ms: 1,
             waveform: vec![1],
@@ -1055,6 +1056,8 @@ mod tests {
 
         client.forget_peer(peer).await.unwrap();
         assert!(keys(&client, Table::Messages.into()).await.is_empty());
+        let statuses = keys(&client, Table::MessageStatus.into()).await;
+        assert!(statuses.is_empty(), "an unreadable row's status goes too");
         assert!(keys(&client, Table::Media.into()).await.is_empty());
         assert!(!client.config.media_path(&FileId([7; 16])).exists());
         client.shutdown().await;
