@@ -186,17 +186,15 @@ pub(crate) async fn send_bytes(
     let dir = state.paths().data.join("staging");
     tokio::fs::create_dir_all(&dir).await.map_err(err)?;
     let staged = dir.join(staging_name());
-    if let Err(e) = tokio::fs::write(&staged, &data).await {
+    let size = data.len() as u64;
+    // An owned buffer (decoded on Android) moves to the writing thread; a
+    // borrowed one is copied, as the write outlives the request.
+    if let Err(e) = tokio::fs::write(&staged, data.into_owned()).await {
         discard(&staged).await;
         return Err(err(e));
     }
     let (msg_id, file_id) = send_staged(&client, peer, &staged, &name, &mime).await?;
-    Ok(TransferInfo::outgoing(
-        msg_id,
-        file_id,
-        name,
-        data.len() as u64,
-    ))
+    Ok(TransferInfo::outgoing(msg_id, file_id, name, size))
 }
 
 /// Sends `staged`, a copy made only for sending, which the client takes

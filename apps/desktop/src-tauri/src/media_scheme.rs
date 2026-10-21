@@ -166,6 +166,12 @@ async fn read_all(client: &Client, file_id: FileId) -> Result<Option<MediaSlice>
     if slice.total > MAX_WHOLE_BYTES {
         return Ok(None);
     }
+    // Room for the rest at once (the total is bounded above), so the
+    // buffer is not regrown and copied for each slice.
+    let rest = usize::try_from(slice.total)
+        .unwrap_or(0)
+        .saturating_sub(slice.bytes.len());
+    slice.bytes.reserve_exact(rest);
     while slice.end + 1 < slice.total {
         let next = arrived(client, file_id, slice.end + 1, None).await?;
         slice.bytes.extend_from_slice(&next.bytes);

@@ -105,14 +105,14 @@ pub(crate) async fn voice_cancel(state: State<'_, AppState>) -> CmdResult<()> {
 
 /// A video note as the webview sends it: `poster JPEG ‖ video` in one raw
 /// body split by `x-poster-len`; peer, MIME type and duration in headers, so
-/// the video is never base64-encoded.
+/// the video is never base64-encoded. The video is the rest of the body
+/// ([`into_video`]).
 #[derive(Debug)]
 struct VideoNote<'a> {
     peer: PeerId,
     duration_ms: u32,
     mime: &'a str,
     poster: &'a [u8],
-    video: &'a [u8],
 }
 
 impl<'a> VideoNote<'a> {
@@ -136,13 +136,12 @@ impl<'a> VideoNote<'a> {
         {
             return Err("video note is too large".into());
         }
-        let (poster, video) = body.split_at(poster_len);
+        let (poster, _video) = body.split_at(poster_len);
         Ok(Self {
             peer,
             duration_ms,
             mime,
             poster,
-            video,
         })
     }
 
@@ -167,28 +166,39 @@ pub(crate) async fn send_video_note(
 ) -> CmdResult<MediaSent> {
     let body = note_body(request.body())?;
     let note = VideoNote::parse(request.headers(), &body)?;
+    let (peer, duration_ms, file_name) = (note.peer, note.duration_ms, note.file_name());
+    let (mime, poster_len) = (note.mime.to_owned(), note.poster.len());
     let kind = MediaKind::VideoNote {
-        duration_ms: note.duration_ms,
+        duration_ms,
         poster: note.poster.to_vec(),
     };
+    let video = into_video(body, poster_len);
     let (msg_id, file_id) = state
         .client()
         .await?
-        .send_media(
-            note.peer,
-            note.video.to_vec(),
-            note.file_name(),
-            note.mime,
-            kind,
-        )
+        .send_media(peer, video, file_name, &mime, kind)
         .await
         .map_err(err)?;
     Ok(MediaSent {
         msg_id: msg_id.to_hex(),
         file_id: file_id.to_hex(),
-        duration_ms: note.duration_ms,
+        duration_ms,
         waveform: None,
     })
+}
+
+/// The video of a note's body (after its `poster_len`-byte poster), owned:
+/// a body decoded into a buffer of its own (Android) gives up that buffer,
+/// so tens of megabytes are not copied once more; a borrowed raw body is
+/// copied out of the request.
+fn into_video(body: Cow<'_, [u8]>, poster_len: usize) -> Vec<u8> {
+    match body {
+        Cow::Owned(mut bytes) => {
+            bytes.drain(..poster_len.min(bytes.len()));
+            bytes
+        }
+        Cow::Borrowed(bytes) => bytes.get(poster_len..).unwrap_or_default().to_vec(),
+    }
 }
 
 #[cfg(test)]
@@ -230,10 +240,23 @@ mod tests {
             (
                 n.duration_ms,
                 n.poster.to_vec(),
-                n.video.to_vec(),
+                into_video(Cow::Borrowed(body), n.poster.len()),
                 n.file_name(),
             )
         })
+    }
+
+    /// The video is the same whichever way the body came; a decoded body
+    /// hands over its own buffer.
+    #[test]
+    fn the_video_follows_the_poster() {
+        let raw = b"PPvideo".as_slice();
+        assert_eq!(into_video(Cow::Borrowed(raw), 2), b"video");
+        let decoded = raw.to_vec();
+        let buffer = decoded.as_ptr();
+        let video = into_video(Cow::Owned(decoded), 2);
+        assert_eq!(video, b"video");
+        assert_eq!(video.as_ptr(), buffer, "copied into a new buffer");
     }
 
     #[test]
