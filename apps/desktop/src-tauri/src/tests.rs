@@ -1281,4 +1281,77 @@ mod offline {
         let late = session::await_event_within(wait, &mut rx, reply).await;
         assert_eq!(late, Ok(()));
     }
+
+    /// How long a command may take to answer while a client starts.
+    const PROMPT: Duration = Duration::from_secs(2);
+
+    /// While a new client starts (held up here before it opens its data),
+    /// commands answer at once: those needing only the identity as usual,
+    /// those needing a client by saying there is none.
+    #[tokio::test]
+    async fn commands_answer_while_a_client_starts() {
+        let desktop = offline_desktop().await;
+        let state = desktop.state();
+        let held = state.held_start.lock().await;
+        let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
+        let restart = desktop.call("connect_to_gateway", args);
+        let meanwhile = async {
+            tokio::time::timeout(WAIT, old_client_gone(&state))
+                .await
+                .unwrap();
+            let bob = json!({ "peerId": cypher_types::PeerId([9; 32]).to_hex() });
+            let number = tokio::time::timeout(PROMPT, desktop.call("safety_number", bob));
+            number.await.expect("waited for the client").unwrap();
+            let list = tokio::time::timeout(PROMPT, desktop.call("get_conversations", json!({})));
+            let list = list.await.expect("waited for the client");
+            assert_eq!(list, Err("not connected".to_owned()));
+            drop(held);
+        };
+        let (restarted, ()) = tokio::join!(restart, meanwhile);
+        assert_eq!(restarted.unwrap().as_str().map(str::len), Some(64));
+        desktop.call("get_conversations", json!({})).await.unwrap();
+    }
+
+    /// Locking while a client starts waits for it and then stops it: no
+    /// client is left running for a locked identity.
+    #[tokio::test]
+    async fn a_lock_stops_a_client_still_starting() {
+        let desktop = offline_desktop().await;
+        let state = desktop.state();
+        let held = state.held_start.lock().await;
+        let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
+        let restart = desktop.call("connect_to_gateway", args);
+        let lock = async {
+            tokio::time::timeout(WAIT, old_client_gone(&state))
+                .await
+                .unwrap();
+            // The lock comes while the client is starting, then it starts.
+            let release = async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                drop(held);
+            };
+            let (locked, ()) = tokio::join!(desktop.call("lock", json!({})), release);
+            locked
+        };
+        let (restarted, locked) = tokio::join!(restart, lock);
+        restarted.unwrap();
+        locked.unwrap();
+        let list = desktop.call("get_conversations", json!({})).await;
+        assert_eq!(list, Err("not connected".to_owned()));
+        assert!(is_locked(&desktop).await);
+    }
+
+    /// Returns once a restart has closed the old client; each look at the
+    /// session answers at once.
+    async fn old_client_gone(state: &AppState) {
+        let present = || async {
+            tokio::time::timeout(PROMPT, state.client())
+                .await
+                .expect("waited for the starting client")
+                .is_ok()
+        };
+        while present().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }

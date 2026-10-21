@@ -8,7 +8,7 @@ use cypher_client::{Client, Config, TorConfig, Unlocked};
 use cypher_core::Event;
 use cypher_types::PeerId;
 use tauri::{AppHandle, Manager, Runtime};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::commands::transfer::release_reservation;
@@ -78,12 +78,21 @@ impl Paths {
 pub(crate) struct AppState {
     paths: Paths,
     tls: Arc<rustls::ClientConfig>,
-    identity: Mutex<Option<Unlocked>>,
+    /// Held while a client starts or stops (connect, and the stop before a
+    /// lock or a new identity), so one client at a time opens the
+    /// identity's data and a stop never misses a client still starting.
+    /// Commands never take it: `identity` and `session` are each locked only
+    /// for a moment, so they answer while a client starts.
+    lifecycle: Mutex<()>,
+    identity: Mutex<Option<Arc<Unlocked>>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
     pub voice: Voice,
     pub transfers: Transfers,
     pub linking: Linking,
+    /// Tests hold it to keep a client starting.
+    #[cfg(test)]
+    pub held_start: Mutex<()>,
 }
 
 impl AppState {
@@ -91,12 +100,15 @@ impl AppState {
         Self {
             paths,
             tls,
+            lifecycle: Mutex::default(),
             identity: Mutex::default(),
             session: Mutex::default(),
             endpoint: Mutex::default(),
             voice: Voice::default(),
             transfers: Transfers::default(),
             linking: Linking::default(),
+            #[cfg(test)]
+            held_start: Mutex::default(),
         }
     }
 
@@ -109,8 +121,8 @@ impl AppState {
     }
 
     pub(crate) async fn set_identity(&self, identity: Unlocked) {
-        self.stop().await;
-        *self.identity.lock().await = Some(identity);
+        let _lifecycle = self.stop().await;
+        *self.identity.lock().await = Some(Arc::new(identity));
     }
 
     /// The safety number with `peer`; needs only the unlocked identity.
@@ -137,13 +149,15 @@ impl AppState {
         emit: impl Fn(&Event) + Send + 'static,
     ) -> CmdResult<String> {
         // One client at a time: the old one is gone before the new one opens
-        // the same data, and a second `connect` waits for this one.
-        let mut session = self.session.lock().await;
-        if let Some(old) = session.take() {
+        // the same data, and a second `connect` waits for this one. Meanwhile
+        // commands find no client and say so.
+        let _lifecycle = self.lifecycle.lock().await;
+        let old = self.session.lock().await.take();
+        if let Some(old) = old {
             old.close().await;
         }
-        let identity = self.identity.lock().await;
-        let identity = identity.as_ref().ok_or("identity is locked")?;
+        let identity = self.identity.lock().await.clone();
+        let identity = identity.ok_or("identity is locked")?;
         let config = Config {
             gateway_addr: endpoint.gateway_addr.clone(),
             tls: Arc::clone(&self.tls),
@@ -155,6 +169,8 @@ impl AppState {
             }),
         };
         *self.endpoint.lock().await = endpoint;
+        #[cfg(test)]
+        drop(self.held_start.lock().await);
         let (client, mut rx) = Client::start(&identity.seed, identity.device, config)
             .await
             .map_err(err)?;
@@ -175,7 +191,7 @@ impl AppState {
             }
         });
         let me = client.peer_id().to_hex();
-        *session = Some(Session {
+        *self.session.lock().await = Some(Session {
             client,
             events,
             pump,
@@ -204,14 +220,19 @@ impl AppState {
 
     /// Stops the client and forgets the unlocked identity.
     pub(crate) async fn lock(&self) {
-        self.stop().await;
+        let _lifecycle = self.stop().await;
         *self.identity.lock().await = None;
     }
 
     /// Closes the microphone of a voice note being recorded (first, before
-    /// waiting on the client), stops the client, a link being waited for, and
-    /// forgets offered and dropped files.
-    pub(crate) async fn stop(&self) {
+    /// waiting on a client still starting), stops the client, a link being
+    /// waited for, and forgets offered and dropped files. The guard returned
+    /// keeps a new client from starting until the caller has changed the
+    /// identity.
+    async fn stop(&self) -> MutexGuard<'_, ()> {
+        self.voice.reset().await;
+        let lifecycle = self.lifecycle.lock().await;
+        // Again, for a microphone opened while a client was starting.
         self.voice.reset().await;
         let session = self.session.lock().await.take();
         if let Some(s) = session {
@@ -219,6 +240,7 @@ impl AppState {
         }
         self.linking.cancel().await;
         self.transfers.reset();
+        lifecycle
     }
 }
 
