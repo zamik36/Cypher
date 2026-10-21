@@ -239,6 +239,57 @@ fn tampering_does_not_desync_and_replay_fails() {
     assert_eq!(recv(&mut b, &m), Err(CryptoError::Aead));
 }
 
+/// A message altered in any part (a copy of one read, or one never read),
+/// or read with other associated data, fails like any forgery, and no
+/// failure moves the session: the message it stood for still decrypts.
+#[test]
+fn altered_messages_fail_and_change_nothing() {
+    let (mut a, mut b) = establish(false);
+    let read = send(&mut a, b"read");
+    assert_eq!(recv(&mut b, &read).unwrap(), b"read");
+    let fresh = send(&mut a, b"fresh");
+
+    let mut body = read.clone();
+    body.1[0] ^= 1;
+    let mut tag = read.clone();
+    *tag.1.last_mut().unwrap() ^= 1;
+    let mut counter = read.clone();
+    counter.0.pn += 1;
+    let mut tampered = fresh.clone();
+    tampered.1[0] ^= 1;
+    let mut spent_position = fresh.clone();
+    spent_position.0.n = read.0.n;
+    let mut far_ahead = fresh.clone();
+    far_ahead.0.n += MAX_SKIP + 1;
+    let mut foreign_key = fresh.clone();
+    foreign_key.0.dh = [9; 32];
+    for (name, forged, error) in [
+        ("altered body", &body, CryptoError::Aead),
+        ("altered tag", &tag, CryptoError::Aead),
+        ("altered header", &counter, CryptoError::Aead),
+        ("tampered fresh message", &tampered, CryptoError::Aead),
+        (
+            "fresh at a spent position",
+            &spent_position,
+            CryptoError::Aead,
+        ),
+        ("far ahead", &far_ahead, CryptoError::TooManySkipped),
+        ("unknown ratchet key", &foreign_key, CryptoError::Aead),
+    ] {
+        let before = b.to_bytes();
+        assert_eq!(recv(&mut b, forged), Err(error), "{name}");
+        assert_eq!(*b.to_bytes(), *before, "{name}: state untouched");
+    }
+    let before = b.to_bytes();
+    assert_eq!(
+        b.decrypt(&read.0, &read.1, b"other context", &mut OsRng),
+        Err(CryptoError::Aead)
+    );
+    assert_eq!(*b.to_bytes(), *before, "other context: state untouched");
+
+    assert_eq!(recv(&mut b, &fresh).unwrap(), b"fresh");
+}
+
 #[test]
 fn extra_aad_is_authenticated() {
     let (mut a, mut b) = establish(false);
