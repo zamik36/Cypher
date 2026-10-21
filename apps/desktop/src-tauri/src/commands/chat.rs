@@ -60,7 +60,11 @@ pub(crate) async fn mark_read(
     msg_ids: Vec<String>,
 ) -> CmdResult<()> {
     let peer = parse_peer(&peer_id)?;
-    let ids = msg_ids.iter().filter_map(|h| MsgId::from_hex(h)).collect();
+    // One malformed id refuses the whole list, before anything is sent.
+    let ids = msg_ids
+        .iter()
+        .map(|h| parse_msg(h))
+        .collect::<CmdResult<_>>()?;
     state
         .client()
         .await?

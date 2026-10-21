@@ -347,10 +347,9 @@ async fn bad_ids_are_named_as_the_web_client_names_them() {
     let bad_file = || json!({ "fileId": "zz" });
     assert_eq!(refused("accept_file", bad_file()).await, file);
     assert_eq!(refused("cancel_transfer", bad_file()).await, file);
-    // A bad id in a read receipt list is skipped, not refused (the web
-    // client refuses the list).
-    let ids = json!({ "peerId": peer, "msgIds": ["zz"] });
-    assert_ne!(refused("mark_read", ids).await, message);
+    // One bad id refuses the whole read receipt list, as on the web.
+    let ids = json!({ "peerId": peer, "msgIds": ["00".repeat(16), "zz"] });
+    assert_eq!(refused("mark_read", ids).await, message);
 }
 
 /// Locking or erasing closes the microphone and gives up a link being
@@ -799,7 +798,12 @@ async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
     })
     .await;
     assert_eq!(received["msg_id"], msg_id);
-    let read = json!({ "peerId": a_id, "msgIds": [msg_id, "zz"] });
+    let bad = json!({ "peerId": a_id, "msgIds": [msg_id, "zz"] });
+    assert_eq!(
+        b.call("mark_read", bad).await.unwrap_err(),
+        "invalid message id"
+    );
+    let read = json!({ "peerId": a_id, "msgIds": [msg_id] });
     b.call("mark_read", read).await.unwrap();
 
     // An answer, then deleting it on this device only.

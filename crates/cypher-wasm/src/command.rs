@@ -369,7 +369,7 @@ mod tests {
             refused(json!({ "type": "discard_outgoing", "msg_id": "zz" })),
             message
         );
-        // One bad id refuses the whole list (the desktop skips it instead).
+        // One bad id refuses the whole list, as on the desktop.
         let ids = json!({ "type": "mark_read", "peer": PEER, "ids": ["00".repeat(16), "zz"] });
         assert_eq!(refused(ids), message);
         let file = "invalid file id";
