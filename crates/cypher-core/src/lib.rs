@@ -29,8 +29,8 @@ pub use core::{Core, Rows, Snapshot};
 pub use media::MediaKey;
 pub use share::ShareLink;
 pub use store::{
-    ContactInfo, Record, StoreOp, Table, Vault, message_key, message_window, peer_messages,
-    session_key,
+    ContactInfo, MessageDeletion, Record, StoreOp, Table, Vault, message_deletion, message_key,
+    message_window, peer_messages, session_key, status_key,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

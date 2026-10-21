@@ -502,13 +502,11 @@ async function deleteRows(rows: Awaited<ReturnType<typeof scan>>) {
   const received: string[] = [];
   const ops: Op[] = [];
   for (const [key, value] of rows) {
-    const msg = c.openMessage(key, value, undefined) as StoredView;
-    if (msg.file && msg.file.kind !== "file") media.push(msg.file.file_id);
-    else if (msg.file) received.push(msg.file.file_id);
-    ops.push({ kind: "delete", table: "messages", key });
-    ops.push({ kind: "delete", table: "message_status", key: key.slice(key.length - 16) });
+    const deletion = c.messageDeletion(key, value);
+    ops.push(...deletion.ops);
+    if (deletion.note) media.push(deletion.note);
+    if (deletion.file) received.push(deletion.file);
   }
-  for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
   await applyOps(db, ops);
   const [sealed, plain] = await Promise.all([sinkDir("media"), sinkDir("download")]);
   await Promise.all([

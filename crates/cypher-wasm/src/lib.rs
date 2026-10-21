@@ -6,9 +6,7 @@ mod command;
 mod convert;
 mod history;
 
-use cypher_core::{
-    Core, Effect, Input, Table, Vault, message_key, message_window, peer_messages, ui,
-};
+use cypher_core::{Core, Effect, Input, Vault, message_key, message_window, peer_messages, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
 use cypher_types::{DeviceId, MsgId};
 use js_sys::Array;
@@ -377,15 +375,20 @@ impl Client {
         value: &[u8],
         status: Option<Vec<u8>>,
     ) -> Result<JsValue, JsError> {
-        let mut msg = self.vault.open_message(key, value).map_err(js_err)?;
-        if let Some(raw) = status
-            && let Ok(s) = self
-                .vault
-                .open(Table::MessageStatus, msg.msg_id.as_bytes(), &raw)
-        {
-            msg.status = s;
-        }
+        let msg = self
+            .vault
+            .open_message_with_status(key, value, status)
+            .map_err(js_err)?;
         to_js(&ui::message(&msg))
+    }
+
+    /// What deleting the message stored under `key` takes: the store
+    /// operations, the note whose sealed copy goes too, and the file whose
+    /// saved copy it named. Fails when the row cannot be read.
+    #[wasm_bindgen(js_name = messageDeletion, unchecked_return_type = "MessageDeletion")]
+    pub fn message_deletion(&self, key: &[u8], value: &[u8]) -> Result<JsValue, JsError> {
+        let msg = self.vault.open_message(key, value).map_err(js_err)?;
+        convert::deletion_to_js(&cypher_core::message_deletion(key, Some(&msg)))
     }
 
     /// Decrypts a sealed voice or video note: `record` is its row from the

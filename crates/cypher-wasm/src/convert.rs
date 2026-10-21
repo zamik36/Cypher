@@ -1,4 +1,5 @@
-use cypher_core::{Effect, Event, Rows, Sink, Snapshot, StoreOp, Table, ui};
+use cypher_core::{Effect, Event, MessageDeletion, Rows, Sink, Snapshot, StoreOp, Table, ui};
+use cypher_types::FileId;
 use js_sys::{Array, Uint8Array};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -45,6 +46,12 @@ export type Effect =
 export interface CommandOutcome { effects: Effect[]; msgId?: string; fileId?: string }
 
 export interface OpenedMedia { mime: string; bytes: Uint8Array<ArrayBuffer> }
+
+/**
+ * What deleting one stored message takes: its store operations, the note
+ * whose sealed copy goes too, and the file it names.
+ */
+export interface MessageDeletion { ops: Op[]; note: string | undefined; file: string | undefined }
 "#;
 
 // Each value is built and serialized immediately, one at a time; boxing the
@@ -162,15 +169,7 @@ fn js_effect(effect: &Effect) -> Option<JsEffect<'_>> {
     Some(match effect {
         Effect::Transmit(b) => JsEffect::Transmit { data: b },
         Effect::Anonymous(b) => JsEffect::Anonymous { data: b },
-        Effect::Persist(StoreOp::Put { table, key, value }) => JsEffect::Put {
-            table: table.name(),
-            key,
-            value,
-        },
-        Effect::Persist(StoreOp::Delete { table, key }) => JsEffect::Delete {
-            table: table.name(),
-            key,
-        },
+        Effect::Persist(op) => js_op(op),
         Effect::Emit(event) => {
             let (channel, payload) = ui::event(event)?;
             JsEffect::Event { channel, payload }
@@ -216,6 +215,35 @@ fn js_effect(effect: &Effect) -> Option<JsEffect<'_>> {
         Effect::Disconnect { reconnect } => JsEffect::Disconnect {
             reconnect: *reconnect,
         },
+    })
+}
+
+fn js_op(op: &StoreOp) -> JsEffect<'_> {
+    match op {
+        StoreOp::Put { table, key, value } => JsEffect::Put {
+            table: table.name(),
+            key,
+            value,
+        },
+        StoreOp::Delete { table, key } => JsEffect::Delete {
+            table: table.name(),
+            key,
+        },
+    }
+}
+
+#[derive(Serialize)]
+struct JsDeletion<'a> {
+    ops: Vec<JsEffect<'a>>,
+    note: Option<String>,
+    file: Option<String>,
+}
+
+pub(crate) fn deletion_to_js(deletion: &MessageDeletion) -> Result<JsValue, JsError> {
+    to_js(&JsDeletion {
+        ops: deletion.ops.iter().map(js_op).collect(),
+        note: deletion.note.map(FileId::to_hex),
+        file: deletion.file.map(FileId::to_hex),
     })
 }
 

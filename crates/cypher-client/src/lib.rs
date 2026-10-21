@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::{
-    Command, Core, CoreError, Event, MediaKind, MessageStatus, Snapshot, StoredMessage, Table,
-    Vault, message_key, message_window, peer_messages,
+    Command, Core, CoreError, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
+    message_deletion, message_key, message_window, peer_messages, status_key,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -163,25 +163,20 @@ fn check_tor(config: &Config) -> Result<(), ClientError> {
     Ok(())
 }
 
-/// Store operations that go with deleting `msg` besides its own row: its
-/// status, a media note's key, where a file was saved. Returns the media
-/// note whose sealed copy must go too.
-fn deletion_ops(msg: &StoredMessage, ops: &mut Vec<store::Op>) -> Option<FileId> {
-    ops.push(store::Op::Delete(
-        Table::MessageStatus.name(),
-        msg.msg_id.to_vec(),
-    ));
-    match &msg.content {
-        Content::File { file_id, kind, .. } if kind.is_media() => {
-            ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
-            Some(*file_id)
-        }
-        Content::File { file_id, .. } => {
-            ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
-            None
-        }
-        Content::Text { .. } => None,
+/// Store operations that delete the message stored under `key` (`msg`,
+/// when readable): see [`message_deletion`]. Returns the media note whose
+/// sealed copy must go too.
+fn deletion_ops(
+    key: &[u8],
+    msg: Option<&StoredMessage>,
+    ops: &mut Vec<store::Op>,
+) -> Option<FileId> {
+    let deletion = message_deletion(key, msg);
+    ops.extend(deletion.ops.into_iter().map(store::Op::from));
+    if let Some(file_id) = deletion.file {
+        ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
     }
+    deletion.note
 }
 
 /// A file about to be offered: its id, where it is, the name it goes by.
@@ -538,19 +533,13 @@ impl Client {
             .await?;
         let mut out = Vec::with_capacity(rows.len());
         for (key, value) in rows {
-            let mut msg = self.vault.open_message(&key, &value)?;
-            if let Some(status) = self
+            let status = self
                 .store
-                .get(Table::MessageStatus.name(), msg.msg_id.to_vec())
-                .await?
-                .and_then(|raw| {
-                    self.vault
-                        .open::<MessageStatus>(Table::MessageStatus, msg.msg_id.as_bytes(), &raw)
-                        .ok()
-                })
-            {
-                msg.status = status;
-            }
+                .get(Table::MessageStatus.name(), status_key(&key).to_vec())
+                .await?;
+            let msg = self
+                .vault
+                .open_message_with_status(&key, &value, status.as_deref())?;
             out.push(msg);
         }
         Ok(out)
@@ -611,10 +600,8 @@ impl Client {
         let mut ops = Vec::with_capacity(rows.len() * 2);
         let mut media = Vec::new();
         for (key, sealed) in rows {
-            if let Ok(msg) = self.vault.open_message(&key, &sealed) {
-                media.extend(deletion_ops(&msg, &mut ops));
-            }
-            ops.push(store::Op::Delete(Table::Messages.name(), key));
+            let msg = self.vault.open_message(&key, &sealed).ok();
+            media.extend(deletion_ops(&key, msg.as_ref(), &mut ops));
         }
         self.store.apply(ops).await?;
         self.remove_media_files(media).await
@@ -644,8 +631,8 @@ impl Client {
             self.command(Command::CancelTransfer { file_id: *file_id })
                 .await?;
         }
-        let mut ops = vec![store::Op::Delete(Table::Messages.name(), key)];
-        let media = deletion_ops(&msg, &mut ops);
+        let mut ops = Vec::new();
+        let media = deletion_ops(&key, Some(&msg), &mut ops);
         self.store.apply(ops).await?;
         self.remove_media_files(media).await
     }
@@ -725,6 +712,8 @@ async fn load_files(
 
 #[cfg(test)]
 mod tests {
+    use cypher_core::MessageStatus;
+
     use super::*;
 
     fn config(dir: &Path) -> Config {
