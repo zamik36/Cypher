@@ -231,9 +231,18 @@ fn release_later(reserved: PathBuf) {
 /// Waits for the first event `pick` accepts.
 pub(crate) async fn await_event<T>(
     rx: &mut broadcast::Receiver<Event>,
+    pick: impl FnMut(&Event) -> Option<CmdResult<T>>,
+) -> CmdResult<T> {
+    await_event_within(REPLY_TIMEOUT, rx, pick).await
+}
+
+/// [`await_event`], giving up after `wait`.
+pub(crate) async fn await_event_within<T>(
+    wait: Duration,
+    rx: &mut broadcast::Receiver<Event>,
     mut pick: impl FnMut(&Event) -> Option<CmdResult<T>>,
 ) -> CmdResult<T> {
-    tokio::time::timeout(REPLY_TIMEOUT, async {
+    tokio::time::timeout(wait, async {
         loop {
             match rx.recv().await {
                 Ok(event) => {
