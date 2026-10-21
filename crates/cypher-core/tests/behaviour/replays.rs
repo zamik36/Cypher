@@ -85,6 +85,18 @@ fn over_session(from: Addr, body: Bytes) -> Bytes {
     .encode()
 }
 
+/// The body of the last end-to-end message client `i` was handed by the
+/// server.
+fn last_message_from(w: &World, i: usize) -> Bytes {
+    let peer = w.peer(i);
+    crate::delivered_bodies(w)
+        .into_iter()
+        .filter_map(|(from, body)| (from == peer).then_some(body))
+        .filter(is_message)
+        .last()
+        .expect("a message delivered")
+}
+
 /// `body` with the last byte of its ciphertext (the AEAD tag) flipped.
 fn altered(body: &Bytes) -> Bytes {
     let mut raw = body.to_vec();
@@ -141,13 +153,7 @@ fn copies_of_messages_already_read_are_no_news() {
 #[test]
 fn an_altered_copy_warns_and_starts_afresh() {
     let mut w = talked();
-    let a = addr(&w, A);
-    let last = crate::delivered_bodies(&w)
-        .into_iter()
-        .filter_map(|(from, body)| (from == a.peer).then_some(body))
-        .filter(is_message)
-        .last()
-        .expect("a message from A");
+    let (a, last) = (addr(&w, A), last_message_from(&w, A));
     let (from, fetches) = (w.clients[B].events.len(), w.server.key_fetches);
 
     w.inject(B, over_session(a, altered(&last)));
@@ -189,4 +195,20 @@ fn a_fresh_message_altered_on_the_way_warns_and_starts_afresh() {
     let shown = w.texts(B);
     let kept = shown.iter().filter(|t| *t == "kept by the server");
     assert_eq!(kept.count(), 1, "sent again on the fresh session");
+}
+
+/// Which messages a session read is kept in memory only: once the app
+/// restarts, a copy of one read before fails like a message whose key is
+/// spent, and the session starts afresh.
+#[test]
+fn after_a_restart_a_copy_warns_and_starts_afresh() {
+    let mut w = talked();
+    let (a, last) = (addr(&w, A), last_message_from(&w, A));
+    w.restart(B);
+    let (from, fetches) = (w.clients[B].events.len(), w.server.key_fetches);
+
+    w.inject(B, over_session(a, last));
+
+    assert!(warned(&w, B, from));
+    assert!(w.server.key_fetches > fetches, "a session started afresh");
 }
