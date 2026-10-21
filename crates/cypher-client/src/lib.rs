@@ -761,6 +761,152 @@ mod tests {
             .unwrap();
     }
 
+    fn file(peer: PeerId, sent_at_ms: u64, id: u8, kind: MediaKind) -> StoredMessage {
+        StoredMessage {
+            content: Content::File {
+                file_id: FileId([id; FileId::LEN]),
+                name: format!("file {id}"),
+                mime: "audio/ogg".into(),
+                size: 10,
+                kind,
+            },
+            ..text(peer, sent_at_ms, id)
+        }
+    }
+
+    async fn started(dir: &Path) -> Client {
+        let seed = IdentitySeed::generate();
+        let (client, _events) = Client::start(&seed, DeviceId::FIRST, config(dir))
+            .await
+            .unwrap();
+        client
+    }
+
+    async fn put_status(client: &Client, msg_id: MsgId, status: MessageStatus) {
+        let sealed =
+            client
+                .vault
+                .seal(Table::MessageStatus, msg_id.as_bytes(), &status, &mut OsRng);
+        let op = store::Op::Put(Table::MessageStatus.name(), msg_id.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+    }
+
+    /// A voice note's key row and its sealed copy on disk.
+    async fn put_note(client: &Client, file_id: FileId) {
+        let key = cypher_core::MediaKey::from_desc(&cypher_core::envelope::FileDesc {
+            file_id,
+            name: "voice".into(),
+            mime: "audio/ogg".into(),
+            size: 10,
+            chunk_size: 64 * 1024,
+            key: [1; 32],
+            inline: None,
+        });
+        let sealed = client
+            .vault
+            .seal(Table::Media, file_id.as_bytes(), &key, &mut OsRng);
+        let op = store::Op::Put(Table::Media.name(), file_id.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+        let path = client.config.media_path(&file_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"sealed").unwrap();
+    }
+
+    /// Where a received file was saved, and the file itself.
+    async fn put_saved(client: &Client, file_id: FileId, dir: &Path) -> PathBuf {
+        let path = dir.join(format!("saved-{}", file_id.to_hex()));
+        std::fs::write(&path, b"plain").unwrap();
+        let location = path.to_str().unwrap().to_owned();
+        let sealed = client.vault.seal(
+            Table::Meta,
+            &saved_key(&file_id),
+            &SavedFile { location },
+            &mut OsRng,
+        );
+        let op = store::Op::Put(SAVED_TABLE, file_id.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+        path
+    }
+
+    async fn keys(client: &Client, table: &'static str) -> Vec<Vec<u8>> {
+        let rows = client.store.scan(table).await.unwrap();
+        rows.into_iter().map(|(k, _)| k).collect()
+    }
+
+    /// History shows each message with the latest status stored for it.
+    #[tokio::test]
+    async fn history_shows_the_latest_status_of_each_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        for msg in [text(peer, 1, 1), text(peer, 2, 2)] {
+            put(&client, &msg).await;
+        }
+        put_status(&client, MsgId([1; 16]), MessageStatus::Read).await;
+        let shown: Vec<_> = client
+            .history(peer, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.msg_id, m.status))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (MsgId([2; 16]), MessageStatus::Delivered),
+                (MsgId([1; 16]), MessageStatus::Read)
+            ]
+        );
+        client.shutdown().await;
+    }
+
+    /// Deleting a message or a conversation takes its rows, statuses and
+    /// sealed notes, and where files were saved; the saved files stay.
+    #[tokio::test]
+    async fn deleting_takes_rows_statuses_and_notes_but_not_saved_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let (peer, other) = (PeerId([4; 32]), PeerId([5; 32]));
+        let voice = MediaKind::Voice {
+            duration_ms: 1,
+            waveform: vec![1],
+        };
+        let msgs = [
+            text(peer, 1_000, 1),
+            text(peer, 2_000, 2),
+            file(peer, 3_000, 3, voice),
+            file(peer, 4_000, 4, MediaKind::File),
+            text(other, 1_000, 5),
+        ];
+        for msg in &msgs {
+            put(&client, msg).await;
+            put_status(&client, msg.msg_id, MessageStatus::Read).await;
+        }
+        put_note(&client, FileId([3; 16])).await;
+        let saved = put_saved(&client, FileId([4; 16]), dir.path()).await;
+
+        client
+            .delete_message(peer, MsgId([1; 16]), 1_000)
+            .await
+            .unwrap();
+        let ids = |n: &[u8]| n.iter().map(|&n| vec![n; 16]).collect::<Vec<_>>();
+        assert_eq!(
+            keys(&client, Table::MessageStatus.name()).await,
+            ids(&[2, 3, 4, 5])
+        );
+        assert_eq!(client.history(peer, None, 10).await.unwrap().len(), 3);
+
+        client.forget_peer(peer).await.unwrap();
+        assert!(client.history(peer, None, 10).await.unwrap().is_empty());
+        assert_eq!(keys(&client, Table::MessageStatus.name()).await, ids(&[5]));
+        assert!(keys(&client, Table::Media.name()).await.is_empty());
+        assert!(!client.config.media_path(&FileId([3; 16])).exists());
+        assert!(keys(&client, SAVED_TABLE).await.is_empty());
+        assert!(saved.exists(), "a saved file stays where it is");
+        assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+        client.shutdown().await;
+    }
+
     /// Asking for Tor never ends in a direct connection to the relay: a
     /// build without Tor, or a process that chose no rustls provider for
     /// Arti, refuses to start instead.
