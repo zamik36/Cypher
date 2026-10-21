@@ -68,6 +68,10 @@ pub(crate) async fn link_cancel(state: State<'_, AppState>) -> CmdResult<()> {
 /// Links the new device whose offer the user scanned or pasted; with
 /// `history`, it also gets the message history.
 #[tauri::command]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "waits for one reply among all the client's events"
+)]
 pub(crate) async fn link_device(
     state: State<'_, AppState>,
     offer: String,

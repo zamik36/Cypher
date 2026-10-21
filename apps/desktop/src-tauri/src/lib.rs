@@ -1,3 +1,7 @@
+// Matches on our own and Tauri's enums name every variant, so a new one
+// is looked at where it matters.
+#![warn(clippy::wildcard_enum_match_arm)]
+
 mod commands;
 mod dto;
 mod ephemeral;
@@ -132,7 +136,9 @@ fn on_webview_event<R: Runtime>(webview: &tauri::Webview<R>, event: &tauri::Webv
         tauri::DragDropEvent::Leave => {
             let _ = app.emit("cypher://files_dragging", false);
         }
-        _ => {}
+        // The UI needs only where a drag starts and ends; Tauri may add
+        // variants (the enum is non-exhaustive), which need nothing either.
+        tauri::DragDropEvent::Over { .. } | _ => {}
     }
 }
 

@@ -10,6 +10,10 @@ pub(crate) struct LinkInfo {
 }
 
 #[tauri::command]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "waits for one reply among all the client's events"
+)]
 pub(crate) async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInfo> {
     let (client, mut events) = state.client_and_events().await?;
     client.command(Command::CreateLink).await.map_err(err)?;
@@ -25,6 +29,10 @@ pub(crate) async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInf
 
 /// Resolves to the joined peer id once the session is established.
 #[tauri::command]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "waits for one reply among all the client's events"
+)]
 pub(crate) async fn join_link(state: State<'_, AppState>, link_id: String) -> CmdResult<String> {
     let (client, mut events) = state.client_and_events().await?;
     let link = link_id.trim().to_owned();
