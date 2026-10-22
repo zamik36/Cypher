@@ -78,6 +78,9 @@ pub(crate) struct Prekeys {
     prev_spk_inits: BTreeSet<[u8; 32]>,
     /// Inits accepted per signed prekey from each sender. In memory only.
     sender_inits: BTreeMap<(u32, PeerId), u16>,
+    /// Refusals already told, per signed prekey: of a sender beyond its
+    /// quota, or (`None`) of a prekey full. In memory only.
+    refusals: BTreeSet<(u32, Option<PeerId>)>,
     /// Read from a record that did not remember inits yet.
     unseeded: bool,
 }
@@ -93,6 +96,7 @@ impl Prekeys {
             spk_inits: BTreeSet::new(),
             prev_spk_inits: BTreeSet::new(),
             sender_inits: BTreeMap::new(),
+            refusals: BTreeSet::new(),
             unseeded: false,
         }
     }
@@ -164,6 +168,17 @@ impl Prekeys {
         room && quota
     }
 
+    /// Notes that an init on signed prekey `spk_id` from `sender` was
+    /// refused; whether it is the first refusal of its kind (this sender
+    /// beyond its quota, or this prekey full), the one to tell.
+    pub(crate) fn first_refusal(&mut self, spk_id: u32, sender: InitSender) -> bool {
+        let full = self
+            .inits(spk_id)
+            .is_none_or(|i| i.len() >= MAX_INITS_PER_SPK);
+        self.refusals
+            .insert((spk_id, (!full).then(|| sender.peer())))
+    }
+
     /// Remembers an init accepted on signed prekey `spk_id` from `sender`;
     /// one on a prekey no longer kept, or one that is full, is not. Whether
     /// the current prekey filled up and was rotated, to be published.
@@ -223,6 +238,7 @@ impl Prekeys {
         self.prev_spk = Some(std::mem::replace(&mut self.spk, next));
         self.prev_spk_inits = std::mem::take(&mut self.spk_inits);
         self.sender_inits.retain(|(id, _), _| *id == kept);
+        self.refusals.retain(|(id, _)| *id == kept);
         self.spk_created_ms = now_ms;
     }
 
@@ -259,6 +275,7 @@ impl Prekeys {
             spk_inits: r.spk_inits.iter().copied().collect(),
             prev_spk_inits: r.prev_spk_inits.iter().copied().collect(),
             sender_inits: BTreeMap::new(),
+            refusals: BTreeSet::new(),
             unseeded: r.from_v1,
         }
     }
@@ -476,6 +493,7 @@ mod tests {
         assert!(!pk.may_init(1, CONTACT));
         assert!(pk.may_init(1, other));
         assert!(pk.spk(2).is_none(), "far from rotating");
+        assert!(pk.first_refusal(1, CONTACT) && !pk.first_refusal(1, CONTACT));
     }
 
     /// However many inits the sessions remember, seeding leaves room: a

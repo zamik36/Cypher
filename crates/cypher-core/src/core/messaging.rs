@@ -616,12 +616,8 @@ impl<R: CryptoRngCore> Core<R> {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
-        let who = if !own && self.peers.get(&from).is_none_or(|p| p.request) {
-            InitSender::Request(from)
-        } else {
-            InitSender::Contact(from)
-        };
-        self.check_init_prekeys(init, who)?;
+        let who = self.init_sender(from);
+        self.check_init_prekeys(init)?;
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
@@ -636,6 +632,7 @@ impl<R: CryptoRngCore> Core<R> {
             init,
         )?;
         let pt = ratchet.decrypt(header, ct, b"", &mut self.rng)?;
+        self.admit_init(init, who)?;
 
         // Both sides started a session at once: the lower device keeps its
         // own and ignores the other's. Spent either way, so that a copy of
@@ -664,29 +661,43 @@ impl<R: CryptoRngCore> Core<R> {
         Ok(Opened::New(pt))
     }
 
-    /// Whether a new init from `sender` can be taken on the prekeys it
-    /// names. Prekeys we lack (our
+    /// Who `from` is, as far as how many of their inits are taken goes:
+    /// someone not (yet) taken as a contact is a request.
+    fn init_sender(&self, from: PeerId) -> InitSender {
+        if from != self.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
+            InitSender::Request(from)
+        } else {
+            InitSender::Contact(from)
+        }
+    }
+
+    /// Whether we hold the prekeys a new init names. Prekeys we lack (our
     /// saved state fell behind what the server hands out) make us publish
-    /// fresh ones. An init refused for the limits on remembered inits is
-    /// told: someone is being turned away.
-    fn check_init_prekeys(
-        &mut self,
-        init: &InitHeader,
-        sender: InitSender,
-    ) -> Result<(), CoreError> {
+    /// fresh ones.
+    fn check_init_prekeys(&mut self, init: &InitHeader) -> Result<(), CoreError> {
         let known = self.prekeys.spk(init.spk_id).is_some()
             && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
         if !known {
             self.resync_prekeys();
             return Err(CoreError::Crypto);
         }
-        if !self.prekeys.may_init(init.spk_id, sender) {
+        Ok(())
+    }
+
+    /// Whether an authenticated init from `sender` is within the limits on
+    /// remembered inits. Only authenticated ones are checked, so no one can
+    /// make us turn anyone away in another's name; the first refusal of a
+    /// kind is told (someone is being turned away), later ones are not.
+    fn admit_init(&mut self, init: &InitHeader, sender: InitSender) -> Result<(), CoreError> {
+        if self.prekeys.may_init(init.spk_id, sender) {
+            return Ok(());
+        }
+        if self.prekeys.first_refusal(init.spk_id, sender) {
             self.emit(Event::Warning {
                 reason: FailReason::Rejected,
             });
-            return Err(CoreError::Conflict);
         }
-        Ok(())
+        Err(CoreError::Conflict)
     }
 
     /// Spends what an authenticated init used: its one-time prekey, and a

@@ -347,23 +347,33 @@ fn inits_accepted_before_the_update_stay_refused() {
     refused_by(&mut w, A, b, frame);
 }
 
-/// Inits a stranger C makes from A's published keys, each starting a
-/// session afresh, as frames A gets from C.
-fn inits_from_stranger(w: &World, n: usize) -> Vec<Bytes> {
+/// An init a stranger C makes from A's published keys, starting a session
+/// afresh, as a frame A gets from C; its ciphertext altered if `tampered`.
+fn init_from_stranger(w: &World, tampered: bool) -> Bytes {
     let identity = IdentitySeed(w.clients[C].seed).derive_identity();
     let bundle = w.bundle_of(addr(w, A));
-    (0..n)
-        .map(|_| {
-            let (mut ratchet, init) =
-                handshake::initiate(&identity, DeviceId::FIRST, &bundle, &mut OsRng).unwrap();
-            let (header, ct) = ratchet.encrypt(b"let me in", b"").unwrap();
-            let body = relay::message_body(Some(&init), &header, &ct);
-            over_session(
-                Addr::new(identity.peer_id(), DeviceId::FIRST),
-                Bytes::from(body),
+    let (mut ratchet, init) =
+        handshake::initiate(&identity, DeviceId::FIRST, &bundle, &mut OsRng).unwrap();
+    let (header, ct) = ratchet.encrypt(b"let me in", b"").unwrap();
+    let body = Bytes::from(relay::message_body(Some(&init), &header, &ct));
+    let body = if tampered { altered(&body) } else { body };
+    over_session(Addr::new(identity.peer_id(), DeviceId::FIRST), body)
+}
+
+/// How many times client `i` was told an init was turned away.
+fn turned_away(w: &World, i: usize) -> usize {
+    w.clients[i]
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::Warning {
+                    reason: FailReason::Rejected
+                }
             )
         })
-        .collect()
+        .count()
 }
 
 /// A stranger floods A with inits, each validly made from A's keys. Only
@@ -373,18 +383,10 @@ fn inits_from_stranger(w: &World, n: usize) -> Vec<Bytes> {
 fn a_stranger_flooding_inits_does_not_lock_out_contacts() {
     let mut w = World::new(3);
     w.pair(A, B);
-    for (n, frame) in inits_from_stranger(&w, 33).into_iter().enumerate() {
-        let from = w.clients[A].events.len();
+    for n in 0..33 {
+        let frame = init_from_stranger(&w, false);
         w.inject(A, frame);
-        let turned_away = events_since(&w, A, from).iter().any(|e| {
-            matches!(
-                e,
-                Event::Warning {
-                    reason: FailReason::Rejected
-                }
-            )
-        });
-        assert_eq!(turned_away, n >= 32, "init {n}");
+        assert_eq!(turned_away(&w, A), usize::from(n >= 32), "init {n}");
     }
 
     let from = w.clients[A].events.len();
@@ -430,4 +432,23 @@ fn the_init_turned_away_when_both_joined_at_once_stays_refused() {
 
     let high_addr = addr(&w, high);
     refused_by(&mut w, low, high_addr, turned_away);
+}
+
+/// Once a stranger is beyond its quota, A says so once. Inits that do not
+/// even decrypt, made by anyone in the stranger's name, are not turned
+/// away for the quota: they fail as any message that does not decrypt.
+#[test]
+fn turning_a_stranger_away_is_told_once_and_only_for_real_inits() {
+    let mut w = World::new(3);
+    w.pair(A, B);
+    for _ in 0..32 {
+        let frame = init_from_stranger(&w, false);
+        w.inject(A, frame);
+    }
+    assert_eq!(turned_away(&w, A), 0);
+    for tampered in [true, true, false, true, false] {
+        let frame = init_from_stranger(&w, tampered);
+        w.inject(A, frame);
+    }
+    assert_eq!(turned_away(&w, A), 1);
 }
