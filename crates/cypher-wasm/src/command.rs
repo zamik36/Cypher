@@ -2,7 +2,7 @@
 //! and their validated mapping onto core commands. Pure, so it is tested
 //! natively; the wasm-bindgen layer only converts `JsValue`s.
 
-use cypher_core::{Command, MediaKind};
+use cypher_core::{Command, CommandId, MediaKind};
 use cypher_types::{FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 use serde::Deserialize;
@@ -13,8 +13,12 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum JsCommand {
-    CreateLink,
+    /// `id` comes back in the reply that answers it.
+    CreateLink {
+        id: CommandId,
+    },
     JoinLink {
+        id: CommandId,
         link: String,
     },
     SendText {
@@ -75,6 +79,7 @@ pub(crate) enum JsCommand {
     },
     DisablePush,
     LinkDevice {
+        id: CommandId,
         offer: String,
         /// Hand the new device the message history too.
         #[serde(default)]
@@ -146,8 +151,8 @@ impl JsCommand {
             file_id: None,
         };
         Ok(match self {
-            Self::CreateLink => plain(Command::CreateLink),
-            Self::JoinLink { link } => plain(Command::JoinLink { link }),
+            Self::CreateLink { id } => plain(Command::CreateLink { id }),
+            Self::JoinLink { id, link } => plain(Command::JoinLink { id, link }),
             Self::SendText {
                 peer: p,
                 text,
@@ -219,7 +224,7 @@ impl JsCommand {
                 auth: auth.try_into().map_err(|_| CommandError::Push)?,
             },
             Self::DisablePush => Command::DisablePush,
-            Self::LinkDevice { offer, history } => Command::LinkDevice { offer, history },
+            Self::LinkDevice { id, offer, history } => Command::LinkDevice { id, offer, history },
             Self::CancelHistory => Command::CancelHistory,
             Self::UnlinkDevice { device } => Command::UnlinkDevice { device },
             Self::ReplaceDevice { device } => Command::ReplaceDevice { device },
@@ -456,12 +461,13 @@ mod tests {
 
     #[test]
     fn devices_are_linked_and_unlinked() {
-        let link = prepare(json!({ "type": "link_device", "offer": "cypher-device:00" })).unwrap();
+        let offer = json!({ "type": "link_device", "id": 5, "offer": "cypher-device:00" });
+        let link = prepare(offer).unwrap();
         assert!(matches!(
             link.command,
-            Command::LinkDevice { offer, history: false } if offer == "cypher-device:00"
+            Command::LinkDevice { id: CommandId(5), offer, history: false } if offer == "cypher-device:00"
         ));
-        let with_history = json!({ "type": "link_device", "offer": "x", "history": true });
+        let with_history = json!({ "type": "link_device", "id": 6, "offer": "x", "history": true });
         assert!(matches!(
             prepare(with_history).unwrap().command,
             Command::LinkDevice { history: true, .. }

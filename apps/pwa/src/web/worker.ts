@@ -51,7 +51,9 @@ let queue: Promise<unknown> = Promise.resolve();
 const sources = new Map<string, File>();
 const offerNames = new Map<string, string>();
 const openSinks = new Map<string, { handle: FileSystemSyncAccessHandle; name: string; sink: Sink }>();
-const waiters = new Set<(r: Reply) => boolean>();
+/** Commands waiting for their answer, by the id they went with. */
+const waiters = new Map<number, (r: Reply | CommandError) => void>();
+let nextCommand = 1;
 
 const post = (msg: WorkerMessage) => self.postMessage(msg);
 
@@ -93,7 +95,9 @@ const sinks: EffectSinks = {
   anonymous: (data) => relay.send(data),
   event: onEvent,
   reply: (r) => {
-    for (const w of waiters) if (w(r)) waiters.delete(w);
+    const waiter = waiters.get(r.id);
+    waiters.delete(r.id);
+    waiter?.(r);
   },
   readChunk: (request) => void readChunk(request),
   openSink: (fileId, len, sink) => openSink(fileId, len, sink).catch((e: unknown) => sinkFailed(fileId, e)),
@@ -127,7 +131,7 @@ function sinkFailed(fileId: string, e: unknown) {
 function storageFailed() {
   gateway.stop();
   relay.stop();
-  sinks.reply({ kind: "reply", op: "warning", value: "storage_failed" });
+  failWaiters(failed("storage_failed"));
   onEvent("error", "storage_failed");
   onEvent("disconnected", null);
 }
@@ -137,7 +141,6 @@ let applier = new EffectApplier(sinks, storageFailed);
 const apply = (effects: Effect[]) => applier.apply(effects);
 
 function onEvent(channel: string, payload: unknown) {
-  for (const w of linkWaiters) if (w(channel, payload)) linkWaiters.delete(w);
   switch (channel) {
     case "file_offered": {
       const offer = payload as { file_id: string; name: string };
@@ -164,23 +167,40 @@ function onEvent(channel: string, payload: unknown) {
   post({ event: channel, payload });
 }
 
-/** Resolves with the first reply `pick` accepts; register before issuing the command. */
-function awaitReply(pick: (r: Reply) => string | CommandError | undefined): Promise<string> {
-  return new Promise((resolve, reject) => {
+/**
+ * Runs `cmd` under a fresh id and resolves with the value of the reply that
+ * answers it, when that reply is `ok`; any other reply is why it failed.
+ * Replies to other commands, and warnings, do not touch it.
+ */
+async function request(cmd: Record<string, unknown>, ok: Reply["op"]): Promise<string> {
+  const id = nextCommand++;
+  const reply = new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => {
-      waiters.delete(waiter);
+      waiters.delete(id);
       reject(failure("timed_out", "timed out"));
     }, REPLY_TIMEOUT_MS);
-    const waiter = (r: Reply) => {
-      const out = pick(r);
-      if (out === undefined) return false;
+    waiters.set(id, (r) => {
       clearTimeout(timer);
-      if (out instanceof CommandError) reject(out);
-      else resolve(out);
-      return true;
-    };
-    waiters.add(waiter);
+      if (r instanceof CommandError) reject(r);
+      else if (r.op === ok) resolve(r.value);
+      else reject(failed(r.value));
+    });
   });
+  try {
+    await serial(() => run({ ...cmd, id }));
+  } catch (e) {
+    const waiter = waiters.get(id);
+    waiters.delete(id);
+    waiter?.(toCommandError(e));
+  }
+  return reply;
+}
+
+/** Fails every command still waiting for its answer. */
+function failWaiters(e: CommandError) {
+  const waiting = [...waiters.values()];
+  waiters.clear();
+  for (const waiter of waiting) waiter(e);
 }
 
 /** A reconnecting WebSocket carrying one wire frame per binary message. */
@@ -305,9 +325,6 @@ function stopLinking() {
   linkSocket.stop();
   linkDone?.settle(failure("cancelled", "cancelled"));
 }
-
-/** Resolves once the core reports linking the device it was given, or why not. */
-const linkWaiters = new Set<(channel: string, payload: unknown) => boolean>();
 
 const relay = new Link(
   () => void feed((c, now) => c.anonymousChannel(true, now)),
@@ -593,16 +610,7 @@ const handlers: Handlers = {
     return Promise.resolve();
   },
   linkDevice: async (offer, history) => {
-    const done = new Promise<void>((resolve, reject) => {
-      linkWaiters.add((channel, payload) => {
-        if (channel === "device_linked") resolve();
-        else if (channel === "link_failed") reject(failed(String(payload)));
-        else return false;
-        return true;
-      });
-    });
-    await serial(() => run({ type: "link_device", offer, history }));
-    await done;
+    await request({ type: "link_device", offer, history }, "device_linked");
   },
   hasIdentity: async () => (await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined,
   createIdentity: (nickname, passphrase) => adopt(Identity.create(nickname, passphrase)),
@@ -646,21 +654,8 @@ const handlers: Handlers = {
   setAnonymity: async (anonymous) => {
     await serial(() => run({ type: "set_anonymity", require_onion: anonymous }));
   },
-  createLink: async () => {
-    const reply = awaitReply((r) =>
-      r.op === "link_created" ? r.value : r.op === "warning" ? failed(r.value) : undefined,
-    );
-    await serial(() => run({ type: "create_link" }));
-    return reply;
-  },
-  joinLink: async (link) => {
-    const trimmed = link.trim();
-    const reply = awaitReply((r) =>
-      r.op === "joined" ? r.value : r.op === "join_failed" && r.link === trimmed ? failed(r.value) : undefined,
-    );
-    await serial(() => run({ type: "join_link", link: trimmed }));
-    return reply;
-  },
+  createLink: () => request({ type: "create_link" }, "link_created"),
+  joinLink: (link) => request({ type: "join_link", link: link.trim() }, "joined"),
   command: (cmd) => serial(() => run(cmd)),
   sendFiles: (peer, files) =>
     serial(async () => {

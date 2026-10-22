@@ -2,7 +2,7 @@
 //! answer in time, or the connection going while they wait.
 
 use bytes::Bytes;
-use cypher_core::{Command, Event, FailReason};
+use cypher_core::{Command, CommandId, Event, FailReason};
 use cypher_types::{Addr, DeviceId};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg};
 
@@ -66,11 +66,14 @@ fn server_errors_tell_the_user_what_they_mean() {
             Fault::Error(code),
         ));
         let from = w.clients[A].events.len();
-        w.command(A, Command::CreateLink);
+        w.command(A, Command::CreateLink { id: CommandId(0) });
         let told: Vec<&Event> = events_since(&w, A, from).iter().collect();
         assert_eq!(
             told,
-            [&Event::Warning { reason: expected }],
+            [&Event::CreateLinkFailed {
+                id: CommandId(0),
+                reason: expected
+            }],
             "{code:?} means {expected:?}"
         );
     }
@@ -88,7 +91,13 @@ struct Visible {
 fn join(w: &mut World, picks: fn(&ClientMsg) -> bool, fault: Fault) {
     let link = w.create_link(B);
     w.server.faults.push(Rule::always(picks, fault));
-    w.command(A, Command::JoinLink { link });
+    w.command(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
 }
 
 /// A asks to hand its identity to a new device; `fault` hits the request
@@ -109,6 +118,7 @@ fn link_device(w: &mut World, fault: Fault, picks_listing: bool) {
     w.command(
         A,
         Command::LinkDevice {
+            id: CommandId(0),
             offer,
             history: false,
         },
@@ -125,8 +135,10 @@ fn lone_world() -> World {
 
 fn visible_requests() -> [Visible; 7] {
     let warning = |e: &Event, r| matches!(e, Event::Warning { reason } if *reason == r);
+    let not_created =
+        |e: &Event, r| matches!(e, Event::CreateLinkFailed { reason, .. } if *reason == r);
     let join_failed = |e: &Event, r| matches!(e, Event::JoinFailed { reason, .. } if *reason == r);
-    let link_failed = |e: &Event, r| matches!(e, Event::LinkFailed { reason } if *reason == r);
+    let link_failed = |e: &Event, r| matches!(e, Event::LinkFailed { reason, .. } if *reason == r);
     [
         Visible {
             name: "an invite",
@@ -135,9 +147,9 @@ fn visible_requests() -> [Visible; 7] {
                 w.server
                     .faults
                     .push(Rule::always(|m| matches!(m, ClientMsg::CreateLink), fault));
-                w.command(A, Command::CreateLink);
+                w.command(A, Command::CreateLink { id: CommandId(0) });
             },
-            told: warning,
+            told: not_created,
         },
         Visible {
             name: "who made an invite",
@@ -192,6 +204,7 @@ fn failures(events: &[Event]) -> Vec<&Event> {
             matches!(
                 e,
                 Event::Warning { .. }
+                    | Event::CreateLinkFailed { .. }
                     | Event::JoinFailed { .. }
                     | Event::LinkFailed { .. }
                     | Event::PushUnavailable
@@ -254,7 +267,7 @@ fn a_host_without_a_device_list_is_joined_at_its_first_device() {
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::PeerAdded {
-            initiated_by_us: true,
+            joined: Some(_),
             ..
         }
     )));
@@ -415,15 +428,21 @@ fn requests_waiting_for_an_answer_fail_when_the_connection_goes() {
         },
         Fault::Ignore,
     ));
-    w.command(A, Command::CreateLink);
-    w.command(A, Command::JoinLink { link });
+    w.command(A, Command::CreateLink { id: CommandId(0) });
+    w.command(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     w.command(A, Command::FetchInbox);
     let from = w.clients[A].events.len();
     w.disconnect(A);
     let told = events_since(&w, A, from);
     let offline = FailReason::Offline;
     assert!(
-        matches!(told.first(), Some(Event::Warning { reason }) if *reason == offline),
+        matches!(told.first(), Some(Event::CreateLinkFailed { reason, .. }) if *reason == offline),
         "{told:?}"
     );
     assert!(
@@ -452,7 +471,13 @@ fn requests_waiting_for_the_relay_go_in_the_order_made() {
     w.run();
     let start = w.server.served.len();
     for link in &links {
-        w.command(A, Command::JoinLink { link: link.clone() });
+        w.command(
+            A,
+            Command::JoinLink {
+                id: CommandId(0),
+                link: link.clone(),
+            },
+        );
     }
     let resolved = |w: &World| -> Vec<String> {
         w.server.served[start..]

@@ -1,5 +1,5 @@
 use cypher_core::{
-    Effect, Event, FailReason, MessageDeletion, Rows, Sink, Snapshot, StoreOp, Table, ui,
+    CommandId, Effect, Event, FailReason, MessageDeletion, Rows, Sink, Snapshot, StoreOp, Table, ui,
 };
 use cypher_types::FileId;
 use js_sys::{Array, Uint8Array};
@@ -27,8 +27,17 @@ export type Op =
   | { kind: "put"; table: string; key: Uint8Array<ArrayBuffer>; value: Uint8Array<ArrayBuffer> }
   | { kind: "delete"; table: string; key: Uint8Array<ArrayBuffer> };
 
-/** Outcome of a pending `create_link` / `join_link` call. */
-export interface Reply { kind: "reply"; op: string; value: string; link?: string | undefined }
+/**
+ * Outcome of the `create_link`, `join_link` or `link_device` command `id`:
+ * `value` is the link made, the peer joined or the device linked (its id),
+ * or the reason it failed (`create_failed`, `join_failed`, `link_failed`).
+ */
+export interface Reply {
+  kind: "reply";
+  op: "link_created" | "create_failed" | "joined" | "join_failed" | "device_linked" | "link_failed";
+  id: number;
+  value: string;
+}
 
 export interface ReadChunk { kind: "read_chunk"; file_id: string; index: number; offset: number; len: number; headroom: number }
 
@@ -121,11 +130,12 @@ enum JsEffect<'a> {
     Disconnect {
         reconnect: bool,
     },
-    /// Outcome of a pending `create_link` / `join_link` call.
+    /// Outcome of the `create_link`, `join_link` or `link_device` command
+    /// `id`.
     Reply {
         op: &'static str,
+        id: CommandId,
         value: ReplyValue,
-        link: Option<&'a str>,
     },
 }
 
@@ -138,22 +148,29 @@ enum ReplyValue {
     Reason(FailReason),
 }
 
-fn reply(event: &Event) -> Option<JsEffect<'_>> {
-    let (op, value, link) = match event {
-        Event::LinkCreated { link } => ("link_created", ReplyValue::Text(link.clone()), None),
+/// The answer to a command the worker waits on, by the command's id; other
+/// events answer none (a warning included: it fails no command).
+fn reply(event: &Event) -> Option<JsEffect<'static>> {
+    let (op, id, value) = match event {
+        Event::LinkCreated { id, link } => ("link_created", id, ReplyValue::Text(link.clone())),
+        Event::CreateLinkFailed { id, reason } => {
+            ("create_failed", id, ReplyValue::Reason(*reason))
+        }
         Event::PeerAdded {
             peer,
-            initiated_by_us: true,
-        } => ("joined", ReplyValue::Text(peer.to_hex()), None),
-        Event::JoinFailed { link, reason } => (
-            "join_failed",
-            ReplyValue::Reason(*reason),
-            Some(link.as_str()),
-        ),
-        Event::Warning { reason } => ("warning", ReplyValue::Reason(*reason), None),
+            joined: Some(id),
+        } => ("joined", id, ReplyValue::Text(peer.to_hex())),
+        Event::JoinFailed { id, reason, .. } => ("join_failed", id, ReplyValue::Reason(*reason)),
+        Event::DeviceLinked { id, device, .. } => {
+            ("device_linked", id, ReplyValue::Text(device.to_string()))
+        }
+        Event::LinkFailed {
+            id: Some(id),
+            reason,
+        } => ("link_failed", id, ReplyValue::Reason(*reason)),
         _ => return None,
     };
-    Some(JsEffect::Reply { op, value, link })
+    Some(JsEffect::Reply { op, id: *id, value })
 }
 
 pub(crate) fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
@@ -477,49 +494,89 @@ mod tests {
         assert_eq!(headroom, Some(json!(u32::MAX)));
     }
 
-    /// The outcomes the worker's pending link and join calls wait for come
-    /// as replies; other events have none.
+    /// The outcomes the worker's link, join and device link calls wait for
+    /// come as replies naming their command; other events have none.
     #[test]
-    fn link_and_join_outcomes_become_replies() {
+    fn command_outcomes_become_replies_naming_their_command() {
         let link = "cypher://join/abc".to_owned();
-        let created = Event::LinkCreated { link: link.clone() };
+        let id = CommandId(41);
+        let created = Event::LinkCreated {
+            id,
+            link: link.clone(),
+        };
         assert_eq!(shape(&Effect::Emit(created.clone())), None);
         let peer = PeerId([2; 32]);
         let golden = [
+            (created, "link_created", json!(link)),
             (
-                created,
-                json!({ "kind": "reply", "op": "link_created", "value": link, "link": null }),
+                Event::CreateLinkFailed {
+                    id,
+                    reason: FailReason::Offline,
+                },
+                "create_failed",
+                json!("offline"),
             ),
             (
                 Event::PeerAdded {
                     peer,
-                    initiated_by_us: true,
+                    joined: Some(id),
                 },
-                json!({ "kind": "reply", "op": "joined", "value": peer.to_hex(), "link": null }),
+                "joined",
+                json!(peer.to_hex()),
             ),
             (
                 Event::JoinFailed {
-                    link: link.clone(),
+                    id,
+                    link,
                     reason: FailReason::NotFound,
                 },
-                json!({ "kind": "reply", "op": "join_failed", "value": "not_found", "link": link }),
+                "join_failed",
+                json!("not_found"),
             ),
             (
-                Event::Warning {
-                    reason: FailReason::Timeout,
+                Event::DeviceLinked {
+                    id,
+                    device: 7,
+                    name: "Laptop".into(),
                 },
-                json!({ "kind": "reply", "op": "warning", "value": "timeout", "link": null }),
+                "device_linked",
+                json!("7"),
+            ),
+            (
+                Event::LinkFailed {
+                    id: Some(id),
+                    reason: FailReason::Rejected,
+                },
+                "link_failed",
+                json!("rejected"),
             ),
         ];
-        for (event, expected) in golden {
+        for (event, op, value) in golden {
             let js = reply(&event).map(|r| serde_json::to_value(r).unwrap());
+            let expected = json!({ "kind": "reply", "op": op, "id": 41, "value": value });
             assert_eq!(js, Some(expected), "{event:?}");
         }
-        let theirs = Event::PeerAdded {
-            peer,
-            initiated_by_us: false,
-        };
-        assert!(reply(&theirs).is_none());
-        assert!(reply(&Event::Connected).is_none());
+    }
+
+    #[test]
+    fn events_answering_no_command_have_no_reply() {
+        let unanswered = [
+            Event::PeerAdded {
+                peer: PeerId([2; 32]),
+                joined: None,
+            },
+            Event::LinkFailed {
+                id: None,
+                reason: FailReason::Rejected,
+            },
+            // A warning fails no command waiting meanwhile.
+            Event::Warning {
+                reason: FailReason::Timeout,
+            },
+            Event::Connected,
+        ];
+        for event in unanswered {
+            assert!(reply(&event).is_none(), "{event:?}");
+        }
     }
 }

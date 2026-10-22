@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 use super::{Core, Pending};
 use crate::CoreError;
-use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
+use crate::api::{CommandId, Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{
     Body, Envelope, InboxAd, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody,
 };
@@ -66,6 +66,8 @@ impl Opened {
 
 /// An invite being joined by, while the host's devices answer one by one.
 pub(super) struct Joining {
+    /// The `JoinLink` this answers.
+    id: CommandId,
     link: String,
     /// Key lookups not answered yet.
     outstanding: usize,
@@ -332,11 +334,18 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// The host of an invite we are joining by has these devices (its first
     /// only, as far as anyone knows, without a list): ask for each one's keys.
-    pub(super) fn join_devices(&mut self, link: &str, peer: PeerId, list: Option<DeviceList>) {
+    pub(super) fn join_devices(
+        &mut self,
+        id: CommandId,
+        link: &str,
+        peer: PeerId,
+        list: Option<DeviceList>,
+    ) {
         let devices = list
             .as_ref()
             .map_or_else(|| vec![DeviceId::FIRST], |l| l.devices().to_vec());
         let joining = Joining {
+            id,
             link: link.to_owned(),
             outstanding: devices.len(),
             devices: list,
@@ -410,9 +419,10 @@ impl<R: CryptoRngCore> Core<R> {
         joining.outstanding = joining.outstanding.saturating_sub(1);
         let first = failure.is_none() && !joining.added;
         joining.added |= first;
-        let (finished, added, link) = (
+        let (finished, added, id, link) = (
             joining.outstanding == 0,
             joining.added,
+            joining.id,
             joining.link.clone(),
         );
         if finished {
@@ -421,11 +431,11 @@ impl<R: CryptoRngCore> Core<R> {
         if first {
             self.emit(Event::PeerAdded {
                 peer,
-                initiated_by_us: true,
+                joined: Some(id),
             });
         } else if finished && !added {
             let reason = failure.unwrap_or(FailReason::ServerError);
-            self.emit(Event::JoinFailed { link, reason });
+            self.emit(Event::JoinFailed { id, link, reason });
         }
     }
 
@@ -764,7 +774,7 @@ impl<R: CryptoRngCore> Core<R> {
                 p.request = false;
                 self.emit(Event::PeerAdded {
                     peer: from,
-                    initiated_by_us: false,
+                    joined: None,
                 });
             }
             Some(p) if p.request => self.emit(Event::ContactRequest { peer: from }),

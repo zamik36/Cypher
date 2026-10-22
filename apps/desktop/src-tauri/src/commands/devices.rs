@@ -1,7 +1,7 @@
 //! Several devices on one identity: a new device waits to be linked, a
 //! device of the identity links or unlinks others.
 
-use cypher_core::{CmdError, Command, ErrorKind, Event};
+use cypher_core::{CmdError, Command, CommandId, ErrorKind, Event};
 use tauri::State;
 
 use super::identity::{activate, with_store};
@@ -65,10 +65,6 @@ pub(crate) async fn link_cancel(state: State<'_, AppState>) -> CmdResult<()> {
 /// Links the new device whose offer the user scanned or pasted; with
 /// `history`, it also gets the message history.
 #[tauri::command]
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "waits for one reply among all the client's events"
-)]
 pub(crate) async fn link_device(
     state: State<'_, AppState>,
     offer: String,
@@ -76,16 +72,28 @@ pub(crate) async fn link_device(
 ) -> CmdResult<()> {
     let (client, mut events) = state.client_and_events().await?;
     let history = history.unwrap_or(false);
+    let id = state.command_id();
     client
-        .command(Command::LinkDevice { offer, history })
-        .await
-        .map_err(CmdError::from)?;
-    await_event(&mut events, |e| match e {
-        Event::DeviceLinked { .. } => Some(Ok(())),
-        Event::LinkFailed { reason } => Some(Err((*reason).into())),
+        .command(Command::LinkDevice { id, offer, history })
+        .await?;
+    await_event(&mut events, device_linked(id)).await
+}
+
+/// The answer to `LinkDevice` `id`; a failure of another change to the
+/// device list is not its answer.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "picks one reply among all the client's events"
+)]
+pub(crate) fn device_linked(id: CommandId) -> impl FnMut(&Event) -> Option<CmdResult<()>> {
+    move |e| match e {
+        Event::DeviceLinked { id: i, .. } if *i == id => Some(Ok(())),
+        Event::LinkFailed {
+            id: Some(i),
+            reason,
+        } if *i == id => Some(Err((*reason).into())),
         _ => None,
-    })
-    .await
+    }
 }
 
 /// Takes another device off this identity's list.

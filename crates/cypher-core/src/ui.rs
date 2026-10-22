@@ -188,8 +188,8 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::DeviceUnlinked => ("unlinked", UiPayload::None),
         Event::OwnDevices { this, devices } => ("devices", own_devices(*this, devices)),
         Event::NoRoom { this, devices } => ("no_room", no_room(*this, devices)),
-        Event::DeviceLinked { device, name } => ("device_linked", device_info(*device, name)),
-        Event::LinkFailed { reason } => ("link_failed", UiPayload::Reason(*reason)),
+        Event::DeviceLinked { device, name, .. } => ("device_linked", device_info(*device, name)),
+        Event::LinkFailed { reason, .. } => ("link_failed", UiPayload::Reason(*reason)),
         Event::LinkedHere => ("linked_here", UiPayload::None),
         Event::ContactsChanged => ("contacts_changed", UiPayload::None),
         Event::ServerKeyChanged { server } => {
@@ -216,9 +216,9 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         }
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
         Event::TransferFailed { file_id, reason } => ("file_failed", failed(file_id, *reason)),
-        Event::JoinFailed { reason, .. } | Event::Warning { reason } => {
-            ("error", UiPayload::Reason(*reason))
-        }
+        Event::JoinFailed { reason, .. }
+        | Event::CreateLinkFailed { reason, .. }
+        | Event::Warning { reason } => ("error", UiPayload::Reason(*reason)),
         Event::PushKey { .. } | Event::PushRegistered | Event::PushUnavailable => push(e),
         Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
     })
@@ -418,7 +418,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::api::FailReason;
+    use crate::api::{CommandId, FailReason};
 
     fn ui(e: &Event) -> (&'static str, Value) {
         let (channel, payload) = event(e).unwrap();
@@ -665,6 +665,7 @@ mod tests {
             ("error", json!("timeout"))
         );
         let join = Event::JoinFailed {
+            id: CommandId(1),
             link: "x".into(),
             reason: FailReason::InvalidLink,
         };
@@ -673,7 +674,7 @@ mod tests {
         assert_eq!(
             ui(&Event::PeerAdded {
                 peer,
-                initiated_by_us: true
+                joined: Some(CommandId(1))
             }),
             ("peer_connected", json!(peer.to_hex()))
         );
@@ -716,7 +717,8 @@ mod tests {
             })
             .1;
             assert_eq!(history["failed"], name);
-            assert_eq!(ui(&Event::LinkFailed { reason }), ("link_failed", name));
+            let link_failed = Event::LinkFailed { id: None, reason };
+            assert_eq!(ui(&link_failed), ("link_failed", name));
         }
         let names: std::collections::BTreeSet<_> =
             FailReason::ALL.into_iter().map(ui_name).collect();
@@ -742,7 +744,10 @@ mod tests {
             Some("contacts_changed")
         );
         for e in [
-            Event::LinkCreated { link: "l".into() },
+            Event::LinkCreated {
+                id: CommandId(1),
+                link: "l".into(),
+            },
             Event::Bootstrap {
                 relay_addr: String::new(),
             },

@@ -19,7 +19,7 @@ use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 
 use crate::CoreError;
-use crate::api::{Command, Effect, Event, FailReason, Input};
+use crate::api::{Command, CommandId, Effect, Event, FailReason, Input};
 use crate::envelope::SyncBody;
 use crate::link::LinkOffer;
 use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord};
@@ -64,8 +64,11 @@ enum Conn {
 
 #[derive(Debug)]
 enum Pending {
-    CreateLink,
+    CreateLink {
+        id: CommandId,
+    },
     Resolve {
+        id: CommandId,
         link: ShareLink,
     },
     /// Keys of one device of the host of an invite we are joining by.
@@ -85,10 +88,11 @@ enum Pending {
     PublishDevices {
         list: DeviceList,
         /// A device this one just linked, listed by this publication.
-        linked: Option<(DeviceId, String)>,
+        linked: Option<devices::Linked>,
     },
-    /// The hand-over to a new device.
+    /// The hand-over to a new device, for `LinkDevice` `id`.
     LinkSend {
+        id: CommandId,
         offer: LinkOffer,
     },
     Publish {
@@ -539,9 +543,11 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn on_success(&mut self, pending: Pending, msg: ServerMsg) {
         match (pending, msg) {
-            (Pending::CreateLink, ServerMsg::LinkCreated { link }) => self.on_link_created(link),
-            (Pending::Resolve { link }, ServerMsg::LinkResolved { peer }) => {
-                self.on_link_resolved(&link, peer);
+            (Pending::CreateLink { id }, ServerMsg::LinkCreated { link }) => {
+                self.on_link_created(id, link);
+            }
+            (Pending::Resolve { id, link }, ServerMsg::LinkResolved { peer }) => {
+                self.on_link_resolved(id, &link, peer);
             }
             (Pending::FetchKeys { link, addr }, ServerMsg::Keys { base, opk }) => {
                 self.on_keys(&link, addr, &base, opk);
@@ -555,8 +561,8 @@ impl<R: CryptoRngCore> Core<R> {
             (Pending::PublishDevices { list, linked }, ServerMsg::Done) => {
                 self.on_own_published(list, linked);
             }
-            (Pending::LinkSend { offer }, ServerMsg::SendAck { status }) => {
-                self.on_link_sent(offer, status);
+            (Pending::LinkSend { id, offer }, ServerMsg::SendAck { status }) => {
+                self.on_link_sent(id, offer, status);
             }
             (Pending::Publish { batch }, ServerMsg::KeysAck { opks_left }) => {
                 if !batch && opks_left < OPK_LOW_WATER {
@@ -593,13 +599,14 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// An invite made here: kept, told to this user's other devices, shown.
-    fn on_link_created(&mut self, link: LinkId) {
+    fn on_link_created(&mut self, id: CommandId, link: LinkId) {
         self.remember_link(link.as_str(), self.now);
         self.sync(SyncBody::Link {
             code: link.as_str().to_owned(),
             at_ms: self.now,
         });
         self.emit(Event::LinkCreated {
+            id,
             link: ShareLink::new(link, &self.peer_id).to_string(),
         });
     }
@@ -637,26 +644,33 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn fail_request(&mut self, pending: Pending, reason: FailReason) {
         match pending {
-            Pending::Resolve { link } => self.emit(Event::JoinFailed {
+            Pending::Resolve { id, link } => self.emit(Event::JoinFailed {
+                id,
                 link: link.to_string(),
                 reason,
             }),
             Pending::FetchKeys { addr, .. } => self.on_join_keys_failed(addr.peer, reason),
             Pending::FetchDevices { peer, purpose } => match (purpose, reason) {
                 (purpose, FailReason::NotFound) => self.on_devices(peer, purpose, None),
-                (DevicesFor::Join { link }, reason) => {
-                    self.emit(Event::JoinFailed { link, reason });
+                (DevicesFor::Join { id, link }, reason) => {
+                    self.emit(Event::JoinFailed { id, link, reason });
                 }
                 (DevicesFor::Own | DevicesFor::Refresh, _) => {}
             },
             Pending::PublishDevices { linked, .. } => {
-                if linked.is_some() {
-                    self.emit(Event::LinkFailed { reason });
+                if let Some(linked) = linked {
+                    self.emit(Event::LinkFailed {
+                        id: Some(linked.id),
+                        reason,
+                    });
                 } else if reason == FailReason::Rejected {
                     self.on_own_conflict();
                 }
             }
-            Pending::LinkSend { .. } => self.emit(Event::LinkFailed { reason }),
+            Pending::LinkSend { id, .. } => self.emit(Event::LinkFailed {
+                id: Some(id),
+                reason,
+            }),
             Pending::SessionKeys { addr } => {
                 // The device is gone: nothing more goes to it.
                 if reason == FailReason::NotFound {
@@ -668,9 +682,8 @@ impl<R: CryptoRngCore> Core<R> {
                 self.send_deferred();
                 self.fetch_inbox();
             }
-            Pending::CreateLink | Pending::InboxFetch { close: false, .. } => {
-                self.emit(Event::Warning { reason });
-            }
+            Pending::CreateLink { id } => self.emit(Event::CreateLinkFailed { id, reason }),
+            Pending::InboxFetch { close: false, .. } => self.emit(Event::Warning { reason }),
             Pending::InboxPut { msg_id, addr } if reason == FailReason::NotFound => {
                 self.on_inbox_gone(msg_id, addr);
             }
@@ -692,8 +705,8 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn on_command(&mut self, cmd: Command) {
         match cmd {
-            Command::CreateLink => self.request(ClientMsg::CreateLink, Pending::CreateLink, false),
-            Command::JoinLink { link } => self.join_link(link),
+            Command::CreateLink { id } => self.create_link(id),
+            Command::JoinLink { id, link } => self.join_link(id, link),
             Command::SendText {
                 peer,
                 msg_id,
@@ -746,7 +759,7 @@ impl<R: CryptoRngCore> Core<R> {
                 auth,
             }),
             Command::DisablePush => self.disable_push(),
-            Command::LinkDevice { offer, history } => self.link_device(&offer, history),
+            Command::LinkDevice { id, offer, history } => self.link_device(id, &offer, history),
             Command::CancelHistory => self.cancel_history(),
             Command::UnlinkDevice { device } => self.unlink_device(DeviceId(device)),
             Command::ReplaceDevice { device } => self.replace_device(DeviceId(device)),
@@ -898,16 +911,21 @@ impl<R: CryptoRngCore> Core<R> {
         );
     }
 
-    fn join_link(&mut self, link: String) {
+    fn create_link(&mut self, id: CommandId) {
+        self.request(ClientMsg::CreateLink, Pending::CreateLink { id }, false);
+    }
+
+    fn join_link(&mut self, id: CommandId, link: String) {
         match ShareLink::parse(&link) {
             Some(share) => self.request(
                 ClientMsg::ResolveLink {
                     link: share.link().clone(),
                 },
-                Pending::Resolve { link: share },
+                Pending::Resolve { id, link: share },
                 true,
             ),
             None => self.emit(Event::JoinFailed {
+                id,
                 link,
                 reason: FailReason::InvalidLink,
             }),
@@ -916,7 +934,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// The server says who made the link; only its fingerprint, which the
     /// server never saw, says whether to believe it.
-    fn on_link_resolved(&mut self, share: &ShareLink, peer: PeerId) {
+    fn on_link_resolved(&mut self, id: CommandId, share: &ShareLink, peer: PeerId) {
         let reason = if peer == self.peer_id {
             Some(FailReason::SelfLink)
         } else if !share.is_host(&peer) {
@@ -926,14 +944,14 @@ impl<R: CryptoRngCore> Core<R> {
         };
         let link = share.to_string();
         if let Some(reason) = reason {
-            self.emit(Event::JoinFailed { link, reason });
+            self.emit(Event::JoinFailed { id, link, reason });
             return;
         }
         self.request(
             ClientMsg::FetchDevices { peer },
             Pending::FetchDevices {
                 peer,
-                purpose: DevicesFor::Join { link },
+                purpose: DevicesFor::Join { id, link },
             },
             true,
         );

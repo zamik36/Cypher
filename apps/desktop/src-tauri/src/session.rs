@@ -2,11 +2,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
-use cypher_core::{CmdError, ErrorKind, Event};
+use cypher_core::{CmdError, CommandId, ErrorKind, Event};
 use cypher_types::PeerId;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, MutexGuard, broadcast};
@@ -87,6 +87,8 @@ pub(crate) struct AppState {
     /// meanwhile say `connecting` (the UI retries once connected) rather
     /// than `not connected`.
     connecting: AtomicBool,
+    /// The id of the next command whose answer is waited for.
+    next_command: AtomicU64,
     identity: Mutex<Option<Arc<Unlocked>>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
@@ -105,6 +107,7 @@ impl AppState {
             tls,
             lifecycle: Mutex::default(),
             connecting: AtomicBool::new(false),
+            next_command: AtomicU64::new(1),
             identity: Mutex::default(),
             session: Mutex::default(),
             endpoint: Mutex::default(),
@@ -114,6 +117,12 @@ impl AppState {
             #[cfg(test)]
             held_start: Mutex::default(),
         }
+    }
+
+    /// A fresh id for a command whose answer is waited for, so the answer
+    /// is told apart from those of other commands in flight.
+    pub(crate) fn command_id(&self) -> CommandId {
+        CommandId(self.next_command.fetch_add(1, Ordering::Relaxed))
     }
 
     pub(crate) fn tls(&self) -> Arc<rustls::ClientConfig> {
