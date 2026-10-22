@@ -123,6 +123,13 @@ impl AppState {
     pub(crate) async fn set_identity(&self, identity: Unlocked) {
         let _lifecycle = self.stop().await;
         *self.identity.lock().await = Some(Arc::new(identity));
+        // Last, for a microphone that opened while the client stopped.
+        self.voice.reset().await;
+    }
+
+    /// Whether an identity is unlocked.
+    pub(crate) async fn is_unlocked(&self) -> bool {
+        self.identity.lock().await.is_some()
     }
 
     /// The safety number with `peer`; needs only the unlocked identity.
@@ -222,18 +229,19 @@ impl AppState {
     pub(crate) async fn lock(&self) {
         let _lifecycle = self.stop().await;
         *self.identity.lock().await = None;
+        // Last, for a microphone that opened while the client stopped: one
+        // that opens after this finds the identity locked (`keep_recorder`).
+        self.voice.reset().await;
     }
 
     /// Closes the microphone of a voice note being recorded (first, before
     /// waiting on a client still starting), stops the client, a link being
     /// waited for, and forgets offered and dropped files. The guard returned
     /// keeps a new client from starting until the caller has changed the
-    /// identity.
+    /// identity and closed the microphone once more.
     async fn stop(&self) -> MutexGuard<'_, ()> {
         self.voice.reset().await;
         let lifecycle = self.lifecycle.lock().await;
-        // Again, for a microphone opened while a client was starting.
-        self.voice.reset().await;
         let session = self.session.lock().await.take();
         if let Some(s) = session {
             s.close().await;

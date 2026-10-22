@@ -1190,6 +1190,26 @@ mod offline {
         crate::init_logging().unwrap_err();
     }
 
+    /// A recording raced against a lock never outlives it: one whose
+    /// microphone opens as the lock ends is closed again, and none starts
+    /// while locked.
+    #[tokio::test]
+    async fn a_microphone_opened_during_a_lock_ends_closed() {
+        let desktop = offline_desktop().await;
+        let state = desktop.state();
+        desktop.call("lock", json!({})).await.unwrap();
+        // The ticket comes after the lock's resets, as for a start that
+        // checked the identity just before the lock.
+        let ticket = state.voice.ticket().unwrap();
+        let kept = crate::commands::media::keep_recorder(&state, ticket, recorder(4_800)).await;
+        assert_eq!(kept, Err("cancelled".to_owned()));
+        assert!(!state.voice.is_recording(), "the microphone stayed open");
+
+        let refused = desktop.call("voice_start", json!({})).await;
+        assert_eq!(refused, Err("identity is locked".to_owned()));
+        assert!(!state.voice.is_recording());
+    }
+
     /// When the app exits, its client stops and the identity leaves memory.
     #[tokio::test]
     async fn exiting_stops_the_client() {

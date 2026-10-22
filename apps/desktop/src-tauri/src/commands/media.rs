@@ -37,6 +37,9 @@ pub(crate) async fn voice_start<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
+    if !state.is_unlocked().await {
+        return Err("identity is locked".into());
+    }
     let ticket = state.voice.ticket().ok_or("already recording")?;
     let recorder = tauri::async_runtime::spawn_blocking(move || {
         Recorder::start(move |level| {
@@ -50,14 +53,21 @@ pub(crate) async fn voice_start<R: Runtime>(
 }
 
 /// Keeps `recorder`, started with `ticket`, as the note being recorded, or
-/// closes it again.
+/// closes it again. Kept, it is closed again if the identity is locked by
+/// now: a lock closes the microphone after it forgets the identity, so a
+/// recorder kept after that close is caught here.
 pub(crate) async fn keep_recorder(
     state: &AppState,
     ticket: u64,
     recorder: Recorder,
 ) -> CmdResult<()> {
     let (recorder, reason) = match state.voice.keep(ticket, recorder) {
-        Ok(()) => return Ok(()),
+        Ok(()) if state.is_unlocked().await => return Ok(()),
+        Ok(()) => match state.voice.take() {
+            Some(recorder) => (recorder, "cancelled"),
+            // The lock closed it already.
+            None => return Err("cancelled".into()),
+        },
         Err(NotKept::AlreadyRecording(recorder)) => (recorder, "already recording"),
         // Locked while the microphone opened: it closes again.
         Err(NotKept::Reset(recorder)) => (recorder, "cancelled"),
