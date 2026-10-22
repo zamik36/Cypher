@@ -136,11 +136,8 @@ pub(crate) fn import(
         }
         reader.push(piece.get(..n).unwrap_or_default());
         while let Some(item) = reader.next_item().map_err(other)? {
-            if let Some(step) = import.take(item) {
+            for step in import.take(item) {
                 importer.step(step)?;
-            }
-            if let Some(done) = import.finished_note() {
-                importer.step(done)?;
             }
         }
     }

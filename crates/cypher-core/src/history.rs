@@ -377,9 +377,14 @@ impl Import {
         Self { vault, note: None }
     }
 
-    /// What to do with `item`, if anything. Ask [`Import::finished_note`]
-    /// after each item.
-    pub fn take<'a>(&mut self, item: Item<'a>) -> Option<Step<'a>> {
+    /// What to do with `item`, in order: nothing, one step, or the item's
+    /// own step and then the end of the note it made whole.
+    pub fn take<'a>(&mut self, item: Item<'a>) -> impl Iterator<Item = Step<'a>> + use<'a> {
+        let step = self.step(item);
+        step.into_iter().chain(self.finished_note())
+    }
+
+    fn step<'a>(&mut self, item: Item<'a>) -> Option<Step<'a>> {
         match item {
             Item::Row { table, key, value } => {
                 if !check_row(&self.vault, table, key, value) {
@@ -418,7 +423,7 @@ impl Import {
     }
 
     /// The note that the last item taken made whole, if it is one to keep.
-    pub fn finished_note(&mut self) -> Option<Step<'static>> {
+    fn finished_note(&mut self) -> Option<Step<'static>> {
         if self.note.as_ref()?.left != Some(0) {
             return None;
         }
@@ -694,11 +699,8 @@ mod tests {
         for chunk in bytes.chunks(piece) {
             r.push(chunk);
             while let Some(item) = r.next_item().unwrap() {
-                if let Some(step) = import.take(item) {
+                for step in import.take(item) {
                     record(step, &mut trace);
-                }
-                if let Some(done) = import.finished_note() {
-                    record(done, &mut trace);
                 }
             }
         }

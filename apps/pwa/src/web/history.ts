@@ -112,28 +112,30 @@ export async function importHistory(db: IDBDatabase, client: Client, dirs: Histo
   try {
     for (let from = 0; from < archive.size; from += SLICE) {
       reader.push(new Uint8Array(await archive.slice(from, from + SLICE).arrayBuffer()));
-      for (let step = reader.next(); step; step = reader.next()) {
-        switch (step.kind) {
-          case "row":
-            await store(step.table, [step.key, step.value]);
-            break;
-          case "note_start": {
-            // A row here means the note is here, whole: it was stored first.
-            if ((await get(db, "media", step.key)) !== undefined) break;
-            const file = await dirs.media.getFileHandle(step.file_id, { create: true });
-            note = { handle: await file.createSyncAccessHandle(), at: 0 };
-            note.handle.truncate(0);
-            break;
+      for (let steps = reader.next(); steps; steps = reader.next()) {
+        for (const step of steps) {
+          switch (step.kind) {
+            case "row":
+              await store(step.table, [step.key, step.value]);
+              break;
+            case "note_start": {
+              // A row here means the note is here, whole: it was stored first.
+              if ((await get(db, "media", step.key)) !== undefined) break;
+              const file = await dirs.media.getFileHandle(step.file_id, { create: true });
+              note = { handle: await file.createSyncAccessHandle(), at: 0 };
+              note.handle.truncate(0);
+              break;
+            }
+            case "note_data":
+              if (note) note.at += note.handle.write(step.data, { at: note.at });
+              break;
+            case "note_end":
+              note?.handle.flush();
+              note?.handle.close();
+              note = undefined;
+              await store("media", [step.key, step.value]);
+              break;
           }
-          case "note_data":
-            if (note) note.at += note.handle.write(step.data, { at: note.at });
-            break;
-          case "note_end":
-            note?.handle.flush();
-            note?.handle.close();
-            note = undefined;
-            await store("media", [step.key, step.value]);
-            break;
         }
       }
     }

@@ -87,8 +87,6 @@ impl HistoryWriter {
 pub struct HistoryReader {
     reader: Reader,
     import: Import,
-    /// A note that became whole with the step handed out last.
-    finished: Option<Step<'static>>,
 }
 
 #[derive(Serialize)]
@@ -139,7 +137,6 @@ impl HistoryReader {
         Self {
             reader: Reader::new(),
             import: Import::new(vault),
-            finished: None,
         }
     }
 }
@@ -150,27 +147,18 @@ impl HistoryReader {
         self.reader.push(piece);
     }
 
-    /// The next step, or `undefined` until more is pushed.
-    #[wasm_bindgen(js_name = next, unchecked_return_type = "HistoryStep | undefined")]
-    pub fn next_step(&mut self) -> Result<JsValue, JsError> {
-        if let Some(done) = self.finished.take() {
-            return step_to_js(&done);
+    /// The steps of the next item, in order (possibly none), or
+    /// `undefined` until more is pushed.
+    #[wasm_bindgen(js_name = next, unchecked_return_type = "HistoryStep[] | undefined")]
+    pub fn next_steps(&mut self) -> Result<JsValue, JsError> {
+        let Some(item) = self.reader.next_item().map_err(js_err)? else {
+            return Ok(JsValue::UNDEFINED);
+        };
+        let steps = js_sys::Array::new();
+        for step in self.import.take(item) {
+            steps.push(&step_to_js(&step)?);
         }
-        loop {
-            let Some(item) = self.reader.next_item().map_err(js_err)? else {
-                return Ok(JsValue::UNDEFINED);
-            };
-            let step = self.import.take(item);
-            let finished = self.import.finished_note();
-            match (step, finished) {
-                (Some(step), finished) => {
-                    self.finished = finished;
-                    return step_to_js(&step);
-                }
-                (None, Some(done)) => return step_to_js(&done),
-                (None, None) => {}
-            }
-        }
+        Ok(steps.into())
     }
 
     /// The archive is over: it must have been whole.
