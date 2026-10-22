@@ -19,7 +19,7 @@ use std::sync::Arc;
 use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::ui::{self, UiConversation};
 use cypher_core::{
-    Command, Core, CoreError, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
+    Command, Core, CoreError, Effect, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
     message_deletion, message_id, message_key, message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
-use store::{End, FILES_TABLE, MessageRow, SAVED_TABLE, Store};
+use store::{End, FILES_TABLE, FORGET_TABLE, MessageRow, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
@@ -184,6 +184,51 @@ fn deletion_ops(
     deletion.note
 }
 
+/// What a start reads from disk.
+struct Restored {
+    store: Store,
+    files: HashMap<FileId, FileEntry>,
+    /// Contacts whose forgetting a crash cut short.
+    forgetting: Vec<PeerId>,
+    core: Core<OsRng>,
+    initial: Vec<Effect>,
+}
+
+/// Opens the store at `db` (in `dir`), reads the state and restores the
+/// core from it: all blocking on the disk or on decryption.
+fn restore(
+    seed: &IdentitySeed,
+    device: DeviceId,
+    dir: &Path,
+    db: &Path,
+) -> Result<Restored, ClientError> {
+    std::fs::create_dir_all(dir)?;
+    let store = Store::open(db)?;
+    let scan = |table: Table| store.blocking_scan(table.into());
+    let snapshot = Snapshot {
+        meta: scan(Table::Meta)?,
+        peers: scan(Table::Peers)?,
+        sessions: scan(Table::Sessions)?,
+        outbox: scan(Table::Outbox)?,
+        transfers: scan(Table::Transfers)?,
+    };
+    let vault = Vault::new(seed.derive_storage_key());
+    let files = load_files(&store, &vault)?;
+    let forgetting = store
+        .blocking_scan(FORGET_TABLE)?
+        .iter()
+        .filter_map(|(key, _)| PeerId::from_bytes(key))
+        .collect();
+    let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
+    Ok(Restored {
+        store,
+        files,
+        forgetting,
+        core,
+        initial,
+    })
+}
+
 /// A file about to be offered: its id, where it is, the name it goes by.
 struct Pick {
     file_id: FileId,
@@ -231,23 +276,13 @@ impl Client {
         let db = dir.join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
         // Opening SQLite, reading the state and decrypting all of it block.
         let restoring = IdentitySeed(*seed.as_bytes());
-        let (store, files, core, initial) = blocking(move || {
-            std::fs::create_dir_all(&dir)?;
-            let store = Store::open(&db)?;
-            let scan = |table: Table| store.blocking_scan(table.into());
-            let snapshot = Snapshot {
-                meta: scan(Table::Meta)?,
-                peers: scan(Table::Peers)?,
-                sessions: scan(Table::Sessions)?,
-                outbox: scan(Table::Outbox)?,
-                transfers: scan(Table::Transfers)?,
-            };
-            let vault = Vault::new(restoring.derive_storage_key());
-            let files = load_files(&store, &vault)?;
-            let (core, initial) = Core::restore(&restoring, device, &snapshot, now_ms(), OsRng)?;
-            Ok((store, files, core, initial))
-        })
-        .await?;
+        let Restored {
+            store,
+            files,
+            forgetting,
+            core,
+            initial,
+        } = blocking(move || restore(&restoring, device, &dir, &db)).await?;
         let vault = Vault::new(seed.derive_storage_key());
 
         // Unbounded by design: the driver emits from synchronous code, at the
@@ -285,6 +320,10 @@ impl Client {
                     require_onion: true,
                 })
                 .await?;
+        }
+        // Contacts whose forgetting a crash cut short.
+        for peer in forgetting {
+            client.forget_peer(peer).await?;
         }
         Ok((client, events_rx))
     }
@@ -621,8 +660,13 @@ impl Client {
 
     /// Ends the session with `peer` and deletes the conversation: messages,
     /// their statuses, stored voice and video notes and where files were
-    /// saved. The saved files themselves stay where they are.
+    /// saved. The saved files themselves stay where they are. It goes a page
+    /// at a time; a marker kept until the last page is gone lets the next
+    /// start finish what a crash cut short.
     pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
+        let marker = move || peer.to_vec();
+        let mark = store::Op::Put(FORGET_TABLE, marker(), Vec::new());
+        self.store.apply(vec![mark]).await?;
         self.command(Command::RemovePeer { peer }).await?;
         let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
         let config = self.config.clone();
@@ -636,7 +680,7 @@ impl Client {
                     FORGET_PAGE,
                 )?;
                 if page.is_empty() {
-                    return Ok(());
+                    return store.blocking_apply(vec![store::Op::Delete(FORGET_TABLE, marker())]);
                 }
                 let mut ops = Vec::with_capacity(page.len() * 3);
                 let mut notes = Vec::new();
@@ -1119,6 +1163,45 @@ mod tests {
             .map(|c| (c.peer_id.clone(), c.last_message_at, c.unread))
             .collect();
         assert_eq!(shown, [(peer.to_hex(), 1, 1)]);
+        client.shutdown().await;
+    }
+
+    /// Forgetting a contact that a crash cut short is finished at the next
+    /// start: nothing of the conversation stays behind for good, and the
+    /// contact's next message starts a fresh one.
+    #[tokio::test]
+    async fn a_forget_cut_short_is_finished_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let (peer, other) = (PeerId([4; 32]), PeerId([5; 32]));
+        let (client, _events) = start().await.unwrap();
+        for msg in [text(peer, 1, 1), text(peer, 2, 2), text(other, 1, 3)] {
+            put(&client, &msg).await;
+            put_status(&client, msg.msg_id, MessageStatus::Read).await;
+        }
+        // Where a crash right after the contact was removed leaves it.
+        let marker = store::Op::Put(FORGET_TABLE, peer.to_vec(), Vec::new());
+        client.store.apply(vec![marker]).await.unwrap();
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        assert!(client.history(peer, None, 10).await.unwrap().is_empty());
+        assert_eq!(
+            keys(&client, Table::MessageStatus.into()).await,
+            [vec![3; 16]]
+        );
+        assert!(
+            keys(&client, FORGET_TABLE).await.is_empty(),
+            "done for good"
+        );
+        assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+
+        // A forget that runs to the end leaves no marker either.
+        client.forget_peer(other).await.unwrap();
+        assert!(keys(&client, FORGET_TABLE).await.is_empty());
+        assert!(keys(&client, Table::Messages.into()).await.is_empty());
         client.shutdown().await;
     }
 }

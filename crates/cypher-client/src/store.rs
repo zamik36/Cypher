@@ -15,6 +15,9 @@ use crate::ClientError;
 pub(crate) const FILES_TABLE: StoreTable = StoreTable::Files;
 /// Driver-owned table: file id → where a finished file was saved.
 pub(crate) const SAVED_TABLE: StoreTable = StoreTable::Saved;
+/// Driver-owned table: peer id → empty, while that contact is being
+/// forgotten; a start finishes what a crash cut short.
+pub(crate) const FORGET_TABLE: StoreTable = StoreTable::Forget;
 
 use cypher_core::Rows as Pairs;
 
@@ -25,6 +28,7 @@ pub(crate) enum StoreTable {
     Core(Table),
     Files,
     Saved,
+    Forget,
 }
 
 impl From<Table> for StoreTable {
@@ -92,9 +96,10 @@ const MEDIA: Sql = sql!("media");
 const SESSIONS: Sql = sql!("sessions");
 const FILES: Sql = sql!("driver_files");
 const SAVED: Sql = sql!("driver_saved");
+const FORGET: Sql = sql!("driver_forget");
 
 impl StoreTable {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Core(Table::Meta),
         Self::Core(Table::Peers),
         Self::Core(Table::Outbox),
@@ -105,6 +110,7 @@ impl StoreTable {
         Self::Core(Table::Sessions),
         Self::Files,
         Self::Saved,
+        Self::Forget,
     ];
 
     fn sql(self) -> &'static Sql {
@@ -119,6 +125,7 @@ impl StoreTable {
             Self::Core(Table::Sessions) => &SESSIONS,
             Self::Files => &FILES,
             Self::Saved => &SAVED,
+            Self::Forget => &FORGET,
         }
     }
 }
@@ -533,6 +540,7 @@ mod tests {
                 StoreTable::Core(t) => t.name(),
                 StoreTable::Files => "driver_files",
                 StoreTable::Saved => "driver_saved",
+                StoreTable::Forget => "driver_forget",
             };
             for text in [
                 sql.create,
@@ -556,7 +564,7 @@ mod tests {
             .into_iter()
             .filter_map(|t| match t {
                 StoreTable::Core(t) => Some(t),
-                StoreTable::Files | StoreTable::Saved => None,
+                StoreTable::Files | StoreTable::Saved | StoreTable::Forget => None,
             })
             .collect();
         assert_eq!(core, Table::ALL, "every core table is created");
