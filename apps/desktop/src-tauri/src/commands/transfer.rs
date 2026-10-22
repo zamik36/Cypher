@@ -99,7 +99,22 @@ pub(crate) async fn send_all<R: Runtime>(
 fn file_label(file: &FilePath) -> String {
     match file {
         FilePath::Path(path) => display_name(path),
-        FilePath::Url(url) => url.to_string(),
+        FilePath::Url(url) => url_label(url),
+    }
+}
+
+/// The name at the end of a picked URI's path, decoded; an Android document
+/// URI ends in its file's path (`…/document/primary%3ADownload%2Fa.pdf`).
+/// The whole URI when its path names nothing.
+fn url_label(url: &tauri::Url) -> String {
+    let last = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .unwrap_or_default();
+    let decoded = percent_encoding::percent_decode_str(last).decode_utf8_lossy();
+    match decoded.rsplit(['/', ':']).next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => url.to_string(),
     }
 }
 
@@ -513,7 +528,19 @@ mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    use super::{release_reservation, reserve_download, runs_code};
+    use super::{release_reservation, reserve_download, runs_code, url_label};
+
+    /// A picked URI is named by its file, not shown whole.
+    #[test]
+    fn picked_uris_are_named_by_their_file() {
+        let label = |uri: &str| url_label(&uri.parse().unwrap());
+        let document = "content://com.android.providers.downloads.documents/document/\
+                        primary%3ADownload%2Freport.pdf";
+        assert_eq!(label(document), "report.pdf");
+        assert_eq!(label("content://media/external/file/42"), "42");
+        assert_eq!(label("file:///home/a/notes%20v2.txt"), "notes v2.txt");
+        assert_eq!(label("content://media/"), "content://media/");
+    }
 
     #[test]
     fn programs_are_told_apart_from_documents() {
