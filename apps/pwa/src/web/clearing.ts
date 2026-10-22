@@ -3,8 +3,15 @@
 /** The OPFS folders whose files only the history leads to. */
 export const HISTORY_DIRS = ["media", "downloads"] as const;
 
+/** The part of an OPFS folder clearing uses. */
+export interface Folder {
+  keys(): AsyncIterable<string>;
+  removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
+}
+
 /** The part of the OPFS root clearing uses. */
 export interface Root {
+  getDirectoryHandle(name: string): Promise<Folder>;
   removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
 }
 
@@ -25,5 +32,22 @@ export interface Clearing {
 export async function clearHistory(c: Clearing): Promise<void> {
   await c.clearRows();
   const root = await c.root();
-  await Promise.all(HISTORY_DIRS.map((dir) => root.removeEntry(dir, { recursive: true }).catch(() => undefined)));
+  await Promise.all(HISTORY_DIRS.map((dir) => emptyFolder(root, dir)));
+}
+
+/**
+ * Removes the files in `dir` one by one: a file still being written is
+ * locked and stays, while removing the whole folder would keep them all.
+ */
+async function emptyFolder(root: Root, dir: string): Promise<void> {
+  let folder: Folder;
+  try {
+    folder = await root.getDirectoryHandle(dir);
+  } catch {
+    // Never made: nothing was kept there.
+    return;
+  }
+  const names: string[] = [];
+  for await (const name of folder.keys()) names.push(name);
+  await Promise.all(names.map((name) => folder.removeEntry(name, { recursive: true }).catch(() => undefined)));
 }
