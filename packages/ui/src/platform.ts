@@ -113,6 +113,8 @@ export type Unsubscribe = () => void;
 /** Core event channels and their payloads (see `cypher_core::ui::event`). */
 export interface Events {
   connected: null;
+  /** The desktop's client is up for commands, online or not. */
+  client_ready: null;
   disconnected: null;
   /** Another device signed in with this identity; this one stopped. */
   superseded: null;
@@ -317,6 +319,7 @@ export const api: Platform = new Proxy({} as Platform, {
 });
 
 export const onConnected = (cb: () => void) => api.on("connected", () => cb());
+export const onClientReady = (cb: () => void) => api.on("client_ready", () => cb());
 export const onDisconnected = (cb: () => void) => api.on("disconnected", () => cb());
 export const onSuperseded = (cb: () => void) => api.on("superseded", () => cb());
 export const onUpdateRequired = (cb: () => void) => api.on("update_required", () => cb());

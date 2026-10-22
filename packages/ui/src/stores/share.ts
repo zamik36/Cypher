@@ -1,4 +1,6 @@
 import { createSignal } from "solid-js";
+import type { TransferInfo } from "../platform";
+import { readyMark, retryWhenReady } from "./clientReady";
 
 /** What another app shared with this one (the PWA's share target). */
 export interface Shared {
@@ -51,4 +53,33 @@ export function takeShare(peerId: string): Shared | null {
   const { share } = chosen;
   chosen = null;
   return share;
+}
+
+/**
+ * Sends shared `files` one at a time, each result to `sent`. A file that
+ * could not go because the client was still starting waits, with the files
+ * after it, until the client is up, so no file goes twice; any other
+ * failure goes to `failed` and the rest still go.
+ */
+export function sendEach(
+  files: File[],
+  send: (file: File) => Promise<TransferInfo[]>,
+  sent: (cards: TransferInfo[]) => void,
+  failed: (error: unknown) => void,
+): void {
+  const [file, ...rest] = files;
+  if (!file) return;
+  const mark = readyMark();
+  const next = () => sendEach(rest, send, sent, failed);
+  send(file).then(
+    (cards) => {
+      sent(cards);
+      next();
+    },
+    (error: unknown) => {
+      if (retryWhenReady(error, mark, () => sendEach(files, send, sent, failed))) return;
+      failed(error);
+      next();
+    },
+  );
 }

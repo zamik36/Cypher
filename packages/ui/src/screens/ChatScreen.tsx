@@ -10,7 +10,7 @@ import FileCard from "../components/FileCard";
 import RecordButton from "../components/media/RecordButton";
 import RoundVideoBubble from "../components/media/RoundVideoBubble";
 import VoiceBubble from "../components/media/VoiceBubble";
-import { api, onConnected, type ChatMessage, type MediaSent, type TransferInfo, type UiFile } from "../platform";
+import { api, type ChatMessage, type MediaSent, type TransferInfo, type UiFile } from "../platform";
 import {
   addMessage,
   findMessage,
@@ -36,7 +36,8 @@ import { clearDraft, draftOf, setDraftText, setReplyTo } from "../stores/drafts"
 import { isWide } from "../stores/layout";
 import { back, push } from "../stores/nav";
 import { awayFor } from "../stores/lock";
-import { takeShare } from "../stores/share";
+import { sendEach, takeShare } from "../stores/share";
+import { readyMark, retryWhenReady } from "../stores/clientReady";
 import { windowActive } from "../stores/presence";
 import { upsertTransfer } from "../stores/transfers";
 import { trackMedia } from "../stores/media";
@@ -44,7 +45,6 @@ import { addToast, toastError } from "../stores/toasts";
 import { copyText } from "../utils/clipboard";
 import { dayLabel, formatTime } from "../utils/format";
 import { isMine, ME, noteOf, previewOf, toChatMessage } from "../utils/messages";
-import { isConnecting } from "../utils/reasons";
 import { buildTimeline } from "../utils/timeline";
 import { locale, t } from "../i18n";
 
@@ -192,21 +192,10 @@ export default function ChatScreen(props: { peerId: string }) {
   const nearBottom = () => !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_PX;
   const toBottom = () => queueMicrotask(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
 
-  // What failed only because the client was still starting runs again
-  // once it is connected.
-  const afterConnect: (() => void)[] = [];
-  onMount(() => {
-    const off = onConnected(() => afterConnect.splice(0).forEach((again) => again()));
-    onCleanup(() => void off.then((unlisten) => unlisten()));
-  });
-  /** Queues `again` if `error` says the client is starting; else shows it. */
-  function retryOrShow(error: unknown, again: () => void) {
-    if (isConnecting(error)) afterConnect.push(again);
-    else toastError(error);
-  }
-
-  // The latest page first; older pages as the user scrolls up.
+  // The latest page first; older pages as the user scrolls up. Asked while
+  // the client was still starting, it is asked again once the client is up.
   function loadLatest(peerId: string) {
+    const mark = readyMark();
     api
       .getHistory(peerId, HISTORY_PAGE)
       .then((page) => {
@@ -216,7 +205,9 @@ export default function ChatScreen(props: { peerId: string }) {
         );
         setHasOlder(peerId, page.length === HISTORY_PAGE);
       })
-      .catch((e: unknown) => retryOrShow(e, () => loadLatest(peerId)))
+      .catch((e: unknown) => {
+        if (!retryWhenReady(e, mark, () => loadLatest(peerId))) toastError(e);
+      })
       .finally(() => {
         setLoading(false);
         toBottom();
@@ -453,15 +444,11 @@ export default function ChatScreen(props: { peerId: string }) {
     const share = takeShare(peerId);
     if (!share) return;
     if (share.text) setDraft(draft() ? `${draft()}\n${share.text}` : share.text);
-    if (share.files.length > 0) sendShared(peerId, share.files);
+    // On a cold start the client may still be starting: each file goes once.
+    if (share.files.length > 0) {
+      sendEach(share.files, (file) => api.sendFiles(peerId, [file]), rememberSent, toastError);
+    }
   });
-  /** Sends shared files; on a cold start the client may still be starting. */
-  function sendShared(peerId: string, files: File[]) {
-    api
-      .sendFiles(peerId, files)
-      .then(rememberSent)
-      .catch((e: unknown) => retryOrShow(e, () => sendShared(peerId, files)));
-  }
 
   function attach() {
     const peerId = props.peerId;
