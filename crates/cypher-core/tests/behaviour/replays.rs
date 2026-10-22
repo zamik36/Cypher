@@ -12,7 +12,7 @@ use rand::rngs::OsRng;
 
 use super::{addr, events_since, is_message, open_item, rows};
 use crate::harness::{Fault, Rule, Seen, World};
-use crate::{A, B, C, paired};
+use crate::{A, B, C, D, E, F, paired};
 
 /// A world where the two have talked back and forth, each turn on a new
 /// ratchet chain, so that the frames delivered so far span chains long
@@ -347,10 +347,10 @@ fn inits_accepted_before_the_update_stay_refused() {
     refused_by(&mut w, A, b, frame);
 }
 
-/// An init a stranger C makes from A's published keys, starting a session
-/// afresh, as a frame A gets from C; its ciphertext altered if `tampered`.
-fn init_from_stranger(w: &World, tampered: bool) -> Bytes {
-    let identity = IdentitySeed(w.clients[C].seed).derive_identity();
+/// An init client `from` makes from A's published keys, starting a session
+/// afresh, as a frame A gets from it; its ciphertext altered if `tampered`.
+fn init_to_a(w: &World, from: usize, tampered: bool) -> Bytes {
+    let identity = IdentitySeed(w.clients[from].seed).derive_identity();
     let bundle = w.bundle_of(addr(w, A));
     let (mut ratchet, init) =
         handshake::initiate(&identity, DeviceId::FIRST, &bundle, &mut OsRng).unwrap();
@@ -384,7 +384,7 @@ fn a_stranger_flooding_inits_does_not_lock_out_contacts() {
     let mut w = World::new(3);
     w.pair(A, B);
     for n in 0..33 {
-        let frame = init_from_stranger(&w, false);
+        let frame = init_to_a(&w, C, false);
         w.inject(A, frame);
         assert_eq!(turned_away(&w, A), usize::from(n >= 32), "init {n}");
     }
@@ -442,13 +442,62 @@ fn turning_a_stranger_away_is_told_once_and_only_for_real_inits() {
     let mut w = World::new(3);
     w.pair(A, B);
     for _ in 0..32 {
-        let frame = init_from_stranger(&w, false);
+        let frame = init_to_a(&w, C, false);
         w.inject(A, frame);
     }
     assert_eq!(turned_away(&w, A), 0);
     for tampered in [true, true, false, true, false] {
-        let frame = init_from_stranger(&w, tampered);
+        let frame = init_to_a(&w, C, tampered);
         w.inject(A, frame);
     }
     assert_eq!(turned_away(&w, A), 1);
+}
+
+/// A's contacts C, D, E and F fill A's signed prekey with inits, each up
+/// to its quota. A rotates it at once and publishes the fresh one; B, whose
+/// session then needs starting again, starts it on the fresh prekey, and
+/// the two talk both ways.
+#[test]
+#[cfg_attr(miri, ignore = "a thousand handshakes; hours under Miri")]
+fn a_prekey_filled_with_inits_is_replaced_and_published() {
+    let mut w = World::new(6);
+    w.pair(A, B);
+    for x in [C, D, E, F] {
+        w.pair(A, x);
+        w.disconnect(x);
+    }
+    let a = addr(&w, A);
+    let spk = w.bundle_of(a).spk_id;
+    let publishes = |w: &World| {
+        w.server
+            .served
+            .iter()
+            .filter(|(i, _, m)| *i == A && matches!(m, ClientMsg::PublishKeys { .. }))
+            .count()
+    };
+    let published = publishes(&w);
+    let from = w.clients[A].events.len();
+    // Each joined by an init already: 255 more is each one's quota, and
+    // with B's, a full prekey.
+    for x in [C, D, E, F] {
+        for _ in 0..255 {
+            let frame = init_to_a(&w, x, false);
+            w.inject(A, frame);
+        }
+    }
+    assert_eq!(turned_away(&w, A), 0, "none turned away");
+    assert!(publishes(&w) > published, "the fresh prekey published");
+    let fresh = w.bundle_of(a).spk_id;
+    assert_ne!(fresh, spk);
+
+    let (_, init) = restart_from_b(&mut w);
+    assert_eq!(init.spk_id, fresh, "B starts on the fresh prekey");
+    w.send_text(A, B, "on the fresh prekey");
+    w.send_text(B, A, "heard you");
+    assert_eq!(
+        w.texts(B).last().map(String::as_str),
+        Some("on the fresh prekey")
+    );
+    assert_eq!(w.texts(A).last().map(String::as_str), Some("heard you"));
+    assert!(!warned(&w, A, from));
 }
