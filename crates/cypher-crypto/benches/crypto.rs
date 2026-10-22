@@ -3,7 +3,8 @@
 
 #![expect(clippy::unwrap_used, reason = "benchmark fixtures fail loudly")]
 
-use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use cypher_crypto::double_ratchet::MAX_SKIP;
 use cypher_crypto::handshake;
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
@@ -53,6 +54,41 @@ fn ratchet(c: &mut Criterion) {
             b3.decrypt(&h, &ct, b"", &mut OsRng).unwrap()
         });
     });
+    group.finish();
+}
+
+/// Bob's side of a session that keeps `skipped` message keys for messages
+/// from Alice that never came.
+fn with_skipped(skipped: usize) -> Ratchet {
+    let (mut a, mut b) = session();
+    let mut left = skipped;
+    while left > 0 {
+        let lost = left.min(MAX_SKIP as usize);
+        for _ in 0..lost {
+            a.encrypt(b"lost", b"").unwrap();
+        }
+        let (h, ct) = a.encrypt(b"arrives", b"").unwrap();
+        b.decrypt(&h, &ct, b"", &mut OsRng).unwrap();
+        left -= lost;
+    }
+    b
+}
+
+/// What storing a session takes after every message: its snapshot, by how
+/// many skipped message keys it keeps.
+#[expect(
+    clippy::print_stderr,
+    reason = "the bytes stored are reported beside the time, to compare by hand"
+)]
+fn snapshot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ratchet/snapshot");
+    for skipped in [0, 100, 999, 2000] {
+        let b = with_skipped(skipped);
+        eprintln!("ratchet/snapshot/{skipped}: {} B", b.to_bytes().len());
+        group.bench_with_input(BenchmarkId::from_parameter(skipped), &b, |bench, b| {
+            bench.iter(|| b.to_bytes());
+        });
+    }
     group.finish();
 }
 
@@ -135,6 +171,7 @@ fn onion_requests(c: &mut Criterion) {
 criterion_group!(
     benches,
     ratchet,
+    snapshot,
     chunks,
     sealed_sender,
     x3dh,

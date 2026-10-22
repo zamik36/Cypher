@@ -218,6 +218,10 @@ pub(crate) struct World {
     pub crash_rows: Option<Kv>,
     /// Every batch of effects the cores made, once set.
     pub log: Option<Vec<Batch>>,
+    /// The client whose end-to-end messages the server holds back rather
+    /// than hands over, and the frames it held, in order.
+    held_for: Option<usize>,
+    held: Vec<Bytes>,
 }
 
 impl World {
@@ -242,6 +246,8 @@ impl World {
             crash_after_send: None,
             crash_rows: None,
             log: None,
+            held_for: None,
+            held: Vec::new(),
         };
         for _ in 0..n {
             let seed: [u8; 32] = rng.r#gen();
@@ -797,11 +803,25 @@ impl World {
 
     fn deliver(&mut self, to: usize, frame: &Frame<ServerMsg>) {
         if let ServerMsg::Recv { .. } | ServerMsg::RecvSealed { .. } = frame.msg {
+            if self.held_for == Some(to) {
+                self.held.push(frame.encode());
+                return;
+            }
             self.server.delivered.push((to, frame.encode()));
         }
         self.clients[to]
             .inputs
             .push_back(Input::Frame(frame.encode()));
+    }
+
+    /// Runs `f` while the server holds back every end-to-end message for
+    /// client `i` (it still takes and acknowledges them): the frames that
+    /// would have reached `i`, in order, to hand over later or never.
+    pub(crate) fn hold_for(&mut self, i: usize, f: impl FnOnce(&mut Self)) -> Vec<Bytes> {
+        self.held_for = Some(i);
+        f(self);
+        self.held_for = None;
+        std::mem::take(&mut self.held)
     }
 
     pub(crate) fn inject(&mut self, to: usize, raw: Bytes) {
