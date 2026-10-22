@@ -6,6 +6,7 @@
   "exports": {
     "./App": "./src/App.tsx",
     "./platform": "./src/platform.ts",
+    "./errors": "./src/errors.ts",
     "./i18n": "./src/i18n/index.ts",
     "./invite": "./src/stores/invite.ts",
     "./share": "./src/stores/share.ts",

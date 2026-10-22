@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use cypher_core::Event;
+use cypher_core::{CmdError, ErrorKind, Event};
 use cypher_media::Recorder;
 use cypher_types::FileId;
 use serde_json::{Value, json};
@@ -70,11 +70,11 @@ impl Desktop {
         invoke_from(&self.webview, LOCAL_ORIGIN, cmd, body, headers).await
     }
 
-    /// `invoke(cmd, args)` from the webview; an error is the command's message.
+    /// `invoke(cmd, args)` from the webview; an error as [`failure`] puts it.
     async fn call(&self, cmd: &str, args: Value) -> Result<Value, String> {
         self.invoke(cmd, InvokeBody::Json(args), HeaderMap::new())
             .await
-            .map_err(|e| e.as_str().map_or_else(|| e.to_string(), str::to_owned))
+            .map_err(|e| failure(&e))
     }
 
     fn state(&self) -> State<'_, AppState> {
@@ -89,6 +89,19 @@ impl Desktop {
     async fn connect(&self, gateway: &str) -> String {
         let args = json!({ "addr": gateway, "anonymous": false, "bridges": [] });
         text(&self.call("connect_to_gateway", args).await.unwrap())
+    }
+}
+
+/// A command's error, `{kind, reason?, message}`, as `kind[/reason]: message`;
+/// an error of Tauri's own (bad arguments, access refused) is its text.
+fn failure(e: &Value) -> String {
+    let field = |name: &str| e.get(name).and_then(Value::as_str);
+    match (field("kind"), field("message")) {
+        (Some(kind), Some(message)) => match field("reason") {
+            Some(reason) => format!("{kind}/{reason}: {message}"),
+            None => format!("{kind}: {message}"),
+        },
+        _ => e.as_str().map_or_else(|| e.to_string(), str::to_owned),
     }
 }
 
@@ -167,7 +180,9 @@ async fn once_online<T, F: Future<Output = Result<T, String>>>(
     tokio::time::timeout(WAIT, async {
         loop {
             match command().await {
-                Err(e) if e == "offline" => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(e) if e.starts_with("failed/offline:") => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
                 other => return other,
             }
         }
@@ -197,7 +212,7 @@ async fn identity_lifecycle_without_a_server() {
     let invalid = desktop
         .call("safety_number", json!({ "peerId": "zz" }))
         .await;
-    assert_eq!(invalid.unwrap_err(), "invalid peer id");
+    assert_eq!(invalid.unwrap_err(), "invalid: invalid peer id");
     assert!(!is_locked(&desktop).await);
 
     let with_pass = |passphrase: &str| json!({ "passphrase": passphrase });
@@ -230,7 +245,7 @@ async fn identity_lifecycle_without_a_server() {
 /// Whether the identity is forgotten: a safety number needs it unlocked.
 async fn is_locked(desktop: &Desktop) -> bool {
     let bob = json!({ "peerId": cypher_types::PeerId([9; 32]).to_hex() });
-    desktop.call("safety_number", bob).await == Err("identity is locked".to_owned())
+    desktop.call("safety_number", bob).await == Err("locked: identity is locked".to_owned())
 }
 
 /// Locking forgets the identity until the passphrase; erasing, for a
@@ -267,15 +282,15 @@ async fn commands_fail_cleanly_before_connecting() {
     let connect = |addr: &str| json!({ "addr": addr, "anonymous": false, "bridges": [] });
 
     let locked = call("connect_to_gateway", connect("localhost:1")).await;
-    assert_eq!(locked.unwrap_err(), "identity is locked");
+    assert_eq!(locked.unwrap_err(), "locked: identity is locked");
     let no_identity = call("safety_number", json!({ "peerId": peer })).await;
-    assert_eq!(no_identity.unwrap_err(), "identity is locked");
+    assert_eq!(no_identity.unwrap_err(), "locked: identity is locked");
     desktop.create("bob").await;
     call("connect_to_gateway", connect("no port"))
         .await
         .unwrap_err();
 
-    let not_connected = Err("not connected".to_owned());
+    let not_connected = Err("not_connected: not connected".to_owned());
     assert_eq!(call("get_conversations", json!({})).await, not_connected);
     // Push: desktops have no distributor, so no subscription and no client.
     assert_eq!(call("push_enable", json!({})).await, not_connected);
@@ -284,13 +299,13 @@ async fn commands_fail_cleanly_before_connecting() {
     let subscribed = call("push_subscribe", key(format!("04{}", "ab".repeat(64)))).await;
     assert_eq!(subscribed, Ok(Value::Bool(false)));
     let bad = call("push_subscribe", key("04".into())).await;
-    assert_eq!(bad.unwrap_err(), "invalid push key");
+    assert_eq!(bad.unwrap_err(), "invalid: invalid push key");
     assert_eq!(call("reconnect", json!({})).await, not_connected);
     let send = |peer_id: &str| json!({ "peerId": peer_id, "text": "x" });
     assert_eq!(call("send_message", send(&peer)).await, not_connected);
     assert_eq!(
         call("send_message", send("zz")).await.unwrap_err(),
-        "invalid peer id"
+        "invalid: invalid peer id"
     );
     let snake_case = call("send_message", json!({ "peer_id": peer, "text": "x" }));
     assert!(
@@ -311,14 +326,14 @@ async fn commands_fail_cleanly_before_connecting() {
         .unwrap_err();
     // The peer is checked before the native file dialog opens.
     let browse = call("browse_and_send", json!({ "peerId": "zz" }));
-    assert_eq!(browse.await.unwrap_err(), "invalid peer id");
+    assert_eq!(browse.await.unwrap_err(), "invalid: invalid peer id");
     let stop = call("voice_stop", json!({ "peerId": peer })).await;
-    assert_eq!(stop.unwrap_err(), "not recording");
+    assert_eq!(stop.unwrap_err(), "not_recording: not recording");
     assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
 
     desktop.state().voice.hold(recorder(4_800));
     let again = call("voice_start", json!({})).await;
-    assert_eq!(again.unwrap_err(), "already recording");
+    assert_eq!(again.unwrap_err(), "already_recording: already recording");
     assert_eq!(call("voice_cancel", json!({})).await, Ok(Value::Null));
     assert!(!desktop.state().voice.is_recording());
 
@@ -337,13 +352,16 @@ async fn bad_ids_are_named_as_the_web_client_names_them() {
     let peer = cypher_types::PeerId([1; 32]).to_hex();
 
     let bad_peer = json!({ "peerId": "zz" });
-    assert_eq!(refused("accept_contact", bad_peer).await, "invalid peer id");
-    let message = "invalid message id";
+    assert_eq!(
+        refused("accept_contact", bad_peer).await,
+        "invalid: invalid peer id"
+    );
+    let message = "invalid: invalid message id";
     let reply = json!({ "peerId": peer, "text": "x", "replyTo": "zz" });
     assert_eq!(refused("send_message", reply).await, message);
     let delete = json!({ "peerId": peer, "msgId": "zz", "timestamp": 0 });
     assert_eq!(refused("delete_message", delete).await, message);
-    let file = "invalid file id";
+    let file = "invalid: invalid file id";
     let bad_file = || json!({ "fileId": "zz" });
     assert_eq!(refused("accept_file", bad_file()).await, file);
     assert_eq!(refused("cancel_transfer", bad_file()).await, file);
@@ -407,7 +425,11 @@ async fn lock_and_erase_forget_offers_and_drops() {
         let peer = cypher_types::PeerId([1; 32]).to_hex();
         let send = json!({ "peerId": peer, "id": drop_id });
         let gone = desktop.call("send_dropped", send).await;
-        assert_eq!(gone.unwrap_err(), "this drop is gone", "after {cmd}");
+        assert_eq!(
+            gone.unwrap_err(),
+            "drop_gone: this drop is gone",
+            "after {cmd}"
+        );
     }
 
     offers.track(&offer_of(file));
@@ -431,7 +453,7 @@ async fn an_offer_lasts_until_accepted_or_ended() {
     let file = FileId([6; 16]);
     offers.track(&offer_of(file));
     let accept = desktop.call("accept_file", json!({ "fileId": file.to_hex() }));
-    assert_eq!(accept.await.unwrap_err(), "not connected");
+    assert_eq!(accept.await.unwrap_err(), "not_connected: not connected");
     assert!(offers.contains(&file), "a failed accept keeps the offer");
     let downloads = std::fs::read_dir(desktop.dir.path().join("downloads")).unwrap();
     assert_eq!(downloads.count(), 0, "no name reserved");
@@ -706,7 +728,10 @@ async fn link_a_new_desktop(
         .unwrap();
     other.call("link_cancel", json!({})).await.unwrap();
     let refused = other.call("link_finish", json!({ "passphrase": PASS }));
-    assert_eq!(refused.await.unwrap_err(), "not waiting to be linked");
+    assert_eq!(
+        refused.await.unwrap_err(),
+        "not_linking: not waiting to be linked"
+    );
 }
 
 /// A contact's name shows in the chat list; deleting the chat empties its
@@ -729,7 +754,7 @@ async fn name_then_forget_a_contact(b: &Desktop, a_id: &str) {
     assert_eq!(list[0]["unread"].as_u64().map(|n| n > 0), Some(true));
 
     let invalid = b.call("rename_peer", json!({ "peerId": "zz", "alias": "x" }));
-    assert_eq!(invalid.await.unwrap_err(), "invalid peer id");
+    assert_eq!(invalid.await.unwrap_err(), "invalid: invalid peer id");
     block_then_unblock(b, a_id).await;
     b.call("push_enable", json!({})).await.unwrap();
     b.call("push_disable", json!({})).await.unwrap();
@@ -763,7 +788,7 @@ async fn block_then_unblock(b: &Desktop, a_id: &str) {
     let accept = json!({ "peerId": a_id });
     b.call("accept_contact", accept).await.unwrap();
     let invalid = b.call("accept_contact", json!({ "peerId": "zz" }));
-    assert_eq!(invalid.await.unwrap_err(), "invalid peer id");
+    assert_eq!(invalid.await.unwrap_err(), "invalid: invalid peer id");
 }
 
 async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {
@@ -776,7 +801,7 @@ async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {
     // stored them, joining finds none.
     let joined = eventually(|| async {
         match once_online(|| b.call("join_link", join(format!("  {link} ")))).await {
-            Err(e) if e == "not_found" => None,
+            Err(e) if e.starts_with("failed/not_found:") => None,
             other => Some(other),
         }
     })
@@ -809,7 +834,7 @@ async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
     let bad = json!({ "peerId": a_id, "msgIds": [msg_id, "zz"] });
     assert_eq!(
         b.call("mark_read", bad).await.unwrap_err(),
-        "invalid message id"
+        "invalid: invalid message id"
     );
     let read = json!({ "peerId": a_id, "msgIds": [msg_id] });
     b.call("mark_read", read).await.unwrap();
@@ -840,7 +865,7 @@ async fn chat(a: &Desktop, b: &Desktop, a_id: &str, b_id: &str) {
     let bad = json!({ "peerId": a_id, "text": "x", "replyTo": "zz" });
     assert_eq!(
         b.call("send_message", bad).await.unwrap_err(),
-        "invalid message id"
+        "invalid: invalid message id"
     );
 }
 
@@ -884,7 +909,7 @@ async fn send_video_note_over_ipc(a: &Desktop, b_id: &str, video: &[u8]) -> Stri
 
     let no_body = a.invoke("send_video_note", InvokeBody::default(), headers.clone());
     assert_eq!(
-        no_body.await.unwrap_err(),
+        no_body.await.unwrap_err()["message"],
         "expected the video note as raw bytes or base64 data"
     );
     let not_base64 = a.invoke(
@@ -893,7 +918,7 @@ async fn send_video_note_over_ipc(a: &Desktop, b_id: &str, video: &[u8]) -> Stri
         headers.clone(),
     );
     assert_eq!(
-        not_base64.await.unwrap_err(),
+        not_base64.await.unwrap_err()["message"],
         "the video note data is not valid base64"
     );
     // Android's webview sends the same bytes as base64 in JSON.
@@ -912,7 +937,7 @@ async fn send_video_note_over_ipc(a: &Desktop, b_id: &str, video: &[u8]) -> Stri
         InvokeBody::Raw(body.clone()),
         HeaderMap::new(),
     );
-    assert_eq!(no_headers.await.unwrap_err(), "missing x-peer");
+    assert_eq!(no_headers.await.unwrap_err()["message"], "missing x-peer");
 
     let sent = a
         .invoke("send_video_note", InvokeBody::Raw(body), headers)
@@ -1014,11 +1039,11 @@ async fn accept_an_offered_file(a: &Desktop, b: &Desktop, b_id: &str) {
     );
     assert_eq!(
         b.call("open_file", unknown.clone()).await,
-        Err("not_saved".to_owned())
+        Err("not_saved: the file is no longer saved".to_owned())
     );
     assert_eq!(
         b.call("reveal_file", unknown).await,
-        Err("not_saved".to_owned())
+        Err("not_saved: the file is no longer saved".to_owned())
     );
 }
 
@@ -1086,7 +1111,7 @@ async fn send_picked_files(a: &Desktop, b_id: &str) {
         send_pick(handle, &client, peer, FilePath::Url(content))
             .await
             .unwrap_err(),
-        "unsupported file location"
+        CmdError::new(ErrorKind::Unsupported, "unsupported file location")
     );
 }
 
@@ -1176,7 +1201,7 @@ async fn refuse_to_open_a_program(a: &Desktop, b: &Desktop, b_id: &str) {
     .await;
     assert_eq!(
         b.call("open_file", file).await,
-        Err("unsafe_type".to_owned())
+        Err("unsafe_type: opening the file would run it".to_owned())
     );
 }
 
@@ -1208,11 +1233,11 @@ mod offline {
         // checked the identity just before the lock.
         let ticket = state.voice.ticket().unwrap();
         let kept = crate::commands::media::keep_recorder(&state, ticket, recorder(4_800)).await;
-        assert_eq!(kept, Err("cancelled".to_owned()));
+        assert_eq!(kept, Err(ErrorKind::Cancelled.into()));
         assert!(!state.voice.is_recording(), "the microphone stayed open");
 
         let refused = desktop.call("voice_start", json!({})).await;
-        assert_eq!(refused, Err("identity is locked".to_owned()));
+        assert_eq!(refused, Err("locked: identity is locked".to_owned()));
         assert!(!state.voice.is_recording());
     }
 
@@ -1230,7 +1255,7 @@ mod offline {
         let count = || ready.load(std::sync::atomic::Ordering::SeqCst);
         let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
         let locked = desktop.call("connect_to_gateway", args.clone()).await;
-        assert_eq!(locked.unwrap_err(), "identity is locked");
+        assert_eq!(locked.unwrap_err(), "locked: identity is locked");
 
         desktop.create("alice").await;
         desktop.call("connect_to_gateway", args).await.unwrap();
@@ -1320,7 +1345,7 @@ mod offline {
         let unconnected = Desktop::new(cypher_tls::make_client_config());
         unconnected.create("alice").await;
         let refused = paste(&unconnected).await.unwrap_err();
-        assert_eq!(refused, "not connected");
+        assert_eq!(failure(&refused), "not_connected: not connected");
         assert_eq!(staged(&unconnected), 0, "a copy outlived a failed send");
 
         let desktop = offline_desktop().await;
@@ -1361,13 +1386,13 @@ mod offline {
         let reply = |e: &Event| (*e == done(9)).then_some(Ok(()));
 
         let quiet = session::await_event_within(wait, &mut rx, never).await;
-        assert_eq!(quiet, Err("timed out".to_owned()));
+        assert_eq!(quiet, Err(ErrorKind::TimedOut.into()));
 
         for id in 1..=3 {
             events.send(done(id)).unwrap();
         }
         let behind = session::await_event_within(wait, &mut rx, never).await;
-        assert_eq!(behind, Err("lagged".to_owned()));
+        assert_eq!(behind, Err(ErrorKind::Lagged.into()));
 
         for id in [1, 2, 9] {
             events.send(done(id)).unwrap();
@@ -1400,7 +1425,7 @@ mod offline {
             let list = list.await.expect("waited for the client");
             assert_eq!(
                 list,
-                Err("connecting".to_owned()),
+                Err("connecting: connecting".to_owned()),
                 "told apart from offline"
             );
             let note = media_request(&FileId([3; 16]).to_hex(), None);
@@ -1438,7 +1463,7 @@ mod offline {
         restarted.unwrap();
         locked.unwrap();
         let list = desktop.call("get_conversations", json!({})).await;
-        assert_eq!(list, Err("not connected".to_owned()));
+        assert_eq!(list, Err("not_connected: not connected".to_owned()));
         assert!(is_locked(&desktop).await);
     }
 

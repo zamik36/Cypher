@@ -6,8 +6,12 @@ mod command;
 mod convert;
 mod history;
 
-use cypher_core::{Core, Effect, Input, Vault, message_key, message_window, peer_messages, ui};
-use cypher_crypto::{IdentitySeed, identity_file};
+use cypher_core::{
+    CmdError, Core, Effect, ErrorKind, IdentityKind, Input, Vault, message_key, message_window,
+    peer_messages, ui,
+};
+use cypher_crypto::IdentitySeed;
+use cypher_crypto::identity_file::{self, IdentityFileError};
 use cypher_types::{DeviceId, MsgId, PeerId};
 use js_sys::Array;
 use rand::rngs::OsRng;
@@ -20,6 +24,24 @@ pub use history::{HistoryReader, HistoryWriter};
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// `e` thrown as the plain `{kind, reason?, message}` object the desktop's
+/// commands fail with, for the worker to hand the UI as it is.
+fn thrown(e: impl Into<CmdError>) -> JsValue {
+    let e = e.into();
+    to_js(&e).unwrap_or_else(|_| JsValue::from_str(&e.message))
+}
+
+/// What is wrong with an identity file, as the UI words it.
+fn identity_error(e: IdentityFileError) -> CmdError {
+    let kind = match e {
+        IdentityFileError::WeakPassphrase => IdentityKind::WeakPassphrase,
+        IdentityFileError::InvalidNickname => IdentityKind::NicknameTooLong,
+        IdentityFileError::WrongPassphrase => IdentityKind::WrongPassphrase,
+        IdentityFileError::Corrupt => IdentityKind::Corrupt,
+    };
+    CmdError::new(ErrorKind::Identity(kind), e.to_string())
 }
 
 /// Renders `text` as an SVG QR code.
@@ -68,7 +90,7 @@ impl SealedIdentity {
 
 #[wasm_bindgen]
 impl Identity {
-    pub fn create(nickname: &str, passphrase: &str) -> Result<SealedIdentity, JsError> {
+    pub fn create(nickname: &str, passphrase: &str) -> Result<SealedIdentity, JsValue> {
         Self::seal_device(
             IdentitySeed::generate(),
             DeviceId::FIRST,
@@ -81,16 +103,16 @@ impl Identity {
         mnemonic: &str,
         nickname: &str,
         passphrase: &str,
-    ) -> Result<SealedIdentity, JsError> {
+    ) -> Result<SealedIdentity, JsValue> {
         let seed = IdentitySeed::from_mnemonic(mnemonic.trim())
-            .map_err(|_| JsError::new("invalid recovery phrase"))?;
+            .map_err(|_| thrown(IdentityKind::InvalidMnemonic))?;
         // A new device of the profile: the ones it had may still be in use,
         // and two installs as one device would push each other out.
         Self::seal_device(seed, DeviceId::random(&mut OsRng), nickname, passphrase)
     }
 
-    pub fn unlock(blob: &[u8], passphrase: &str) -> Result<Self, JsError> {
-        let file = identity_file::open(blob, passphrase).map_err(js_err)?;
+    pub fn unlock(blob: &[u8], passphrase: &str) -> Result<Self, JsValue> {
+        let file = identity_file::open(blob, passphrase).map_err(|e| thrown(identity_error(e)))?;
         Ok(Self {
             seed: file.seed,
             device: file.device,
@@ -103,9 +125,9 @@ impl Identity {
         device: DeviceId,
         nickname: &str,
         passphrase: &str,
-    ) -> Result<SealedIdentity, JsError> {
-        let blob =
-            identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng).map_err(js_err)?;
+    ) -> Result<SealedIdentity, JsValue> {
+        let blob = identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng)
+            .map_err(|e| thrown(identity_error(e)))?;
         Ok(SealedIdentity {
             identity: Self {
                 seed,
@@ -177,11 +199,11 @@ impl Provision {
 
     /// The identity handed over (after `linked_here`), sealed under this
     /// device's own `passphrase`; the seed never reaches JavaScript.
-    pub fn finish(&mut self, passphrase: &str) -> Result<SealedIdentity, JsError> {
+    pub fn finish(&mut self, passphrase: &str) -> Result<SealedIdentity, JsValue> {
         let linked = self
             .inner
             .take_linked()
-            .ok_or_else(|| JsError::new("not linked yet"))?;
+            .ok_or_else(|| thrown(CmdError::new(ErrorKind::NotLinking, "not linked yet")))?;
         Identity::seal_device(linked.seed, linked.device, &linked.nickname, passphrase)
     }
 
@@ -319,13 +341,15 @@ impl Client {
 
     /// Runs a UI command.
     #[wasm_bindgen(unchecked_return_type = "CommandOutcome")]
-    pub fn command(&mut self, cmd: JsValue, now_ms: f64) -> Result<JsValue, JsError> {
-        let cmd: JsCommand = serde_wasm_bindgen::from_value(cmd).map_err(js_err)?;
+    pub fn command(&mut self, cmd: JsValue, now_ms: f64) -> Result<JsValue, JsValue> {
+        let invalid =
+            |e: &dyn std::fmt::Display| thrown(CmdError::new(ErrorKind::Invalid, e.to_string()));
+        let cmd: JsCommand = serde_wasm_bindgen::from_value(cmd).map_err(|e| invalid(&e))?;
         let Prepared {
             command,
             msg_id,
             file_id,
-        } = cmd.prepare(&mut OsRng).map_err(js_err)?;
+        } = cmd.prepare(&mut OsRng).map_err(|e| invalid(&e))?;
         let effects = self.feed(Input::Command(command), now_ms)?;
         let out = js_sys::Object::new();
         js_sys::Reflect::set(&out, &"effects".into(), &effects)
@@ -554,6 +578,32 @@ mod tests {
     use rand::rngs::OsRng;
 
     use super::*;
+
+    /// Identity files fail with the identity kinds the desktop's native
+    /// identity store fails with, so the UI words both alike.
+    #[test]
+    fn identity_file_errors_are_identity_kinds() {
+        let cases = [
+            (
+                IdentityFileError::WeakPassphrase,
+                IdentityKind::WeakPassphrase,
+            ),
+            (
+                IdentityFileError::InvalidNickname,
+                IdentityKind::NicknameTooLong,
+            ),
+            (
+                IdentityFileError::WrongPassphrase,
+                IdentityKind::WrongPassphrase,
+            ),
+            (IdentityFileError::Corrupt, IdentityKind::Corrupt),
+        ];
+        for (e, kind) in cases {
+            let error = identity_error(e);
+            assert_eq!(error.kind, ErrorKind::Identity(kind));
+            assert_eq!(error.message, e.to_string());
+        }
+    }
 
     fn row(vault: &Vault, peer: PeerId, at: u64, status: Option<MessageStatus>) -> MessageRow {
         let msg = StoredMessage {

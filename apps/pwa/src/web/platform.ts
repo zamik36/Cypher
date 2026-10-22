@@ -1,3 +1,4 @@
+import { CommandError } from "@cypher/ui/errors";
 import { browserName } from "./device";
 import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 import type { Method, Methods, WorkerMessage } from "./protocol";
@@ -20,7 +21,7 @@ worker.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
     const call = pending.get(data.id);
     pending.delete(data.id);
     if (data.ok) call?.resolve(data.result);
-    else call?.reject(new Error(data.error));
+    else call?.reject(new CommandError(data.error));
   } else if ("event" in data) {
     listeners.get(data.event)?.forEach((cb) => cb(data.payload));
   } else {

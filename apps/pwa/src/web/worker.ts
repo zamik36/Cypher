@@ -23,6 +23,14 @@ import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effe
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import { offerFile, Refused, staleFiles, type Offering } from "./outgoing";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
+import {
+  CommandError,
+  type ErrorKind,
+  type FailReason,
+  type IdentityKind,
+  toCmdErrorShape,
+  toCommandError,
+} from "@cypher/ui/errors";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -47,6 +55,14 @@ const waiters = new Set<(r: Reply) => boolean>();
 
 const post = (msg: WorkerMessage) => self.postMessage(msg);
 
+/** A failure of `kind` for the UI, in the shape the desktop's commands fail with. */
+const failure = (kind: ErrorKind, message: string) => new CommandError({ kind, message });
+/** The core failed something, for `reason`. */
+const failed = (reason: string) =>
+  new CommandError({ kind: "failed", reason: reason as FailReason, message: `failed: ${reason}` });
+const identityFailure = (reason: IdentityKind, message: string) =>
+  new CommandError({ kind: "identity", reason, message });
+
 /** Runs core interactions one at a time so effects apply in order. */
 function serial<T>(task: () => Promise<T> | T): Promise<T> {
   const next = queue.then(task, task);
@@ -62,12 +78,12 @@ function feed(call: (c: Client, now: number) => Effect[]): Promise<void> {
 }
 
 function requireIdentity(): Identity {
-  if (!identity) throw new Error("identity is locked");
+  if (!identity) throw failure("locked", "identity is locked");
   return identity;
 }
 
 function requireClient(): Client {
-  if (!client) throw new Error("not connected");
+  if (!client) throw failure("not_connected", "not connected");
   return client;
 }
 
@@ -149,17 +165,17 @@ function onEvent(channel: string, payload: unknown) {
 }
 
 /** Resolves with the first reply `pick` accepts; register before issuing the command. */
-function awaitReply(pick: (r: Reply) => string | Error | undefined): Promise<string> {
+function awaitReply(pick: (r: Reply) => string | CommandError | undefined): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       waiters.delete(waiter);
-      reject(new Error("timed out"));
+      reject(failure("timed_out", "timed out"));
     }, REPLY_TIMEOUT_MS);
     const waiter = (r: Reply) => {
       const out = pick(r);
       if (out === undefined) return false;
       clearTimeout(timer);
-      if (out instanceof Error) reject(out);
+      if (out instanceof CommandError) reject(out);
       else resolve(out);
       return true;
     };
@@ -252,7 +268,7 @@ const gateway = new Link(
 let provision: Provision | null = null;
 let linkTicker: ReturnType<typeof setInterval> | undefined;
 /** Settles once the hand-over arrived, or waiting ended without it. */
-let linkDone: { promise: Promise<void>; settle: (failure?: Error) => void } | null = null;
+let linkDone: { promise: Promise<void>; settle: (failure?: CommandError) => void } | null = null;
 
 function feedLink(call: (p: Provision, now: number) => Effect[]): Promise<void> {
   return serial(async () => {
@@ -272,7 +288,7 @@ const linkSinks: EffectSinks = {
   anonymous: () => undefined,
   event: (channel) => {
     if (channel === "linked_here") linkDone?.settle();
-    else if (channel === "link_failed") linkDone?.settle(new Error("the offer expired"));
+    else if (channel === "link_failed") linkDone?.settle(failure("expired", "the offer expired"));
   },
   reply: () => undefined,
   readChunk: () => undefined,
@@ -284,10 +300,10 @@ const linkSinks: EffectSinks = {
   disconnect: () => linkSocket.stop(),
 };
 
-function stopLinking(failure?: Error) {
+function stopLinking() {
   clearInterval(linkTicker);
   linkSocket.stop();
-  linkDone?.settle(failure ?? new Error("cancelled"));
+  linkDone?.settle(failure("cancelled", "cancelled"));
 }
 
 /** Resolves once the core reports linking the device it was given, or why not. */
@@ -386,13 +402,13 @@ async function closeSink(fileId: string, complete: boolean) {
 
 async function sealedBlob(): Promise<Uint8Array> {
   const blob = await get<Uint8Array>(db, "identity", IDENTITY_KEY);
-  if (!blob) throw new Error("no identity");
+  if (!blob) throw identityFailure("missing", "no identity");
   return blob;
 }
 
 async function adopt(sealed: SealedIdentity): Promise<string> {
   if ((await get<Uint8Array>(db, "identity", IDENTITY_KEY)) !== undefined)
-    throw new Error("an identity already exists");
+    throw identityFailure("exists", "an identity already exists");
   await put(db, "identity", IDENTITY_KEY, sealed.blob);
   identity?.free();
   identity = sealed.intoIdentity();
@@ -400,7 +416,7 @@ async function adopt(sealed: SealedIdentity): Promise<string> {
 }
 
 async function startClient(): Promise<Client> {
-  if (!identity) throw new Error("identity is locked");
+  if (!identity) throw failure("locked", "identity is locked");
   const [meta, peers, sessions, outbox, transfers] = await Promise.all([
     scan(db, "meta"),
     scan(db, "peers"),
@@ -423,7 +439,7 @@ async function startClient(): Promise<Client> {
 }
 
 async function run(cmd: Record<string, unknown>) {
-  if (applier.stopped) throw new Error("storage_failed");
+  if (applier.stopped) throw failed("storage_failed");
   const { effects, ...ids } = requireClient().command(cmd, Date.now());
   await apply(effects);
   return ids;
@@ -457,14 +473,14 @@ async function sendMedia(
       inline,
     };
     const ids = await offerFile(offering, cmd, inline ? undefined : new File([blob], name, { type: mime }));
-    if (!ids) throw new Error("media rejected");
+    if (!ids) throw failure("internal", "media rejected");
     return { msg_id: ids.msgId, file_id: ids.fileId, duration_ms: durationMs, ...(waveform && { waveform }) };
   });
 }
 
 async function mediaBlob(fileId: string): Promise<Blob> {
   const record = await get<Uint8Array>(db, "media", unhex(fileId));
-  if (!record) throw new Error("media not found");
+  if (!record) throw failure("not_found", "media not found");
   const file = await (await (await sinkDir("media")).getFileHandle(fileId)).getFile();
   const sealed = new Uint8Array(await file.arrayBuffer());
   const { mime, bytes } = requireClient().openMedia(fileId, record, sealed);
@@ -517,10 +533,10 @@ const offering: Offering = {
   run: async (cmd) => {
     let outcome: ReturnType<Client["command"]>;
     try {
-      if (applier.stopped) throw new Error("storage_failed");
+      if (applier.stopped) throw failed("storage_failed");
       outcome = requireClient().command(cmd, Date.now());
     } catch (e) {
-      throw new Refused(e);
+      throw new Refused(toCommandError(e));
     }
     const { effects, ...ids } = outcome;
     await apply(effects);
@@ -548,7 +564,7 @@ const handlers: Handlers = {
     stopLinking();
     provision?.free();
     provision = new Provision(name, Date.now());
-    let settle: (failure?: Error) => void = () => undefined;
+    let settle: (failure?: CommandError) => void = () => undefined;
     const promise = new Promise<void>((resolve, reject) => {
       settle = (failure) => (failure ? reject(failure) : resolve());
     });
@@ -560,7 +576,7 @@ const handlers: Handlers = {
     return Promise.resolve(provision.offer());
   },
   finishLink: async (passphrase) => {
-    if (!provision || !linkDone) throw new Error("not waiting to be linked");
+    if (!provision || !linkDone) throw failure("not_linking", "not waiting to be linked");
     await linkDone.promise;
     clearInterval(linkTicker);
     const sealed = provision.finish(passphrase);
@@ -580,7 +596,7 @@ const handlers: Handlers = {
     const done = new Promise<void>((resolve, reject) => {
       linkWaiters.add((channel, payload) => {
         if (channel === "device_linked") resolve();
-        else if (channel === "link_failed") reject(new Error(String(payload)));
+        else if (channel === "link_failed") reject(failed(String(payload)));
         else return false;
         return true;
       });
@@ -632,7 +648,7 @@ const handlers: Handlers = {
   },
   createLink: async () => {
     const reply = awaitReply((r) =>
-      r.op === "link_created" ? r.value : r.op === "warning" ? new Error(r.value) : undefined,
+      r.op === "link_created" ? r.value : r.op === "warning" ? failed(r.value) : undefined,
     );
     await serial(() => run({ type: "create_link" }));
     return reply;
@@ -640,7 +656,7 @@ const handlers: Handlers = {
   joinLink: async (link) => {
     const trimmed = link.trim();
     const reply = awaitReply((r) =>
-      r.op === "joined" ? r.value : r.op === "join_failed" && r.link === trimmed ? new Error(r.value) : undefined,
+      r.op === "joined" ? r.value : r.op === "join_failed" && r.link === trimmed ? failed(r.value) : undefined,
     );
     await serial(() => run({ type: "join_link", link: trimmed }));
     return reply;
@@ -694,7 +710,7 @@ const handlers: Handlers = {
         const id = messageId(key);
         return id !== undefined && hex(id) === msgId;
       });
-      if (!row) throw new Error("not_found");
+      if (!row) throw failure("not_found", "no such message");
       await run({ type: "discard_outgoing", msg_id: msgId });
       const msg = requireClient().openMessage(row[0], row[1], undefined) as StoredView;
       if (msg.file) await run({ type: "cancel_transfer", file_id: msg.file.file_id });
@@ -716,7 +732,7 @@ self.onmessage = async ({ data: { id, method, args } }: MessageEvent<Request>) =
     const handler = handlers[method] as (...a: unknown[]) => Promise<unknown>;
     post({ id, ok: true, result: await handler(...args) });
   } catch (err) {
-    post({ id, ok: false, error: err instanceof Error ? err.message : String(err) });
+    post({ id, ok: false, error: toCmdErrorShape(err) });
   }
 };
 

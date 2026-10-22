@@ -1,9 +1,10 @@
 //! The identity: creating, unlocking, importing, locking and erasing it.
 
 use cypher_client::{IdentityStore, Unlocked};
+use cypher_core::CmdError;
 use tauri::State;
 
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 /// Argon2id is deliberately slow; keep it off the async runtime.
 pub(super) async fn with_store<T: Send + 'static>(
@@ -11,10 +12,9 @@ pub(super) async fn with_store<T: Send + 'static>(
     f: impl FnOnce(IdentityStore) -> Result<T, cypher_client::ClientError> + Send + 'static,
 ) -> CmdResult<T> {
     let store = IdentityStore::new(&state.paths().data);
-    tokio::task::spawn_blocking(move || f(store))
+    Ok(tokio::task::spawn_blocking(move || f(store))
         .await
-        .map_err(err)?
-        .map_err(err)
+        .map_err(CmdError::internal)??)
 }
 
 pub(super) async fn activate(state: &AppState, unlocked: Unlocked) -> String {

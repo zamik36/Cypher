@@ -19,8 +19,9 @@ use std::sync::Arc;
 use cypher_core::envelope::MAX_INLINE_LEN;
 use cypher_core::ui::{self, UiConversation};
 use cypher_core::{
-    Command, Core, CoreError, Effect, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
-    message_deletion, message_id, message_key, message_window, peer_messages,
+    CmdError, Command, Core, CoreError, Effect, ErrorKind, Event, IdentityKind, MediaKind,
+    Snapshot, StoredMessage, Table, Vault, message_deletion, message_id, message_key,
+    message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -73,6 +74,33 @@ pub enum ClientError {
     /// rustls `CryptoProvider` for Arti to use.
     #[error("Tor needs a process-wide rustls CryptoProvider; install one at startup")]
     NoCryptoProvider,
+}
+
+/// The kind the UI words a client failure by; the message is the error's.
+impl From<ClientError> for CmdError {
+    fn from(e: ClientError) -> Self {
+        let kind = match &e {
+            ClientError::Io(_)
+            | ClientError::Sqlite(_)
+            | ClientError::Core(CoreError::Storage | CoreError::Crypto | CoreError::Conflict)
+            | ClientError::NoCryptoProvider => ErrorKind::Internal,
+            ClientError::Core(CoreError::Invalid) | ClientError::InvalidInput => ErrorKind::Invalid,
+            ClientError::Core(CoreError::NewerStorage) => {
+                ErrorKind::Failed(FailReason::UpdateRequired)
+            }
+            ClientError::Closed => ErrorKind::Stopped,
+            ClientError::IdentityExists => ErrorKind::Identity(IdentityKind::Exists),
+            ClientError::WeakPassphrase => ErrorKind::Identity(IdentityKind::WeakPassphrase),
+            ClientError::WrongPassphrase => ErrorKind::Identity(IdentityKind::WrongPassphrase),
+            ClientError::CorruptIdentity => ErrorKind::Identity(IdentityKind::Corrupt),
+            ClientError::InvalidMnemonic => ErrorKind::Identity(IdentityKind::InvalidMnemonic),
+            ClientError::NotFound => ErrorKind::NotFound,
+            ClientError::NotReady => ErrorKind::NotReady,
+            ClientError::Expired => ErrorKind::Expired,
+            ClientError::TorUnavailable => ErrorKind::Unsupported,
+        };
+        Self::new(kind, e.to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -1033,6 +1061,50 @@ mod tests {
     async fn keys(client: &Client, table: store::StoreTable) -> Vec<Vec<u8>> {
         let rows = client.store.scan(table).await.unwrap();
         rows.into_iter().map(|(k, _)| k).collect()
+    }
+
+    /// Client failures reach the UI by the kind it words them by, with the
+    /// error's own text as the message.
+    #[test]
+    fn client_errors_become_the_kinds_the_ui_words() {
+        let cases = [
+            (ClientError::Closed, ErrorKind::Stopped),
+            (ClientError::InvalidInput, ErrorKind::Invalid),
+            (ClientError::Core(CoreError::Invalid), ErrorKind::Invalid),
+            (ClientError::NotFound, ErrorKind::NotFound),
+            (ClientError::NotReady, ErrorKind::NotReady),
+            (ClientError::Expired, ErrorKind::Expired),
+            (ClientError::TorUnavailable, ErrorKind::Unsupported),
+            (
+                ClientError::Core(CoreError::NewerStorage),
+                ErrorKind::Failed(FailReason::UpdateRequired),
+            ),
+            (
+                ClientError::WrongPassphrase,
+                ErrorKind::Identity(IdentityKind::WrongPassphrase),
+            ),
+            (
+                ClientError::WeakPassphrase,
+                ErrorKind::Identity(IdentityKind::WeakPassphrase),
+            ),
+            (
+                ClientError::CorruptIdentity,
+                ErrorKind::Identity(IdentityKind::Corrupt),
+            ),
+            (
+                ClientError::InvalidMnemonic,
+                ErrorKind::Identity(IdentityKind::InvalidMnemonic),
+            ),
+            (
+                ClientError::IdentityExists,
+                ErrorKind::Identity(IdentityKind::Exists),
+            ),
+            (ClientError::Core(CoreError::Storage), ErrorKind::Internal),
+        ];
+        for (e, kind) in cases {
+            let message = e.to_string();
+            assert_eq!(CmdError::from(e), CmdError::new(kind, message));
+        }
     }
 
     /// History shows each message with the latest status stored for it.

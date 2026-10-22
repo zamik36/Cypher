@@ -1,11 +1,24 @@
-import { convertFileSrc, invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import { toCommandError } from "@cypher/ui/errors";
 import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 
 let stopLevels: UnlistenFn | null = null;
+
+/**
+ * Runs a command; a failure is thrown as a `CommandError`, whose `kind`
+ * (and `reason`) the UI words for the user.
+ */
+async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  try {
+    return await tauriInvoke<T>(cmd, args, options);
+  } catch (e) {
+    throw toCommandError(e);
+  }
+}
 
 const isAndroid = /Android/i.test(navigator.userAgent);
 

@@ -6,8 +6,8 @@
 
 use std::borrow::Cow;
 
-use cypher_core::MediaKind;
 use cypher_core::envelope::{MAX_MIME_LEN, MAX_POSTER_LEN};
+use cypher_core::{CmdError, ErrorKind, MediaKind};
 use cypher_media::Recorder;
 use cypher_types::PeerId;
 use serde::Serialize;
@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Runtime, State};
 
 use super::chat::parse_peer;
 use crate::ephemeral::NotKept;
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 /// Shorter presses are treated as accidental taps and discarded.
 const MIN_VOICE_MS: u32 = 500;
@@ -38,17 +38,17 @@ pub(crate) async fn voice_start<R: Runtime>(
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
     if !state.is_unlocked().await {
-        return Err("identity is locked".into());
+        return Err(ErrorKind::Locked.into());
     }
-    let ticket = state.voice.ticket().ok_or("already recording")?;
+    let ticket = state.voice.ticket().ok_or(ErrorKind::AlreadyRecording)?;
     let recorder = tauri::async_runtime::spawn_blocking(move || {
         Recorder::start(move |level| {
             let _ = app.emit("cypher://voice_level", level);
         })
     })
     .await
-    .map_err(err)?
-    .map_err(err)?;
+    .map_err(CmdError::internal)?
+    .map_err(CmdError::internal)?;
     keep_recorder(&state, ticket, recorder).await
 }
 
@@ -64,17 +64,17 @@ pub(crate) async fn keep_recorder(
     let (recorder, reason) = match state.voice.keep(ticket, recorder) {
         Ok(()) if state.is_unlocked().await => return Ok(()),
         Ok(()) => match state.voice.take() {
-            Some(recorder) => (recorder, "cancelled"),
+            Some(recorder) => (recorder, ErrorKind::Cancelled),
             // The lock closed it already.
-            None => return Err("cancelled".into()),
+            None => return Err(ErrorKind::Cancelled.into()),
         },
-        Err(NotKept::AlreadyRecording(recorder)) => (recorder, "already recording"),
+        Err(NotKept::AlreadyRecording(recorder)) => (recorder, ErrorKind::AlreadyRecording),
         // Locked while the microphone opened: it closes again.
-        Err(NotKept::Reset(recorder)) => (recorder, "cancelled"),
+        Err(NotKept::Reset(recorder)) => (recorder, ErrorKind::Cancelled),
     };
     tauri::async_runtime::spawn_blocking(move || recorder.cancel())
         .await
-        .map_err(err)?;
+        .map_err(CmdError::internal)?;
     Err(reason.into())
 }
 
@@ -85,11 +85,11 @@ pub(crate) async fn voice_stop(
     peer_id: String,
 ) -> CmdResult<Option<MediaSent>> {
     let peer = parse_peer(&peer_id)?;
-    let recorder = state.voice.take().ok_or("not recording")?;
+    let recorder = state.voice.take().ok_or(ErrorKind::NotRecording)?;
     let recording = tauri::async_runtime::spawn_blocking(move || recorder.finish())
         .await
-        .map_err(err)?
-        .map_err(err)?;
+        .map_err(CmdError::internal)?
+        .map_err(CmdError::internal)?;
     if recording.duration_ms < MIN_VOICE_MS {
         return Ok(None);
     }
@@ -104,7 +104,7 @@ pub(crate) async fn voice_stop(
         .await?
         .send_media(peer, recording.webm, "voice.webm", "audio/webm", kind)
         .await
-        .map_err(err)?;
+        .map_err(CmdError::from)?;
     Ok(Some(MediaSent {
         msg_id: msg_id.to_hex(),
         file_id: file_id.to_hex(),
@@ -118,7 +118,7 @@ pub(crate) async fn voice_cancel(state: State<'_, AppState>) -> CmdResult<()> {
     if let Some(recorder) = state.voice.take() {
         tauri::async_runtime::spawn_blocking(move || recorder.cancel())
             .await
-            .map_err(err)?;
+            .map_err(CmdError::internal)?;
     }
     Ok(())
 }
@@ -141,20 +141,32 @@ impl<'a> VideoNote<'a> {
             headers
                 .get(name)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| format!("missing {name}"))
+                .ok_or_else(|| CmdError::new(ErrorKind::Invalid, format!("missing {name}")))
         };
         let peer = parse_peer(header("x-peer")?)?;
-        let duration_ms = header("x-duration-ms")?.parse().map_err(err)?;
-        let poster_len: usize = header("x-poster-len")?.parse().map_err(err)?;
+        let not_a_number =
+            |name: &str| CmdError::new(ErrorKind::Invalid, format!("{name} is not a number"));
+        let duration_ms = header("x-duration-ms")?
+            .parse()
+            .map_err(|_| not_a_number("x-duration-ms"))?;
+        let poster_len: usize = header("x-poster-len")?
+            .parse()
+            .map_err(|_| not_a_number("x-poster-len"))?;
         let mime = header("x-mime")?;
         if !mime.starts_with("video/") || mime.len() > MAX_MIME_LEN {
-            return Err("unsupported video type".into());
+            return Err(CmdError::new(
+                ErrorKind::Unsupported,
+                "unsupported video type",
+            ));
         }
         if poster_len > MAX_POSTER_LEN
             || poster_len >= body.len()
             || body.len() - poster_len > MAX_VIDEO_NOTE_BYTES
         {
-            return Err("video note is too large".into());
+            return Err(CmdError::new(
+                ErrorKind::TooLarge,
+                "video note is too large",
+            ));
         }
         let (poster, _video) = body.split_at(poster_len);
         Ok(Self {
@@ -198,7 +210,7 @@ pub(crate) async fn send_video_note(
         .await?
         .send_media(peer, video, file_name, &mime, kind)
         .await
-        .map_err(err)?;
+        .map_err(CmdError::from)?;
     Ok(MediaSent {
         msg_id: msg_id.to_hex(),
         file_id: file_id.to_hex(),
@@ -301,13 +313,13 @@ mod tests {
                 "unsupported video type",
             ),
             (|h| h[2].1 = "3".into(), b"PPv", "too large"),
-            (|h| h[1].1 = "-1".into(), b"PPv", "invalid digit"),
+            (|h| h[1].1 = "-1".into(), b"PPv", "is not a number"),
             (|_| {}, b"PP", "too large"),
         ];
         for (change, body, expected) in cases {
             let error = parse_with(change, body).unwrap_err();
             assert!(
-                error.contains(expected),
+                error.message.contains(expected),
                 "{error} should mention {expected}"
             );
         }

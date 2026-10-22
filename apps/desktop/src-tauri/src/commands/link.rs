@@ -1,8 +1,8 @@
-use cypher_core::{Command, Event};
+use cypher_core::{CmdError, Command, Event};
 use serde::Serialize;
 use tauri::State;
 
-use crate::session::{AppState, CmdResult, await_event, err, reason_name};
+use crate::session::{AppState, CmdResult, await_event};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LinkInfo {
@@ -16,12 +16,15 @@ pub(crate) struct LinkInfo {
 )]
 pub(crate) async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInfo> {
     let (client, mut events) = state.client_and_events().await?;
-    client.command(Command::CreateLink).await.map_err(err)?;
+    client
+        .command(Command::CreateLink)
+        .await
+        .map_err(CmdError::from)?;
     await_event(&mut events, |e| match e {
         Event::LinkCreated { link } => Some(Ok(LinkInfo {
             link_id: link.clone(),
         })),
-        Event::Warning { reason } => Some(Err(reason_name(*reason))),
+        Event::Warning { reason } => Some(Err((*reason).into())),
         _ => None,
     })
     .await
@@ -39,13 +42,13 @@ pub(crate) async fn join_link(state: State<'_, AppState>, link_id: String) -> Cm
     client
         .command(Command::JoinLink { link: link.clone() })
         .await
-        .map_err(err)?;
+        .map_err(CmdError::from)?;
     await_event(&mut events, |e| match e {
         Event::PeerAdded {
             peer,
             initiated_by_us: true,
         } => Some(Ok(peer.to_hex())),
-        Event::JoinFailed { link: l, reason } if *l == link => Some(Err(reason_name(*reason))),
+        Event::JoinFailed { link: l, reason } if *l == link => Some(Err((*reason).into())),
         _ => None,
     })
     .await

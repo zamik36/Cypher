@@ -12,6 +12,7 @@ vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check }));
 
 const { tauriPlatform } = await import("./tauri");
+const { CommandError } = await import("@cypher/ui/errors");
 
 const file = (name: string) => new File([name], name, { type: "text/plain" });
 
@@ -44,6 +45,25 @@ describe("sendFiles", () => {
     invoke.mockRejectedValueOnce(new Error("first")).mockRejectedValueOnce(new Error("second"));
     await expect(tauriPlatform.sendFiles("peer", [file("a.txt"), file("b.txt")])).rejects.toThrow("first");
     expect(emit).not.toHaveBeenCalled();
+  });
+});
+
+describe("commands", () => {
+  beforeEach(() => invoke.mockReset());
+
+  it("fail with the command's kind and reason", async () => {
+    invoke.mockRejectedValueOnce({ kind: "failed", reason: "offline", message: "failed: Offline" });
+    const joined = tauriPlatform.joinLink("link");
+    await expect(joined).rejects.toBeInstanceOf(CommandError);
+    await expect(joined).rejects.toMatchObject({ kind: "failed", reason: "offline", message: "failed: Offline" });
+  });
+
+  it("fail as internal errors with Tauri's own text", async () => {
+    invoke.mockRejectedValueOnce("invalid args `peerId` for command `send_message`");
+    await expect(tauriPlatform.sendMessage("peer", "hi")).rejects.toMatchObject({
+      kind: "internal",
+      message: "invalid args `peerId` for command `send_message`",
+    });
   });
 });
 

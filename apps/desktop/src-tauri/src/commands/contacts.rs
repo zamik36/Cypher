@@ -1,10 +1,10 @@
 //! What the user decides about a contact: accepting, blocking, naming.
 
-use cypher_core::Command;
+use cypher_core::{CmdError, Command};
 use tauri::State;
 
 use super::chat::parse_peer;
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 /// Takes someone who wrote without an invite as a contact.
 #[tauri::command]
@@ -30,7 +30,12 @@ pub(crate) async fn set_blocked(
 }
 
 async fn contact_command(state: &AppState, cmd: Command) -> CmdResult<()> {
-    state.client().await?.command(cmd).await.map_err(err)
+    state
+        .client()
+        .await?
+        .command(cmd)
+        .await
+        .map_err(CmdError::from)
 }
 
 /// Names a contact on this device; an empty name removes it.
@@ -46,5 +51,5 @@ pub(crate) async fn rename_peer(
         .await?
         .rename_contact(peer, alias)
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }

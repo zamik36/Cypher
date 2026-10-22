@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CommandError } from "../errors";
 
 describe("shares from other apps", () => {
   beforeEach(() => vi.resetModules());
@@ -38,7 +39,7 @@ describe("shares from other apps", () => {
     let starting = false;
     const send = (file: File) => {
       tried.push(file.name);
-      if (starting) return Promise.reject(new Error("connecting"));
+      if (starting) return Promise.reject(new CommandError({ kind: "connecting", message: "connecting" }));
       // The client restarts once, after the first file.
       if (tried.length === 1) starting = true;
       return Promise.resolve([{ file_name: file.name } as never]);

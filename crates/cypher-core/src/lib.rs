@@ -9,6 +9,7 @@
 mod api;
 mod core;
 pub mod envelope;
+mod errors;
 pub mod fs_name;
 pub mod history;
 pub mod link;
@@ -26,6 +27,7 @@ pub use api::{
     StoredMessage,
 };
 pub use core::{Core, Rows, Snapshot};
+pub use errors::{CmdError, ErrorKind, IdentityKind};
 pub use media::MediaKey;
 pub use share::ShareLink;
 pub use store::{
