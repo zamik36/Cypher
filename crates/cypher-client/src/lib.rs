@@ -12,7 +12,7 @@ mod store;
 #[cfg(feature = "tor")]
 mod tor;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -108,11 +108,10 @@ impl Config {
             .join(format!("{}.bin", file_id.to_hex()))
     }
 
-    /// Plaintext of an outgoing recording, deleted once its transfer ends.
+    /// Plaintext of an outgoing recording, or a copy made only for sending,
+    /// deleted once its transfer ends.
     pub(crate) fn outgoing_path(&self, file_id: &FileId) -> PathBuf {
-        self.data_dir
-            .join("outgoing")
-            .join(format!("{}.bin", file_id.to_hex()))
+        outgoing_dir(&self.data_dir).join(format!("{}.bin", file_id.to_hex()))
     }
 
     /// A message history archive, built for another device or received from
@@ -223,7 +222,17 @@ fn restore(
         transfers: scan(Table::Transfers)?,
     };
     let vault = Vault::new(seed.derive_storage_key());
-    let files = load_files(&store, &vault)?;
+    let file_rows = store.blocking_scan(FILES_TABLE)?;
+    // Named by a row, even one unreadable now, or by a transfer of the core.
+    let named = file_rows
+        .iter()
+        .chain(&snapshot.transfers)
+        .filter_map(|(key, _)| FileId::from_bytes(key))
+        .collect();
+    if let Err(e) = sweep_outgoing(dir, &named) {
+        tracing::warn!("deleting copies no transfer names failed: {e}");
+    }
+    let files = load_files(file_rows, &vault)?;
     let forgetting = store
         .blocking_scan(FORGET_TABLE)?
         .into_iter()
@@ -404,7 +413,7 @@ impl Client {
 
     /// Sends a copy the app made only for sending (such as an Android
     /// `content://` pick) as `name`. The client takes the copy over and
-    /// deletes it when the transfer ends.
+    /// deletes it when the transfer ends, or at once when the offer fails.
     pub async fn send_staged_file(
         &self,
         peer: PeerId,
@@ -417,17 +426,24 @@ impl Client {
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
-        if tokio::fs::rename(staged, &path).await.is_err() {
-            // Another file system: copy, then drop the original.
-            tokio::fs::copy(staged, &path).await?;
-            tokio::fs::remove_file(staged).await?;
-        }
         let file = Pick {
             file_id,
-            path,
+            path: path.clone(),
             name: name.to_owned(),
         };
-        self.offer(peer, file, mime, MediaKind::File).await
+        let offered = async {
+            if tokio::fs::rename(staged, &path).await.is_err() {
+                // Another file system: copy, then drop the original.
+                tokio::fs::copy(staged, &path).await?;
+                tokio::fs::remove_file(staged).await?;
+            }
+            self.offer(peer, file, mime, MediaKind::File).await
+        }
+        .await;
+        if offered.is_err() {
+            discard_copy(&path).await;
+        }
+        offered
     }
 
     async fn offer(
@@ -507,17 +523,24 @@ impl Client {
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
-        tokio::fs::write(&path, data).await?;
-        let source = SourceStamp::of(&tokio::fs::metadata(&path).await?)?;
-        self.send(Request::Track {
-            file_id,
-            entry: FileEntry {
-                path,
-                source: Some(source),
-            },
-            then: Some(cmd),
-        })
-        .await?;
+        let tracked = async {
+            tokio::fs::write(&path, data).await?;
+            let source = SourceStamp::of(&tokio::fs::metadata(&path).await?)?;
+            self.send(Request::Track {
+                file_id,
+                entry: FileEntry {
+                    path: path.clone(),
+                    source: Some(source),
+                },
+                then: Some(cmd),
+            })
+            .await
+        }
+        .await;
+        if let Err(e) = tracked {
+            discard_copy(&path).await;
+            return Err(e);
+        }
         Ok((msg_id, file_id))
     }
 
@@ -806,6 +829,43 @@ impl Client {
     }
 }
 
+/// Where the copies of files being sent are kept, in the client's folder.
+fn outgoing_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("outgoing")
+}
+
+/// Deletes a copy in `outgoing/` whose offer failed: no transfer names it,
+/// so nothing else would. One already gone is fine.
+async fn discard_copy(path: &Path) {
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+/// Deletes the copies in `outgoing/` that no file row names (`named`): a
+/// crash after a copy was taken over for sending, before it was recorded,
+/// leaves one behind. Only regular files there are touched; the folder is
+/// the client's own.
+fn sweep_outgoing(data_dir: &Path, named: &HashSet<FileId>) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(outgoing_dir(data_dir)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let file_id = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".bin"))
+            .and_then(FileId::from_hex);
+        if !file_id.is_some_and(|id| named.contains(&id)) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Deletes the sealed copies of voice and video notes; one already gone is
 /// fine.
 fn remove_notes(
@@ -841,9 +901,12 @@ async fn blocking<T: Send + 'static>(
     })?
 }
 
-fn load_files(store: &Store, vault: &Vault) -> Result<HashMap<FileId, FileEntry>, ClientError> {
+fn load_files(
+    rows: cypher_core::Rows,
+    vault: &Vault,
+) -> Result<HashMap<FileId, FileEntry>, ClientError> {
     let mut files = HashMap::new();
-    for (k, v) in store.blocking_scan(FILES_TABLE)? {
+    for (k, v) in rows {
         let Some(file_id) = FileId::from_bytes(&k) else {
             continue;
         };
@@ -1311,6 +1374,89 @@ mod tests {
 
         let (client, _events) = start().await.unwrap();
         assert_eq!(keys(&client, FORGET_TABLE).await, [peer.to_vec()]);
+        client.shutdown().await;
+    }
+
+    /// The files in the app's `outgoing/` folder, by name.
+    fn outgoing_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir.join("outgoing")).map_or_else(
+            |_| Vec::new(),
+            |entries| {
+                let mut names: Vec<_> = entries
+                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            },
+        )
+    }
+
+    /// A copy taken over for sending is deleted when its offer fails, so
+    /// nothing is left in `outgoing/` that no transfer will ever remove.
+    #[tokio::test]
+    async fn a_copy_for_sending_is_deleted_when_its_offer_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        // A stopped client refuses every offer.
+        client.shutdown().await;
+        let peer = PeerId([4; 32]);
+        let staged = dir.path().join("pick.tmp");
+        std::fs::write(&staged, b"picked").unwrap();
+        let refused = client
+            .send_staged_file(peer, &staged, "pick.txt", "text/plain")
+            .await;
+        assert!(matches!(refused, Err(ClientError::Closed)), "{refused:?}");
+        assert!(!staged.exists(), "the client took the copy over");
+        assert!(outgoing_files(dir.path()).is_empty());
+
+        let voice = MediaKind::Voice {
+            duration_ms: 1,
+            waveform: vec![1],
+        };
+        let note = vec![7; MAX_INLINE_LEN + 1];
+        let refused = client
+            .send_media(peer, note, "voice.ogg", "audio/ogg", voice)
+            .await;
+        assert!(matches!(refused, Err(ClientError::Closed)), "{refused:?}");
+        assert!(outgoing_files(dir.path()).is_empty());
+    }
+
+    /// A start deletes the copies in `outgoing/` no transfer names (a crash
+    /// between taking a copy over and recording it leaves one), and nothing
+    /// else.
+    #[tokio::test]
+    async fn a_start_deletes_copies_no_transfer_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let (client, _events) = start().await.unwrap();
+        let (kept, orphan) = (FileId([1; 16]), FileId([2; 16]));
+        let kept_path = client.config.outgoing_path(&kept);
+        let entry = FileEntry {
+            path: kept_path.clone(),
+            source: None,
+        };
+        let sealed = client
+            .vault
+            .seal(Table::Meta, &file_key(&kept), &entry, &mut OsRng);
+        let op = store::Op::Put(FILES_TABLE, kept.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+        let orphan_path = client.config.outgoing_path(&orphan);
+        std::fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        for path in [&kept_path, &orphan_path] {
+            std::fs::write(path, b"plain").unwrap();
+        }
+        // Not the client's to delete: elsewhere in its folder, or a folder.
+        let elsewhere = dir.path().join("keep.bin");
+        std::fs::write(&elsewhere, b"user").unwrap();
+        std::fs::create_dir_all(dir.path().join("outgoing").join("folder")).unwrap();
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        let kept_name = format!("{}.bin", kept.to_hex());
+        assert_eq!(outgoing_files(dir.path()), [kept_name, "folder".to_owned()]);
+        assert!(elsewhere.exists());
         client.shutdown().await;
     }
 }
