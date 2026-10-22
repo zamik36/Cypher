@@ -15,8 +15,9 @@ use crate::ClientError;
 pub(crate) const FILES_TABLE: StoreTable = StoreTable::Files;
 /// Driver-owned table: file id → where a finished file was saved.
 pub(crate) const SAVED_TABLE: StoreTable = StoreTable::Saved;
-/// Driver-owned table: peer id → empty, while that contact is being
-/// forgotten; a start finishes what a crash cut short.
+/// Driver-owned table: peer id → the key of its newest message (empty for
+/// none) when forgetting it began, while that contact is being forgotten;
+/// a start finishes what did not.
 pub(crate) const FORGET_TABLE: StoreTable = StoreTable::Forget;
 
 use cypher_core::Rows as Pairs;

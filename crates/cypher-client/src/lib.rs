@@ -184,12 +184,22 @@ fn deletion_ops(
     deletion.note
 }
 
+/// A contact whose forgetting did not finish: a crash cut it short, or it
+/// failed while the app ran on.
+struct Forgetting {
+    peer: PeerId,
+    /// Set when `peer` is a contact (or a request) again: only messages up
+    /// to this key, the newest when the forget began, are what it was
+    /// about; empty when there were none.
+    upto: Option<Vec<u8>>,
+}
+
 /// What a start reads from disk.
 struct Restored {
     store: Store,
     files: HashMap<FileId, FileEntry>,
-    /// Contacts whose forgetting a crash cut short.
-    forgetting: Vec<PeerId>,
+    /// Contacts whose forgetting did not finish.
+    forgetting: Vec<Forgetting>,
     core: Core<OsRng>,
     initial: Vec<Effect>,
 }
@@ -216,8 +226,15 @@ fn restore(
     let files = load_files(&store, &vault)?;
     let forgetting = store
         .blocking_scan(FORGET_TABLE)?
-        .iter()
-        .filter_map(|(key, _)| PeerId::from_bytes(key))
+        .into_iter()
+        .filter_map(|(key, bound)| {
+            let peer = PeerId::from_bytes(&key)?;
+            let contact = snapshot.peers.iter().any(|(k, _)| *k == key);
+            Some(Forgetting {
+                peer,
+                upto: contact.then_some(bound),
+            })
+        })
         .collect();
     let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
     Ok(Restored {
@@ -321,9 +338,16 @@ impl Client {
                 })
                 .await?;
         }
-        // Contacts whose forgetting a crash cut short.
-        for peer in forgetting {
-            client.forget_peer(peer).await?;
+        // A forget that cannot finish now keeps its marker for the next
+        // start rather than keep the client from starting.
+        for Forgetting { peer, upto } in forgetting {
+            let finished = match upto {
+                Some(upto) => client.delete_conversation(peer, upto).await,
+                None => client.forget_peer(peer).await,
+            };
+            if let Err(e) = finished {
+                tracing::warn!("finishing forgetting a contact failed: {e}");
+            }
         }
         Ok((client, events_rx))
     }
@@ -662,25 +686,43 @@ impl Client {
     /// their statuses, stored voice and video notes and where files were
     /// saved. The saved files themselves stay where they are. It goes a page
     /// at a time; a marker kept until the last page is gone lets the next
-    /// start finish what a crash cut short.
+    /// start finish what a crash or a failure cut short.
     pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
-        let marker = move || peer.to_vec();
-        let mark = store::Op::Put(FORGET_TABLE, marker(), Vec::new());
+        // The marker names the newest message too: should the contact come
+        // back before this finishes, what came after it is spared.
+        let (first, last) = peer_messages(&peer);
+        let newest = self
+            .store
+            .range_desc(Table::Messages.into(), first, End::Through(last.clone()), 1)
+            .await?
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .unwrap_or_default();
+        let mark = store::Op::Put(FORGET_TABLE, peer.to_vec(), newest);
         self.store.apply(vec![mark]).await?;
         self.command(Command::RemovePeer { peer }).await?;
+        self.delete_conversation(peer, last).await
+    }
+
+    /// Deletes the messages with `peer` up to the key `upto`, a page at a
+    /// time, then the marker of its forgetting.
+    async fn delete_conversation(&self, peer: PeerId, upto: Vec<u8>) -> Result<(), ClientError> {
         let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
         let config = self.config.clone();
         blocking(move || {
-            let (first, last) = peer_messages(&peer);
+            let (first, _) = peer_messages(&peer);
             loop {
+                // Nothing lies before `first`: an empty bound takes nothing.
                 let page = store.blocking_range(
                     Table::Messages.into(),
                     first.clone(),
-                    End::Through(last.clone()),
+                    End::Through(upto.clone()),
                     FORGET_PAGE,
                 )?;
                 if page.is_empty() {
-                    return store.blocking_apply(vec![store::Op::Delete(FORGET_TABLE, marker())]);
+                    let unmark = store::Op::Delete(FORGET_TABLE, peer.to_vec());
+                    return store.blocking_apply(vec![unmark]);
                 }
                 let mut ops = Vec::with_capacity(page.len() * 3);
                 let mut notes = Vec::new();
@@ -1202,6 +1244,73 @@ mod tests {
         client.forget_peer(other).await.unwrap();
         assert!(keys(&client, FORGET_TABLE).await.is_empty());
         assert!(keys(&client, Table::Messages.into()).await.is_empty());
+        client.shutdown().await;
+    }
+
+    /// Marks `peer` as being forgotten up to the message at `upto_ms`, the
+    /// way a forget that failed after removing the contact leaves it.
+    async fn mark_forgetting(client: &Client, peer: PeerId, upto_ms: u64, id: u8) {
+        let bound = message_key(&peer, upto_ms, &MsgId([id; 16]));
+        let marker = store::Op::Put(FORGET_TABLE, peer.to_vec(), bound);
+        client.store.apply(vec![marker]).await.unwrap();
+    }
+
+    /// A contact taken back (or writing again as a request) after a forget
+    /// that did not finish keeps what came after it: the next start deletes
+    /// only what the forget was about.
+    #[tokio::test]
+    async fn a_forget_left_unfinished_spares_what_came_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let peer = PeerId([4; 32]);
+        let (client, _events) = start().await.unwrap();
+        put(&client, &text(peer, 1, 1)).await;
+        mark_forgetting(&client, peer, 1, 1).await;
+        // The contact is back, and wrote again.
+        let row = store::Op::Put(Table::Peers.into(), peer.to_vec(), vec![0; 40]);
+        client.store.apply(vec![row]).await.unwrap();
+        put(&client, &text(peer, 5, 5)).await;
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        let left: Vec<_> = client
+            .history(peer, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.msg_id)
+            .collect();
+        assert_eq!(left, [MsgId([5; 16])], "only what came after is kept");
+        assert_eq!(keys(&client, Table::Peers.into()).await, [peer.to_vec()]);
+        assert!(keys(&client, FORGET_TABLE).await.is_empty());
+        client.shutdown().await;
+    }
+
+    /// A forget that cannot be finished at start does not stop the client
+    /// from starting; its marker stays for the next try.
+    #[tokio::test]
+    async fn a_forget_that_cannot_finish_does_not_stop_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let peer = PeerId([4; 32]);
+        let (client, _events) = start().await.unwrap();
+        let voice = MediaKind::Voice {
+            duration_ms: 1,
+            waveform: vec![1],
+        };
+        put(&client, &file(peer, 1, 7, voice)).await;
+        mark_forgetting(&client, peer, 1, 7).await;
+        // A sealed copy that cannot be deleted.
+        let stuck = client.config.media_path(&FileId([7; 16]));
+        std::fs::create_dir_all(stuck.join("inside")).unwrap();
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        assert_eq!(keys(&client, FORGET_TABLE).await, [peer.to_vec()]);
         client.shutdown().await;
     }
 }
