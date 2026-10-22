@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 const emit = vi.fn();
+const relaunch = vi.fn();
+const check = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke, convertFileSrc: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ emit, listen: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({}));
-vi.mock("@tauri-apps/plugin-process", () => ({}));
-vi.mock("@tauri-apps/plugin-updater", () => ({}));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
+vi.mock("@tauri-apps/plugin-updater", () => ({ check }));
 
 const { tauriPlatform } = await import("./tauri");
 
@@ -42,5 +44,41 @@ describe("sendFiles", () => {
     invoke.mockRejectedValueOnce(new Error("first")).mockRejectedValueOnce(new Error("second"));
     await expect(tauriPlatform.sendFiles("peer", [file("a.txt"), file("b.txt")])).rejects.toThrow("first");
     expect(emit).not.toHaveBeenCalled();
+  });
+});
+
+describe("updates", () => {
+  /** An update whose steps, and the commands around them, go into `trace`. */
+  function offer(trace: string[]) {
+    const step = (name: string) => () => {
+      trace.push(name);
+      return Promise.resolve();
+    };
+    check.mockResolvedValue({
+      version: "9.9.9",
+      download: vi.fn(step("download")),
+      install: vi.fn(step("install")),
+      downloadAndInstall: vi.fn(step("downloadAndInstall")),
+    });
+    invoke.mockImplementation((cmd: string) => step(`invoke ${cmd}`)());
+    relaunch.mockImplementation(step("relaunch"));
+  }
+
+  it("stops the client before installing, as the Windows installer exits the app itself", async () => {
+    const trace: string[] = [];
+    offer(trace);
+    expect(await tauriPlatform.updates?.check()).toBe("9.9.9");
+    await tauriPlatform.updates?.install();
+    expect(trace).toEqual(["download", "invoke lock", "install", "relaunch"]);
+  });
+
+  it("starts the app over when installing fails after the client stopped", async () => {
+    const trace: string[] = [];
+    offer(trace);
+    await tauriPlatform.updates?.check();
+    const update = (await check.mock.results[0]?.value) as { install: ReturnType<typeof vi.fn> };
+    update.install.mockRejectedValueOnce(new Error("installer gone"));
+    await expect(tauriPlatform.updates?.install()).rejects.toThrow("installer gone");
+    expect(trace).toEqual(["download", "invoke lock", "relaunch"]);
   });
 });

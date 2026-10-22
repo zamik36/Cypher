@@ -48,8 +48,16 @@ const updates: Platform["updates"] = {
   },
   install: async () => {
     if (!offered) return;
-    await offered.downloadAndInstall();
-    await relaunch();
+    await offered.download();
+    // On Windows, installing ends the app at once, without the exit that
+    // stops the client elsewhere: it is stopped here, as on exit. Should
+    // installing fail, the app starts over as it is, at the unlock screen.
+    await command("lock");
+    try {
+      await offered.install();
+    } finally {
+      await relaunch();
+    }
   },
 };
 
