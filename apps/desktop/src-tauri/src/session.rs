@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
@@ -84,6 +85,10 @@ pub(crate) struct AppState {
     /// Commands never take it: `identity` and `session` are each locked only
     /// for a moment, so they answer while a client starts.
     lifecycle: Mutex<()>,
+    /// Set while a connect is under way, so commands that find no client
+    /// meanwhile say `connecting` (the UI retries once connected) rather
+    /// than `not connected`.
+    connecting: AtomicBool,
     identity: Mutex<Option<Arc<Unlocked>>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
@@ -101,6 +106,7 @@ impl AppState {
             paths,
             tls,
             lifecycle: Mutex::default(),
+            connecting: AtomicBool::new(false),
             identity: Mutex::default(),
             session: Mutex::default(),
             endpoint: Mutex::default(),
@@ -159,6 +165,7 @@ impl AppState {
         // the same data, and a second `connect` waits for this one. Meanwhile
         // commands find no client and say so.
         let _lifecycle = self.lifecycle.lock().await;
+        let _connecting = Connecting::mark(&self.connecting);
         let old = self.session.lock().await.take();
         if let Some(old) = old {
             old.close().await;
@@ -212,7 +219,7 @@ impl AppState {
             .await
             .as_ref()
             .map(|s| s.client.clone())
-            .ok_or_else(|| "not connected".to_owned())
+            .ok_or_else(|| self.no_client())
     }
 
     /// Client plus an event subscription taken before any command is sent,
@@ -221,8 +228,17 @@ impl AppState {
         &self,
     ) -> CmdResult<(Client, broadcast::Receiver<Event>)> {
         let guard = self.session.lock().await;
-        let s = guard.as_ref().ok_or("not connected")?;
+        let s = guard.as_ref().ok_or_else(|| self.no_client())?;
         Ok((s.client.clone(), s.events.subscribe()))
+    }
+
+    /// Why there is no client: one is being started, or none is.
+    fn no_client(&self) -> String {
+        if self.connecting.load(Ordering::Acquire) {
+            "connecting".to_owned()
+        } else {
+            "not connected".to_owned()
+        }
     }
 
     /// Stops the client and forgets the unlocked identity.
@@ -249,6 +265,22 @@ impl AppState {
         self.linking.cancel().await;
         self.transfers.reset();
         lifecycle
+    }
+}
+
+/// Marks a connect as under way until dropped, whichever way it ends.
+struct Connecting<'a>(&'a AtomicBool);
+
+impl<'a> Connecting<'a> {
+    fn mark(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for Connecting<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

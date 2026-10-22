@@ -1364,7 +1364,14 @@ mod offline {
             number.await.expect("waited for the client").unwrap();
             let list = tokio::time::timeout(PROMPT, desktop.call("get_conversations", json!({})));
             let list = list.await.expect("waited for the client");
-            assert_eq!(list, Err("not connected".to_owned()));
+            assert_eq!(
+                list,
+                Err("connecting".to_owned()),
+                "told apart from offline"
+            );
+            let note = media_request(&FileId([3; 16]).to_hex(), None);
+            let note = media_scheme::answer(desktop.app.handle(), &note).await;
+            assert_eq!(note.status(), StatusCode::SERVICE_UNAVAILABLE);
             drop(held);
         };
         let (restarted, ()) = tokio::join!(restart, meanwhile);
