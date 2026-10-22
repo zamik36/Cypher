@@ -563,7 +563,8 @@ impl Client {
     }
 
     /// Every conversation as the chat list shows it, the most recent first.
-    /// A contact row that cannot be read still lists its contact, unnamed.
+    /// A contact row that cannot be read still lists its contact, unnamed;
+    /// a message row that cannot be read is left out.
     pub async fn conversations(&self) -> Result<Vec<UiConversation>, ClientError> {
         let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
         blocking(move || {
@@ -587,9 +588,18 @@ impl Client {
                 .into_iter()
                 .zip(&recent)
                 .map(|((peer, contact), rows)| {
-                    Ok(ui::summary(&peer, contact, &open_messages(&vault, rows)?))
+                    // A row that cannot be read is left out, not the list.
+                    let readable: Vec<_> = rows
+                        .iter()
+                        .filter_map(|(key, value, status)| {
+                            vault
+                                .open_message_with_status(key, value, status.as_deref())
+                                .ok()
+                        })
+                        .collect();
+                    ui::summary(&peer, contact, &readable)
                 })
-                .collect::<Result<_, ClientError>>()?;
+                .collect();
             Ok(ui::chat_list(entries))
         })
         .await
@@ -1087,6 +1097,28 @@ mod tests {
         assert_eq!(status, MessageStatus::Read);
         let statuses = keys(&client, Table::MessageStatus.into()).await;
         assert_eq!(statuses, [vec![1; 16]]);
+        client.shutdown().await;
+    }
+
+    /// A message row that cannot be read is left out of the chat list
+    /// instead of failing it.
+    #[tokio::test]
+    async fn the_chat_list_passes_over_a_row_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        let contact = store::Op::Put(Table::Peers.into(), peer.to_vec(), vec![0; 40]);
+        let unreadable = message_key(&peer, 9, &MsgId([9; 16]));
+        let broken = store::Op::Put(Table::Messages.into(), unreadable, b"x".to_vec());
+        client.store.apply(vec![contact, broken]).await.unwrap();
+        put(&client, &text(peer, 1, 1)).await;
+
+        let list = client.conversations().await.unwrap();
+        let shown: Vec<_> = list
+            .iter()
+            .map(|c| (c.peer_id.clone(), c.last_message_at, c.unread))
+            .collect();
+        assert_eq!(shown, [(peer.to_hex(), 1, 1)]);
         client.shutdown().await;
     }
 }

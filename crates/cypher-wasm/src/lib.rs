@@ -359,7 +359,7 @@ impl Client {
     /// The chat list: each contact's row from `peers` with, at the same
     /// index of `recent`, its latest messages and their status rows, newest
     /// first. A contact row that cannot be read still lists its contact,
-    /// unnamed.
+    /// unnamed; a message row that cannot be read is left out.
     #[wasm_bindgen(js_name = chatList, unchecked_return_type = "ChatEntry[]")]
     pub fn chat_list(
         &self,
@@ -449,8 +449,6 @@ type MessageRow = (ByteBuf, ByteBuf, Option<ByteBuf>);
 enum ChatListError {
     #[error("one list of messages per contact")]
     Mismatch,
-    #[error("{0}")]
-    Core(#[from] cypher_core::CoreError),
 }
 
 /// The chat-list entry of each contact in `peers`, whose latest messages
@@ -469,12 +467,15 @@ fn chat_entries(
             continue;
         };
         let contact = vault.open_contact(key, sealed).unwrap_or_default();
-        let msgs = rows
+        // A row that cannot be read is left out, not the list.
+        let msgs: Vec<_> = rows
             .iter()
-            .map(|(key, value, status)| {
-                vault.open_message_with_status(key, value, status.as_deref())
+            .filter_map(|(key, value, status)| {
+                vault
+                    .open_message_with_status(key, value, status.as_deref())
+                    .ok()
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         entries.push(ui::summary(&peer, contact, &msgs));
     }
     Ok(entries)
@@ -606,8 +607,17 @@ mod tests {
             chat_entries(&vault, &peers, &recent[..1]),
             Err(ChatListError::Mismatch)
         ));
-        let stranger = [vec![row(&Vault::new([2; 32]), a, 1, None)], Vec::new()];
-        chat_entries(&vault, &peers, &stranger).unwrap_err();
+        // A row that cannot be read is passed over, not the whole list.
+        let mixed = [
+            vec![
+                row(&Vault::new([2; 32]), a, 5, None),
+                row(&vault, a, 1, None),
+            ],
+            Vec::new(),
+        ];
+        let entries = chat_entries(&vault, &peers, &mixed).unwrap();
+        let first = entries.first().unwrap();
+        assert_eq!((first.last_message_at, first.unread), (1, 1));
     }
 
     /// The web client deletes a row it cannot read with its status, as the
