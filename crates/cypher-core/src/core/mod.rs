@@ -22,12 +22,14 @@ use crate::CoreError;
 use crate::api::{Command, Effect, Event, FailReason, Input};
 use crate::envelope::SyncBody;
 use crate::link::LinkOffer;
-use crate::peer::{OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord};
+use crate::peer::{
+    OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord, SkippedKeyRecord,
+};
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
 use crate::store::{
     META_DEVICES, META_HISTORY, META_INBOX, META_LINKS, META_PREKEYS, META_PROFILE, META_SERVERS,
-    Record, StoreOp, Table, Vault, session_addr, session_key,
+    Record, SessionRow, StoreOp, Table, Vault, session_key, session_row, skipped_key_row,
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
@@ -240,7 +242,7 @@ impl<R: CryptoRngCore> Core<R> {
 
         let own = load_own(&vault, &snapshot.meta, &mut skipped)?;
         let (peers, sessions, legacy) =
-            load_contacts(&vault, snapshot, identity.peer_id(), &mut skipped)?;
+            load_contacts(&vault, snapshot, identity.peer_id(), now_ms, &mut skipped)?;
         let outbox = load_outbox(&vault, &snapshot.outbox, &mut skipped)?;
         let (outgoing, incoming) = load_transfers(&vault, &snapshot.transfers, &mut skipped)?;
         let inboxes_new = own.inbox.is_none();
@@ -255,7 +257,7 @@ impl<R: CryptoRngCore> Core<R> {
             vault,
             prekeys,
             peers,
-            sessions,
+            sessions: sessions.sessions,
             outbox,
             outgoing,
             incoming,
@@ -286,6 +288,7 @@ impl<R: CryptoRngCore> Core<R> {
             own_links: own.links,
             effects: Vec::new(),
         };
+        core.tidy_session_rows(sessions.stale, sessions.migrated);
         core.adopt_legacy_sessions(legacy, &mut skipped);
         if core.prekeys.take_unseeded() {
             core.seed_accepted_inits();
@@ -1028,15 +1031,72 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
+    /// Stores the session with `addr` and what changed in its skipped keys:
+    /// keys set aside are stored before the session's row, which counts
+    /// them (should the app stop in between, the next start deletes them),
+    /// and keys gone are deleted after it, which names them (should it stop
+    /// in between, the next start deletes them too).
     fn persist_session(&mut self, addr: Addr) {
-        if let Some(s) = self.sessions.get(&addr) {
+        let Some(s) = self.sessions.get_mut(&addr) else {
+            return;
+        };
+        let changes = s.ratchet.take_changes();
+        for key in &changes.stored {
             let op = self.vault.put(
                 Table::Sessions,
-                session_key(addr),
-                &s.to_record(),
+                skipped_key_row(addr, key.seq()),
+                &SkippedKeyRecord::new(s.lineage, key),
                 &mut self.rng,
             );
             self.effects.push(Effect::Persist(op));
+        }
+        let record = s.to_record(changes.spent);
+        let op = self
+            .vault
+            .put(Table::Sessions, session_key(addr), &record, &mut self.rng);
+        self.effects.push(Effect::Persist(op));
+        self.effects.extend(record.spent.iter().map(|&seq| {
+            Effect::Persist(StoreOp::Delete {
+                table: Table::Sessions,
+                key: skipped_key_row(addr, seq),
+            })
+        }));
+    }
+
+    /// Deletes the row of `session`, which was with `addr`, and every
+    /// skipped key stored beside it.
+    fn delete_session(&mut self, addr: Addr, session: &Session) {
+        self.persist(StoreOp::Delete {
+            table: Table::Sessions,
+            key: session_key(addr),
+        });
+        for seq in session.ratchet.stored_skipped() {
+            self.persist(StoreOp::Delete {
+                table: Table::Sessions,
+                key: skipped_key_row(addr, seq),
+            });
+        }
+    }
+
+    /// Deletes the rows beside sessions that no session counts, and stores
+    /// again, the way this release stores them, the sessions read from a
+    /// release that kept their skipped keys inside: in a line of their
+    /// own, so that rows an earlier, unfinished attempt left are not
+    /// theirs.
+    fn tidy_session_rows(&mut self, stale: Vec<Vec<u8>>, mut migrated: Vec<Addr>) {
+        for key in stale {
+            self.persist(StoreOp::Delete {
+                table: Table::Sessions,
+                key,
+            });
+        }
+        migrated.sort_unstable();
+        for addr in migrated {
+            let lineage = self.rng.next_u64();
+            if let Some(s) = self.sessions.get_mut(&addr) {
+                s.lineage = lineage;
+            }
+            self.persist_session(addr);
         }
     }
 
@@ -1052,8 +1112,9 @@ impl<R: CryptoRngCore> Core<R> {
         for (peer, record) in legacy {
             let addr = Addr::new(peer, DeviceId::FIRST);
             if let Entry::Vacant(slot) = self.sessions.entry(addr) {
-                match Session::from_record(&record) {
-                    Ok(session) => {
+                match Session::from_record(&record, self.now) {
+                    Ok(mut session) => {
+                        session.lineage = self.rng.next_u64();
                         slot.insert(session);
                         self.persist_session(addr);
                     }
@@ -1098,7 +1159,7 @@ type LoadedPeers = (HashMap<PeerId, Peer>, Vec<(PeerId, SessionRecord)>);
 /// records from before devices still held.
 type LoadedContacts = (
     HashMap<PeerId, Peer>,
-    HashMap<Addr, Session>,
+    LoadedSessions,
     Vec<(PeerId, SessionRecord)>,
 );
 
@@ -1106,10 +1167,11 @@ fn load_contacts(
     vault: &Vault,
     snapshot: &Snapshot,
     own: PeerId,
+    now_ms: u64,
     skipped: &mut Skipped,
 ) -> Result<LoadedContacts, CoreError> {
     let (peers, legacy) = load_peers(vault, &snapshot.peers, skipped)?;
-    let sessions = load_sessions(vault, &snapshot.sessions, &peers, own, skipped)?;
+    let sessions = load_sessions(vault, &snapshot.sessions, &peers, own, now_ms, skipped)?;
     Ok((peers, sessions, legacy))
 }
 
@@ -1132,29 +1194,86 @@ fn load_peers(vault: &Vault, rows: &Rows, skipped: &mut Skipped) -> Result<Loade
     Ok((peers, legacy))
 }
 
-/// Sessions with the devices of known contacts and our own other devices;
-/// any other is left behind.
+/// The sessions restored, and what to do about the rows beside them.
+#[derive(Default)]
+struct LoadedSessions {
+    sessions: HashMap<Addr, Session>,
+    /// Keys of rows beside a session that no session counts: stored ahead
+    /// of a session row that was never stored, spent but not yet deleted,
+    /// of a session deleted or replaced since.
+    stale: Vec<Vec<u8>>,
+    /// Sessions read from a release that kept their skipped keys inside.
+    migrated: Vec<Addr>,
+}
+
+/// Sessions with the devices of known contacts and our own other devices,
+/// and the skipped keys stored beside them; any other session is left
+/// behind.
 fn load_sessions(
     vault: &Vault,
     rows: &Rows,
     peers: &HashMap<PeerId, Peer>,
     own: PeerId,
+    now_ms: u64,
     skipped: &mut Skipped,
-) -> Result<HashMap<Addr, Session>, CoreError> {
-    let mut sessions = HashMap::with_capacity(rows.len());
+) -> Result<LoadedSessions, CoreError> {
+    let mut out = LoadedSessions {
+        sessions: HashMap::with_capacity(rows.len()),
+        ..LoadedSessions::default()
+    };
+    // Every session row there is, read or not, and what each spent.
+    let mut present: HashMap<Addr, Vec<u64>> = HashMap::new();
     for (k, v) in rows {
+        let Some(SessionRow::Session(addr)) = session_row(k) else {
+            continue;
+        };
+        present.insert(addr, Vec::new());
         let Some(record) = skipped.open::<SessionRecord>(vault, Table::Sessions, k, v)? else {
             continue;
         };
-        match (session_addr(k), Session::from_record(&record)) {
-            (Some(addr), Ok(session)) if addr.peer == own || peers.contains_key(&addr.peer) => {
-                sessions.insert(addr, session);
+        match Session::from_record(&record, now_ms) {
+            Ok(session) if addr.peer == own || peers.contains_key(&addr.peer) => {
+                if record.migrated {
+                    out.migrated.push(addr);
+                }
+                present.insert(addr, record.spent.clone());
+                out.sessions.insert(addr, session);
             }
-            (Some(_), Ok(_)) => {}
-            _ => skipped.0 = skipped.0.saturating_add(1),
+            Ok(_) => {}
+            Err(_) => skipped.0 = skipped.0.saturating_add(1),
         }
     }
-    Ok(sessions)
+    for (k, v) in rows {
+        match session_row(k) {
+            Some(SessionRow::Session(_)) => {}
+            Some(SessionRow::SkippedKey(addr, seq)) => {
+                let Some(spent) = present.get(&addr) else {
+                    out.stale.push(k.clone());
+                    continue;
+                };
+                let Some(session) = out.sessions.get_mut(&addr) else {
+                    // Its session is left behind, and so is it.
+                    continue;
+                };
+                if out.migrated.contains(&addr) || spent.contains(&seq) {
+                    out.stale.push(k.clone());
+                    continue;
+                }
+                let Some(record) =
+                    skipped.open::<SkippedKeyRecord>(vault, Table::Sessions, k, v)?
+                else {
+                    continue;
+                };
+                if record.lineage != session.lineage
+                    || !session.ratchet.restore_skipped(&record.key(seq))
+                {
+                    out.stale.push(k.clone());
+                }
+            }
+            None => skipped.0 = skipped.0.saturating_add(1),
+        }
+    }
+    Ok(out)
 }
 
 fn load_outbox(

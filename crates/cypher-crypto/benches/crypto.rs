@@ -36,7 +36,7 @@ fn session() -> (Ratchet, Ratchet) {
     )
     .unwrap();
     let (h, ct) = a.encrypt(b"hi", b"").unwrap();
-    b.decrypt(&h, &ct, b"", &mut OsRng).unwrap();
+    b.decrypt(&h, &ct, b"", 0, &mut OsRng).unwrap();
     (a, b)
 }
 
@@ -51,7 +51,7 @@ fn ratchet(c: &mut Criterion) {
     group.bench_function("roundtrip_1k", |bench| {
         bench.iter(|| {
             let (h, ct) = a3.encrypt(MESSAGE, b"").unwrap();
-            b3.decrypt(&h, &ct, b"", &mut OsRng).unwrap()
+            b3.decrypt(&h, &ct, b"", 0, &mut OsRng).unwrap()
         });
     });
     group.finish();
@@ -68,7 +68,7 @@ fn with_skipped(skipped: usize) -> Ratchet {
             a.encrypt(b"lost", b"").unwrap();
         }
         let (h, ct) = a.encrypt(b"arrives", b"").unwrap();
-        b.decrypt(&h, &ct, b"", &mut OsRng).unwrap();
+        b.decrypt(&h, &ct, b"", 0, &mut OsRng).unwrap();
         left -= lost;
     }
     b

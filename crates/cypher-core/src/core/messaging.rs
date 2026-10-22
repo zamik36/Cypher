@@ -17,7 +17,7 @@ use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
 use crate::prekeys::InitSender;
 use crate::relay::RelayBody;
 use crate::share::ShareLink;
-use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key, session_key};
+use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key};
 
 /// How long an invite admits a contact; the server keeps links as long.
 const LINK_TTL_MS: u64 = 24 * 3600 * 1000;
@@ -54,9 +54,10 @@ impl Opened {
         ratchet: &mut Ratchet,
         header: &Header,
         ct: &[u8],
+        now_ms: u64,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, CoreError> {
-        match ratchet.decrypt(header, ct, b"", rng) {
+        match ratchet.decrypt(header, ct, b"", now_ms, rng) {
             Ok(pt) => Ok(Self::New(pt)),
             Err(CryptoError::Duplicate) => Ok(Self::Copy),
             Err(e) => Err(e.into()),
@@ -297,11 +298,9 @@ impl<R: CryptoRngCore> Core<R> {
             .collect();
         devices.sort_unstable();
         for addr in devices {
-            self.sessions.remove(&addr);
-            self.persist(StoreOp::Delete {
-                table: Table::Sessions,
-                key: session_key(addr),
-            });
+            if let Some(session) = self.sessions.remove(&addr) {
+                self.delete_session(addr, &session);
+            }
         }
         self.drop_outbox_for(peer);
         self.cancel_transfers_with(peer);
@@ -476,7 +475,11 @@ impl<R: CryptoRngCore> Core<R> {
             .filter(|b| b.identity == addr.peer && b.device == addr.device)?;
         let (ratchet, init) =
             handshake::initiate(&self.identity, self.device, &bundle, &mut self.rng).ok()?;
-        Some((Session::new(ratchet, Some(init)), bundle.identity_dh))
+        let lineage = self.rng.next_u64();
+        Some((
+            Session::new(ratchet, Some(init), lineage),
+            bundle.identity_dh,
+        ))
     }
 
     /// Greets one device of a contact, once per session; a request or a
@@ -578,7 +581,7 @@ impl<R: CryptoRngCore> Core<R> {
         ct: &[u8],
     ) -> Result<Opened, CoreError> {
         let session = self.sessions.get_mut(&sender).ok_or(CoreError::Crypto)?;
-        let opened = Opened::decrypt(&mut session.ratchet, header, ct, &mut self.rng)?;
+        let opened = Opened::decrypt(&mut session.ratchet, header, ct, self.now, &mut self.rng)?;
         if matches!(opened, Opened::New(_)) {
             session.pending_init = None;
         }
@@ -599,7 +602,7 @@ impl<R: CryptoRngCore> Core<R> {
         if let Some(s) = self.sessions.get_mut(&sender)
             && s.accepted_ephemerals.contains(&init.ephemeral)
         {
-            return Opened::decrypt(&mut s.ratchet, header, ct, &mut self.rng);
+            return Opened::decrypt(&mut s.ratchet, header, ct, self.now, &mut self.rng);
         }
         // Accepted before, yet its session no longer knows it (replaced
         // since, or the init forgotten among later ones): a copy, not a
@@ -631,7 +634,7 @@ impl<R: CryptoRngCore> Core<R> {
             (&from, from_device),
             init,
         )?;
-        let pt = ratchet.decrypt(header, ct, b"", &mut self.rng)?;
+        let pt = ratchet.decrypt(header, ct, b"", self.now, &mut self.rng)?;
         self.admit_init(init, who)?;
 
         // Both sides started a session at once: the lower device keeps its
@@ -650,7 +653,7 @@ impl<R: CryptoRngCore> Core<R> {
         if !own {
             self.meet(from, init.identity_dh);
         }
-        let mut fresh = Session::new(ratchet, None);
+        let mut fresh = Session::new(ratchet, None, self.rng.next_u64());
         if let Some(old) = self.sessions.remove(&sender) {
             fresh.carry_over(old);
         }

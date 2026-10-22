@@ -3,7 +3,9 @@
     reason = "test helpers fail loudly on broken fixtures"
 )]
 
-use cypher_crypto::double_ratchet::{MAX_DECRYPTED, MAX_SKIP};
+use std::collections::BTreeMap;
+
+use cypher_crypto::double_ratchet::{MAX_DECRYPTED, MAX_SKIP, SkippedKey};
 use cypher_crypto::handshake::{self, InitHeader};
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
@@ -19,6 +21,8 @@ use rand_chacha::ChaCha20Rng;
 const ALICE: DeviceId = DeviceId(1);
 /// The responder's device.
 const BOB: DeviceId = DeviceId(2);
+/// The clock skipped keys are dated by.
+const NOW: u64 = 1_000;
 
 struct Responder {
     ik: IdentityKeyPair,
@@ -64,7 +68,7 @@ fn establish(with_opk: bool) -> (Ratchet, Ratchet) {
     let mut b = bob.accept(&alice, &header).unwrap();
 
     let (h, ct) = a.encrypt(b"hello", b"").unwrap();
-    assert_eq!(b.decrypt(&h, &ct, b"", &mut OsRng).unwrap(), b"hello");
+    assert_eq!(b.decrypt(&h, &ct, b"", NOW, &mut OsRng).unwrap(), b"hello");
     (a, b)
 }
 
@@ -73,7 +77,50 @@ fn send(from: &mut Ratchet, msg: &[u8]) -> (Header, Vec<u8>) {
 }
 
 fn recv(to: &mut Ratchet, m: &(Header, Vec<u8>)) -> Result<Vec<u8>, CryptoError> {
-    to.decrypt(&m.0, &m.1, b"", &mut OsRng)
+    to.decrypt(&m.0, &m.1, b"", NOW, &mut OsRng)
+}
+
+/// What a session holds that a message could change: its snapshot, and
+/// its skipped keys (their count).
+fn state(r: &Ratchet) -> (Vec<u8>, String) {
+    (r.to_bytes().to_vec(), format!("{r:?}"))
+}
+
+/// A session as a caller stores it: its snapshot, and its skipped keys
+/// one by one.
+#[derive(Default)]
+struct Stored {
+    snapshot: Vec<u8>,
+    keys: BTreeMap<u64, SkippedKey>,
+}
+
+impl Stored {
+    fn of(r: &mut Ratchet) -> Self {
+        let mut stored = Self::default();
+        stored.save(r);
+        stored
+    }
+
+    /// Stores what changed in `r`: new keys, then the snapshot, then the
+    /// keys gone are deleted.
+    fn save(&mut self, r: &mut Ratchet) {
+        let changes = r.take_changes();
+        for key in changes.stored {
+            self.keys.insert(key.seq(), key);
+        }
+        self.snapshot = r.to_bytes().to_vec();
+        for seq in changes.spent {
+            self.keys.remove(&seq);
+        }
+    }
+
+    fn load(&self) -> Ratchet {
+        let mut r = Ratchet::from_bytes(&self.snapshot, NOW).unwrap();
+        for key in self.keys.values() {
+            assert!(r.restore_skipped(key), "{key:?} is stored");
+        }
+        r
+    }
 }
 
 #[test]
@@ -255,9 +302,9 @@ fn a_copy_of_a_decrypted_message_is_a_duplicate_and_changes_nothing() {
     assert_eq!(recv(&mut b, &current).unwrap(), b"current chain");
 
     for copy in [&late, &in_order, &current] {
-        let before = b.to_bytes();
+        let before = state(&b);
         assert_eq!(recv(&mut b, copy), Err(CryptoError::Duplicate));
-        assert_eq!(*b.to_bytes(), *before, "state untouched");
+        assert_eq!(state(&b), before, "state untouched");
     }
     let next = send(&mut a, b"next");
     assert_eq!(recv(&mut b, &next).unwrap(), b"next");
@@ -302,16 +349,16 @@ fn altered_messages_fail_and_change_nothing() {
         ("far ahead", &far_ahead, CryptoError::TooManySkipped),
         ("unknown ratchet key", &foreign_key, CryptoError::Aead),
     ] {
-        let before = b.to_bytes();
+        let before = state(&b);
         assert_eq!(recv(&mut b, forged), Err(error), "{name}");
-        assert_eq!(*b.to_bytes(), *before, "{name}: state untouched");
+        assert_eq!(state(&b), before, "{name}: state untouched");
     }
-    let before = b.to_bytes();
+    let before = state(&b);
     assert_eq!(
-        b.decrypt(&read.0, &read.1, b"other context", &mut OsRng),
+        b.decrypt(&read.0, &read.1, b"other context", NOW, &mut OsRng),
         Err(CryptoError::Aead)
     );
-    assert_eq!(*b.to_bytes(), *before, "other context: state untouched");
+    assert_eq!(state(&b), before, "other context: state untouched");
 
     assert_eq!(recv(&mut b, &fresh).unwrap(), b"fresh");
 }
@@ -342,11 +389,11 @@ fn a_new_session_knows_the_copies_of_the_one_it_replaces() {
     let read = send(&mut a, b"read in the old session");
     recv(&mut b, &read).unwrap();
     let (mut a2, mut b2) = establish(false);
-    b2.inherit_decrypted(&mut b);
+    b2.inherit(&mut b);
 
-    let before = b2.to_bytes();
+    let before = state(&b2);
     assert_eq!(recv(&mut b2, &read), Err(CryptoError::Duplicate));
-    assert_eq!(*b2.to_bytes(), *before, "state untouched");
+    assert_eq!(state(&b2), before, "state untouched");
     let fresh = send(&mut a2, b"new session");
     assert_eq!(recv(&mut b2, &fresh).unwrap(), b"new session");
 }
@@ -358,7 +405,7 @@ fn a_restored_session_does_not_know_its_copies() {
     let (mut a, mut b) = establish(false);
     let read = send(&mut a, b"read");
     assert_eq!(recv(&mut b, &read).unwrap(), b"read");
-    let mut restored = Ratchet::from_bytes(&b.to_bytes()).unwrap();
+    let mut restored = Stored::of(&mut b).load();
     assert_eq!(recv(&mut restored, &read), Err(CryptoError::Aead));
 }
 
@@ -367,10 +414,10 @@ fn extra_aad_is_authenticated() {
     let (mut a, mut b) = establish(false);
     let (h, ct) = a.encrypt(b"x", b"ctx-1").unwrap();
     assert_eq!(
-        b.decrypt(&h, &ct, b"ctx-2", &mut OsRng),
+        b.decrypt(&h, &ct, b"ctx-2", NOW, &mut OsRng),
         Err(CryptoError::Aead)
     );
-    assert_eq!(b.decrypt(&h, &ct, b"ctx-1", &mut OsRng).unwrap(), b"x");
+    assert_eq!(b.decrypt(&h, &ct, b"ctx-1", NOW, &mut OsRng).unwrap(), b"x");
 }
 
 #[test]
@@ -382,7 +429,7 @@ fn forged_dh_step_with_low_order_key_is_rejected() {
         n: 0,
     };
     assert_eq!(
-        b.decrypt(&forged, &[0; 32], b"", &mut OsRng),
+        b.decrypt(&forged, &[0; 32], b"", NOW, &mut OsRng),
         Err(CryptoError::NonContributory)
     );
 }
@@ -428,9 +475,8 @@ fn snapshot_restore_continues_without_key_reuse() {
     recv(&mut b, &delivered).unwrap();
 
     let blob_a = a.to_bytes();
-    let blob_b = b.to_bytes();
-    let mut a2 = Ratchet::from_bytes(&blob_a).unwrap();
-    let mut b2 = Ratchet::from_bytes(&blob_b).unwrap();
+    let mut a2 = Ratchet::from_bytes(&blob_a, NOW).unwrap();
+    let mut b2 = Stored::of(&mut b).load();
 
     assert_eq!(recv(&mut b2, &pending).unwrap(), b"in-flight");
     let fresh = send(&mut a2, b"after-restore");
@@ -439,8 +485,102 @@ fn snapshot_restore_continues_without_key_reuse() {
     let back = send(&mut b2, b"back");
     assert_eq!(recv(&mut a2, &back).unwrap(), b"back");
 
-    Ratchet::from_bytes(&blob_a[..blob_a.len() - 1]).unwrap_err();
-    Ratchet::from_bytes(b"garbage").unwrap_err();
+    Ratchet::from_bytes(&blob_a[..blob_a.len() - 1], NOW).unwrap_err();
+    Ratchet::from_bytes(b"garbage", NOW).unwrap_err();
+    Ratchet::from_bytes(b"", NOW).unwrap_err();
+}
+
+/// The snapshot does not grow with the keys a session keeps for messages
+/// that have not come: they are stored one by one, each once, and only
+/// what changed is stored again.
+#[test]
+#[cfg_attr(miri, ignore = "derives hundreds of skipped keys; minutes under Miri")]
+fn skipped_keys_are_stored_apart_and_once() {
+    let (mut a, mut b) = establish(false);
+    let mut stored = Stored::of(&mut b);
+    let empty = stored.snapshot.len();
+    let late: Vec<_> = (0..300).map(|_| send(&mut a, b"late")).collect();
+    recv(&mut b, &send(&mut a, b"on time")).unwrap();
+
+    let changes = b.take_changes();
+    assert_eq!(changes.stored.len(), late.len());
+    assert!(changes.spent.is_empty());
+    for key in changes.stored {
+        stored.keys.insert(key.seq(), key);
+    }
+    stored.snapshot = b.to_bytes().to_vec();
+    // The next key's number grows by a byte or two, the keys are not in it.
+    assert!(
+        stored.snapshot.len() <= empty + 2,
+        "no keys in the snapshot"
+    );
+
+    recv(&mut b, &send(&mut a, b"next")).unwrap();
+    let changes = b.take_changes();
+    assert!(changes.stored.is_empty() && changes.spent.is_empty());
+
+    assert_eq!(recv(&mut b, &late[7]).unwrap(), b"late");
+    let changes = b.take_changes();
+    assert!(changes.stored.is_empty());
+    assert_eq!(changes.spent.len(), 1, "the key it took");
+    stored.keys.remove(&changes.spent[0]);
+    stored.snapshot = b.to_bytes().to_vec();
+
+    let mut restored = stored.load();
+    assert_eq!(
+        recv(&mut restored, &late[7]),
+        Err(CryptoError::Aead),
+        "spent"
+    );
+    for (i, m) in late.iter().enumerate().filter(|(i, _)| *i != 7) {
+        assert_eq!(recv(&mut restored, m).unwrap(), b"late", "{i}");
+    }
+}
+
+/// Keys stored for a state whose snapshot was never stored (the app
+/// stopped in between) are refused when the older snapshot is restored:
+/// that state reads the same messages again, setting the keys aside anew.
+#[test]
+fn keys_stored_ahead_of_their_snapshot_are_refused() {
+    let (mut a, mut b) = establish(false);
+    let stored = Stored::of(&mut b);
+    let late = send(&mut a, b"late");
+    let on_time = send(&mut a, b"on time");
+    recv(&mut b, &on_time).unwrap();
+    let ahead = b.take_changes().stored;
+    assert_eq!(ahead.len(), 1);
+
+    let mut restored = stored.load();
+    assert!(!restored.restore_skipped(&ahead[0]));
+    assert_eq!(recv(&mut restored, &on_time).unwrap(), b"on time");
+    assert_eq!(recv(&mut restored, &late).unwrap(), b"late");
+}
+
+/// A session that replaces another numbers its skipped keys on from the
+/// old one's, and every key the old one stored is to be deleted; the new
+/// session's keys still open its own late messages.
+#[test]
+fn a_new_session_numbers_its_keys_on_and_spends_the_old_ones() {
+    let (mut a, mut b) = establish(false);
+    let _late = send(&mut a, b"never comes");
+    recv(&mut b, &send(&mut a, b"x")).unwrap();
+    let old = Stored::of(&mut b);
+    let old_seqs: Vec<u64> = old.keys.keys().copied().collect();
+
+    let alice = IdentityKeyPair::generate();
+    let bob = Responder::new();
+    let (mut a2, header) =
+        handshake::initiate(&alice, ALICE, &bob.bundle(false), &mut OsRng).unwrap();
+    let mut b2 = bob.accept(&alice, &header).unwrap();
+    let late = send(&mut a2, b"late in the new session");
+    recv(&mut b2, &send(&mut a2, b"first")).unwrap();
+    b2.inherit(&mut b);
+
+    let changes = b2.take_changes();
+    assert_eq!(changes.spent, old_seqs);
+    assert_eq!(changes.stored.len(), 1);
+    assert!(changes.stored[0].seq() > old_seqs[0]);
+    assert_eq!(recv(&mut b2, &late).unwrap(), b"late in the new session");
 }
 
 #[test]
@@ -467,8 +607,18 @@ type InFlight = Vec<((Header, Vec<u8>), Vec<u8>)>;
 
 #[derive(Clone, Debug)]
 enum Op {
-    Send { from_a: bool },
-    Deliver { to_a: bool, pick: usize, dup: bool },
+    Send {
+        from_a: bool,
+    },
+    Deliver {
+        to_a: bool,
+        pick: usize,
+        dup: bool,
+    },
+    /// One side is stored and restored, as across an app restart.
+    Restart {
+        a: bool,
+    },
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -476,6 +626,7 @@ fn op() -> impl Strategy<Value = Op> {
         any::<bool>().prop_map(|from_a| Op::Send { from_a }),
         (any::<bool>(), any::<usize>(), prop::bool::weighted(0.1))
             .prop_map(|(to_a, pick, dup)| Op::Deliver { to_a, pick, dup }),
+        any::<bool>().prop_map(|a| Op::Restart { a }),
     ]
 }
 
@@ -500,6 +651,7 @@ proptest! {
     #[cfg_attr(miri, ignore = "up to 200 ops per case; tens of minutes under Miri")]
     fn arbitrary_schedules_decrypt_every_message_once(ops in prop::collection::vec(op(), 1..200)) {
         let (mut a, mut b) = establish(true);
+        let mut stored = [Stored::of(&mut a), Stored::of(&mut b)];
         let mut to_a: InFlight = Vec::new();
         let mut to_b: InFlight = Vec::new();
         let mut counter = 0u32;
@@ -522,6 +674,11 @@ proptest! {
                     if dup {
                         prop_assert_eq!(recv(receiver, &msg), Err(CryptoError::Duplicate));
                     }
+                }
+                Op::Restart { a: restart_a } => {
+                    let (r, s) = if restart_a { (&mut a, &mut stored[0]) } else { (&mut b, &mut stored[1]) };
+                    s.save(r);
+                    *r = s.load();
                 }
             }
         }

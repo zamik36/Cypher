@@ -30,7 +30,9 @@ pub enum Table {
     /// sealed at rest.
     Media = 7,
     /// Key: `peer ‖ device (BE)` → the session with that device of a
-    /// contact (or of our own identity), see [`session_key`].
+    /// contact (or of our own identity), see [`session_key`]; the keys it
+    /// keeps for messages that have not come follow it, one row each
+    /// (`session_key ‖ 1 ‖ seq (BE)`).
     Sessions = 8,
 }
 
@@ -119,6 +121,44 @@ pub(crate) fn session_addr(key: &[u8]) -> Option<Addr> {
     let (peer, device) = key.split_first_chunk::<32>()?;
     let device = DeviceId(u32::from_be_bytes(device.try_into().ok()?));
     device.is_valid().then(|| Addr::new(PeerId(*peer), device))
+}
+
+/// What follows a [`session_key`] in the key of a skipped message key kept
+/// for that session: `session_key ‖ SKIPPED_ROW ‖ seq (BE)`.
+const SKIPPED_ROW: u8 = 1;
+
+/// Where the skipped message key numbered `seq` of the session with `addr`
+/// is stored; a prefix scan by [`session_key`] yields the session's row
+/// first, then its keys in the order they were set aside.
+pub(crate) fn skipped_key_row(addr: Addr, seq: u64) -> Vec<u8> {
+    let mut k = session_key(addr);
+    k.push(SKIPPED_ROW);
+    k.extend_from_slice(&seq.to_be_bytes());
+    k
+}
+
+/// What a row of [`Table::Sessions`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionRow {
+    /// The session with a device.
+    Session(Addr),
+    /// A skipped message key of that session, by its number.
+    SkippedKey(Addr, u64),
+}
+
+/// Tells a row of [`Table::Sessions`] by its key; `None` for a key no
+/// release writes.
+pub(crate) fn session_row(key: &[u8]) -> Option<SessionRow> {
+    let (session, rest) = key.split_at_checked(PeerId::LEN + 4)?;
+    let addr = session_addr(session)?;
+    match rest.split_first() {
+        None => Some(SessionRow::Session(addr)),
+        Some((&SKIPPED_ROW, seq)) => {
+            let seq = u64::from_be_bytes(seq.try_into().ok()?);
+            Some(SessionRow::SkippedKey(addr, seq))
+        }
+        Some(_) => None,
+    }
 }
 
 pub fn message_key(peer: &PeerId, sent_at_ms: u64, msg_id: &MsgId) -> Vec<u8> {
@@ -624,6 +664,33 @@ mod tests {
         }
         let d = message_deletion(&[9; 16], None);
         assert_eq!(d.ops.len(), 1, "no status row for a key that names none");
+    }
+
+    #[test]
+    fn session_rows_are_told_by_their_key() {
+        let addr = Addr::new(PeerId([7; 32]), DeviceId(3));
+        let session = session_key(addr);
+        assert_eq!(session_row(&session), Some(SessionRow::Session(addr)));
+        let key = skipped_key_row(addr, 300);
+        assert!(key.starts_with(&session));
+        assert_eq!(session_row(&key), Some(SessionRow::SkippedKey(addr, 300)));
+        assert!(
+            session < skipped_key_row(addr, 0)
+                && skipped_key_row(addr, 2) < skipped_key_row(addr, 256),
+            "the session first, then its keys in the order set aside"
+        );
+        let longer = [&key[..], &[0]].concat();
+        let unknown = [&session[..], &[9; 9]].concat();
+        let no_device = session_key(Addr::new(PeerId([7; 32]), DeviceId(0)));
+        for other in [
+            &key[..key.len() - 1],
+            &longer,
+            &unknown,
+            &session[..session.len() - 1],
+            &no_device,
+        ] {
+            assert_eq!(session_row(other), None, "{other:?}");
+        }
     }
 
     #[test]

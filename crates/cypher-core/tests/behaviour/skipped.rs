@@ -3,13 +3,15 @@
 //! and a session stored before those keys were kept apart still does.
 
 use bytes::Bytes;
-use cypher_core::{Content, Core, Event, FailReason, Input, Snapshot, StoreOp, Table};
+use cypher_core::{
+    Command, Content, Core, Effect, Event, FailReason, Input, Snapshot, StoreOp, Table, session_key,
+};
 use cypher_crypto::IdentitySeed;
-use cypher_types::DeviceId;
+use cypher_types::{Addr, DeviceId};
 use rand::SeedableRng;
 use serde::Deserialize;
 
-use super::events_since;
+use super::{addr, events_since, rows};
 use crate::harness::{Rng, World};
 use crate::{A, B, paired};
 
@@ -112,22 +114,42 @@ fn snapshot(rows: &[(u8, Vec<u8>, Vec<u8>)]) -> Snapshot {
 }
 
 /// Applies the rows `effects` write or delete to `rows`; the events.
-fn apply(rows: &mut Vec<(u8, Vec<u8>, Vec<u8>)>, effects: Vec<cypher_core::Effect>) -> Vec<Event> {
+fn apply(rows: &mut Vec<(u8, Vec<u8>, Vec<u8>)>, effects: Vec<Effect>) -> Vec<Event> {
     let mut events = Vec::new();
     for effect in effects {
         match effect {
-            cypher_core::Effect::Persist(StoreOp::Put { table, key, value }) => {
-                rows.retain(|(t, k, _)| (*t, k) != (table as u8, &key));
-                rows.push((table as u8, key, value));
-            }
-            cypher_core::Effect::Persist(StoreOp::Delete { table, key }) => {
-                rows.retain(|(t, k, _)| (*t, k) != (table as u8, &key));
-            }
-            cypher_core::Effect::Emit(event) => events.push(event),
+            Effect::Persist(op) => write(rows, op),
+            Effect::Emit(event) => events.push(event),
             _ => {}
         }
     }
     events
+}
+
+fn write(rows: &mut Vec<(u8, Vec<u8>, Vec<u8>)>, op: StoreOp) {
+    match op {
+        StoreOp::Put { table, key, value } => {
+            rows.retain(|(t, k, _)| (*t, k) != (table as u8, &key));
+            rows.push((table as u8, key, value));
+        }
+        StoreOp::Delete { table, key } => {
+            rows.retain(|(t, k, _)| (*t, k) != (table as u8, &key));
+        }
+    }
+}
+
+/// The texts of the messages `events` show.
+fn texts_of(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Message(m) => match &m.content {
+                Content::Text { text, .. } => Some(text.as_str()),
+                Content::File { .. } => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// B's session was stored by a release that kept its skipped message keys
@@ -161,19 +183,172 @@ fn a_session_stored_with_its_skipped_keys_inside_still_reads_late_messages() {
         events.extend(apply(&mut rows, effects));
     }
 
-    let texts: Vec<&str> = events
-        .iter()
-        .filter_map(|e| match e {
-            Event::Message(m) => match &m.content {
-                Content::Text { text, .. } => Some(text.as_str()),
-                Content::File { .. } => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(texts, fixture.texts);
+    assert_eq!(texts_of(&events), fixture.texts);
     assert!(
         !events.iter().any(|e| matches!(e, Event::Warning { .. })),
         "{events:?}"
     );
+}
+
+/// Client `i`'s stored rows, as `(table, key, sealed value)`.
+fn rows_of(w: &World, i: usize) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
+    w.clients[i]
+        .kv
+        .iter()
+        .map(|((t, k), v)| (*t, k.clone(), v.clone()))
+        .collect()
+}
+
+/// The rows kept beside the session with `with` among `rows`.
+fn rows_beside(rows: &[(u8, Vec<u8>, Vec<u8>)], with: Addr) -> usize {
+    let session = session_key(with);
+    rows.iter()
+        .filter(|(t, k, _)| {
+            *t == Table::Sessions as u8 && k.len() > session.len() && k.starts_with(&session)
+        })
+        .count()
+}
+
+/// Client `i` as it starts from `rows`, offline.
+fn restored(
+    w: &World,
+    i: usize,
+    rows: &[(u8, Vec<u8>, Vec<u8>)],
+    rng: u64,
+) -> (Core<Rng>, Vec<Effect>) {
+    let c = &w.clients[i];
+    Core::restore(
+        &IdentitySeed(c.seed),
+        c.device,
+        &snapshot(rows),
+        w.now,
+        Rng::seed_from_u64(rng),
+    )
+    .unwrap()
+}
+
+/// The keys B sets aside for messages it skipped are stored beside its
+/// session, one row each, not inside it: the session's row does not grow
+/// with them, a later message stores only that row again, a late message
+/// read deletes its key, and removing the contact deletes them all.
+#[test]
+fn skipped_keys_are_stored_beside_their_session_and_go_with_it() {
+    let mut w = paired();
+    let a = addr(&w, A);
+    let empty = rows::session(&w, B, a).unwrap().ratchet.len();
+    let late = held(&mut w, &["late 1", "late 2", "late 3"]);
+    w.send_text(A, B, "on time");
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 3);
+    assert!(rows::session(&w, B, a).unwrap().ratchet.len() <= empty + 1);
+
+    w.log = Some(Vec::new());
+    w.send_text(A, B, "next");
+    let session = session_key(a);
+    for batch in w.log.take().unwrap().iter().filter(|b| b.client == B) {
+        for seen in &batch.effects {
+            if let crate::harness::Seen::Persist { table, key } = seen
+                && *table == Table::Sessions as u8
+            {
+                assert_eq!(*key, session, "only the session's own row");
+            }
+        }
+    }
+
+    w.inject(B, late[1].clone());
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 2);
+    let peer = w.peer(A);
+    w.command(B, Command::RemovePeer { peer });
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 0);
+    assert!(rows::session(&w, B, a).is_none());
+}
+
+/// B takes a message that makes it set a key aside, or one that takes a
+/// key set aside, and the app stops after any of the rows that message
+/// writes (the rest are lost). Restored from what was written, B neither
+/// uses a key twice nor loses one: every message still to come is read
+/// once, the message itself is read again if and only if its session row
+/// was not stored, and once every late message is read no row is left
+/// beside the session.
+#[test]
+fn a_stop_after_any_row_written_neither_reuses_nor_loses_a_skipped_key() {
+    let mut w = paired();
+    let late = held(&mut w, &["late 1", "late 2"]);
+    w.send_text(A, B, "on time");
+    let ahead = held(&mut w, &["late 3", "sets a key aside"]);
+    let before = rows_of(&w, B);
+    let frames = [
+        (late[0].clone(), "late 1"),
+        (late[1].clone(), "late 2"),
+        (ahead[0].clone(), "late 3"),
+        (ahead[1].clone(), "sets a key aside"),
+    ];
+
+    for step in [3, 0] {
+        let (mut core, _) = restored(&w, B, &before, 0);
+        let effects = core.handle(Input::Frame(frames[step].0.clone()), w.now);
+        let ops: Vec<StoreOp> = effects
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Persist(op) => Some(op),
+                _ => None,
+            })
+            .collect();
+        assert!(ops.len() > 2, "the message writes several rows");
+        for stop in 0..=ops.len() {
+            restart_after(&w, &before, &frames, step, &ops[..stop]);
+        }
+    }
+}
+
+/// B, stopped once `written` (the first rows message `step` wrote) were
+/// stored, starts again from `before` and them and is handed every frame
+/// once more; see the test above for what it must make of them.
+fn restart_after(
+    w: &World,
+    before: &[(u8, Vec<u8>, Vec<u8>)],
+    frames: &[(Bytes, &str)],
+    step: usize,
+    written: &[StoreOp],
+) {
+    let a = addr(w, A);
+    let session = session_key(a);
+    let stop = written.len();
+    let mut rows = before.to_vec();
+    for op in written {
+        write(&mut rows, op.clone());
+    }
+    let committed = written.iter().any(
+        |op| matches!(op, StoreOp::Put { table: Table::Sessions, key, .. } if *key == session),
+    );
+
+    let (mut core, effects) = restored(w, B, &rows, 1);
+    let mut events = apply(&mut rows, effects);
+    let mut expected: Vec<&str> = Vec::new();
+    for (i, (frame, text)) in frames.iter().enumerate() {
+        if i == step && committed {
+            continue;
+        }
+        expected.push(text);
+        let effects = core.handle(Input::Frame(frame.clone()), w.now);
+        events.extend(apply(&mut rows, effects));
+    }
+    let mut read = texts_of(&events);
+    read.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(read, expected, "step {step}, stopped after {stop} rows");
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Warning { .. })),
+        "step {step}, stopped after {stop} rows: {events:?}"
+    );
+    assert_eq!(
+        rows_beside(&rows, a),
+        0,
+        "step {step}, stopped after {stop} rows"
+    );
+
+    if committed {
+        let again = core.handle(Input::Frame(frames[step].0.clone()), w.now);
+        let again = apply(&mut rows, again);
+        assert!(texts_of(&again).is_empty(), "step {step}: read twice");
+    }
 }

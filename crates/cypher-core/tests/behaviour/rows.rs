@@ -23,10 +23,14 @@ pub(crate) struct Session {
     pub accepted_ephemerals: Vec<[u8; 32]>,
     pub inbox: Option<Ad>,
     pub hello_sent: bool,
+    /// The line of sessions with the device; rows beside it carry it.
+    pub lineage: u64,
+    /// Skipped keys whose rows are deleted right after this one is stored.
+    pub spent: Vec<u64>,
 }
 
 impl Record for Session {
-    const VERSION: u8 = 2;
+    const VERSION: u8 = 3;
 }
 
 /// One device a message goes to.
