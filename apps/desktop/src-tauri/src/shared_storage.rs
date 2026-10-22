@@ -44,6 +44,7 @@ async fn publish<R: Runtime>(app: &AppHandle<R>, file_id: FileId) -> CmdResult<(
         handle.state::<Files<R>>().publish(&location, &name, "")
     })
     .await
-    .map_err(err)??;
+    .map_err(err)?
+    .map_err(err)?;
     client.move_saved_file(file_id, uri).await.map_err(err)
 }

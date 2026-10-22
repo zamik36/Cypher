@@ -13,6 +13,9 @@ base64 = "0.22"
 serde.workspace = true
 tauri = { version = "2", features = [] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+thiserror.workspace = true
+
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
 

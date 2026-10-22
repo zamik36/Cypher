@@ -1,6 +1,7 @@
 import {
   api,
   onAnonymityLevel,
+  onClientReady,
   onConnected,
   onDisconnected,
   onError,
@@ -38,6 +39,7 @@ import { addOwnDevice, setNoRoom, takeOwnDevices } from "../stores/devices";
 import { setHistoryTransfer } from "../stores/history";
 import { setChangedServer } from "../stores/serverKey";
 import { setSharesReady } from "../stores/share";
+import { clientReady, dropRetries } from "../stores/clientReady";
 import { addToast, toastError } from "../stores/toasts";
 import { anonymousSettings, setOnionUp } from "../stores/anonymity";
 import { windowActive } from "../stores/presence";
@@ -163,6 +165,7 @@ export async function startApp(): Promise<() => void> {
       if (hasTransfer(file_id)) upsertTransfer({ file_id, status: "error", error: reasonText(reason) });
     }),
     onError(toastError),
+    onClientReady(clientReady),
     onAnonymityLevel(({ level }) => setOnionUp(level > 0)),
     api.on("push_key", (key) => void onPushKey(key)),
     api.on("push_state", onPushState),
@@ -176,6 +179,7 @@ export async function startApp(): Promise<() => void> {
   return () => {
     setInvitesReady(false);
     setSharesReady(false);
+    dropRetries();
     stopNavigation();
     for (const off of unsubscribe) off();
   };

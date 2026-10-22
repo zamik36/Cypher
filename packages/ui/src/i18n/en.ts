@@ -344,6 +344,8 @@ const en = {
   // -- Errors --
   error_rejected: "The other side declined.",
   error_cancelled: "Cancelled.",
+  error_connecting: "Still connecting. Try again in a moment.",
+  error_lagged: "The reply was missed. Try again.",
   error_source_unavailable: "The file is no longer available on the sender's device.",
   error_unauthorized: "The server did not accept this device. Restart the app.",
   error_server: "The server could not handle the request. Try again later.",

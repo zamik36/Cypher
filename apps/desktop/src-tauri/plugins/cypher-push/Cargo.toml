@@ -12,6 +12,9 @@ links = "tauri-plugin-cypher-push"
 serde.workspace = true
 tauri = { version = "2", features = [] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+thiserror.workspace = true
+
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
 

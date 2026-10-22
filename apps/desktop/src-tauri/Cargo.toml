@@ -36,9 +36,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-qrcode = "0.14"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 cypher-media = { workspace = true, features = ["test-util"] }

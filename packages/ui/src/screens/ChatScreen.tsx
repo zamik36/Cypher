@@ -36,7 +36,8 @@ import { clearDraft, draftOf, setDraftText, setReplyTo } from "../stores/drafts"
 import { isWide } from "../stores/layout";
 import { back, push } from "../stores/nav";
 import { awayFor } from "../stores/lock";
-import { takeShare } from "../stores/share";
+import { sendEach, takeShare } from "../stores/share";
+import { readyMark, retryWhenReady } from "../stores/clientReady";
 import { windowActive } from "../stores/presence";
 import { upsertTransfer } from "../stores/transfers";
 import { trackMedia } from "../stores/media";
@@ -191,14 +192,10 @@ export default function ChatScreen(props: { peerId: string }) {
   const nearBottom = () => !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_PX;
   const toBottom = () => queueMicrotask(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
 
-  // The latest page first; older pages as the user scrolls up.
-  onMount(() => {
-    const peerId = props.peerId;
-    if (historyLoaded(peerId)) {
-      setLoading(false);
-      toBottom();
-      return;
-    }
+  // The latest page first; older pages as the user scrolls up. Asked while
+  // the client was still starting, it is asked again once the client is up.
+  function loadLatest(peerId: string) {
+    const mark = readyMark();
     api
       .getHistory(peerId, HISTORY_PAGE)
       .then((page) => {
@@ -208,11 +205,22 @@ export default function ChatScreen(props: { peerId: string }) {
         );
         setHasOlder(peerId, page.length === HISTORY_PAGE);
       })
-      .catch(toastError)
+      .catch((e: unknown) => {
+        if (!retryWhenReady(e, mark, () => loadLatest(peerId))) toastError(e);
+      })
       .finally(() => {
         setLoading(false);
         toBottom();
       });
+  }
+  onMount(() => {
+    const peerId = props.peerId;
+    if (historyLoaded(peerId)) {
+      setLoading(false);
+      toBottom();
+      return;
+    }
+    loadLatest(peerId);
   });
 
   async function loadOlder() {
@@ -436,7 +444,10 @@ export default function ChatScreen(props: { peerId: string }) {
     const share = takeShare(peerId);
     if (!share) return;
     if (share.text) setDraft(draft() ? `${draft()}\n${share.text}` : share.text);
-    if (share.files.length > 0) void offer(() => api.sendFiles(peerId, share.files));
+    // On a cold start the client may still be starting: each file goes once.
+    if (share.files.length > 0) {
+      sendEach(share.files, (file) => api.sendFiles(peerId, [file]), rememberSent, toastError);
+    }
   });
 
   function attach() {

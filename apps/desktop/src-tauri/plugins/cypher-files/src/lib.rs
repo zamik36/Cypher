@@ -8,17 +8,19 @@ use tauri::plugin::{Builder, TauriPlugin};
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub use android::{Files, Staged};
+pub use android::{Error, Files, Staged};
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("cypher-files")
-        .setup(|_app, _api| {
+        .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
                 use tauri::Manager;
-                let handle = _api.register_android_plugin("app.cypher.files", "FilesPlugin")?;
-                _app.manage(Files(handle));
+                let handle = api.register_android_plugin("app.cypher.files", "FilesPlugin")?;
+                app.manage(Files(handle));
             }
+            #[cfg(not(target_os = "android"))]
+            let _ = (app, api);
             Ok(())
         })
         .build()

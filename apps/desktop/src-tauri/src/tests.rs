@@ -569,12 +569,17 @@ async fn other_webviews_and_remote_pages_cannot_call_the_app() {
 }
 
 #[tokio::test]
-async fn qr_codes_are_png_data_uris() {
+async fn qr_codes_are_svg_data_uris() {
     let desktop = Desktop::new(cypher_tls::make_client_config());
     let uri = desktop
         .call("generate_qr", json!({ "linkId": "cypher-link" }))
         .await;
-    assert!(text(&uri.unwrap()).starts_with("data:image/png;base64,"));
+    let uri = text(&uri.unwrap());
+    let b64 = uri.strip_prefix("data:image/svg+xml;base64,").unwrap();
+    let svg = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    assert!(String::from_utf8(svg).unwrap().contains("<svg"));
 }
 
 #[tokio::test]
@@ -651,8 +656,11 @@ async fn two_desktops_against_in_process_stack() {
     refuse_to_open_a_program(&a, &b, &b_id).await;
     send_picked_files(&a, &b_id).await;
     send_and_preview_pictures(&a, &b, &b_id).await;
-    name_then_forget_a_contact(&b, &a_id).await;
+    let tls = &stack.target().tls;
+    a_note_goes_out_beside_a_second_device(tls, &a, &b, &b_id, &gateway).await;
     link_a_new_desktop(&stack.target().tls, &a, &a_id, &gateway).await;
+    huge_notes_play_only_by_ranges(&a, &b, &b_id).await;
+    name_then_forget_a_contact(&b, &a_id).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
     a.call("apply_anonymous_settings", anonymity).await.unwrap();
@@ -1085,11 +1093,7 @@ async fn send_picked_files(a: &Desktop, b_id: &str) {
 /// A pasted picture goes from memory, a dropped one by the path the drop
 /// gave; once kept, both show through the preview route, a text file not.
 async fn send_and_preview_pictures(a: &Desktop, b: &Desktop, b_id: &str) {
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::GrayImage::from_pixel(8, 8, image::Luma([200]))
-        .write_to(&mut png, image::ImageFormat::Png)
-        .unwrap();
-    let png = png.into_inner();
+    let png = GRAY_PNG.to_vec();
     let headers: HeaderMap = [
         ("x-peer", b_id.to_owned()),
         ("x-name", "%D1%84%D0%BE%D1%82%D0%BE.png".to_owned()),
@@ -1174,4 +1178,376 @@ async fn refuse_to_open_a_program(a: &Desktop, b: &Desktop, b_id: &str) {
         b.call("open_file", file).await,
         Err("unsafe_type".to_owned())
     );
+}
+
+/// Batch sends, staged copies, waiting for replies and the session's
+/// lifecycle, driven against a client that is up but offline (no stack).
+mod offline {
+    use tauri_plugin_dialog::FilePath;
+
+    use super::*;
+    use crate::commands::transfer::send_all;
+
+    /// Logging set up twice is an error the app warns about and goes on
+    /// from, not a panic.
+    #[test]
+    fn a_second_logger_is_refused_not_a_panic() {
+        let _first = crate::init_logging();
+        crate::init_logging().unwrap_err();
+    }
+
+    /// A recording raced against a lock never outlives it: one whose
+    /// microphone opens as the lock ends is closed again, and none starts
+    /// while locked.
+    #[tokio::test]
+    async fn a_microphone_opened_during_a_lock_ends_closed() {
+        let desktop = offline_desktop().await;
+        let state = desktop.state();
+        desktop.call("lock", json!({})).await.unwrap();
+        // The ticket comes after the lock's resets, as for a start that
+        // checked the identity just before the lock.
+        let ticket = state.voice.ticket().unwrap();
+        let kept = crate::commands::media::keep_recorder(&state, ticket, recorder(4_800)).await;
+        assert_eq!(kept, Err("cancelled".to_owned()));
+        assert!(!state.voice.is_recording(), "the microphone stayed open");
+
+        let refused = desktop.call("voice_start", json!({})).await;
+        assert_eq!(refused, Err("identity is locked".to_owned()));
+        assert!(!state.voice.is_recording());
+    }
+
+    /// The UI hears when a client is up for its commands, once its start is
+    /// over, even with no server reachable; a connect that fails says
+    /// nothing.
+    #[tokio::test]
+    async fn a_started_client_is_announced_online_or_not() {
+        let desktop = Desktop::new(cypher_tls::make_client_config());
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::clone(&ready);
+        tauri::Listener::listen(desktop.app.handle(), "cypher://client_ready", move |_| {
+            heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let count = || ready.load(std::sync::atomic::Ordering::SeqCst);
+        let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
+        let locked = desktop.call("connect_to_gateway", args.clone()).await;
+        assert_eq!(locked.unwrap_err(), "identity is locked");
+
+        desktop.create("alice").await;
+        desktop.call("connect_to_gateway", args).await.unwrap();
+        eventually(|| async { (count() == 1).then_some(()) }).await;
+        desktop.call("get_conversations", json!({})).await.unwrap();
+        let settings = json!({ "anonymous": false, "bridges": [] });
+        desktop
+            .call("apply_anonymous_settings", settings)
+            .await
+            .unwrap();
+        eventually(|| async { (count() == 2).then_some(()) }).await;
+    }
+
+    /// When the app exits, its client stops and the identity leaves memory.
+    #[tokio::test]
+    async fn exiting_stops_the_client() {
+        let desktop = offline_desktop().await;
+        let client = desktop.state().client().await.unwrap();
+        let app = desktop.app.handle().clone();
+        tokio::task::spawn_blocking(move || crate::shut_down(&app))
+            .await
+            .unwrap();
+        let after = client.command(cypher_core::Command::TrustServerKey).await;
+        assert!(matches!(after, Err(cypher_client::ClientError::Closed)));
+        assert!(is_locked(&desktop).await);
+    }
+
+    /// A desktop with an identity and a client for a gateway nobody runs.
+    async fn offline_desktop() -> Desktop {
+        let desktop = Desktop::new(cypher_tls::make_client_config());
+        desktop.create("alice").await;
+        desktop.connect("127.0.0.1:1").await;
+        desktop
+    }
+
+    /// A file that cannot be sent costs neither the others nor their cards;
+    /// when none can be, its error is the answer.
+    #[tokio::test]
+    async fn a_failed_file_keeps_the_cards_of_the_others() {
+        let desktop = offline_desktop().await;
+        let client = desktop.state().client().await.unwrap();
+        let peer = cypher_types::PeerId([1; 32]);
+        let file = |name: &str| desktop.dir.path().join(name);
+        std::fs::write(file("first.txt"), b"one").unwrap();
+        std::fs::write(file("second.txt"), b"two").unwrap();
+        let batch = vec![
+            FilePath::Path(file("first.txt")),
+            FilePath::Path(file("gone.txt")),
+            FilePath::Path(file("second.txt")),
+        ];
+
+        let handle = desktop.app.handle();
+        let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = Arc::clone(&told);
+        tauri::Listener::listen(handle, "cypher://error", move |event| {
+            let message: String = serde_json::from_str(event.payload()).unwrap();
+            heard.lock().unwrap().push(message);
+        });
+        let sent = send_all(handle, &client, peer, batch).await.unwrap();
+        let sent = serde_json::to_value(sent).unwrap();
+        let names: Vec<&str> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|card| card["file_name"].as_str())
+            .collect();
+        assert_eq!(names, ["first.txt", "second.txt"]);
+        // The file left out is told to the user.
+        let told_once = || {
+            let told = told.lock().unwrap();
+            (told.len() == 1).then(|| told[0].clone())
+        };
+        let message = eventually(|| async { told_once() }).await;
+        assert!(message.starts_with("gone.txt: "), "{message}");
+
+        // Nothing went: the error is the answer, with no event besides.
+        let none = vec![FilePath::Path(file("gone.txt"))];
+        send_all(handle, &client, peer, none).await.unwrap_err();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(told.lock().unwrap().len(), 1);
+    }
+
+    /// A pasted file is staged as a copy only for sending: whether it went
+    /// or not, no copy stays in the app's folder.
+    #[tokio::test]
+    async fn a_pasted_file_leaves_no_staged_copy() {
+        let unconnected = Desktop::new(cypher_tls::make_client_config());
+        unconnected.create("alice").await;
+        let refused = paste(&unconnected).await.unwrap_err();
+        assert_eq!(refused, "not connected");
+        assert_eq!(staged(&unconnected), 0, "a copy outlived a failed send");
+
+        let desktop = offline_desktop().await;
+        paste(&desktop).await.unwrap();
+        assert_eq!(staged(&desktop), 0, "the client took the copy over");
+    }
+
+    /// Pastes a few bytes as a picture for a peer, as the webview does.
+    async fn paste(desktop: &Desktop) -> Result<Value, Value> {
+        let headers: HeaderMap = [
+            ("x-peer", cypher_types::PeerId([1; 32]).to_hex()),
+            ("x-name", "a.png".to_owned()),
+            ("x-mime", "image%2Fpng".to_owned()),
+        ]
+        .iter()
+        .map(|(k, v)| (k.parse().unwrap(), HeaderValue::from_str(v).unwrap()))
+        .collect();
+        let body = InvokeBody::Raw(b"pasted".to_vec());
+        desktop.invoke("send_bytes", body, headers).await
+    }
+
+    /// How many staged copies are in the app's folder.
+    fn staged(desktop: &Desktop) -> usize {
+        let dir = desktop.dir.path().join("data").join("staging");
+        std::fs::read_dir(dir).map_or(0, Iterator::count)
+    }
+
+    /// Falling behind the client's events is told apart from no reply
+    /// coming, and a reply after it is still taken.
+    #[tokio::test]
+    async fn missed_events_are_not_a_plain_timeout() {
+        let (events, mut rx) = tokio::sync::broadcast::channel(1);
+        let done = |id: u8| Event::TransferComplete {
+            file_id: FileId([id; 16]),
+        };
+        let wait = Duration::from_millis(200);
+        let never = |_: &Event| None::<session::CmdResult<()>>;
+        let reply = |e: &Event| (*e == done(9)).then_some(Ok(()));
+
+        let quiet = session::await_event_within(wait, &mut rx, never).await;
+        assert_eq!(quiet, Err("timed out".to_owned()));
+
+        for id in 1..=3 {
+            events.send(done(id)).unwrap();
+        }
+        let behind = session::await_event_within(wait, &mut rx, never).await;
+        assert_eq!(behind, Err("lagged".to_owned()));
+
+        for id in [1, 2, 9] {
+            events.send(done(id)).unwrap();
+        }
+        let late = session::await_event_within(wait, &mut rx, reply).await;
+        assert_eq!(late, Ok(()));
+    }
+
+    /// How long a command may take to answer while a client starts.
+    const PROMPT: Duration = Duration::from_secs(2);
+
+    /// While a new client starts (held up here before it opens its data),
+    /// commands answer at once: those needing only the identity as usual,
+    /// those needing a client by saying there is none.
+    #[tokio::test]
+    async fn commands_answer_while_a_client_starts() {
+        let desktop = offline_desktop().await;
+        let state = desktop.state();
+        let held = state.held_start.lock().await;
+        let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
+        let restart = desktop.call("connect_to_gateway", args);
+        let meanwhile = async {
+            tokio::time::timeout(WAIT, old_client_gone(&state))
+                .await
+                .unwrap();
+            let bob = json!({ "peerId": cypher_types::PeerId([9; 32]).to_hex() });
+            let number = tokio::time::timeout(PROMPT, desktop.call("safety_number", bob));
+            number.await.expect("waited for the client").unwrap();
+            let list = tokio::time::timeout(PROMPT, desktop.call("get_conversations", json!({})));
+            let list = list.await.expect("waited for the client");
+            assert_eq!(
+                list,
+                Err("connecting".to_owned()),
+                "told apart from offline"
+            );
+            let note = media_request(&FileId([3; 16]).to_hex(), None);
+            let note = media_scheme::answer(desktop.app.handle(), &note).await;
+            assert_eq!(note.status(), StatusCode::SERVICE_UNAVAILABLE);
+            drop(held);
+        };
+        let (restarted, ()) = tokio::join!(restart, meanwhile);
+        assert_eq!(restarted.unwrap().as_str().map(str::len), Some(64));
+        desktop.call("get_conversations", json!({})).await.unwrap();
+    }
+
+    /// Locking while a client starts waits for it and then stops it: no
+    /// client is left running for a locked identity.
+    #[tokio::test]
+    async fn a_lock_stops_a_client_still_starting() {
+        let desktop = offline_desktop().await;
+        let state = desktop.state();
+        let held = state.held_start.lock().await;
+        let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
+        let restart = desktop.call("connect_to_gateway", args);
+        let lock = async {
+            tokio::time::timeout(WAIT, old_client_gone(&state))
+                .await
+                .unwrap();
+            // The lock comes while the client is starting and waits for it.
+            let lock = desktop.call("lock", json!({}));
+            tokio::pin!(lock);
+            let early = tokio::time::timeout(Duration::from_millis(100), &mut lock).await;
+            assert!(early.is_err(), "the lock went ahead of the starting client");
+            drop(held);
+            lock.await
+        };
+        let (restarted, locked) = tokio::join!(restart, lock);
+        restarted.unwrap();
+        locked.unwrap();
+        let list = desktop.call("get_conversations", json!({})).await;
+        assert_eq!(list, Err("not connected".to_owned()));
+        assert!(is_locked(&desktop).await);
+    }
+
+    /// Returns once a restart has closed the old client; each look at the
+    /// session answers at once.
+    async fn old_client_gone(state: &AppState) {
+        let present = || async {
+            tokio::time::timeout(PROMPT, state.client())
+                .await
+                .expect("waited for the starting client")
+                .is_ok()
+        };
+        while present().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// An 8×8 light-gray PNG.
+const GRAY_PNG: [u8; 71] = [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0xE1, 0x64, 0xE1,
+    0x57, 0x00, 0x00, 0x00, 0x0E, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x38, 0x01, 0x05, 0x0C,
+    0x94, 0x31, 0x00, 0x08, 0xB1, 0x32, 0x01, 0xB5, 0xC0, 0xAB, 0x65, 0x00, 0x00, 0x00, 0x00, 0x49,
+    0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+/// A "note" larger than any this app sends is not read whole into memory
+/// for a request without a range; ranges still serve it.
+async fn huge_notes_play_only_by_ranges(a: &Desktop, b: &Desktop, b_id: &str) {
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let kind = cypher_core::MediaKind::VideoNote {
+        duration_ms: 1000,
+        poster: vec![0xFF, 0xD8],
+    };
+    let huge = vec![7; (32 << 20) + (1 << 20)];
+    let client = a.state().client().await.unwrap();
+    let sent = client.send_media(peer, huge, "huge.webm", "video/webm", kind);
+    let file = sent.await.unwrap().1.to_hex();
+    let serve = |request| async move { media_scheme::answer(b.app.handle(), &request).await };
+
+    // Unknown (404) until the transfer starts on the receiving side.
+    let whole = eventually(|| async {
+        let status = serve(media_request(&file, None)).await.status();
+        (status != StatusCode::NOT_FOUND).then_some(status)
+    })
+    .await;
+    assert_eq!(whole, StatusCode::PAYLOAD_TOO_LARGE);
+    let first = serve(media_request(&file, Some("bytes=0-9"))).await;
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(first.body().as_slice(), [7; 10]);
+    a.call("cancel_transfer", json!({ "fileId": file }))
+        .await
+        .unwrap();
+}
+
+/// A chunked note from A reaches B whole while A has a second device
+/// online, linked with the history so it knows B. That device gets the sent
+/// message as a record; its content is not copied to own devices.
+async fn a_note_goes_out_beside_a_second_device(
+    tls: &Arc<rustls::ClientConfig>,
+    a: &Desktop,
+    b: &Desktop,
+    b_id: &str,
+    gateway: &str,
+) {
+    let laptop = Desktop::new(Arc::clone(tls));
+    let start = json!({ "addr": gateway, "name": "Laptop" });
+    let offer = text(&laptop.call("link_start", start).await.unwrap());
+    let finish = laptop.call("link_finish", json!({ "passphrase": PASS }));
+    let link = eventually(|| {
+        let args = json!({ "offer": offer, "history": true });
+        async move { a.call("link_device", args).await.ok() }
+    });
+    let (finished, _) = tokio::join!(finish, link);
+    finished.unwrap();
+    laptop.connect(gateway).await;
+
+    // Larger than a message carries inline, so it goes in chunks.
+    let note: Vec<u8> = (0..300_000u32).map(|i| i.to_le_bytes()[1]).collect();
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let kind = cypher_core::MediaKind::VideoNote {
+        duration_ms: 1000,
+        poster: vec![0xFF, 0xD8],
+    };
+    let client = a.state().client().await.unwrap();
+    let sent = client.send_media(peer, note.clone(), "n.webm", "video/webm", kind);
+    let file = sent.await.unwrap().1.to_hex();
+    let whole = |desktop: &Desktop| {
+        let request = media_request(&file, None);
+        let app = desktop.app.handle().clone();
+        async move {
+            let response = media_scheme::answer(&app, &request).await;
+            (response.status() == StatusCode::OK).then(|| response.into_body())
+        }
+    };
+    assert_eq!(eventually(|| whole(b)).await, note, "B's copy");
+    let history = json!({ "peerId": b_id, "limit": 10, "before": null });
+    let synced = eventually(|| {
+        let history = history.clone();
+        let laptop = &laptop;
+        let file = &file;
+        async move {
+            let list = laptop.call("get_history", history).await.ok()?;
+            list.as_array()?
+                .iter()
+                .any(|m| m["file"]["file_id"] == file.as_str())
+                .then_some(())
+        }
+    });
+    synced.await;
 }

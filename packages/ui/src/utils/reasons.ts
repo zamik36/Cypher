@@ -5,7 +5,7 @@ import { t } from "../i18n";
  * `FailReason` name (e.g. `KeyMismatch`); anything else is shown as is.
  */
 export function reasonText(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
+  const raw = rawReason(error);
   const tr = t();
   const known: Record<string, string> = {
     InvalidLink: tr.join_invalid_link,
@@ -24,6 +24,9 @@ export function reasonText(error: unknown): string {
     Unauthorized: tr.error_unauthorized,
     ServerError: tr.error_server,
     DecryptFailed: tr.error_decrypt_failed,
+    // The desktop's client is still starting, or missed a reply.
+    connecting: tr.error_connecting,
+    lagged: tr.error_lagged,
     // Opening a received file.
     unsafe_type: tr.file_unsafe,
     no_app: tr.file_no_app,
@@ -38,4 +41,14 @@ export function reasonText(error: unknown): string {
     "nickname is too long": tr.identity_err_nickname,
   };
   return known[raw] ?? raw;
+}
+
+/** The failure as the platform reported it. */
+function rawReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Whether a command failed only because the client is still starting. */
+export function isConnecting(error: unknown): boolean {
+  return rawReason(error) === "connecting";
 }

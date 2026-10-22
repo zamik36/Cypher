@@ -39,6 +39,8 @@ export default function RoundVideoBubble(props: { file: UiFile }) {
     try {
       if (!src()) setSrc(await api.mediaUrl(props.file.file_id));
       if (!video) return;
+      // A load that failed (the app was still connecting) is tried again.
+      if (video.error) video.load();
       if (video.paused) {
         claimPlayback(video);
         await video.play();

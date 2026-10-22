@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use tauri::Runtime;
 use tauri::plugin::PluginHandle;
+use tauri::plugin::mobile::PluginInvokeError;
+
+/// Why a call to the Kotlin side failed. Its message is the string these
+/// calls have always failed with.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct Error(#[from] PluginInvokeError);
 
 /// The Kotlin side (`PushPlugin`), managed as app state.
 pub struct Push<R: Runtime>(pub(crate) PluginHandle<R>);
@@ -25,6 +32,10 @@ struct SubscribeArgs<'a> {
 }
 
 #[derive(Deserialize)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "the Kotlin side answers with an empty object, which a unit struct does not take"
+)]
 struct Done {}
 
 impl<R: Runtime> Push<R> {
@@ -33,20 +44,18 @@ impl<R: Runtime> Push<R> {
     ///
     /// # Errors
     /// The Kotlin side's message when registering cannot start.
-    pub fn subscribe(&self, vapid: &str) -> Result<Subscribed, String> {
-        self.0
-            .run_mobile_plugin::<Subscribed>("subscribe", SubscribeArgs { vapid })
-            .map_err(|e| e.to_string())
+    pub fn subscribe(&self, vapid: &str) -> Result<Subscribed, Error> {
+        Ok(self
+            .0
+            .run_mobile_plugin::<Subscribed>("subscribe", SubscribeArgs { vapid })?)
     }
 
     /// Unregisters from the distributor.
     ///
     /// # Errors
     /// The Kotlin side's message.
-    pub fn unsubscribe(&self) -> Result<(), String> {
-        self.0
-            .run_mobile_plugin::<Done>("unsubscribe", ())
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    pub fn unsubscribe(&self) -> Result<(), Error> {
+        self.0.run_mobile_plugin::<Done>("unsubscribe", ())?;
+        Ok(())
     }
 }

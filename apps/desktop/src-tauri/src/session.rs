@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
 use cypher_core::Event;
 use cypher_types::PeerId;
 use tauri::{AppHandle, Manager, Runtime};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::commands::transfer::release_reservation;
@@ -78,12 +79,25 @@ impl Paths {
 pub(crate) struct AppState {
     paths: Paths,
     tls: Arc<rustls::ClientConfig>,
-    identity: Mutex<Option<Unlocked>>,
+    /// Held while a client starts or stops (connect, and the stop before a
+    /// lock or a new identity), so one client at a time opens the
+    /// identity's data and a stop never misses a client still starting.
+    /// Commands never take it: `identity` and `session` are each locked only
+    /// for a moment, so they answer while a client starts.
+    lifecycle: Mutex<()>,
+    /// Set while a connect is under way, so commands that find no client
+    /// meanwhile say `connecting` (the UI retries once connected) rather
+    /// than `not connected`.
+    connecting: AtomicBool,
+    identity: Mutex<Option<Arc<Unlocked>>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
     pub voice: Voice,
     pub transfers: Transfers,
     pub linking: Linking,
+    /// Tests hold it to keep a client starting.
+    #[cfg(test)]
+    pub held_start: Mutex<()>,
 }
 
 impl AppState {
@@ -91,12 +105,16 @@ impl AppState {
         Self {
             paths,
             tls,
+            lifecycle: Mutex::default(),
+            connecting: AtomicBool::new(false),
             identity: Mutex::default(),
             session: Mutex::default(),
             endpoint: Mutex::default(),
             voice: Voice::default(),
             transfers: Transfers::default(),
             linking: Linking::default(),
+            #[cfg(test)]
+            held_start: Mutex::default(),
         }
     }
 
@@ -109,8 +127,15 @@ impl AppState {
     }
 
     pub(crate) async fn set_identity(&self, identity: Unlocked) {
-        self.stop().await;
-        *self.identity.lock().await = Some(identity);
+        let _lifecycle = self.stop().await;
+        *self.identity.lock().await = Some(Arc::new(identity));
+        // Last, for a microphone that opened while the client stopped.
+        self.voice.reset().await;
+    }
+
+    /// Whether an identity is unlocked.
+    pub(crate) async fn is_unlocked(&self) -> bool {
+        self.identity.lock().await.is_some()
     }
 
     /// The safety number with `peer`; needs only the unlocked identity.
@@ -137,13 +162,16 @@ impl AppState {
         emit: impl Fn(&Event) + Send + 'static,
     ) -> CmdResult<String> {
         // One client at a time: the old one is gone before the new one opens
-        // the same data, and a second `connect` waits for this one.
-        let mut session = self.session.lock().await;
-        if let Some(old) = session.take() {
+        // the same data, and a second `connect` waits for this one. Meanwhile
+        // commands find no client and say so.
+        let _lifecycle = self.lifecycle.lock().await;
+        let _connecting = Connecting::mark(&self.connecting);
+        let old = self.session.lock().await.take();
+        if let Some(old) = old {
             old.close().await;
         }
-        let identity = self.identity.lock().await;
-        let identity = identity.as_ref().ok_or("identity is locked")?;
+        let identity = self.identity.lock().await.clone();
+        let identity = identity.ok_or("identity is locked")?;
         let config = Config {
             gateway_addr: endpoint.gateway_addr.clone(),
             tls: Arc::clone(&self.tls),
@@ -155,6 +183,8 @@ impl AppState {
             }),
         };
         *self.endpoint.lock().await = endpoint;
+        #[cfg(test)]
+        drop(self.held_start.lock().await);
         let (client, mut rx) = Client::start(&identity.seed, identity.device, config)
             .await
             .map_err(err)?;
@@ -175,7 +205,7 @@ impl AppState {
             }
         });
         let me = client.peer_id().to_hex();
-        *session = Some(Session {
+        *self.session.lock().await = Some(Session {
             client,
             events,
             pump,
@@ -189,7 +219,7 @@ impl AppState {
             .await
             .as_ref()
             .map(|s| s.client.clone())
-            .ok_or_else(|| "not connected".to_owned())
+            .ok_or_else(|| self.no_client())
     }
 
     /// Client plus an event subscription taken before any command is sent,
@@ -198,27 +228,59 @@ impl AppState {
         &self,
     ) -> CmdResult<(Client, broadcast::Receiver<Event>)> {
         let guard = self.session.lock().await;
-        let s = guard.as_ref().ok_or("not connected")?;
+        let s = guard.as_ref().ok_or_else(|| self.no_client())?;
         Ok((s.client.clone(), s.events.subscribe()))
+    }
+
+    /// Why there is no client: one is being started, or none is.
+    fn no_client(&self) -> String {
+        if self.connecting.load(Ordering::Acquire) {
+            "connecting".to_owned()
+        } else {
+            "not connected".to_owned()
+        }
     }
 
     /// Stops the client and forgets the unlocked identity.
     pub(crate) async fn lock(&self) {
-        self.stop().await;
+        let _lifecycle = self.stop().await;
         *self.identity.lock().await = None;
+        // Last, for a microphone that opened while the client stopped: one
+        // that opens after this finds the identity locked (`keep_recorder`).
+        self.voice.reset().await;
     }
 
     /// Closes the microphone of a voice note being recorded (first, before
-    /// waiting on the client), stops the client, a link being waited for, and
-    /// forgets offered and dropped files.
-    pub(crate) async fn stop(&self) {
+    /// waiting on a client still starting), stops the client, a link being
+    /// waited for, and forgets offered and dropped files. The guard returned
+    /// keeps a new client from starting until the caller has changed the
+    /// identity and closed the microphone once more.
+    async fn stop(&self) -> MutexGuard<'_, ()> {
         self.voice.reset().await;
+        let lifecycle = self.lifecycle.lock().await;
         let session = self.session.lock().await.take();
         if let Some(s) = session {
             s.close().await;
         }
         self.linking.cancel().await;
         self.transfers.reset();
+        lifecycle
+    }
+}
+
+/// Marks a connect as under way until dropped, whichever way it ends.
+struct Connecting<'a>(&'a AtomicBool);
+
+impl<'a> Connecting<'a> {
+    fn mark(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for Connecting<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -231,9 +293,22 @@ fn release_later(reserved: PathBuf) {
 /// Waits for the first event `pick` accepts.
 pub(crate) async fn await_event<T>(
     rx: &mut broadcast::Receiver<Event>,
+    pick: impl FnMut(&Event) -> Option<CmdResult<T>>,
+) -> CmdResult<T> {
+    await_event_within(REPLY_TIMEOUT, rx, pick).await
+}
+
+/// [`await_event`], giving up after `wait`. Events skipped because the
+/// receiver fell behind may have held the reply: waiting goes on, since the
+/// reply may still come, but a wait that then runs out says it missed
+/// events (`lagged`) rather than that no reply came (`timed out`).
+pub(crate) async fn await_event_within<T>(
+    wait: Duration,
+    rx: &mut broadcast::Receiver<Event>,
     mut pick: impl FnMut(&Event) -> Option<CmdResult<T>>,
 ) -> CmdResult<T> {
-    tokio::time::timeout(REPLY_TIMEOUT, async {
+    let mut lagged = false;
+    let waited = tokio::time::timeout(wait, async {
         loop {
             match rx.recv().await {
                 Ok(event) => {
@@ -241,13 +316,16 @@ pub(crate) async fn await_event<T>(
                         return result;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                 Err(broadcast::error::RecvError::Closed) => return Err("client stopped".to_owned()),
             }
         }
     })
-    .await
-    .unwrap_or_else(|_| Err("timed out".to_owned()))
+    .await;
+    waited.unwrap_or_else(|_| {
+        let reason = if lagged { "lagged" } else { "timed out" };
+        Err(reason.to_owned())
+    })
 }
 
 /// System trust roots, unless development certificates are pinned: by the

@@ -25,6 +25,21 @@ pub(crate) struct TransferInfo {
     status: &'static str,
 }
 
+impl TransferInfo {
+    /// The card of a file this device just offered: active, nothing sent yet.
+    fn outgoing(msg_id: MsgId, file_id: FileId, file_name: String, total_size: u64) -> Self {
+        Self {
+            file_id: file_id.to_hex(),
+            msg_id: msg_id.to_hex(),
+            file_name,
+            total_size,
+            progress: 0.0,
+            direction: "send",
+            status: "active",
+        }
+    }
+}
+
 /// The backend owns path selection: the webview can never make the client
 /// read an arbitrary file.
 #[tauri::command]
@@ -40,20 +55,67 @@ pub(crate) async fn browse_and_send<R: Runtime>(
     });
     let picked = rx.await.map_err(err)?;
     let client = state.client().await?;
-    let mut out = Vec::with_capacity(picked.len());
-    for file in picked {
-        let (msg_id, file_id, file_name, total_size) = send_pick(&app, &client, peer, file).await?;
-        out.push(TransferInfo {
-            file_id: file_id.to_hex(),
-            msg_id: msg_id.to_hex(),
-            file_name,
-            total_size,
-            progress: 0.0,
-            direction: "send",
-            status: "active",
-        });
+    send_all(&app, &client, peer, picked).await
+}
+
+/// Sends `files` to `peer` in order; the cards of the files sent. A file
+/// that cannot be sent does not stop the others, whose cards the UI needs
+/// to follow them. When none went, the first error is the answer; when
+/// some did, each file left out is told to the UI as an error event,
+/// `<name>: <reason>`.
+pub(crate) async fn send_all<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &Client,
+    peer: PeerId,
+    files: Vec<FilePath>,
+) -> CmdResult<Vec<TransferInfo>> {
+    let mut sent = Vec::with_capacity(files.len());
+    let mut failed = Vec::new();
+    for file in files {
+        let name = file_label(&file);
+        match send_pick(app, client, peer, file).await {
+            Ok((msg_id, file_id, file_name, total_size)) => sent.push(TransferInfo::outgoing(
+                msg_id, file_id, file_name, total_size,
+            )),
+            Err(e) => {
+                tracing::warn!(error = %e, "a file of a batch was not sent");
+                failed.push((name, e));
+            }
+        }
     }
-    Ok(out)
+    let mut failed = failed.into_iter();
+    if sent.is_empty()
+        && let Some((_, e)) = failed.next()
+    {
+        return Err(e);
+    }
+    for (name, e) in failed {
+        let _ = app.emit("cypher://error", format!("{name}: {e}"));
+    }
+    Ok(sent)
+}
+
+/// How a picked file is named to the user.
+fn file_label(file: &FilePath) -> String {
+    match file {
+        FilePath::Path(path) => display_name(path),
+        FilePath::Url(url) => url_label(url),
+    }
+}
+
+/// The name at the end of a picked URI's path, decoded; an Android document
+/// URI ends in its file's path (`…/document/primary%3ADownload%2Fa.pdf`).
+/// The whole URI when its path names nothing.
+fn url_label(url: &tauri::Url) -> String {
+    let last = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .unwrap_or_default();
+    let decoded = percent_encoding::percent_decode_str(last).decode_utf8_lossy();
+    match decoded.rsplit(['/', ':']).next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => url.to_string(),
+    }
 }
 
 /// Files dropped on the window, held for the UI to send to the open chat:
@@ -116,25 +178,14 @@ pub(crate) async fn send_dropped<R: Runtime>(
         std::mem::take(&mut dropped.paths)
     };
     let client = state.client().await?;
-    let mut out = Vec::with_capacity(paths.len());
+    let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         // Folders and the like are skipped, not fatal.
-        if !tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
-            continue;
+        if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+            files.push(FilePath::Path(path));
         }
-        let (msg_id, file_id, file_name, total_size) =
-            send_pick(&app, &client, peer, FilePath::Path(path)).await?;
-        out.push(TransferInfo {
-            file_id: file_id.to_hex(),
-            msg_id: msg_id.to_hex(),
-            file_name,
-            total_size,
-            progress: 0.0,
-            direction: "send",
-            status: "active",
-        });
     }
-    Ok(out)
+    send_all(&app, &client, peer, files).await
 }
 
 /// A fresh name for a staged copy.
@@ -162,25 +213,41 @@ pub(crate) async fn send_bytes(
     let name = ipc::header(headers, "x-name")?;
     let mime = ipc::header(headers, "x-mime")?;
     let data = ipc::bytes(request.body(), MAX_SENT_BYTES, "file")?;
+    // Before anything is written: without a client, nothing is staged.
+    let client = state.client().await?;
     let dir = state.paths().data.join("staging");
     tokio::fs::create_dir_all(&dir).await.map_err(err)?;
     let staged = dir.join(staging_name());
-    tokio::fs::write(&staged, &data).await.map_err(err)?;
-    let (msg_id, file_id) = state
-        .client()
-        .await?
-        .send_staged_file(peer, &staged, &name, &mime)
-        .await
-        .map_err(err)?;
-    Ok(TransferInfo {
-        file_id: file_id.to_hex(),
-        msg_id: msg_id.to_hex(),
-        file_name: name,
-        total_size: data.len() as u64,
-        progress: 0.0,
-        direction: "send",
-        status: "active",
-    })
+    let size = data.len() as u64;
+    // An owned buffer (decoded on Android) moves to the writing thread; a
+    // borrowed one is copied, as the write outlives the request.
+    if let Err(e) = tokio::fs::write(&staged, data.into_owned()).await {
+        discard(&staged).await;
+        return Err(err(e));
+    }
+    let (msg_id, file_id) = send_staged(&client, peer, &staged, &name, &mime).await?;
+    Ok(TransferInfo::outgoing(msg_id, file_id, name, size))
+}
+
+/// Sends `staged`, a copy made only for sending, which the client takes
+/// over and deletes once sent; if sending fails, the copy is deleted here.
+async fn send_staged(
+    client: &Client,
+    peer: PeerId,
+    staged: &Path,
+    name: &str,
+    mime: &str,
+) -> CmdResult<(MsgId, FileId)> {
+    let sent = client.send_staged_file(peer, staged, name, mime).await;
+    if sent.is_err() {
+        discard(staged).await;
+    }
+    sent.map_err(err)
+}
+
+/// Deletes what is left of a staged copy; one already gone is fine.
+async fn discard(staged: &Path) {
+    let _ = tokio::fs::remove_file(staged).await;
 }
 
 /// Sends one picked file: a path as it is, a `content://` pick (Android)
@@ -222,12 +289,17 @@ async fn send_content<R: Runtime>(
             .stage(&uri)
     })
     .await
-    .map_err(err)??;
-    let size = tokio::fs::metadata(&staged.path).await.map_err(err)?.len();
-    let (msg_id, file_id) = client
-        .send_staged_file(peer, Path::new(&staged.path), &staged.name, &staged.mime)
-        .await
-        .map_err(err)?;
+    .map_err(err)?
+    .map_err(err)?;
+    let path = Path::new(&staged.path);
+    let size = match tokio::fs::metadata(path).await {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            discard(path).await;
+            return Err(err(e));
+        }
+    };
+    let (msg_id, file_id) = send_staged(client, peer, path, &staged.name, &staged.mime).await?;
     Ok((msg_id, file_id, staged.name, size))
 }
 
@@ -276,6 +348,7 @@ async fn open_location<R: Runtime>(app: AppHandle<R>, location: String) -> CmdRe
     })
     .await
     .map_err(err)?
+    .map_err(err)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -455,7 +528,19 @@ mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    use super::{release_reservation, reserve_download, runs_code};
+    use super::{release_reservation, reserve_download, runs_code, url_label};
+
+    /// A picked URI is named by its file, not shown whole.
+    #[test]
+    fn picked_uris_are_named_by_their_file() {
+        let label = |uri: &str| url_label(&uri.parse().unwrap());
+        let document = "content://com.android.providers.downloads.documents/document/\
+                        primary%3ADownload%2Freport.pdf";
+        assert_eq!(label(document), "report.pdf");
+        assert_eq!(label("content://media/external/file/42"), "42");
+        assert_eq!(label("file:///home/a/notes%20v2.txt"), "notes v2.txt");
+        assert_eq!(label("content://media/"), "content://media/");
+    }
 
     #[test]
     fn programs_are_told_apart_from_documents() {

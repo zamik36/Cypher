@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::dto;
 use crate::session::{AppState, CmdResult, Endpoint, err};
@@ -27,7 +27,9 @@ pub(crate) async fn connect_to_gateway<R: Runtime>(
         anonymous,
         bridges: clean_bridges(bridges),
     };
-    state.connect(endpoint, dto::emitter(app)).await
+    let me = state.connect(endpoint, dto::emitter(app.clone())).await?;
+    client_ready(&app);
+    Ok(me)
 }
 
 /// Switching anonymity changes the transport, so the session restarts.
@@ -43,7 +45,16 @@ pub(crate) async fn apply_anonymous_settings<R: Runtime>(
         bridges: clean_bridges(bridges),
         ..state.endpoint().await
     };
-    state.connect(endpoint, dto::emitter(app)).await.map(|_| ())
+    state.connect(endpoint, dto::emitter(app.clone())).await?;
+    client_ready(&app);
+    Ok(())
+}
+
+/// Tells the UI that a client is up for its commands, online or not: sent
+/// once the connect that started it is over, so a command that was told
+/// `connecting` can be tried again.
+fn client_ready<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit("cypher://client_ready", ());
 }
 
 /// Trusts the signing key the server showed in place of the one remembered.
