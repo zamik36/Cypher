@@ -27,6 +27,9 @@ const SPK_ROTATION_MS: u64 = 7 * 24 * 3600 * 1000;
 /// the one before that retry with fresh keys. Every accepted init rewrites
 /// the prekeys record, so this also bounds it: two sets of 32 KiB.
 const MAX_INITS_PER_SPK: usize = 1024;
+/// Inits taken from the sessions when prekeys saved before inits were
+/// remembered are read: half a set, see [`Prekeys::seed_inits`].
+const MAX_SEEDED_INITS: usize = MAX_INITS_PER_SPK / 2;
 /// Inits accepted on one signed prekey from one sender still waiting to be
 /// taken as a contact. Each starts a session afresh; an honest stranger
 /// needs one, a few more when sessions fail. Beyond it, only that sender is
@@ -240,12 +243,15 @@ impl Prekeys {
     }
 
     /// Takes inits accepted before they were remembered with the prekeys
-    /// (on which prekey is not known) as accepted on both kept, as far as
-    /// there is room.
+    /// (on which prekey is not known) as accepted on both kept, filling
+    /// each to half at most. This is a one-off and best effort; seeding
+    /// leaves half the current set for new inits, so rotation still
+    /// happens only when an init is accepted, never at startup, where it
+    /// would drop a prekey initiators may still hold.
     pub(crate) fn seed_inits(&mut self, ephemerals: &[[u8; 32]]) {
         for set in [&mut self.spk_inits, &mut self.prev_spk_inits] {
             for e in ephemerals {
-                if set.len() >= MAX_INITS_PER_SPK {
+                if set.len() >= MAX_SEEDED_INITS {
                     break;
                 }
                 set.insert(*e);
@@ -426,6 +432,19 @@ mod tests {
             "a fresh quota on a fresh prekey"
         );
         assert!(!pk.may_init(1, Some(&stranger)), "kept on the previous one");
+    }
+
+    /// However many inits the sessions remember, seeding leaves room: a
+    /// contact's next init is taken.
+    #[test]
+    fn seeding_leaves_room_for_new_inits() {
+        let mut pk = Prekeys::generate(0, &mut OsRng);
+        let seeds: Vec<_> = (0..MAX_INITS_PER_SPK).map(ephemeral).collect();
+        pk.seed_inits(&seeds);
+        assert!(pk.accepted_init(1, &seeds[0]));
+        assert!(pk.may_init(1, None));
+        assert!(!remember(&mut pk, 1, [0xEE; 32]), "no rotation");
+        assert!(pk.accepted_init(1, &[0xEE; 32]));
     }
 
     /// A record written by version 1 reads back with its keys and no
