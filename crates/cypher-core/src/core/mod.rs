@@ -769,6 +769,7 @@ impl<R: CryptoRngCore> Core<R> {
                 self.fail_request(p, FailReason::Timeout);
             }
         }
+        self.expire_skipped_keys();
 
         if self.conn == Conn::Offline {
             return;
@@ -1061,6 +1062,22 @@ impl<R: CryptoRngCore> Core<R> {
                 key: skipped_key_row(addr, seq),
             })
         }));
+    }
+
+    /// Drops the skipped keys every session kept longer than
+    /// [`cypher_crypto::double_ratchet::MAX_SKIPPED_AGE_MS`], and stores
+    /// the sessions that had any. Most ticks look at one key per session.
+    fn expire_skipped_keys(&mut self) {
+        let now = self.now;
+        let mut expired: Vec<Addr> = self
+            .sessions
+            .iter_mut()
+            .filter_map(|(addr, s)| s.ratchet.expire_skipped(now).then_some(*addr))
+            .collect();
+        expired.sort_unstable();
+        for addr in expired {
+            self.persist_session(addr);
+        }
     }
 
     /// Deletes the row of `session`, which was with `addr`, and every

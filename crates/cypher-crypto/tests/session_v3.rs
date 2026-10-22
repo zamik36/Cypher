@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use cypher_crypto::double_ratchet::{MAX_DECRYPTED, MAX_SKIP, SkippedKey};
+use cypher_crypto::double_ratchet::{MAX_DECRYPTED, MAX_SKIP, MAX_SKIPPED_AGE_MS, SkippedKey};
 use cypher_crypto::handshake::{self, InitHeader};
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
@@ -554,6 +554,36 @@ fn keys_stored_ahead_of_their_snapshot_are_refused() {
     assert!(!restored.restore_skipped(&ahead[0]));
     assert_eq!(recv(&mut restored, &on_time).unwrap(), b"on time");
     assert_eq!(recv(&mut restored, &late).unwrap(), b"late");
+}
+
+/// A key set aside for a late message opens it until it has been kept
+/// [`MAX_SKIPPED_AGE_MS`], and nothing from then on, restored or not:
+/// expiring drops it, and it is to be deleted.
+#[test]
+fn skipped_keys_open_their_messages_for_a_limited_time() {
+    let (mut a, mut b) = establish(false);
+    let late = [send(&mut a, b"late 1"), send(&mut a, b"late 2")];
+    recv(&mut b, &send(&mut a, b"on time")).unwrap();
+    let stored = Stored::of(&mut b);
+    let (last, expired) = (NOW + MAX_SKIPPED_AGE_MS - 1, NOW + MAX_SKIPPED_AGE_MS);
+    let open =
+        |r: &mut Ratchet, m: &(Header, Vec<u8>), at| r.decrypt(&m.0, &m.1, b"", at, &mut OsRng);
+
+    assert!(!b.expire_skipped(last));
+    assert_eq!(open(&mut b, &late[0], last).unwrap(), b"late 1");
+    let before = state(&b);
+    assert_eq!(open(&mut b, &late[1], expired), Err(CryptoError::Aead));
+    assert_eq!(state(&b), before, "a failure changes nothing");
+    assert!(b.expire_skipped(expired));
+    assert!(!b.expire_skipped(expired), "nothing left to expire");
+    assert_eq!(b.take_changes().spent.len(), 2, "both stored keys go");
+
+    let mut restored = stored.load();
+    assert_eq!(
+        open(&mut restored, &late[1], expired),
+        Err(CryptoError::Aead)
+    );
+    assert_eq!(open(&mut restored, &late[1], last).unwrap(), b"late 2");
 }
 
 /// A session that replaces another numbers its skipped keys on from the

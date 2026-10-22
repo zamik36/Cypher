@@ -12,7 +12,7 @@ use crate::aead;
 use crate::error::CryptoError;
 use crate::kdf::{kdf_ck, kdf_rk, message_keys};
 
-pub use skipped::{Changes, MAX_STORED_SKIPPED, SkippedKey};
+pub use skipped::{Changes, MAX_SKIPPED_AGE_MS, MAX_STORED_SKIPPED, SkippedKey};
 use skipped::{SkipKey, SkippedKeys};
 
 pub const HEADER_LEN: usize = 40;
@@ -220,7 +220,8 @@ impl Ratchet {
     }
 
     /// Decrypts a message and moves the session on; keys it sets aside for
-    /// messages it skips are dated `now_ms`. On any error the session is
+    /// messages it skips are dated `now_ms`, and a key kept longer than
+    /// [`MAX_SKIPPED_AGE_MS`] opens nothing. On any error the session is
     /// left exactly as it was.
     ///
     /// A byte-for-byte copy of one of the last [`MAX_DECRYPTED`] messages
@@ -243,7 +244,7 @@ impl Ratchet {
             return Err(CryptoError::Duplicate);
         }
         let key = (header.dh, header.n);
-        if let Some(mk) = self.skipped.get(&key) {
+        if let Some(mk) = self.skipped.get(&key, now_ms) {
             let pt = open(mk, &aad, ciphertext)?;
             self.skipped.remove(&key);
             self.decrypted.insert(digest);
@@ -400,6 +401,13 @@ impl Ratchet {
     /// whether still kept or gone since: what deleting it deletes.
     pub fn stored_skipped(&self) -> impl Iterator<Item = u64> + '_ {
         self.skipped.stored_seqs()
+    }
+
+    /// Drops the skipped keys kept longer than [`MAX_SKIPPED_AGE_MS`] at
+    /// `now_ms`; whether there were any, which then are to be deleted
+    /// ([`Ratchet::take_changes`]).
+    pub fn expire_skipped(&mut self, now_ms: u64) -> bool {
+        self.skipped.expire(now_ms)
     }
 }
 

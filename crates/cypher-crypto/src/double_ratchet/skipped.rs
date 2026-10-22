@@ -9,6 +9,18 @@ use zeroize::Zeroize;
 /// Most skipped keys retained per session; the oldest are evicted first.
 pub const MAX_STORED_SKIPPED: usize = 2000;
 
+/// How long a skipped key is kept after it was set aside: 30 days.
+///
+/// A key is set aside when a later message on its chain arrives, so the
+/// message it opens was sent before then. Every way a message travels ends
+/// within 14 days of its sending: online delivery is immediate, and an
+/// inbox item lives 14 days at most (`INBOX_TTL_SECS` in signaling). Twice
+/// that leaves room for clocks that disagree. A key kept
+/// longer could only open a message that will not come, while it stays on
+/// the device for anyone who takes it to read that message from a copy
+/// made on the way.
+pub const MAX_SKIPPED_AGE_MS: u64 = 30 * 24 * 3600 * 1000;
+
 /// Which message a key opens: the sender's ratchet key and the message's
 /// number on that chain.
 pub(super) type SkipKey = ([u8; 32], u32);
@@ -92,6 +104,14 @@ struct Entry {
     created_ms: u64,
 }
 
+impl Entry {
+    /// Whether the key outlived [`MAX_SKIPPED_AGE_MS`] at `now_ms`; a key
+    /// dated ahead of the clock has not.
+    fn expired(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.created_ms) >= MAX_SKIPPED_AGE_MS
+    }
+}
+
 impl Drop for Entry {
     fn drop(&mut self) {
         self.mk.zeroize();
@@ -129,9 +149,38 @@ impl SkippedKeys {
         self.next_seq
     }
 
-    pub(super) fn get(&self, k: &SkipKey) -> Option<&[u8; 32]> {
+    /// The key for message `k`, unless it outlived [`MAX_SKIPPED_AGE_MS`]
+    /// at `now_ms`.
+    pub(super) fn get(&self, k: &SkipKey, now_ms: u64) -> Option<&[u8; 32]> {
         let seq = self.index.get(k)?;
-        self.by_seq.get(seq).map(|e| &e.mk)
+        self.by_seq
+            .get(seq)
+            .filter(|e| !e.expired(now_ms))
+            .map(|e| &e.mk)
+    }
+
+    /// Drops every key that outlived [`MAX_SKIPPED_AGE_MS`] at `now_ms`;
+    /// whether there was one. Keys are dated as they are set aside, oldest
+    /// first, so a look at the oldest tells, unless a clock went back.
+    pub(super) fn expire(&mut self, now_ms: u64) -> bool {
+        if !self
+            .by_seq
+            .values()
+            .next()
+            .is_some_and(|oldest| oldest.expired(now_ms))
+        {
+            return false;
+        }
+        let expired: Vec<u64> = self
+            .by_seq
+            .iter()
+            .filter(|(_, e)| e.expired(now_ms))
+            .map(|(&seq, _)| seq)
+            .collect();
+        for seq in expired {
+            self.drop_seq(seq);
+        }
+        true
     }
 
     pub(super) fn remove(&mut self, k: &SkipKey) {

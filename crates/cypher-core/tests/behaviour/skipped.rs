@@ -262,6 +262,43 @@ fn skipped_keys_are_stored_beside_their_session_and_go_with_it() {
     assert!(rows::session(&w, B, a).is_none());
 }
 
+/// How long a key set aside for a late message is kept: 30 days.
+const KEPT_MS: u64 = 30 * 24 * 3600 * 1000;
+
+/// A key kept for a late message is kept 30 days and deleted once they are
+/// over: the message, coming later still, is not read, and warns.
+#[test]
+fn a_skipped_key_is_deleted_after_thirty_days_and_opens_nothing() {
+    let mut w = paired();
+    let a = addr(&w, A);
+    let late = held(&mut w, &["late"]);
+    w.send_text(A, B, "on time");
+    w.now += KEPT_MS - 1_000;
+    w.advance(500);
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 1, "kept until then");
+
+    w.advance(1_000);
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 0, "deleted once over");
+    let from = w.clients[B].events.len();
+    w.inject(B, late[0].clone());
+    assert!(warned(&w, B, from));
+    assert_eq!(w.texts(B), ["on time"]);
+}
+
+/// A key whose 30 days ran out while the app was closed is deleted soon
+/// after it starts again.
+#[test]
+fn a_skipped_key_that_ran_out_meanwhile_is_deleted_after_a_restart() {
+    let mut w = paired();
+    let a = addr(&w, A);
+    held(&mut w, &["late"]);
+    w.send_text(A, B, "on time");
+    w.now += KEPT_MS;
+    w.restart(B);
+    w.advance(500);
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 0);
+}
+
 /// B takes a message that makes it set a key aside, or one that takes a
 /// key set aside, and the app stops after any of the rows that message
 /// writes (the rest are lost). Restored from what was written, B neither
