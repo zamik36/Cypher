@@ -46,6 +46,8 @@ export default function VoiceBubble(props: { file: UiFile; meta?: JSX.Element })
     }
     try {
       const el = await element();
+      // A load that failed (the app was still connecting) is tried again.
+      if (el.error) el.load();
       if (el.paused) {
         claimPlayback(el);
         await el.play();

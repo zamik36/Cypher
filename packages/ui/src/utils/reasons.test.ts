@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { t } from "../i18n";
-import { reasonText } from "./reasons";
+import { isConnecting, reasonText } from "./reasons";
 
 describe("reasonText", () => {
   it("words the core's reasons instead of showing their codes", () => {
@@ -8,6 +8,17 @@ describe("reasonText", () => {
     expect(reasonText(new Error("NotFound"))).toBe(t().join_not_found);
     expect(reasonText("UpdateRequired")).toBe(t().error_update_required);
     expect(reasonText(new Error("unsafe_type"))).toBe(t().file_unsafe);
+  });
+
+  it("words the desktop's own waits", () => {
+    expect(reasonText("connecting")).toBe(t().error_connecting);
+    expect(reasonText(new Error("lagged"))).toBe(t().error_lagged);
+  });
+
+  it("tells a client still starting apart from other failures", () => {
+    expect(isConnecting("connecting")).toBe(true);
+    expect(isConnecting(new Error("connecting"))).toBe(true);
+    expect(isConnecting("not connected")).toBe(false);
   });
 
   it("passes unknown errors through", () => {

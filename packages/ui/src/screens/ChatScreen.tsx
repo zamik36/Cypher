@@ -10,7 +10,7 @@ import FileCard from "../components/FileCard";
 import RecordButton from "../components/media/RecordButton";
 import RoundVideoBubble from "../components/media/RoundVideoBubble";
 import VoiceBubble from "../components/media/VoiceBubble";
-import { api, type ChatMessage, type MediaSent, type TransferInfo, type UiFile } from "../platform";
+import { api, onConnected, type ChatMessage, type MediaSent, type TransferInfo, type UiFile } from "../platform";
 import {
   addMessage,
   findMessage,
@@ -44,6 +44,7 @@ import { addToast, toastError } from "../stores/toasts";
 import { copyText } from "../utils/clipboard";
 import { dayLabel, formatTime } from "../utils/format";
 import { isMine, ME, noteOf, previewOf, toChatMessage } from "../utils/messages";
+import { isConnecting } from "../utils/reasons";
 import { buildTimeline } from "../utils/timeline";
 import { locale, t } from "../i18n";
 
@@ -191,14 +192,21 @@ export default function ChatScreen(props: { peerId: string }) {
   const nearBottom = () => !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_PX;
   const toBottom = () => queueMicrotask(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
 
-  // The latest page first; older pages as the user scrolls up.
+  // What failed only because the client was still starting runs again
+  // once it is connected.
+  const afterConnect: (() => void)[] = [];
   onMount(() => {
-    const peerId = props.peerId;
-    if (historyLoaded(peerId)) {
-      setLoading(false);
-      toBottom();
-      return;
-    }
+    const off = onConnected(() => afterConnect.splice(0).forEach((again) => again()));
+    onCleanup(() => void off.then((unlisten) => unlisten()));
+  });
+  /** Queues `again` if `error` says the client is starting; else shows it. */
+  function retryOrShow(error: unknown, again: () => void) {
+    if (isConnecting(error)) afterConnect.push(again);
+    else toastError(error);
+  }
+
+  // The latest page first; older pages as the user scrolls up.
+  function loadLatest(peerId: string) {
     api
       .getHistory(peerId, HISTORY_PAGE)
       .then((page) => {
@@ -208,11 +216,20 @@ export default function ChatScreen(props: { peerId: string }) {
         );
         setHasOlder(peerId, page.length === HISTORY_PAGE);
       })
-      .catch(toastError)
+      .catch((e: unknown) => retryOrShow(e, () => loadLatest(peerId)))
       .finally(() => {
         setLoading(false);
         toBottom();
       });
+  }
+  onMount(() => {
+    const peerId = props.peerId;
+    if (historyLoaded(peerId)) {
+      setLoading(false);
+      toBottom();
+      return;
+    }
+    loadLatest(peerId);
   });
 
   async function loadOlder() {
@@ -436,8 +453,15 @@ export default function ChatScreen(props: { peerId: string }) {
     const share = takeShare(peerId);
     if (!share) return;
     if (share.text) setDraft(draft() ? `${draft()}\n${share.text}` : share.text);
-    if (share.files.length > 0) void offer(() => api.sendFiles(peerId, share.files));
+    if (share.files.length > 0) sendShared(peerId, share.files);
   });
+  /** Sends shared files; on a cold start the client may still be starting. */
+  function sendShared(peerId: string, files: File[]) {
+    api
+      .sendFiles(peerId, files)
+      .then(rememberSent)
+      .catch((e: unknown) => retryOrShow(e, () => sendShared(peerId, files)));
+  }
 
   function attach() {
     const peerId = props.peerId;
