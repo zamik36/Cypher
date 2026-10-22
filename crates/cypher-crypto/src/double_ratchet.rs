@@ -710,6 +710,15 @@ mod tests {
     /// come out new, numbered from the start and dated by the clock it is
     /// read at, to be stored; no stored key is taken back; and they open
     /// their messages.
+    /// A skipped key shows which message it is for, never the key.
+    #[test]
+    fn a_skipped_key_does_not_show_the_key() {
+        let key = SkippedKey::new(7, [1; 32], 3, [0xAB; 32], 5);
+        let shown = format!("{key:?}");
+        assert!(shown.contains("seq: 7"), "{shown}");
+        assert!(!shown.contains("171") && !shown.to_lowercase().contains("ab, "));
+    }
+
     #[test]
     fn a_version_2_snapshot_gives_its_keys_out_to_store() {
         let (sk, ad) = ([1; 32], [[2; 32], [3; 32]]);
