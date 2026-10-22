@@ -33,9 +33,39 @@ const MAX_SEEDED_INITS: usize = MAX_INITS_PER_SPK / 2;
 /// Inits accepted on one signed prekey from one sender still waiting to be
 /// taken as a contact. Each starts a session afresh; an honest stranger
 /// needs one, a few more when sessions fail. Beyond it, only that sender is
-/// refused. In memory: a restart grants another round, which a sender
-/// cannot cause.
+/// refused. Counts are kept in memory: a restart grants another round,
+/// which a sender cannot cause.
 const MAX_REQUEST_INITS: u16 = 32;
+/// Inits accepted on one signed prekey from one contact (all its devices,
+/// or our own other devices). A device repairs a session with another at
+/// most every ten minutes, so a week of honest use stays far below; with
+/// this, no single contact can fill a prekey and keep rotating it, as that
+/// takes [`MAX_INITS_PER_SPK`] / this many senders.
+const MAX_CONTACT_INITS: u16 = 256;
+
+/// Who sent an init, as far as how many of theirs are taken goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InitSender {
+    /// Someone not (yet) taken as a contact.
+    Request(PeerId),
+    /// A contact, or this identity's own other device.
+    Contact(PeerId),
+}
+
+impl InitSender {
+    fn peer(self) -> PeerId {
+        match self {
+            Self::Request(peer) | Self::Contact(peer) => peer,
+        }
+    }
+
+    fn quota(self) -> u16 {
+        match self {
+            Self::Request(_) => MAX_REQUEST_INITS,
+            Self::Contact(_) => MAX_CONTACT_INITS,
+        }
+    }
+}
 
 pub(crate) struct Prekeys {
     spk: SignedPreKey,
@@ -46,9 +76,8 @@ pub(crate) struct Prekeys {
     /// Ephemeral keys of the inits accepted on `spk`, and on `prev_spk`.
     spk_inits: BTreeSet<[u8; 32]>,
     prev_spk_inits: BTreeSet<[u8; 32]>,
-    /// Inits accepted per signed prekey from each sender that was a request
-    /// at the time. In memory only.
-    request_inits: BTreeMap<(u32, PeerId), u16>,
+    /// Inits accepted per signed prekey from each sender. In memory only.
+    sender_inits: BTreeMap<(u32, PeerId), u16>,
     /// Read from a record that did not remember inits yet.
     unseeded: bool,
 }
@@ -63,7 +92,7 @@ impl Prekeys {
             next_opk_id: 1,
             spk_inits: BTreeSet::new(),
             prev_spk_inits: BTreeSet::new(),
-            request_inits: BTreeMap::new(),
+            sender_inits: BTreeMap::new(),
             unseeded: false,
         }
     }
@@ -120,32 +149,29 @@ impl Prekeys {
         self.inits(spk_id).is_some_and(|i| i.contains(ephemeral))
     }
 
-    /// Whether a new init on signed prekey `spk_id` may be taken, from
-    /// `request` if the sender is still waiting to be taken as a contact.
-    /// The current prekey always has room (it rotates when full); the
-    /// previous one takes no more once full, nor does a request beyond its
-    /// quota.
-    pub(crate) fn may_init(&self, spk_id: u32, request: Option<&PeerId>) -> bool {
+    /// Whether a new init on signed prekey `spk_id` from `sender` may be
+    /// taken. The current prekey always has room (it rotates when full);
+    /// the previous one takes no more once full, nor does a sender beyond
+    /// its quota.
+    pub(crate) fn may_init(&self, spk_id: u32, sender: InitSender) -> bool {
         let room = self
             .inits(spk_id)
             .is_some_and(|i| i.len() < MAX_INITS_PER_SPK);
-        let quota = request.is_none_or(|peer| {
-            self.request_inits
-                .get(&(spk_id, *peer))
-                .is_none_or(|n| *n < MAX_REQUEST_INITS)
-        });
+        let quota = self
+            .sender_inits
+            .get(&(spk_id, sender.peer()))
+            .is_none_or(|n| *n < sender.quota());
         room && quota
     }
 
-    /// Remembers an init accepted on signed prekey `spk_id`, from `request`
-    /// if the sender is still waiting to be taken as a contact; one on a
-    /// prekey no longer kept, or one that is full, is not. Whether the
-    /// current prekey filled up and was rotated, to be published.
+    /// Remembers an init accepted on signed prekey `spk_id` from `sender`;
+    /// one on a prekey no longer kept, or one that is full, is not. Whether
+    /// the current prekey filled up and was rotated, to be published.
     pub(crate) fn remember_init(
         &mut self,
         spk_id: u32,
         ephemeral: [u8; 32],
-        request: Option<PeerId>,
+        sender: InitSender,
         now_ms: u64,
         rng: &mut impl CryptoRngCore,
     ) -> bool {
@@ -161,10 +187,11 @@ impl Prekeys {
             return false;
         }
         set.insert(ephemeral);
-        if let Some(peer) = request {
-            let n = self.request_inits.entry((spk_id, peer)).or_insert(0);
-            *n = n.saturating_add(1);
-        }
+        let n = self
+            .sender_inits
+            .entry((spk_id, sender.peer()))
+            .or_insert(0);
+        *n = n.saturating_add(1);
         let full = current && self.spk_inits.len() >= MAX_INITS_PER_SPK;
         if full {
             self.rotate(now_ms, rng);
@@ -195,7 +222,7 @@ impl Prekeys {
         let kept = self.spk.id();
         self.prev_spk = Some(std::mem::replace(&mut self.spk, next));
         self.prev_spk_inits = std::mem::take(&mut self.spk_inits);
-        self.request_inits.retain(|(id, _), _| *id == kept);
+        self.sender_inits.retain(|(id, _), _| *id == kept);
         self.spk_created_ms = now_ms;
     }
 
@@ -231,7 +258,7 @@ impl Prekeys {
             next_opk_id: r.next_opk_id,
             spk_inits: r.spk_inits.iter().copied().collect(),
             prev_spk_inits: r.prev_spk_inits.iter().copied().collect(),
-            request_inits: BTreeMap::new(),
+            sender_inits: BTreeMap::new(),
             unseeded: r.from_v1,
         }
     }
@@ -355,9 +382,12 @@ mod tests {
         assert!(pk.spk(1).is_some() && pk.spk(2).is_some() && pk.spk(3).is_none());
     }
 
+    /// A contact.
+    const CONTACT: InitSender = InitSender::Contact(PeerId([9; 32]));
+
     /// Remembers an init from a contact on `spk_id`; whether that rotated.
     fn remember(pk: &mut Prekeys, spk_id: u32, ephemeral: [u8; 32]) -> bool {
-        pk.remember_init(spk_id, ephemeral, None, 0, &mut OsRng)
+        pk.remember_init(spk_id, ephemeral, CONTACT, 0, &mut OsRng)
     }
 
     #[test]
@@ -395,15 +425,16 @@ mod tests {
         for n in 0..MAX_INITS_PER_SPK - 1 {
             assert!(!remember(&mut pk, 1, ephemeral(n)));
         }
-        assert!(pk.may_init(1, None));
+        assert!(pk.may_init(1, InitSender::Contact(PeerId([3; 32]))));
         assert!(
             remember(&mut pk, 1, ephemeral(MAX_INITS_PER_SPK)),
             "rotated"
         );
         assert!(pk.spk(2).is_some(), "a fresh prekey");
         assert!(pk.accepted_init(1, &ephemeral(0)), "none forgotten");
-        assert!(!pk.may_init(1, None), "the full one takes no more");
-        assert!(pk.may_init(2, None));
+        let other = InitSender::Contact(PeerId([3; 32]));
+        assert!(!pk.may_init(1, other), "the full one takes no more");
+        assert!(pk.may_init(2, other));
         assert!(!remember(&mut pk, 1, [0xFF; 32]));
         assert!(!pk.accepted_init(1, &[0xFF; 32]));
 
@@ -419,19 +450,32 @@ mod tests {
     #[test]
     fn a_request_has_a_quota_of_inits() {
         let mut pk = Prekeys::generate(0, &mut OsRng);
-        let (stranger, other) = (PeerId([1; 32]), PeerId([2; 32]));
+        let stranger = InitSender::Request(PeerId([1; 32]));
+        let other = InitSender::Request(PeerId([2; 32]));
         for n in 0..usize::from(MAX_REQUEST_INITS) {
-            assert!(pk.may_init(1, Some(&stranger)));
-            pk.remember_init(1, ephemeral(n), Some(stranger), 0, &mut OsRng);
+            assert!(pk.may_init(1, stranger));
+            pk.remember_init(1, ephemeral(n), stranger, 0, &mut OsRng);
         }
-        assert!(!pk.may_init(1, Some(&stranger)));
-        assert!(pk.may_init(1, Some(&other)) && pk.may_init(1, None));
+        assert!(!pk.may_init(1, stranger));
+        assert!(pk.may_init(1, other) && pk.may_init(1, CONTACT));
         assert!(pk.rotate_if_due(SPK_ROTATION_MS, &mut OsRng));
-        assert!(
-            pk.may_init(2, Some(&stranger)),
-            "a fresh quota on a fresh prekey"
-        );
-        assert!(!pk.may_init(1, Some(&stranger)), "kept on the previous one");
+        assert!(pk.may_init(2, stranger), "a fresh quota on a fresh prekey");
+        assert!(!pk.may_init(1, stranger), "kept on the previous one");
+    }
+
+    /// A contact, too, may have only so many inits accepted per prekey, so
+    /// that it alone cannot fill one; other contacts are not held back.
+    #[test]
+    fn a_contact_has_a_quota_of_inits() {
+        let mut pk = Prekeys::generate(0, &mut OsRng);
+        let other = InitSender::Contact(PeerId([2; 32]));
+        for n in 0..usize::from(MAX_CONTACT_INITS) {
+            assert!(pk.may_init(1, CONTACT));
+            pk.remember_init(1, ephemeral(n), CONTACT, 0, &mut OsRng);
+        }
+        assert!(!pk.may_init(1, CONTACT));
+        assert!(pk.may_init(1, other));
+        assert!(pk.spk(2).is_none(), "far from rotating");
     }
 
     /// However many inits the sessions remember, seeding leaves room: a
@@ -442,7 +486,7 @@ mod tests {
         let seeds: Vec<_> = (0..MAX_INITS_PER_SPK).map(ephemeral).collect();
         pk.seed_inits(&seeds);
         assert!(pk.accepted_init(1, &seeds[0]));
-        assert!(pk.may_init(1, None));
+        assert!(pk.may_init(1, CONTACT));
         assert!(!remember(&mut pk, 1, [0xEE; 32]), "no rotation");
         assert!(pk.accepted_init(1, &[0xEE; 32]));
     }

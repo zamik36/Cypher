@@ -14,6 +14,7 @@ use crate::envelope::{
     Body, Envelope, InboxAd, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody,
 };
 use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
+use crate::prekeys::InitSender;
 use crate::relay::RelayBody;
 use crate::share::ShareLink;
 use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key, session_key};
@@ -615,9 +616,12 @@ impl<R: CryptoRngCore> Core<R> {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
-        // Someone not (yet) taken as a contact.
-        let request = (!own && self.peers.get(&from).is_none_or(|p| p.request)).then_some(from);
-        self.check_init_prekeys(init, request.as_ref())?;
+        let who = if !own && self.peers.get(&from).is_none_or(|p| p.request) {
+            InitSender::Request(from)
+        } else {
+            InitSender::Contact(from)
+        };
+        self.check_init_prekeys(init, who)?;
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
@@ -641,7 +645,7 @@ impl<R: CryptoRngCore> Core<R> {
             .get(&sender)
             .is_some_and(Session::is_unconfirmed_initiator)
             && (self.peer_id, self.device) < (from, from_device);
-        self.spend_init(init, request);
+        self.spend_init(init, who);
         if keep_ours {
             return Err(CoreError::Conflict);
         }
@@ -660,15 +664,15 @@ impl<R: CryptoRngCore> Core<R> {
         Ok(Opened::New(pt))
     }
 
-    /// Whether a new init can be taken on the prekeys it names, from
-    /// `request` if the sender is not a contact yet. Prekeys we lack (our
+    /// Whether a new init from `sender` can be taken on the prekeys it
+    /// names. Prekeys we lack (our
     /// saved state fell behind what the server hands out) make us publish
     /// fresh ones. An init refused for the limits on remembered inits is
     /// told: someone is being turned away.
     fn check_init_prekeys(
         &mut self,
         init: &InitHeader,
-        request: Option<&PeerId>,
+        sender: InitSender,
     ) -> Result<(), CoreError> {
         let known = self.prekeys.spk(init.spk_id).is_some()
             && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
@@ -676,7 +680,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.resync_prekeys();
             return Err(CoreError::Crypto);
         }
-        if !self.prekeys.may_init(init.spk_id, request) {
+        if !self.prekeys.may_init(init.spk_id, sender) {
             self.emit(Event::Warning {
                 reason: FailReason::Rejected,
             });
@@ -689,14 +693,14 @@ impl<R: CryptoRngCore> Core<R> {
     /// place among the inits remembered, so that a copy of it is refused
     /// later. Saved before anything goes out; a prekey that filled up is
     /// rotated and published.
-    fn spend_init(&mut self, init: &InitHeader, request: Option<PeerId>) {
+    fn spend_init(&mut self, init: &InitHeader, sender: InitSender) {
         if let Some(id) = init.opk_id {
             self.prekeys.take_opk(id);
         }
         let rotated = self.prekeys.remember_init(
             init.spk_id,
             init.ephemeral,
-            request,
+            sender,
             self.now,
             &mut self.rng,
         );
