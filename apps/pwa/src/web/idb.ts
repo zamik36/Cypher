@@ -141,6 +141,11 @@ export async function insertMissing(db: IDBDatabase, table: string, rows: Row[])
   await done(tx);
 }
 
+/** Every key of `table`. */
+export async function keys(db: IDBDatabase, table: string): Promise<IDBValidKey[]> {
+  return result(db.transaction(table, "readonly").objectStore(table).getAllKeys());
+}
+
 export async function get<T>(db: IDBDatabase, table: string, key: IDBValidKey): Promise<T | undefined> {
   return result(db.transaction(table, "readonly").objectStore(table).get(key)) as Promise<T | undefined>;
 }

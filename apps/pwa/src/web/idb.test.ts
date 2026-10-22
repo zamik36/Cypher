@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Row } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, insertMissing, messageRows, openDb, put, remove, scan } from "./idb";
+import { applyOps, clear, get, insertMissing, keys, messageRows, openDb, put, remove, scan } from "./idb";
 
 const key = (...b: number[]) => new Uint8Array(b);
 const rows = (list: [Uint8Array, Uint8Array][]) => list.map(([k, v]) => [[...k], [...v]]);
@@ -118,6 +118,7 @@ describe("idb", () => {
     expect([...((await get<Uint8Array>(db, "identity", "current")) ?? [])]).toEqual([1, 2]);
     await remove(db, "identity", "current");
     expect(await get(db, "identity", "current")).toBeUndefined();
+    expect(await keys(db, "files")).toEqual(["f"]);
     await clear(db, ["files"]);
     expect(await get(db, "files", "f")).toBeUndefined();
   });

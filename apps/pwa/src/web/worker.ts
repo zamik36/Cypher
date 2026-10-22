@@ -16,11 +16,11 @@ import init, {
   type Row,
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, messageRows, openDb, put, remove, scan, STORES } from "./idb";
+import { applyOps, clear, get, keys, messageRows, openDb, put, remove, scan, STORES } from "./idb";
 import { deleteRows as deleteStoredRows } from "./deletion";
 import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
-import { offerFile, type Offering } from "./outgoing";
+import { offerFile, Refused, staleFiles, type Offering } from "./outgoing";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -130,7 +130,9 @@ function onEvent(channel: string, payload: unknown) {
     case "file_complete":
     case "file_failed": {
       const fileId = typeof payload === "string" ? payload : (payload as { file_id: string }).file_id;
-      if (sources.delete(fileId)) void remove(db, "files", fileId);
+      // Kept bytes of a file sent, read or not: the transfer is over.
+      sources.delete(fileId);
+      void remove(db, "files", fileId);
       break;
     }
     case "history_done":
@@ -405,6 +407,13 @@ async function startClient(): Promise<Client> {
     scan(db, "outbox"),
     scan(db, "transfers"),
   ]);
+  // Bytes kept for a file whose offer never became a transfer, or whose
+  // end went unrecorded.
+  const stale = staleFiles(
+    (await keys(db, "files")).filter((k) => typeof k === "string"),
+    transfers,
+  );
+  await Promise.all(stale.map((id) => remove(db, "files", id)));
   client?.free();
   client = new Client(identity, { meta, peers, sessions, outbox, transfers }, Date.now());
   applier = new EffectApplier(sinks, storageFailed);
@@ -504,7 +513,18 @@ function deleteRows(rows: Row[]) {
 
 /** Offers a file through the core, keeping its bytes as the transfer's source. */
 const offering: Offering = {
-  run,
+  run: async (cmd) => {
+    let outcome: ReturnType<Client["command"]>;
+    try {
+      if (applier.stopped) throw new Error("StorageFailed");
+      outcome = requireClient().command(cmd, Date.now());
+    } catch (e) {
+      throw new Refused(e);
+    }
+    const { effects, ...ids } = outcome;
+    await apply(effects);
+    return ids;
+  },
   keep: async (fileId, file) => {
     await put(db, "files", fileId, file);
     sources.set(fileId, file);
