@@ -10,6 +10,12 @@ describe("reasonText", () => {
     expect(reasonText(new Error("unsafe_type"))).toBe(t().file_unsafe);
   });
 
+  it("words a cancelled device link as the core's cancellations", () => {
+    // The desktop's link_finish says "cancelled"; the core says "Cancelled".
+    expect(reasonText(new Error("cancelled"))).toBe(t().error_cancelled);
+    expect(reasonText("Cancelled")).toBe(t().error_cancelled);
+  });
+
   it("words the desktop's own waits", () => {
     expect(reasonText("connecting")).toBe(t().error_connecting);
     expect(reasonText(new Error("lagged"))).toBe(t().error_lagged);

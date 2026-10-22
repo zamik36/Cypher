@@ -24,6 +24,8 @@ export function reasonText(error: unknown): string {
     Unauthorized: tr.error_unauthorized,
     ServerError: tr.error_server,
     DecryptFailed: tr.error_decrypt_failed,
+    // Waiting to be linked stopped (both platforms).
+    cancelled: tr.error_cancelled,
     // The desktop's client is still starting, or missed a reply.
     connecting: tr.error_connecting,
     lagged: tr.error_lagged,
