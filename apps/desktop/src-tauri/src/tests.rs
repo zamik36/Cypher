@@ -1249,6 +1249,12 @@ mod offline {
         ];
 
         let handle = desktop.app.handle();
+        let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = Arc::clone(&told);
+        tauri::Listener::listen(handle, "cypher://error", move |event| {
+            let message: String = serde_json::from_str(event.payload()).unwrap();
+            heard.lock().unwrap().push(message);
+        });
         let sent = send_all(handle, &client, peer, batch).await.unwrap();
         let sent = serde_json::to_value(sent).unwrap();
         let names: Vec<&str> = sent
@@ -1258,9 +1264,19 @@ mod offline {
             .filter_map(|card| card["file_name"].as_str())
             .collect();
         assert_eq!(names, ["first.txt", "second.txt"]);
+        // The file left out is told to the user.
+        let told_once = || {
+            let told = told.lock().unwrap();
+            (told.len() == 1).then(|| told[0].clone())
+        };
+        let message = eventually(|| async { told_once() }).await;
+        assert!(message.starts_with("gone.txt: "), "{message}");
 
+        // Nothing went: the error is the answer, with no event besides.
         let none = vec![FilePath::Path(file("gone.txt"))];
         send_all(handle, &client, peer, none).await.unwrap_err();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(told.lock().unwrap().len(), 1);
     }
 
     /// A pasted file is staged as a copy only for sending: whether it went

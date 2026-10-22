@@ -60,7 +60,9 @@ pub(crate) async fn browse_and_send<R: Runtime>(
 
 /// Sends `files` to `peer` in order; the cards of the files sent. A file
 /// that cannot be sent does not stop the others, whose cards the UI needs
-/// to follow them: its error is the answer only when no file went.
+/// to follow them. When none went, the first error is the answer; when
+/// some did, each file left out is told to the UI as an error event,
+/// `<name>: <reason>`.
 pub(crate) async fn send_all<R: Runtime>(
     app: &AppHandle<R>,
     client: &Client,
@@ -68,21 +70,36 @@ pub(crate) async fn send_all<R: Runtime>(
     files: Vec<FilePath>,
 ) -> CmdResult<Vec<TransferInfo>> {
     let mut sent = Vec::with_capacity(files.len());
-    let mut failed = None;
+    let mut failed = Vec::new();
     for file in files {
+        let name = file_label(&file);
         match send_pick(app, client, peer, file).await {
             Ok((msg_id, file_id, file_name, total_size)) => sent.push(TransferInfo::outgoing(
                 msg_id, file_id, file_name, total_size,
             )),
             Err(e) => {
                 tracing::warn!(error = %e, "a file of a batch was not sent");
-                failed.get_or_insert(e);
+                failed.push((name, e));
             }
         }
     }
-    match failed {
-        Some(e) if sent.is_empty() => Err(e),
-        _ => Ok(sent),
+    let mut failed = failed.into_iter();
+    if sent.is_empty()
+        && let Some((_, e)) = failed.next()
+    {
+        return Err(e);
+    }
+    for (name, e) in failed {
+        let _ = app.emit("cypher://error", format!("{name}: {e}"));
+    }
+    Ok(sent)
+}
+
+/// How a picked file is named to the user.
+fn file_label(file: &FilePath) -> String {
+    match file {
+        FilePath::Path(path) => display_name(path),
+        FilePath::Url(url) => url.to_string(),
     }
 }
 
