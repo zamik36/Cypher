@@ -1212,6 +1212,34 @@ mod offline {
         assert!(!state.voice.is_recording());
     }
 
+    /// The UI hears when a client is up for its commands, once its start is
+    /// over, even with no server reachable; a connect that fails says
+    /// nothing.
+    #[tokio::test]
+    async fn a_started_client_is_announced_online_or_not() {
+        let desktop = Desktop::new(cypher_tls::make_client_config());
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::clone(&ready);
+        tauri::Listener::listen(desktop.app.handle(), "cypher://client_ready", move |_| {
+            heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let count = || ready.load(std::sync::atomic::Ordering::SeqCst);
+        let args = json!({ "addr": "127.0.0.1:1", "anonymous": false, "bridges": [] });
+        let locked = desktop.call("connect_to_gateway", args.clone()).await;
+        assert_eq!(locked.unwrap_err(), "identity is locked");
+
+        desktop.create("alice").await;
+        desktop.call("connect_to_gateway", args).await.unwrap();
+        eventually(|| async { (count() == 1).then_some(()) }).await;
+        desktop.call("get_conversations", json!({})).await.unwrap();
+        let settings = json!({ "anonymous": false, "bridges": [] });
+        desktop
+            .call("apply_anonymous_settings", settings)
+            .await
+            .unwrap();
+        eventually(|| async { (count() == 2).then_some(()) }).await;
+    }
+
     /// When the app exits, its client stops and the identity leaves memory.
     #[tokio::test]
     async fn exiting_stops_the_client() {
