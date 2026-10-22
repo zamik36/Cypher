@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use cypher_crypto::aead;
+use cypher_crypto::double_ratchet::MAX_DECRYPTED;
 use cypher_types::{Addr, DeviceId, FileId, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 use serde::Serialize;
@@ -32,7 +33,8 @@ pub enum Table {
     /// Key: `peer ‖ device (BE)` → the session with that device of a
     /// contact (or of our own identity), see [`session_key`]; the keys it
     /// keeps for messages that have not come follow it, one row each
-    /// (`session_key ‖ 1 ‖ seq (BE)`).
+    /// (`session_key ‖ 1 ‖ seq (BE)`), then the digests of the messages it
+    /// decrypted last (`session_key ‖ 2 ‖ slot (BE)`).
     Sessions = 8,
 }
 
@@ -137,6 +139,22 @@ pub(crate) fn skipped_key_row(addr: Addr, seq: u64) -> Vec<u8> {
     k
 }
 
+/// What follows a [`session_key`] in the key of a digest of a message the
+/// session decrypted: `session_key ‖ DECRYPTED_ROW ‖ slot (BE)`.
+const DECRYPTED_ROW: u8 = 2;
+
+/// Where the digest numbered `seq` of a message the session with `addr`
+/// decrypted is stored: in one of as many slots as digests are remembered,
+/// so that each new one takes the place of the one it makes forgotten.
+pub(crate) fn decrypted_row(addr: Addr, seq: u64) -> Vec<u8> {
+    let slots = u64::try_from(MAX_DECRYPTED).unwrap_or(u64::MAX);
+    let slot = u16::try_from(seq % slots).unwrap_or(u16::MAX);
+    let mut k = session_key(addr);
+    k.push(DECRYPTED_ROW);
+    k.extend_from_slice(&slot.to_be_bytes());
+    k
+}
+
 /// What a row of [`Table::Sessions`] holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionRow {
@@ -144,6 +162,8 @@ pub(crate) enum SessionRow {
     Session(Addr),
     /// A skipped message key of that session, by its number.
     SkippedKey(Addr, u64),
+    /// A digest of a message that session decrypted, by its slot.
+    Decrypted(Addr, u16),
 }
 
 /// Tells a row of [`Table::Sessions`] by its key; `None` for a key no
@@ -156,6 +176,10 @@ pub(crate) fn session_row(key: &[u8]) -> Option<SessionRow> {
         Some((&SKIPPED_ROW, seq)) => {
             let seq = u64::from_be_bytes(seq.try_into().ok()?);
             Some(SessionRow::SkippedKey(addr, seq))
+        }
+        Some((&DECRYPTED_ROW, slot)) => {
+            let slot = u16::from_be_bytes(slot.try_into().ok()?);
+            Some(SessionRow::Decrypted(addr, slot))
         }
         Some(_) => None,
     }
@@ -679,6 +703,17 @@ mod tests {
                 && skipped_key_row(addr, 2) < skipped_key_row(addr, 256),
             "the session first, then its keys in the order set aside"
         );
+        let digest = decrypted_row(addr, 300);
+        assert_eq!(
+            session_row(&digest),
+            Some(SessionRow::Decrypted(addr, 300 - 256))
+        );
+        assert_eq!(
+            digest,
+            decrypted_row(addr, 300 - 256),
+            "one slot per digest kept"
+        );
+        assert_ne!(decrypted_row(addr, 0), decrypted_row(addr, 255));
         let longer = [&key[..], &[0]].concat();
         let unknown = [&session[..], &[9; 9]].concat();
         let no_device = session_key(Addr::new(PeerId([7; 32]), DeviceId(0)));

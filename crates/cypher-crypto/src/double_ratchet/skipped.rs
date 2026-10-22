@@ -88,15 +88,6 @@ impl Drop for SkippedKey {
     }
 }
 
-/// What changed in a session's skipped keys since they were last stored:
-/// keys to store, and the sequence numbers of stored keys that are gone
-/// (used, evicted, expired, or dropped with a session replaced).
-#[derive(Debug, Default)]
-pub struct Changes {
-    pub stored: Vec<SkippedKey>,
-    pub spent: Vec<u64>,
-}
-
 /// A kept key, by its sequence number.
 struct Entry {
     key: SkipKey,
@@ -253,19 +244,17 @@ impl SkippedKeys {
         true
     }
 
-    /// What changed since the last call; everything kept counts as stored
-    /// from now on.
-    pub(super) fn take_changes(&mut self) -> Changes {
+    /// What changed since the last call: keys to store, and the numbers of
+    /// stored keys that are gone. Everything kept counts as stored from now
+    /// on.
+    pub(super) fn take_changes(&mut self) -> (Vec<SkippedKey>, Vec<u64>) {
         let stored = self
             .by_seq
             .range(self.stored_upto..)
             .map(|(&seq, e)| SkippedKey::new(seq, e.key.0, e.key.1, e.mk, e.created_ms))
             .collect();
         self.stored_upto = self.next_seq;
-        Changes {
-            stored,
-            spent: std::mem::take(&mut self.spent),
-        }
+        (stored, std::mem::take(&mut self.spent))
     }
 
     /// Every stored key this one knows of, kept or gone since last stored:

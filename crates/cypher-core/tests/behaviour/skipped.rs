@@ -199,14 +199,27 @@ fn rows_of(w: &World, i: usize) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-/// The rows kept beside the session with `with` among `rows`.
-fn rows_beside(rows: &[(u8, Vec<u8>, Vec<u8>)], with: Addr) -> usize {
+/// What follows the session's key in the key of a row of each kind kept
+/// beside it.
+const SKIPPED_KEY: u8 = 1;
+const DIGEST: u8 = 2;
+
+/// The rows of kind `kind` kept beside the session with `with` among
+/// `rows`.
+fn beside(rows: &[(u8, Vec<u8>, Vec<u8>)], with: Addr, kind: u8) -> usize {
     let session = session_key(with);
     rows.iter()
         .filter(|(t, k, _)| {
-            *t == Table::Sessions as u8 && k.len() > session.len() && k.starts_with(&session)
+            *t == Table::Sessions as u8
+                && k.starts_with(&session)
+                && k.get(session.len()) == Some(&kind)
         })
         .count()
+}
+
+/// The skipped keys stored beside the session with `with` among `rows`.
+fn rows_beside(rows: &[(u8, Vec<u8>, Vec<u8>)], with: Addr) -> usize {
+    beside(rows, with, SKIPPED_KEY)
 }
 
 /// Client `i` as it starts from `rows`, offline.
@@ -229,8 +242,9 @@ fn restored(
 
 /// The keys B sets aside for messages it skipped are stored beside its
 /// session, one row each, not inside it: the session's row does not grow
-/// with them, a later message stores only that row again, a late message
-/// read deletes its key, and removing the contact deletes them all.
+/// with them, a later message stores that row again and its own digest,
+/// no key, a late message read deletes its key, and removing the contact
+/// deletes them all, digests too.
 #[test]
 fn skipped_keys_are_stored_beside_their_session_and_go_with_it() {
     let mut w = paired();
@@ -244,21 +258,27 @@ fn skipped_keys_are_stored_beside_their_session_and_go_with_it() {
     w.log = Some(Vec::new());
     w.send_text(A, B, "next");
     let session = session_key(a);
+    let mut digests = 0;
     for batch in w.log.take().unwrap().iter().filter(|b| b.client == B) {
         for seen in &batch.effects {
             if let crate::harness::Seen::Persist { table, key } = seen
                 && *table == Table::Sessions as u8
+                && *key != session
             {
-                assert_eq!(*key, session, "only the session's own row");
+                assert_eq!(key.get(session.len()), Some(&DIGEST), "no key stored");
+                digests += 1;
             }
         }
     }
+    assert_eq!(digests, 1, "the one message read");
 
     w.inject(B, late[1].clone());
     assert_eq!(rows_beside(&rows_of(&w, B), a), 2);
     let peer = w.peer(A);
+    assert!(beside(&rows_of(&w, B), a, DIGEST) > 0);
     w.command(B, Command::RemovePeer { peer });
     assert_eq!(rows_beside(&rows_of(&w, B), a), 0);
+    assert_eq!(beside(&rows_of(&w, B), a, DIGEST), 0);
     assert!(rows::session(&w, B, a).is_none());
 }
 
@@ -304,8 +324,9 @@ fn a_skipped_key_that_ran_out_meanwhile_is_deleted_after_a_restart() {
 /// writes (the rest are lost). Restored from what was written, B neither
 /// uses a key twice nor loses one: every message still to come is read
 /// once, the message itself is read again if and only if its session row
-/// was not stored, and once every late message is read no row is left
-/// beside the session.
+/// was not stored (and is no news, without a warning, once its digest
+/// was), and once every late message is read no key is left beside the
+/// session.
 #[test]
 fn a_stop_after_any_row_written_neither_reuses_nor_loses_a_skipped_key() {
     let mut w = paired();
@@ -357,6 +378,10 @@ fn restart_after(
     let committed = written.iter().any(
         |op| matches!(op, StoreOp::Put { table: Table::Sessions, key, .. } if *key == session),
     );
+    let digest = written.iter().any(|op| {
+        matches!(op, StoreOp::Put { table: Table::Sessions, key, .. }
+            if key.starts_with(&session) && key.get(session.len()) == Some(&DIGEST))
+    });
 
     let (mut core, effects) = restored(w, B, &rows, 1);
     let mut events = apply(&mut rows, effects);
@@ -387,5 +412,11 @@ fn restart_after(
         let again = core.handle(Input::Frame(frames[step].0.clone()), w.now);
         let again = apply(&mut rows, again);
         assert!(texts_of(&again).is_empty(), "step {step}: read twice");
+        if digest {
+            assert!(
+                again.is_empty(),
+                "step {step}: a copy is no news: {again:?}"
+            );
+        }
     }
 }

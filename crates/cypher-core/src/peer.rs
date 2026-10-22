@@ -426,6 +426,21 @@ impl crate::Record for SkippedKeyRecord {
     const VERSION: u8 = 1;
 }
 
+/// The digest of a message a session decrypted, as stored in its slot
+/// ([`crate::store::decrypted_row`]).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DecryptedRecord {
+    /// The [`Session::lineage`] of the session that decrypted it.
+    pub(crate) lineage: u64,
+    /// Its number among the messages the session decrypted.
+    pub(crate) seq: u64,
+    pub(crate) digest: [u8; 32],
+}
+
+impl crate::Record for DecryptedRecord {
+    const VERSION: u8 = 1;
+}
+
 /// [`SessionRecord`] as version 1 stored it.
 #[derive(Deserialize)]
 struct SessionRecordV1 {

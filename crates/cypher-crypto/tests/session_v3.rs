@@ -86,12 +86,13 @@ fn state(r: &Ratchet) -> (Vec<u8>, String) {
     (r.to_bytes().to_vec(), format!("{r:?}"))
 }
 
-/// A session as a caller stores it: its snapshot, and its skipped keys
-/// one by one.
+/// A session as a caller stores it: its snapshot, its skipped keys one by
+/// one, and the digests of what it decrypted in [`MAX_DECRYPTED`] slots.
 #[derive(Default)]
 struct Stored {
     snapshot: Vec<u8>,
     keys: BTreeMap<u64, SkippedKey>,
+    decrypted: BTreeMap<u64, (u64, [u8; 32])>,
 }
 
 impl Stored {
@@ -112,6 +113,10 @@ impl Stored {
         for seq in changes.spent {
             self.keys.remove(&seq);
         }
+        for (seq, digest) in changes.decrypted {
+            self.decrypted
+                .insert(seq % MAX_DECRYPTED as u64, (seq, digest));
+        }
     }
 
     fn load(&self) -> Ratchet {
@@ -119,6 +124,7 @@ impl Stored {
         for key in self.keys.values() {
             assert!(r.restore_skipped(key), "{key:?} is stored");
         }
+        r.restore_decrypted(self.decrypted.values().copied().collect());
         r
     }
 }
@@ -398,15 +404,51 @@ fn a_new_session_knows_the_copies_of_the_one_it_replaces() {
     assert_eq!(recv(&mut b2, &fresh).unwrap(), b"new session");
 }
 
-/// Which messages were decrypted is not saved: once restored, a copy of
-/// one fails like any message whose key is spent.
+/// Which messages were decrypted is stored a digest at a time, in as
+/// many slots as are remembered: once restored, a copy of one of the last
+/// [`MAX_DECRYPTED`] is still a duplicate, and numbering goes on, so the
+/// next message takes the oldest slot.
 #[test]
-fn a_restored_session_does_not_know_its_copies() {
+#[cfg_attr(miri, ignore = "hundreds of messages; minutes under Miri")]
+fn a_restored_session_knows_its_copies() {
     let (mut a, mut b) = establish(false);
-    let read = send(&mut a, b"read");
-    assert_eq!(recv(&mut b, &read).unwrap(), b"read");
-    let mut restored = Stored::of(&mut b).load();
-    assert_eq!(recv(&mut restored, &read), Err(CryptoError::Aead));
+    let mut stored = Stored::of(&mut b);
+    let sent: Vec<_> = (0..=MAX_DECRYPTED).map(|_| send(&mut a, b"x")).collect();
+    for m in &sent {
+        recv(&mut b, m).unwrap();
+        let changes = b.take_changes();
+        assert_eq!(changes.decrypted.len(), 1, "one digest per message");
+        for (seq, digest) in changes.decrypted {
+            stored
+                .decrypted
+                .insert(seq % MAX_DECRYPTED as u64, (seq, digest));
+        }
+        stored.snapshot = b.to_bytes().to_vec();
+    }
+    assert_eq!(stored.decrypted.len(), MAX_DECRYPTED);
+
+    let mut restored = stored.load();
+    assert_eq!(recv(&mut restored, &sent[1]), Err(CryptoError::Duplicate));
+    assert_eq!(
+        recv(&mut restored, sent.last().unwrap()),
+        Err(CryptoError::Duplicate)
+    );
+    assert_eq!(
+        recv(&mut restored, &sent[0]),
+        Err(CryptoError::Aead),
+        "forgotten"
+    );
+    let next = send(&mut a, b"next");
+    recv(&mut restored, &next).unwrap();
+    let digests = restored.take_changes().decrypted;
+    assert_eq!(digests.len(), 1);
+    let last = stored
+        .decrypted
+        .values()
+        .map(|(seq, _)| *seq)
+        .max()
+        .unwrap();
+    assert_eq!(digests[0].0, last + 1, "numbered on");
 }
 
 #[test]

@@ -23,13 +23,15 @@ use crate::api::{Command, Effect, Event, FailReason, Input};
 use crate::envelope::SyncBody;
 use crate::link::LinkOffer;
 use crate::peer::{
-    OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord, SkippedKeyRecord,
+    DecryptedRecord, OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord,
+    SkippedKeyRecord,
 };
 use crate::prekeys::{OPK_LOW_WATER, Prekeys, PrekeysRecord};
 use crate::share::ShareLink;
 use crate::store::{
     META_DEVICES, META_HISTORY, META_INBOX, META_LINKS, META_PREKEYS, META_PROFILE, META_SERVERS,
-    Record, SessionRow, StoreOp, Table, Vault, session_key, session_row, skipped_key_row,
+    Record, SessionRow, StoreOp, Table, Vault, decrypted_row, session_key, session_row,
+    skipped_key_row,
 };
 use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
@@ -1032,11 +1034,13 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    /// Stores the session with `addr` and what changed in its skipped keys:
-    /// keys set aside are stored before the session's row, which counts
-    /// them (should the app stop in between, the next start deletes them),
-    /// and keys gone are deleted after it, which names them (should it stop
-    /// in between, the next start deletes them too).
+    /// Stores the session with `addr` and what changed beside it: keys set
+    /// aside are stored before the session's row, which counts them (should
+    /// the app stop in between, the next start deletes them); digests of
+    /// messages it decrypted after it (should it stop in between, a copy of
+    /// that message is not known for one); and keys gone are deleted after
+    /// it, which names them (should it stop in between, the next start
+    /// deletes them too).
     fn persist_session(&mut self, addr: Addr) {
         let Some(s) = self.sessions.get_mut(&addr) else {
             return;
@@ -1056,6 +1060,19 @@ impl<R: CryptoRngCore> Core<R> {
             .vault
             .put(Table::Sessions, session_key(addr), &record, &mut self.rng);
         self.effects.push(Effect::Persist(op));
+        for (seq, digest) in changes.decrypted {
+            let op = self.vault.put(
+                Table::Sessions,
+                decrypted_row(addr, seq),
+                &DecryptedRecord {
+                    lineage: s.lineage,
+                    seq,
+                    digest,
+                },
+                &mut self.rng,
+            );
+            self.effects.push(Effect::Persist(op));
+        }
         self.effects.extend(record.spent.iter().map(|&seq| {
             Effect::Persist(StoreOp::Delete {
                 table: Table::Sessions,
@@ -1080,8 +1097,8 @@ impl<R: CryptoRngCore> Core<R> {
         }
     }
 
-    /// Deletes the row of `session`, which was with `addr`, and every
-    /// skipped key stored beside it.
+    /// Deletes the row of `session`, which was with `addr`, and every row
+    /// stored beside it: skipped keys and digests.
     fn delete_session(&mut self, addr: Addr, session: &Session) {
         self.persist(StoreOp::Delete {
             table: Table::Sessions,
@@ -1091,6 +1108,12 @@ impl<R: CryptoRngCore> Core<R> {
             self.persist(StoreOp::Delete {
                 table: Table::Sessions,
                 key: skipped_key_row(addr, seq),
+            });
+        }
+        for seq in session.ratchet.decrypted_seqs() {
+            self.persist(StoreOp::Delete {
+                table: Table::Sessions,
+                key: decrypted_row(addr, seq),
             });
         }
     }
@@ -1224,8 +1247,8 @@ struct LoadedSessions {
 }
 
 /// Sessions with the devices of known contacts and our own other devices,
-/// and the skipped keys stored beside them; any other session is left
-/// behind.
+/// and the skipped keys and digests stored beside them; any other session
+/// is left behind.
 fn load_sessions(
     vault: &Vault,
     rows: &Rows,
@@ -1234,27 +1257,30 @@ fn load_sessions(
     now_ms: u64,
     skipped: &mut Skipped,
 ) -> Result<LoadedSessions, CoreError> {
-    let mut out = LoadedSessions {
-        sessions: HashMap::with_capacity(rows.len()),
-        ..LoadedSessions::default()
+    let mut load = SessionLoader {
+        vault,
+        out: LoadedSessions {
+            sessions: HashMap::with_capacity(rows.len()),
+            ..LoadedSessions::default()
+        },
+        present: HashMap::new(),
+        decrypted: BTreeMap::new(),
     };
-    // Every session row there is, read or not, and what each spent.
-    let mut present: HashMap<Addr, Vec<u64>> = HashMap::new();
     for (k, v) in rows {
         let Some(SessionRow::Session(addr)) = session_row(k) else {
             continue;
         };
-        present.insert(addr, Vec::new());
+        load.present.insert(addr, Vec::new());
         let Some(record) = skipped.open::<SessionRecord>(vault, Table::Sessions, k, v)? else {
             continue;
         };
         match Session::from_record(&record, now_ms) {
             Ok(session) if addr.peer == own || peers.contains_key(&addr.peer) => {
                 if record.migrated {
-                    out.migrated.push(addr);
+                    load.out.migrated.push(addr);
                 }
-                present.insert(addr, record.spent.clone());
-                out.sessions.insert(addr, session);
+                load.present.insert(addr, record.spent.clone());
+                load.out.sessions.insert(addr, session);
             }
             Ok(_) => {}
             Err(_) => skipped.0 = skipped.0.saturating_add(1),
@@ -1264,33 +1290,98 @@ fn load_sessions(
         match session_row(k) {
             Some(SessionRow::Session(_)) => {}
             Some(SessionRow::SkippedKey(addr, seq)) => {
-                let Some(spent) = present.get(&addr) else {
-                    out.stale.push(k.clone());
-                    continue;
-                };
-                let Some(session) = out.sessions.get_mut(&addr) else {
-                    // Its session is left behind, and so is it.
-                    continue;
-                };
-                if out.migrated.contains(&addr) || spent.contains(&seq) {
-                    out.stale.push(k.clone());
-                    continue;
-                }
-                let Some(record) =
-                    skipped.open::<SkippedKeyRecord>(vault, Table::Sessions, k, v)?
-                else {
-                    continue;
-                };
-                if record.lineage != session.lineage
-                    || !session.ratchet.restore_skipped(&record.key(seq))
-                {
-                    out.stale.push(k.clone());
-                }
+                load.skipped_key(addr, seq, k, v, skipped)?;
+            }
+            Some(SessionRow::Decrypted(addr, _)) => {
+                load.decrypted(addr, k, v, skipped)?;
             }
             None => skipped.0 = skipped.0.saturating_add(1),
         }
     }
-    Ok(out)
+    Ok(load.finish())
+}
+
+/// Reads the rows beside the sessions [`load_sessions`] restored.
+struct SessionLoader<'a> {
+    vault: &'a Vault,
+    out: LoadedSessions,
+    /// Every session row there is, read or not, and what each spent.
+    present: HashMap<Addr, Vec<u64>>,
+    /// The digests each restored session stored.
+    decrypted: BTreeMap<Addr, Vec<(u64, [u8; 32])>>,
+}
+
+impl SessionLoader<'_> {
+    /// Takes back the skipped key `seq` stored under `k` beside the
+    /// session with `addr`, if that session counts it.
+    fn skipped_key(
+        &mut self,
+        addr: Addr,
+        seq: u64,
+        k: &[u8],
+        v: &[u8],
+        skipped: &mut Skipped,
+    ) -> Result<(), CoreError> {
+        let Some(spent) = self.present.get(&addr) else {
+            self.out.stale.push(k.to_vec());
+            return Ok(());
+        };
+        let Some(session) = self.out.sessions.get_mut(&addr) else {
+            // Its session is left behind, and so is it.
+            return Ok(());
+        };
+        if self.out.migrated.contains(&addr) || spent.contains(&seq) {
+            self.out.stale.push(k.to_vec());
+            return Ok(());
+        }
+        let Some(record) = skipped.open::<SkippedKeyRecord>(self.vault, Table::Sessions, k, v)?
+        else {
+            return Ok(());
+        };
+        if record.lineage != session.lineage || !session.ratchet.restore_skipped(&record.key(seq)) {
+            self.out.stale.push(k.to_vec());
+        }
+        Ok(())
+    }
+
+    /// Notes the digest stored under `k` beside the session with `addr`,
+    /// if it is that session's.
+    fn decrypted(
+        &mut self,
+        addr: Addr,
+        k: &[u8],
+        v: &[u8],
+        skipped: &mut Skipped,
+    ) -> Result<(), CoreError> {
+        let Some(session) = self.out.sessions.get(&addr) else {
+            if !self.present.contains_key(&addr) {
+                self.out.stale.push(k.to_vec());
+            }
+            return Ok(());
+        };
+        let Some(record) = skipped.open::<DecryptedRecord>(self.vault, Table::Sessions, k, v)?
+        else {
+            return Ok(());
+        };
+        if record.lineage == session.lineage && k == decrypted_row(addr, record.seq) {
+            self.decrypted
+                .entry(addr)
+                .or_default()
+                .push((record.seq, record.digest));
+        } else {
+            self.out.stale.push(k.to_vec());
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> LoadedSessions {
+        for (addr, digests) in self.decrypted {
+            if let Some(session) = self.out.sessions.get_mut(&addr) {
+                session.ratchet.restore_decrypted(digests);
+            }
+        }
+        self.out
+    }
 }
 
 fn load_outbox(
