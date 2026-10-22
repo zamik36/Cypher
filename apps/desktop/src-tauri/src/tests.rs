@@ -1369,13 +1369,13 @@ mod offline {
             tokio::time::timeout(WAIT, old_client_gone(&state))
                 .await
                 .unwrap();
-            // The lock comes while the client is starting, then it starts.
-            let release = async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                drop(held);
-            };
-            let (locked, ()) = tokio::join!(desktop.call("lock", json!({})), release);
-            locked
+            // The lock comes while the client is starting and waits for it.
+            let lock = desktop.call("lock", json!({}));
+            tokio::pin!(lock);
+            let early = tokio::time::timeout(Duration::from_millis(100), &mut lock).await;
+            assert!(early.is_err(), "the lock went ahead of the starting client");
+            drop(held);
+            lock.await
         };
         let (restarted, locked) = tokio::join!(restart, lock);
         restarted.unwrap();
