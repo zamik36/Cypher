@@ -51,7 +51,7 @@ export interface OpenedMedia { mime: string; bytes: Uint8Array<ArrayBuffer> }
  * What deleting one stored message takes: its store operations, the note
  * whose sealed copy goes too, and the file it names.
  */
-export interface MessageDeletion { ops: Op[]; note: string | undefined; file: string | undefined }
+export interface MessageDeletion { ops: Op[]; note: string | undefined }
 "#;
 
 // Each value is built and serialized immediately, one at a time; boxing the
@@ -248,14 +248,12 @@ fn js_op(op: &StoreOp) -> JsEffect<'_> {
 struct JsDeletion<'a> {
     ops: Vec<JsEffect<'a>>,
     note: Option<String>,
-    file: Option<String>,
 }
 
 pub(crate) fn deletion_to_js(deletion: &MessageDeletion) -> Result<JsValue, JsError> {
     to_js(&JsDeletion {
         ops: deletion.ops.iter().map(js_op).collect(),
         note: deletion.note.map(FileId::to_hex),
-        file: deletion.file.map(FileId::to_hex),
     })
 }
 

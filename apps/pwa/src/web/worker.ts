@@ -498,7 +498,7 @@ function deleteRows(rows: Row[]) {
   return deleteStoredRows(rows, {
     deletion: (key, value) => c.messageDeletion(key, value),
     apply: (ops) => applyOps(db, ops),
-    remove: async (sink, fileId) => (await sinkDir(sink)).removeEntry(fileId).catch(() => undefined),
+    removeNote: async (fileId) => (await sinkDir("media")).removeEntry(fileId).catch(() => undefined),
   });
 }
 

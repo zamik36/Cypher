@@ -4,12 +4,12 @@ import { deleteRows } from "./deletion";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 
-/** Rows 1, 2 and 3: a text, a voice note and a received file. */
+/** Rows 1, 2 and 3: a text, a voice note and a received file (which names no note). */
 const rows: Row[] = [1, 2, 3].map((n) => [bytes(n), bytes(n)]);
 const deletions: Record<number, MessageDeletion> = {
-  1: { ops: [{ kind: "delete", table: "messages", key: bytes(1) }], note: undefined, file: undefined },
-  2: { ops: [{ kind: "delete", table: "messages", key: bytes(2) }], note: "n2", file: undefined },
-  3: { ops: [{ kind: "delete", table: "messages", key: bytes(3) }], note: undefined, file: "f3" },
+  1: { ops: [{ kind: "delete", table: "messages", key: bytes(1) }], note: undefined },
+  2: { ops: [{ kind: "delete", table: "messages", key: bytes(2) }], note: "n2" },
+  3: { ops: [{ kind: "delete", table: "messages", key: bytes(3) }], note: undefined },
 };
 
 async function run() {
@@ -26,8 +26,8 @@ async function run() {
       applied = ops;
       return Promise.resolve();
     },
-    remove: (sink, fileId) => {
-      trace.push(`remove ${sink} ${fileId}`);
+    removeNote: (fileId) => {
+      trace.push(`remove ${fileId}`);
       return Promise.resolve();
     },
   });
@@ -39,11 +39,11 @@ describe("deleteRows", () => {
     const { trace, applied } = await run();
     expect(applied.map((op) => [...op.key])).toEqual([[1], [2], [3]]);
     expect(trace[0]).toBe("apply");
-    expect(trace).toContain("remove media n2");
+    expect(trace).toContain("remove n2");
   });
 
   it("leaves received files where they are, as the native client does", async () => {
     const { trace } = await run();
-    expect(trace.filter((t) => t.startsWith("remove download"))).toEqual([]);
+    expect(trace.filter((t) => t.startsWith("remove"))).toEqual(["remove n2"]);
   });
 });
