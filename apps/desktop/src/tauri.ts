@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, type InvokeArgs } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -53,6 +53,42 @@ const updates: Platform["updates"] = {
   },
 };
 
+/** Offers one file the webview holds to `peerId`. */
+async function sendBytes(peerId: string, file: File): Promise<TransferInfo> {
+  const payload = isAndroid ? { data: await base64Of(file) } : new Uint8Array(await file.arrayBuffer());
+  return invoke<TransferInfo>("send_bytes", payload, {
+    headers: {
+      "x-peer": peerId,
+      "x-name": encodeURIComponent(file.name || "file"),
+      "x-mime": encodeURIComponent(file.type || "application/octet-stream"),
+    },
+  });
+}
+
+/**
+ * Sends `files` in order, as the native side sends a batch: a file that
+ * cannot be sent does not stop the others, whose cards the UI needs. When
+ * none went, the first error is the answer; when some did, each file left
+ * out is told to the UI as an error event, `<name>: <reason>`.
+ */
+async function sendEach(files: File[], send: (file: File) => Promise<TransferInfo>): Promise<TransferInfo[]> {
+  const sent: TransferInfo[] = [];
+  const failed: [string, unknown][] = [];
+  for (const file of files) {
+    try {
+      sent.push(await send(file));
+    } catch (e) {
+      failed.push([file.name || "file", e]);
+    }
+  }
+  const [first] = failed;
+  if (sent.length === 0 && first) throw first[1];
+  for (const [name, e] of failed) {
+    await emit("cypher://error", `${name}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return sent;
+}
+
 /** Runs a command that returns nothing. */
 async function command(cmd: string, args?: InvokeArgs): Promise<void> {
   await invoke(cmd, args);
@@ -96,22 +132,7 @@ export const tauriPlatform: Platform = {
   markRead: (peerId, msgIds) => command("mark_read", { peerId, msgIds }),
   pickAndSend: (peerId) => invoke<TransferInfo[]>("browse_and_send", { peerId }),
   sendDropped: (peerId, dropId) => invoke<TransferInfo[]>("send_dropped", { peerId, id: dropId }),
-  sendFiles: async (peerId, files) => {
-    const sent: TransferInfo[] = [];
-    for (const file of files) {
-      const payload = isAndroid ? { data: await base64Of(file) } : new Uint8Array(await file.arrayBuffer());
-      sent.push(
-        await invoke<TransferInfo>("send_bytes", payload, {
-          headers: {
-            "x-peer": peerId,
-            "x-name": encodeURIComponent(file.name || "file"),
-            "x-mime": encodeURIComponent(file.type || "application/octet-stream"),
-          },
-        }),
-      );
-    }
-    return sent;
-  },
+  sendFiles: (peerId, files) => sendEach(files, (file) => sendBytes(peerId, file)),
   acceptFile: (fileId) => command("accept_file", { fileId }),
   cancelTransfer: (fileId) => command("cancel_transfer", { fileId }),
   fileSaved: (fileId) => invoke<boolean>("file_saved", { fileId }),
