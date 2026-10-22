@@ -2,30 +2,30 @@ import { t } from "../i18n";
 
 /**
  * A failure in the user's language. Both platforms report the core's
- * `FailReason` name (e.g. `KeyMismatch`); anything else is shown as is.
+ * `FailReason` by its snake_case name (e.g. `key_mismatch`); anything else
+ * is shown as is.
  */
 export function reasonText(error: unknown): string {
   const raw = rawReason(error);
   const tr = t();
   const known: Record<string, string> = {
-    InvalidLink: tr.join_invalid_link,
-    NotFound: tr.join_not_found,
-    SelfLink: tr.join_self_link,
-    KeyMismatch: tr.join_key_mismatch,
-    InvalidKeys: tr.join_invalid_keys,
-    Timeout: tr.join_timeout,
-    Offline: tr.join_offline,
-    UpdateRequired: tr.error_update_required,
-    StorageFailed: tr.error_storage_failed,
-    Corrupted: tr.error_corrupted,
-    Rejected: tr.error_rejected,
-    Cancelled: tr.error_cancelled,
-    SourceUnavailable: tr.error_source_unavailable,
-    Unauthorized: tr.error_unauthorized,
-    ServerError: tr.error_server,
-    DecryptFailed: tr.error_decrypt_failed,
-    // Waiting to be linked stopped (both platforms).
+    invalid_link: tr.join_invalid_link,
+    not_found: tr.join_not_found,
+    self_link: tr.join_self_link,
+    key_mismatch: tr.join_key_mismatch,
+    invalid_keys: tr.join_invalid_keys,
+    timeout: tr.join_timeout,
+    offline: tr.join_offline,
+    update_required: tr.error_update_required,
+    storage_failed: tr.error_storage_failed,
+    corrupted: tr.error_corrupted,
+    rejected: tr.error_rejected,
+    // The core's, and waiting to be linked that stopped (both platforms).
     cancelled: tr.error_cancelled,
+    source_unavailable: tr.error_source_unavailable,
+    unauthorized: tr.error_unauthorized,
+    server_error: tr.error_server,
+    decrypt_failed: tr.error_decrypt_failed,
     // The desktop's client is still starting, or missed a reply.
     connecting: tr.error_connecting,
     lagged: tr.error_lagged,

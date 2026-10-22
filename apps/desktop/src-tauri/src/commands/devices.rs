@@ -5,7 +5,7 @@ use cypher_core::{Command, Event};
 use tauri::State;
 
 use super::identity::{activate, with_store};
-use crate::session::{AppState, CmdResult, await_event, err};
+use crate::session::{AppState, CmdResult, await_event, err, reason_name};
 
 /// A name for this device to suggest; the user may change it.
 #[tauri::command]
@@ -85,7 +85,7 @@ pub(crate) async fn link_device(
         .map_err(err)?;
     await_event(&mut events, |e| match e {
         Event::DeviceLinked { .. } => Some(Ok(())),
-        Event::LinkFailed { reason } => Some(Err(format!("{reason:?}"))),
+        Event::LinkFailed { reason } => Some(Err(reason_name(*reason))),
         _ => None,
     })
     .await

@@ -111,8 +111,8 @@ function sinkFailed(fileId: string, e: unknown) {
 function storageFailed() {
   gateway.stop();
   relay.stop();
-  sinks.reply({ kind: "reply", op: "warning", value: "StorageFailed" });
-  onEvent("error", "StorageFailed");
+  sinks.reply({ kind: "reply", op: "warning", value: "storage_failed" });
+  onEvent("error", "storage_failed");
   onEvent("disconnected", null);
 }
 
@@ -423,7 +423,7 @@ async function startClient(): Promise<Client> {
 }
 
 async function run(cmd: Record<string, unknown>) {
-  if (applier.stopped) throw new Error("StorageFailed");
+  if (applier.stopped) throw new Error("storage_failed");
   const { effects, ...ids } = requireClient().command(cmd, Date.now());
   await apply(effects);
   return ids;
@@ -517,7 +517,7 @@ const offering: Offering = {
   run: async (cmd) => {
     let outcome: ReturnType<Client["command"]>;
     try {
-      if (applier.stopped) throw new Error("StorageFailed");
+      if (applier.stopped) throw new Error("storage_failed");
       outcome = requireClient().command(cmd, Date.now());
     } catch (e) {
       throw new Refused(e);
@@ -694,7 +694,7 @@ const handlers: Handlers = {
         const id = messageId(key);
         return id !== undefined && hex(id) === msgId;
       });
-      if (!row) throw new Error("NotFound");
+      if (!row) throw new Error("not_found");
       await run({ type: "discard_outgoing", msg_id: msgId });
       const msg = requireClient().openMessage(row[0], row[1], undefined) as StoredView;
       if (msg.file) await run({ type: "cancel_transfer", file_id: msg.file.file_id });

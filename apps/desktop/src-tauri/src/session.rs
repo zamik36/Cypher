@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
-use cypher_core::Event;
+use cypher_core::{Event, FailReason};
 use cypher_types::PeerId;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, MutexGuard, broadcast};
@@ -21,6 +21,14 @@ pub(crate) type CmdResult<T> = Result<T, String>;
 
 pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+/// A failure reason as the UI's events name it: `snake_case`.
+pub(crate) fn reason_name(reason: FailReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|name| name.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 struct Session {

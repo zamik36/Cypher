@@ -1,4 +1,6 @@
-use cypher_core::{Effect, Event, MessageDeletion, Rows, Sink, Snapshot, StoreOp, Table, ui};
+use cypher_core::{
+    Effect, Event, FailReason, MessageDeletion, Rows, Sink, Snapshot, StoreOp, Table, ui,
+};
 use cypher_types::FileId;
 use js_sys::{Array, Uint8Array};
 use serde::Serialize;
@@ -122,22 +124,33 @@ enum JsEffect<'a> {
     /// Outcome of a pending `create_link` / `join_link` call.
     Reply {
         op: &'static str,
-        value: String,
+        value: ReplyValue,
         link: Option<&'a str>,
     },
 }
 
+/// What a reply carries: the link made or the peer joined, or why not (by
+/// the reason's `snake_case` name, as the UI's events name it).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ReplyValue {
+    Text(String),
+    Reason(FailReason),
+}
+
 fn reply(event: &Event) -> Option<JsEffect<'_>> {
     let (op, value, link) = match event {
-        Event::LinkCreated { link } => ("link_created", link.clone(), None),
+        Event::LinkCreated { link } => ("link_created", ReplyValue::Text(link.clone()), None),
         Event::PeerAdded {
             peer,
             initiated_by_us: true,
-        } => ("joined", peer.to_hex(), None),
-        Event::JoinFailed { link, reason } => {
-            ("join_failed", format!("{reason:?}"), Some(link.as_str()))
-        }
-        Event::Warning { reason } => ("warning", format!("{reason:?}"), None),
+        } => ("joined", ReplyValue::Text(peer.to_hex()), None),
+        Event::JoinFailed { link, reason } => (
+            "join_failed",
+            ReplyValue::Reason(*reason),
+            Some(link.as_str()),
+        ),
+        Event::Warning { reason } => ("warning", ReplyValue::Reason(*reason), None),
         _ => return None,
     };
     Some(JsEffect::Reply { op, value, link })
@@ -312,7 +325,6 @@ pub(crate) fn pairs_from_js(rows: &Array) -> Result<Rows, JsError> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use cypher_core::FailReason;
     use cypher_types::{FileId, PeerId};
     use serde_json::{Value, json};
 
@@ -490,13 +502,13 @@ mod tests {
                     link: link.clone(),
                     reason: FailReason::NotFound,
                 },
-                json!({ "kind": "reply", "op": "join_failed", "value": "NotFound", "link": link }),
+                json!({ "kind": "reply", "op": "join_failed", "value": "not_found", "link": link }),
             ),
             (
                 Event::Warning {
                     reason: FailReason::Timeout,
                 },
-                json!({ "kind": "reply", "op": "warning", "value": "Timeout", "link": null }),
+                json!({ "kind": "reply", "op": "warning", "value": "timeout", "link": null }),
             ),
         ];
         for (event, expected) in golden {

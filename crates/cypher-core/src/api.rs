@@ -378,6 +378,28 @@ pub enum FailReason {
     UpdateRequired,
 }
 
+impl FailReason {
+    /// Every reason, for the tests that pin the names frontends key on.
+    pub const ALL: [Self; 16] = [
+        Self::NotFound,
+        Self::InvalidLink,
+        Self::SelfLink,
+        Self::InvalidKeys,
+        Self::Timeout,
+        Self::Offline,
+        Self::Rejected,
+        Self::Cancelled,
+        Self::SourceUnavailable,
+        Self::Corrupted,
+        Self::Unauthorized,
+        Self::ServerError,
+        Self::DecryptFailed,
+        Self::KeyMismatch,
+        Self::StorageFailed,
+        Self::UpdateRequired,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {

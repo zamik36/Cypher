@@ -167,7 +167,7 @@ async fn once_online<T, F: Future<Output = Result<T, String>>>(
     tokio::time::timeout(WAIT, async {
         loop {
             match command().await {
-                Err(e) if e == "Offline" => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(e) if e == "offline" => tokio::time::sleep(Duration::from_millis(50)).await,
                 other => return other,
             }
         }
@@ -776,7 +776,7 @@ async fn pair(a: &Desktop, b: &Desktop, b_id: &str) {
     // stored them, joining finds none.
     let joined = eventually(|| async {
         match once_online(|| b.call("join_link", join(format!("  {link} ")))).await {
-            Err(e) if e == "NotFound" => None,
+            Err(e) if e == "not_found" => None,
             other => Some(other),
         }
     })

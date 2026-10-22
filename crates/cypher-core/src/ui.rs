@@ -39,6 +39,8 @@ pub struct UiMessage {
 pub enum UiPayload {
     None,
     Text(String),
+    /// Why something failed, by the reason's `snake_case` name.
+    Reason(FailReason),
     Message(UiMessage),
     Status {
         msg_id: String,
@@ -57,7 +59,7 @@ pub enum UiPayload {
     },
     Failed {
         file_id: String,
-        reason: String,
+        reason: FailReason,
     },
     /// 1 while inbox traffic goes through the onion relay, 0 otherwise.
     Anonymity {
@@ -80,7 +82,7 @@ pub enum UiPayload {
         file_id: String,
         outgoing: bool,
         progress: f64,
-        failed: Option<String>,
+        failed: Option<FailReason>,
     },
 }
 
@@ -187,7 +189,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::OwnDevices { this, devices } => ("devices", own_devices(*this, devices)),
         Event::NoRoom { this, devices } => ("no_room", no_room(*this, devices)),
         Event::DeviceLinked { device, name } => ("device_linked", device_info(*device, name)),
-        Event::LinkFailed { reason } => ("link_failed", UiPayload::Text(format!("{reason:?}"))),
+        Event::LinkFailed { reason } => ("link_failed", UiPayload::Reason(*reason)),
         Event::LinkedHere => ("linked_here", UiPayload::None),
         Event::ContactsChanged => ("contacts_changed", UiPayload::None),
         Event::ServerKeyChanged { server } => {
@@ -215,7 +217,7 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
         Event::TransferFailed { file_id, reason } => ("file_failed", failed(file_id, *reason)),
         Event::JoinFailed { reason, .. } | Event::Warning { reason } => {
-            ("error", UiPayload::Text(format!("{reason:?}")))
+            ("error", UiPayload::Reason(*reason))
         }
         Event::PushKey { .. } | Event::PushRegistered | Event::PushUnavailable => push(e),
         Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
@@ -278,7 +280,7 @@ fn history_event(e: &Event) -> (&'static str, UiPayload) {
 fn failed(file_id: &FileId, reason: FailReason) -> UiPayload {
     UiPayload::Failed {
         file_id: file_id.to_hex(),
-        reason: format!("{reason:?}"),
+        reason,
     }
 }
 
@@ -292,7 +294,7 @@ fn history(
         file_id: file_id.to_hex(),
         outgoing,
         progress,
-        failed: failed.map(|reason| format!("{reason:?}")),
+        failed,
     }
 }
 
@@ -477,7 +479,7 @@ mod tests {
             }),
             (
                 "history_failed",
-                json!({ "file_id": file_id.to_hex(), "outgoing": true, "progress": 0.0, "failed": "Cancelled" })
+                json!({ "file_id": file_id.to_hex(), "outgoing": true, "progress": 0.0, "failed": "cancelled" })
             )
         );
     }
@@ -511,7 +513,7 @@ mod tests {
             ui(&Event::Warning {
                 reason: FailReason::StorageFailed
             }),
-            ("error", json!("StorageFailed"))
+            ("error", json!("storage_failed"))
         );
         assert_eq!(
             ui(&Event::Onion { up: true }),
@@ -632,7 +634,7 @@ mod tests {
         });
         assert_eq!(
             (channel, &failed["reason"]),
-            ("file_failed", &json!("Cancelled"))
+            ("file_failed", &json!("cancelled"))
         );
     }
 
@@ -660,13 +662,13 @@ mod tests {
             ui(&Event::Warning {
                 reason: FailReason::Timeout
             }),
-            ("error", json!("Timeout"))
+            ("error", json!("timeout"))
         );
         let join = Event::JoinFailed {
             link: "x".into(),
             reason: FailReason::InvalidLink,
         };
-        assert_eq!(ui(&join), ("error", json!("InvalidLink")));
+        assert_eq!(ui(&join), ("error", json!("invalid_link")));
         let peer = PeerId([2; 32]);
         assert_eq!(
             ui(&Event::PeerAdded {
@@ -675,6 +677,50 @@ mod tests {
             }),
             ("peer_connected", json!(peer.to_hex()))
         );
+    }
+
+    /// The name the UI gets for `reason`, which both frontends' dictionaries
+    /// key on. Exhaustive: a new reason does not compile until named here.
+    fn ui_name(reason: FailReason) -> &'static str {
+        match reason {
+            FailReason::NotFound => "not_found",
+            FailReason::InvalidLink => "invalid_link",
+            FailReason::SelfLink => "self_link",
+            FailReason::InvalidKeys => "invalid_keys",
+            FailReason::Timeout => "timeout",
+            FailReason::Offline => "offline",
+            FailReason::Rejected => "rejected",
+            FailReason::Cancelled => "cancelled",
+            FailReason::SourceUnavailable => "source_unavailable",
+            FailReason::Corrupted => "corrupted",
+            FailReason::Unauthorized => "unauthorized",
+            FailReason::ServerError => "server_error",
+            FailReason::DecryptFailed => "decrypt_failed",
+            FailReason::KeyMismatch => "key_mismatch",
+            FailReason::StorageFailed => "storage_failed",
+            FailReason::UpdateRequired => "update_required",
+        }
+    }
+
+    #[test]
+    fn failure_reasons_reach_the_ui_by_their_stable_names() {
+        let file_id = FileId([3; 16]);
+        for reason in FailReason::ALL {
+            let name = json!(ui_name(reason));
+            let failed = ui(&Event::TransferFailed { file_id, reason }).1;
+            assert_eq!(failed["reason"], name);
+            let history = ui(&Event::HistoryFailed {
+                file_id,
+                outgoing: false,
+                reason,
+            })
+            .1;
+            assert_eq!(history["failed"], name);
+            assert_eq!(ui(&Event::LinkFailed { reason }), ("link_failed", name));
+        }
+        let names: std::collections::BTreeSet<_> =
+            FailReason::ALL.into_iter().map(ui_name).collect();
+        assert_eq!(names.len(), FailReason::ALL.len(), "names are unique");
     }
 
     #[test]

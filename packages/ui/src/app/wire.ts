@@ -108,7 +108,7 @@ export async function startApp(): Promise<() => void> {
     }),
     api.on("history_failed", ({ failed }) => {
       setHistoryTransfer(null);
-      if (failed !== "Cancelled") addToast(t().history_failed, "error");
+      if (failed !== "cancelled") addToast(t().history_failed, "error");
     }),
     api.on("device_linked", addOwnDevice),
     onPeerConnected((peerId) => {

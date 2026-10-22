@@ -4,16 +4,18 @@ import { isConnecting, reasonText } from "./reasons";
 
 describe("reasonText", () => {
   it("words the core's reasons instead of showing their codes", () => {
-    expect(reasonText("KeyMismatch")).toBe(t().join_key_mismatch);
-    expect(reasonText(new Error("NotFound"))).toBe(t().join_not_found);
-    expect(reasonText("UpdateRequired")).toBe(t().error_update_required);
+    expect(reasonText("key_mismatch")).toBe(t().join_key_mismatch);
+    expect(reasonText(new Error("not_found"))).toBe(t().join_not_found);
+    expect(reasonText("update_required")).toBe(t().error_update_required);
     expect(reasonText(new Error("unsafe_type"))).toBe(t().file_unsafe);
   });
 
   it("words a cancelled device link as the core's cancellations", () => {
-    // The desktop's link_finish says "cancelled"; the core says "Cancelled".
     expect(reasonText(new Error("cancelled"))).toBe(t().error_cancelled);
-    expect(reasonText("Cancelled")).toBe(t().error_cancelled);
+  });
+
+  it("knows the core's reasons only by their snake_case names", () => {
+    expect(reasonText("KeyMismatch")).toBe("KeyMismatch");
   });
 
   it("words the desktop's own waits", () => {

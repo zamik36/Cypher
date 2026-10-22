@@ -2,7 +2,7 @@ use cypher_core::{Command, Event};
 use serde::Serialize;
 use tauri::State;
 
-use crate::session::{AppState, CmdResult, await_event, err};
+use crate::session::{AppState, CmdResult, await_event, err, reason_name};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LinkInfo {
@@ -21,7 +21,7 @@ pub(crate) async fn create_link(state: State<'_, AppState>) -> CmdResult<LinkInf
         Event::LinkCreated { link } => Some(Ok(LinkInfo {
             link_id: link.clone(),
         })),
-        Event::Warning { reason } => Some(Err(format!("{reason:?}"))),
+        Event::Warning { reason } => Some(Err(reason_name(*reason))),
         _ => None,
     })
     .await
@@ -45,7 +45,7 @@ pub(crate) async fn join_link(state: State<'_, AppState>, link_id: String) -> Cm
             peer,
             initiated_by_us: true,
         } => Some(Ok(peer.to_hex())),
-        Event::JoinFailed { link: l, reason } if *l == link => Some(Err(format!("{reason:?}"))),
+        Event::JoinFailed { link: l, reason } if *l == link => Some(Err(reason_name(*reason))),
         _ => None,
     })
     .await
