@@ -652,14 +652,16 @@ async fn two_desktops_against_in_process_stack() {
     chat(&a, &b, &a_id, &b_id).await;
     send_a_voice_note(&a, &b, &a_id, &b_id).await;
     play_a_video_note(&a, &b, &b_id).await;
-    huge_notes_play_only_by_ranges(&a, &b, &b_id).await;
     accept_an_offered_file(&a, &b, &b_id).await;
     accept_two_files_of_one_name(&a, &b, &b_id).await;
     refuse_to_open_a_program(&a, &b, &b_id).await;
     send_picked_files(&a, &b_id).await;
     send_and_preview_pictures(&a, &b, &b_id).await;
-    name_then_forget_a_contact(&b, &a_id).await;
+    let tls = &stack.target().tls;
+    a_note_goes_out_beside_a_second_device(tls, &a, &b, &b_id, &gateway).await;
     link_a_new_desktop(&stack.target().tls, &a, &a_id, &gateway).await;
+    huge_notes_play_only_by_ranges(&a, &b, &b_id).await;
+    name_then_forget_a_contact(&b, &a_id).await;
 
     let anonymity = json!({ "anonymous": false, "bridges": [" "] });
     a.call("apply_anonymous_settings", anonymity).await.unwrap();
@@ -1459,4 +1461,61 @@ async fn huge_notes_play_only_by_ranges(a: &Desktop, b: &Desktop, b_id: &str) {
     a.call("cancel_transfer", json!({ "fileId": file }))
         .await
         .unwrap();
+}
+
+/// A chunked note from A reaches B whole while A has a second device
+/// online, linked with the history so it knows B. That device gets the sent
+/// message as a record; its content is not copied to own devices.
+async fn a_note_goes_out_beside_a_second_device(
+    tls: &Arc<rustls::ClientConfig>,
+    a: &Desktop,
+    b: &Desktop,
+    b_id: &str,
+    gateway: &str,
+) {
+    let laptop = Desktop::new(Arc::clone(tls));
+    let start = json!({ "addr": gateway, "name": "Laptop" });
+    let offer = text(&laptop.call("link_start", start).await.unwrap());
+    let finish = laptop.call("link_finish", json!({ "passphrase": PASS }));
+    let link = eventually(|| {
+        let args = json!({ "offer": offer, "history": true });
+        async move { a.call("link_device", args).await.ok() }
+    });
+    let (finished, _) = tokio::join!(finish, link);
+    finished.unwrap();
+    laptop.connect(gateway).await;
+
+    // Larger than a message carries inline, so it goes in chunks.
+    let note: Vec<u8> = (0..300_000u32).map(|i| i.to_le_bytes()[1]).collect();
+    let peer = cypher_types::PeerId::from_hex(b_id).unwrap();
+    let kind = cypher_core::MediaKind::VideoNote {
+        duration_ms: 1000,
+        poster: vec![0xFF, 0xD8],
+    };
+    let client = a.state().client().await.unwrap();
+    let sent = client.send_media(peer, note.clone(), "n.webm", "video/webm", kind);
+    let file = sent.await.unwrap().1.to_hex();
+    let whole = |desktop: &Desktop| {
+        let request = media_request(&file, None);
+        let app = desktop.app.handle().clone();
+        async move {
+            let response = media_scheme::answer(&app, &request).await;
+            (response.status() == StatusCode::OK).then(|| response.into_body())
+        }
+    };
+    assert_eq!(eventually(|| whole(b)).await, note, "B's copy");
+    let history = json!({ "peerId": b_id, "limit": 10, "before": null });
+    let synced = eventually(|| {
+        let history = history.clone();
+        let laptop = &laptop;
+        let file = &file;
+        async move {
+            let list = laptop.call("get_history", history).await.ok()?;
+            list.as_array()?
+                .iter()
+                .any(|m| m["file"]["file_id"] == file.as_str())
+                .then_some(())
+        }
+    });
+    synced.await;
 }
