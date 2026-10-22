@@ -4,19 +4,23 @@ import init, {
   conversationRange,
   historyRange,
   Identity,
+  messageId,
   messageWindow,
   Provision,
   qrSvg,
+  unreadWindow,
   waveformFromRms,
   type Effect,
   type ReadChunk,
   type Reply,
-  type Op,
+  type Row,
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, openDb, put, remove, scan, STORES } from "./idb";
+import { applyOps, clear, get, keys, messageRows, openDb, put, remove, scan, STORES } from "./idb";
+import { deleteRows as deleteStoredRows } from "./deletion";
 import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
+import { offerFile, Refused, staleFiles, type Offering } from "./outgoing";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -126,7 +130,9 @@ function onEvent(channel: string, payload: unknown) {
     case "file_complete":
     case "file_failed": {
       const fileId = typeof payload === "string" ? payload : (payload as { file_id: string }).file_id;
-      if (sources.delete(fileId)) void remove(db, "files", fileId);
+      // Kept bytes of a file sent, read or not: the transfer is over.
+      sources.delete(fileId);
+      void remove(db, "files", fileId);
       break;
     }
     case "history_done":
@@ -401,6 +407,13 @@ async function startClient(): Promise<Client> {
     scan(db, "outbox"),
     scan(db, "transfers"),
   ]);
+  // Bytes kept for a file whose offer never became a transfer, or whose
+  // end went unrecorded.
+  const stale = staleFiles(
+    (await keys(db, "files")).filter((k) => typeof k === "string"),
+    transfers,
+  );
+  await Promise.all(stale.map((id) => remove(db, "files", id)));
   client?.free();
   client = new Client(identity, { meta, peers, sessions, outbox, transfers }, Date.now());
   applier = new EffectApplier(sinks, storageFailed);
@@ -430,7 +443,7 @@ async function sendMedia(
   const inline = blob.size <= MAX_INLINE_BYTES ? new Uint8Array(await blob.arrayBuffer()) : undefined;
   const name = `${kind === "voice" ? "voice" : "note"}.${mime.includes("mp4") ? "mp4" : mime.includes("ogg") ? "ogg" : "webm"}`;
   return serial(async () => {
-    const { msgId, fileId } = await run({
+    const cmd = {
       type: "send_file",
       peer,
       name,
@@ -441,14 +454,10 @@ async function sendMedia(
       waveform,
       poster: extra.poster,
       inline,
-    });
-    if (!msgId || !fileId) throw new Error("media rejected");
-    if (!inline) {
-      const file = new File([blob], name, { type: mime });
-      sources.set(fileId, file);
-      await put(db, "files", fileId, file);
-    }
-    return { msg_id: msgId, file_id: fileId, duration_ms: durationMs, ...(waveform && { waveform }) };
+    };
+    const ids = await offerFile(offering, cmd, inline ? undefined : new File([blob], name, { type: mime }));
+    if (!ids) throw new Error("media rejected");
+    return { msg_id: ids.msgId, file_id: ids.fileId, duration_ms: durationMs, ...(waveform && { waveform }) };
   });
 }
 
@@ -471,11 +480,8 @@ async function history(peer: string, limit: number, before?: number) {
   const c = requireClient();
   const range =
     before === undefined ? conversation(peer) : IDBKeyRange.bound(...historyRange(peer, before), false, true);
-  const rows = await scan(db, "messages", range, limit, true);
-  const statuses = await Promise.all(
-    rows.map(([key]) => get<Uint8Array>(db, "message_status", key.subarray(key.length - 16))),
-  );
-  return rows.map(([key, value], i) => c.openMessage(key, value, statuses[i]));
+  const [rows = []] = await messageRows(db, [range], limit, messageId);
+  return rows.map(([key, value, status]) => c.openMessage(key, value, status));
 }
 
 /** Stops talking to the network and drops every key from memory. */
@@ -495,37 +501,43 @@ function forget() {
 /** How far around the UI's time a deleted message is looked for. */
 const DELETE_WINDOW_MS = 60_000;
 
-/** Deletes stored messages with their statuses, media notes and kept files. */
-async function deleteRows(rows: Awaited<ReturnType<typeof scan>>) {
+/** Deletes stored messages as the core says each one goes. */
+function deleteRows(rows: Row[]) {
   const c = requireClient();
-  const media: string[] = [];
-  const received: string[] = [];
-  const ops: Op[] = [];
-  for (const [key, value] of rows) {
-    const msg = c.openMessage(key, value, undefined) as StoredView;
-    if (msg.file && msg.file.kind !== "file") media.push(msg.file.file_id);
-    else if (msg.file) received.push(msg.file.file_id);
-    ops.push({ kind: "delete", table: "messages", key });
-    ops.push({ kind: "delete", table: "message_status", key: key.slice(key.length - 16) });
-  }
-  for (const id of media) ops.push({ kind: "delete", table: "media", key: unhex(id) });
-  await applyOps(db, ops);
-  const [sealed, plain] = await Promise.all([sinkDir("media"), sinkDir("download")]);
-  await Promise.all([
-    ...media.map((id) => sealed.removeEntry(id).catch(() => undefined)),
-    ...received.map((id) => plain.removeEntry(id).catch(() => undefined)),
-  ]);
+  return deleteStoredRows(rows, {
+    deletion: (key, value) => c.messageDeletion(key, value),
+    apply: (ops) => applyOps(db, ops),
+    removeNote: async (fileId) => (await sinkDir("media")).removeEntry(fileId).catch(() => undefined),
+  });
 }
 
-/** How far back unread messages are counted; the list shows "99+" anyway. */
-const UNREAD_WINDOW = 100;
+/** Offers a file through the core, keeping its bytes as the transfer's source. */
+const offering: Offering = {
+  run: async (cmd) => {
+    let outcome: ReturnType<Client["command"]>;
+    try {
+      if (applier.stopped) throw new Error("StorageFailed");
+      outcome = requireClient().command(cmd, Date.now());
+    } catch (e) {
+      throw new Refused(e);
+    }
+    const { effects, ...ids } = outcome;
+    await apply(effects);
+    return ids;
+  },
+  keep: async (fileId, file) => {
+    await put(db, "files", fileId, file);
+    sources.set(fileId, file);
+  },
+  drop: async (fileId) => {
+    sources.delete(fileId);
+    await remove(db, "files", fileId);
+  },
+};
 
 /** The fields of a decrypted message the worker itself reads. */
 interface StoredView {
-  timestamp: number;
-  outgoing: boolean;
-  status: string;
-  file: { file_id: string; kind: string } | null;
+  file: { file_id: string } | null;
 }
 
 type Handlers = { [M in Method]: (...args: Parameters<Methods[M]>) => Promise<ReturnType<Methods[M]>> };
@@ -637,18 +649,17 @@ const handlers: Handlers = {
     serial(async () => {
       const sent = [];
       for (const file of files) {
-        const { msgId, fileId } = await run({
+        const cmd = {
           type: "send_file",
           peer,
           name: file.name,
           mime: file.type || "application/octet-stream",
           size: file.size,
           kind: "file",
-        });
-        if (!msgId || !fileId) continue;
-        sources.set(fileId, file);
-        await put(db, "files", fileId, file);
-        sent.push({ msg_id: msgId, file_id: fileId, file_name: file.name, total_size: file.size });
+        };
+        const ids = await offerFile(offering, cmd, file);
+        if (!ids) continue;
+        sent.push({ msg_id: ids.msgId, file_id: ids.fileId, file_name: file.name, total_size: file.size });
       }
       return sent;
     }),
@@ -667,24 +678,8 @@ const handlers: Handlers = {
   conversations: async () => {
     const c = requireClient();
     const peers = await scan(db, "peers");
-    const out = await Promise.all(
-      peers.map(async ([key, value]) => {
-        const peer_id = hex(key);
-        const recent = (await history(peer_id, UNREAD_WINDOW)) as StoredView[];
-        const last = recent[0] ?? null;
-        return {
-          peer_id,
-          alias: c.contactAlias(key, value) ?? null,
-          name: c.contactName(key, value) ?? null,
-          request: (c.contactFlags(key, value) & 1) !== 0,
-          blocked: (c.contactFlags(key, value) & 2) !== 0,
-          last_message_at: last?.timestamp ?? 0,
-          last,
-          unread: recent.filter((m) => !m.outgoing && m.status !== "read").length,
-        };
-      }),
-    );
-    return out.sort((a, b) => b.last_message_at - a.last_message_at);
+    const ranges = peers.map(([key]) => conversation(hex(key)));
+    return c.chatList(peers, await messageRows(db, ranges, unreadWindow(), messageId));
   },
   forgetPeer: (peer) =>
     serial(async () => {
@@ -693,9 +688,11 @@ const handlers: Handlers = {
     }),
   deleteMessage: (peer, msgId, timestamp) =>
     serial(async () => {
-      const id = unhex(msgId);
       const rows = await scan(db, "messages", IDBKeyRange.bound(...messageWindow(peer, timestamp, DELETE_WINDOW_MS)));
-      const row = rows.find(([key]) => key.subarray(key.length - 16).every((b, i) => b === id[i]));
+      const row = rows.find(([key]) => {
+        const id = messageId(key);
+        return id !== undefined && hex(id) === msgId;
+      });
       if (!row) throw new Error("NotFound");
       await run({ type: "discard_outgoing", msg_id: msgId });
       const msg = requireClient().openMessage(row[0], row[1], undefined) as StoredView;

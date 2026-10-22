@@ -6,13 +6,12 @@ mod command;
 mod convert;
 mod history;
 
-use cypher_core::{
-    Core, Effect, Input, Table, Vault, message_key, message_window, peer_messages, ui,
-};
+use cypher_core::{Core, Effect, Input, Vault, message_key, message_window, peer_messages, ui};
 use cypher_crypto::{IdentitySeed, identity_file};
-use cypher_types::{DeviceId, MsgId};
+use cypher_types::{DeviceId, MsgId, PeerId};
 use js_sys::Array;
 use rand::rngs::OsRng;
+use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 
 use command::{JsCommand, Prepared, file, file_size, peer};
@@ -342,33 +341,6 @@ impl Client {
         Ok(out.into())
     }
 
-    /// The name the user gave a contact, from its stored session row.
-    #[wasm_bindgen(js_name = contactAlias)]
-    pub fn contact_alias(&self, key: &[u8], value: &[u8]) -> Option<String> {
-        self.vault
-            .open_contact(key, value)
-            .ok()
-            .and_then(|n| n.alias)
-    }
-
-    /// The name a contact goes by, from its stored session row.
-    #[wasm_bindgen(js_name = contactName)]
-    pub fn contact_name(&self, key: &[u8], value: &[u8]) -> Option<String> {
-        self.vault
-            .open_contact(key, value)
-            .ok()
-            .and_then(|n| n.name)
-    }
-
-    /// Bit 0: the contact wrote without an invite and is not accepted yet;
-    /// bit 1: blocked. From its stored session row.
-    #[wasm_bindgen(js_name = contactFlags)]
-    pub fn contact_flags(&self, key: &[u8], value: &[u8]) -> u8 {
-        self.vault
-            .open_contact(key, value)
-            .map_or(0, |c| u8::from(c.request) | (u8::from(c.blocked) << 1))
-    }
-
     /// Decrypts a stored message, applying a newer status row if present.
     #[wasm_bindgen(js_name = openMessage, unchecked_return_type = "unknown")]
     pub fn open_message(
@@ -377,15 +349,37 @@ impl Client {
         value: &[u8],
         status: Option<Vec<u8>>,
     ) -> Result<JsValue, JsError> {
-        let mut msg = self.vault.open_message(key, value).map_err(js_err)?;
-        if let Some(raw) = status
-            && let Ok(s) = self
-                .vault
-                .open(Table::MessageStatus, msg.msg_id.as_bytes(), &raw)
-        {
-            msg.status = s;
-        }
+        let msg = self
+            .vault
+            .open_message_with_status(key, value, status)
+            .map_err(js_err)?;
         to_js(&ui::message(&msg))
+    }
+
+    /// The chat list: each contact's row from `peers` with, at the same
+    /// index of `recent`, its latest messages and their status rows, newest
+    /// first. A contact row that cannot be read still lists its contact,
+    /// unnamed; a message row that cannot be read is left out.
+    #[wasm_bindgen(js_name = chatList, unchecked_return_type = "ChatEntry[]")]
+    pub fn chat_list(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Row[]")] peers: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "MessageRow[][]")] recent: JsValue,
+    ) -> Result<JsValue, JsError> {
+        let peers: Vec<(ByteBuf, ByteBuf)> =
+            serde_wasm_bindgen::from_value(peers).map_err(js_err)?;
+        let recent: Vec<Vec<MessageRow>> =
+            serde_wasm_bindgen::from_value(recent).map_err(js_err)?;
+        let entries = chat_entries(&self.vault, &peers, &recent).map_err(js_err)?;
+        convert::to_js_with_nulls(&ui::chat_list(entries))
+    }
+
+    /// What deleting the message stored under `key` takes: the store
+    /// operations, the note whose sealed copy goes too, and the file it
+    /// names. A row that cannot be read still goes, with its status.
+    #[wasm_bindgen(js_name = messageDeletion, unchecked_return_type = "MessageDeletion")]
+    pub fn message_deletion(&self, key: &[u8], value: &[u8]) -> Result<JsValue, JsError> {
+        convert::deletion_to_js(&deletion(&self.vault, key, value))
     }
 
     /// Decrypts a sealed voice or video note: `record` is its row from the
@@ -428,6 +422,82 @@ impl Client {
     fn feed(&mut self, input: Input, now_ms: f64) -> Result<Array, JsError> {
         effects_to_js(&self.core.handle(input, now(now_ms)))
     }
+}
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES: &str = r#"
+/** A message row with the row of its latest status, when there is one. */
+export type MessageRow = [Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer> | undefined];
+
+/** A contact as the chat list shows it. */
+export interface ChatEntry {
+  peer_id: string;
+  alias: string | null;
+  name: string | null;
+  request: boolean;
+  blocked: boolean;
+  last_message_at: number;
+  last: unknown;
+  unread: number;
+}
+"#;
+
+/// A message row, its value and the row of its latest status.
+type MessageRow = (ByteBuf, ByteBuf, Option<ByteBuf>);
+
+#[derive(Debug, thiserror::Error)]
+enum ChatListError {
+    #[error("one list of messages per contact")]
+    Mismatch,
+}
+
+/// The chat-list entry of each contact in `peers`, whose latest messages
+/// are at the same index of `recent`; each contact row is opened once.
+fn chat_entries(
+    vault: &Vault,
+    peers: &[(ByteBuf, ByteBuf)],
+    recent: &[Vec<MessageRow>],
+) -> Result<Vec<ui::UiConversation>, ChatListError> {
+    if peers.len() != recent.len() {
+        return Err(ChatListError::Mismatch);
+    }
+    let mut entries = Vec::with_capacity(peers.len());
+    for ((key, sealed), rows) in peers.iter().zip(recent) {
+        let Some(peer) = PeerId::from_bytes(key) else {
+            continue;
+        };
+        let contact = vault.open_contact(key, sealed).unwrap_or_default();
+        // A row that cannot be read is left out, not the list.
+        let msgs: Vec<_> = rows
+            .iter()
+            .filter_map(|(key, value, status)| {
+                vault
+                    .open_message_with_status(key, value, status.as_deref())
+                    .ok()
+            })
+            .collect();
+        entries.push(ui::summary(&peer, contact, &msgs));
+    }
+    Ok(entries)
+}
+
+/// What deleting the message row `key`, `value` takes, readable or not.
+fn deletion(vault: &Vault, key: &[u8], value: &[u8]) -> cypher_core::MessageDeletion {
+    let msg = vault.open_message(key, value).ok();
+    cypher_core::message_deletion(key, msg.as_ref())
+}
+
+/// The id of the message stored under `key`, which also keys its status
+/// row; `undefined` for a key that is not a message key.
+#[wasm_bindgen(js_name = messageId, unchecked_return_type = "Uint8Array<ArrayBuffer> | undefined")]
+pub fn message_id(key: &[u8]) -> Option<Vec<u8>> {
+    cypher_core::message_id(key).map(MsgId::to_vec)
+}
+
+/// How many of a contact's latest messages `chatList` wants.
+#[wasm_bindgen(js_name = unreadWindow)]
+pub fn unread_window() -> usize {
+    ui::UNREAD_WINDOW
 }
 
 /// `[from, to]` `IndexedDB` key bounds of a whole conversation, both
@@ -475,5 +545,150 @@ fn now(ms: f64) -> u64 {
         ms as u64
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cypher_core::{Content, MessageStatus, StoredMessage, Table, message_key};
+    use rand::rngs::OsRng;
+
+    use super::*;
+
+    fn row(vault: &Vault, peer: PeerId, at: u64, status: Option<MessageStatus>) -> MessageRow {
+        let msg = StoredMessage {
+            msg_id: MsgId([u8::try_from(at).unwrap(); 16]),
+            peer,
+            outgoing: false,
+            sent_at_ms: at,
+            status: MessageStatus::Delivered,
+            content: Content::Text {
+                text: String::new(),
+                reply_to: None,
+            },
+        };
+        let key = message_key(&peer, at, &msg.msg_id);
+        let value = vault.seal(Table::Messages, &key, &msg, &mut OsRng);
+        let status = status.map(|s| {
+            ByteBuf::from(vault.seal(Table::MessageStatus, msg.msg_id.as_bytes(), &s, &mut OsRng))
+        });
+        (ByteBuf::from(key), ByteBuf::from(value), status)
+    }
+
+    #[test]
+    fn the_chat_list_counts_what_the_status_rows_say() {
+        let vault = Vault::new([1; 32]);
+        let (a, b) = (PeerId([1; 32]), PeerId([2; 32]));
+        // A contact row that cannot be read lists its contact, unnamed.
+        let contact = |p: PeerId| (ByteBuf::from(p.to_vec()), ByteBuf::from(vec![0; 40]));
+        let peers = [contact(a), contact(b)];
+        let recent = [
+            vec![
+                row(&vault, a, 3, None),
+                row(&vault, a, 2, Some(MessageStatus::Read)),
+                row(&vault, a, 1, None),
+            ],
+            Vec::new(),
+        ];
+        let list = ui::chat_list(chat_entries(&vault, &peers, &recent).unwrap());
+        let shown: Vec<_> = list
+            .iter()
+            .map(|c| {
+                (
+                    c.peer_id.clone(),
+                    c.last_message_at,
+                    c.unread,
+                    c.alias.is_none(),
+                )
+            })
+            .collect();
+        assert_eq!(shown, [(a.to_hex(), 3, 2, true), (b.to_hex(), 0, 0, true)]);
+
+        assert!(matches!(
+            chat_entries(&vault, &peers, &recent[..1]),
+            Err(ChatListError::Mismatch)
+        ));
+        // A row that cannot be read is passed over, not the whole list.
+        let mixed = [
+            vec![
+                row(&Vault::new([2; 32]), a, 5, None),
+                row(&vault, a, 1, None),
+            ],
+            Vec::new(),
+        ];
+        let entries = chat_entries(&vault, &peers, &mixed).unwrap();
+        let first = entries.first().unwrap();
+        assert_eq!((first.last_message_at, first.unread), (1, 1));
+    }
+
+    /// The web client deletes a row it cannot read with its status, as the
+    /// native one does, instead of giving up the whole conversation.
+    #[test]
+    fn a_row_that_cannot_be_read_is_deleted_with_its_status() {
+        let vault = Vault::new([1; 32]);
+        let key = message_key(&PeerId([1; 32]), 5, &MsgId([7; 16]));
+        let d = deletion(&vault, &key, b"not sealed here");
+        let tables: Vec<_> = d
+            .ops
+            .iter()
+            .map(|op| match op {
+                cypher_core::StoreOp::Delete { table, key } => (*table, key.clone()),
+                cypher_core::StoreOp::Put { .. } => panic!("a deletion puts nothing"),
+            })
+            .collect();
+        assert_eq!(
+            tables,
+            [(Table::Messages, key), (Table::MessageStatus, vec![7; 16])]
+        );
+        assert_eq!((d.note, d.file), (None, None));
+        let (k, v, _) = row(&vault, PeerId([1; 32]), 3, None);
+        assert_eq!(deletion(&vault, &k, &v).ops.len(), 2);
+    }
+
+    /// The status row the core writes when a message is read is the one
+    /// the chat list applies to that message, and it outranks the status
+    /// kept with the message.
+    #[test]
+    fn a_status_the_core_writes_is_the_one_the_chat_list_reads() {
+        use cypher_core::{Command, Effect, Input, Snapshot, StoreOp};
+        let seed = IdentitySeed([3; 32]);
+        let vault = Vault::new(seed.derive_storage_key());
+        let (mut core, _) =
+            Core::restore(&seed, DeviceId::FIRST, &Snapshot::default(), 1, OsRng).unwrap();
+        let peer = PeerId([1; 32]);
+        let (key, value, _) = row(&vault, peer, 7, None);
+        let read = Command::MarkRead {
+            peer,
+            ids: vec![MsgId([7; 16])],
+        };
+        let status = core
+            .handle(Input::Command(read), 2)
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::Persist(StoreOp::Put {
+                    table: Table::MessageStatus,
+                    key,
+                    value,
+                }) => Some((key, value)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            status.0,
+            cypher_core::message_id(&key).map(MsgId::to_vec).unwrap(),
+            "keyed as the driver looks it up"
+        );
+
+        let peers = [(ByteBuf::from(peer.to_vec()), ByteBuf::from(vec![0; 40]))];
+        let unread = |status: Option<Vec<u8>>| {
+            let rows = [vec![(
+                key.clone(),
+                value.clone(),
+                status.map(ByteBuf::from),
+            )]];
+            chat_entries(&vault, &peers, &rows).unwrap()[0].unread
+        };
+        assert_eq!(unread(None), 1);
+        assert_eq!(unread(Some(status.1)), 0);
     }
 }

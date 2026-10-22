@@ -92,6 +92,10 @@ pub(crate) enum JsCommand {
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsFile {
     peer: String,
+    /// The id the worker kept the file's bytes under before sending; a
+    /// fresh one when none is given (bytes that travel inline).
+    #[serde(default)]
+    file_id: Option<String>,
     name: String,
     mime: String,
     size: f64,
@@ -226,7 +230,11 @@ impl JsCommand {
 
 impl JsFile {
     fn prepare(self, rng: &mut impl CryptoRngCore) -> Result<Prepared, CommandError> {
-        let (msg_id, file_id) = (MsgId::random(rng), FileId::random(rng));
+        let file_id = match &self.file_id {
+            Some(hex) => file(hex)?,
+            None => FileId::random(rng),
+        };
+        let msg_id = MsgId::random(rng);
         let kind = match self.kind {
             JsMediaKind::File => MediaKind::File,
             JsMediaKind::Voice => MediaKind::Voice {
@@ -331,6 +339,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_goes_out_under_the_id_its_bytes_were_kept_under() {
+        let send = |file_id: serde_json::Value| {
+            prepare(json!({
+                "type": "send_file", "peer": PEER, "name": "f", "mime": "x/y",
+                "size": 1.0, "kind": "file", "file_id": file_id
+            }))
+        };
+        let kept = "ab".repeat(16);
+        let p = send(json!(kept)).unwrap();
+        assert_eq!(p.file_id.map(FileId::to_hex), Some(kept.clone()));
+        let Command::SendFile { file_id, .. } = p.command else {
+            panic!("expected SendFile");
+        };
+        assert_eq!(file_id.to_hex(), kept);
+        assert_ne!(
+            send(json!(null)).unwrap().file_id.map(FileId::to_hex),
+            Some(kept)
+        );
+        assert_eq!(send(json!("zz")).unwrap_err(), CommandError::File);
+    }
+
+    #[test]
     fn rejects_bad_ids_and_sizes() {
         let text = |peer: &str| json!({ "type": "send_text", "peer": peer, "text": "x" });
         assert_eq!(prepare(text("zz")).unwrap_err(), CommandError::Peer);
@@ -369,7 +399,7 @@ mod tests {
             refused(json!({ "type": "discard_outgoing", "msg_id": "zz" })),
             message
         );
-        // One bad id refuses the whole list (the desktop skips it instead).
+        // One bad id refuses the whole list, as on the desktop.
         let ids = json!({ "type": "mark_read", "peer": PEER, "ids": ["00".repeat(16), "zz"] });
         assert_eq!(refused(ids), message);
         let file = "invalid file id";

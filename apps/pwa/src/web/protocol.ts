@@ -1,4 +1,5 @@
 /** Messages between the UI thread and the core worker. */
+import type { ChatEntry } from "../wasm/cypher_wasm.js";
 
 export interface Methods {
   hasIdentity(): boolean;
@@ -32,16 +33,7 @@ export interface Methods {
   safetyNumber(peer: string): string;
   /** Takes the session back after another device took it over. */
   reconnect(): void;
-  conversations(): {
-    peer_id: string;
-    alias: string | null;
-    name: string | null;
-    request: boolean;
-    blocked: boolean;
-    last_message_at: number;
-    last: unknown;
-    unread: number;
-  }[];
+  conversations(): ChatEntry[];
   /** Deletes one message from this device; `timestamp` within a minute of its own. */
   deleteMessage(peer: string, msgId: string, timestamp: number): void;
   /** Ends the session with `peer` and deletes the conversation. */

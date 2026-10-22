@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
 use crate::CoreError;
-use crate::api::StoredMessage;
+use crate::api::{Content, MessageStatus, StoredMessage};
 use crate::media::MediaKey;
 
 /// Logical tables of the driver's ordered key-value store. Keys sort
@@ -157,6 +157,68 @@ pub fn message_window(peer: &PeerId, at_ms: u64, window_ms: u64) -> (Vec<u8>, Ve
     )
 }
 
+/// How long every [`message_key`] is: peer, date, message id.
+pub const MESSAGE_KEY_LEN: usize = PeerId::LEN + 8 + MsgId::LEN;
+
+/// The id of the message stored under `key`, which ends every
+/// [`message_key`]; `None` for a key of another length. The message's
+/// status row is keyed by it.
+pub fn message_id(key: &[u8]) -> Option<MsgId> {
+    if key.len() != MESSAGE_KEY_LEN {
+        return None;
+    }
+    let (_, id) = key.split_last_chunk::<{ MsgId::LEN }>()?;
+    Some(MsgId(*id))
+}
+
+/// What deleting one stored message takes, for drivers to carry out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MessageDeletion {
+    /// Its row, its status and a voice or video note's key: deleted in one
+    /// batch.
+    pub ops: Vec<StoreOp>,
+    /// A voice or video note: its sealed copy goes too.
+    pub note: Option<FileId>,
+    /// A file sent or received: the driver forgets where it was saved, and
+    /// leaves the file itself where it is.
+    pub file: Option<FileId>,
+}
+
+/// What deleting the message stored under `key` takes; `msg` is what the
+/// row holds, `None` when it cannot be read. A row that cannot be read
+/// still goes with its status, both found by the key alone; what its
+/// content would name stays unknown.
+pub fn message_deletion(key: &[u8], msg: Option<&StoredMessage>) -> MessageDeletion {
+    let mut out = MessageDeletion {
+        ops: vec![StoreOp::Delete {
+            table: Table::Messages,
+            key: key.to_vec(),
+        }],
+        ..MessageDeletion::default()
+    };
+    if let Some(id) = message_id(key) {
+        out.ops.push(StoreOp::Delete {
+            table: Table::MessageStatus,
+            key: id.to_vec(),
+        });
+    }
+    let Some(msg) = msg else {
+        return out;
+    };
+    match &msg.content {
+        Content::File { file_id, kind, .. } if kind.is_media() => {
+            out.ops.push(StoreOp::Delete {
+                table: Table::Media,
+                key: file_id.to_vec(),
+            });
+            out.note = Some(*file_id);
+        }
+        Content::File { file_id, .. } => out.file = Some(*file_id),
+        Content::Text { .. } => {}
+    }
+    out
+}
+
 /// At-rest encryption for every record the core persists. Records are bound
 /// to their `(table, key)` through the AEAD associated data, so a storage
 /// attacker cannot swap values between keys.
@@ -251,6 +313,25 @@ impl Vault {
     /// Decrypts a message record read by the driver for history views.
     pub fn open_message(&self, key: &[u8], sealed: &[u8]) -> Result<StoredMessage, CoreError> {
         self.open(Table::Messages, key, sealed)
+    }
+
+    /// Decrypts a message record together with the row of its latest
+    /// status, which overrides the status kept with the message; a status
+    /// row that cannot be read is passed over.
+    pub fn open_message_with_status(
+        &self,
+        key: &[u8],
+        sealed: &[u8],
+        status: Option<impl AsRef<[u8]>>,
+    ) -> Result<StoredMessage, CoreError> {
+        let mut msg = self.open_message(key, sealed)?;
+        if let Some(status) = status.and_then(|raw| {
+            self.open::<MessageStatus>(Table::MessageStatus, msg.msg_id.as_bytes(), raw.as_ref())
+                .ok()
+        }) {
+            msg.status = status;
+        }
+        Ok(msg)
     }
 
     /// Decrypts the playback key of a sealed media file.
@@ -397,6 +478,101 @@ mod tests {
         }
     }
 
+    fn stored(content: Content) -> StoredMessage {
+        StoredMessage {
+            msg_id: MsgId([4; 16]),
+            peer: PeerId([5; 32]),
+            outgoing: false,
+            sent_at_ms: 6,
+            status: MessageStatus::Delivered,
+            content,
+        }
+    }
+
+    fn deleted(d: &MessageDeletion) -> Vec<(Table, Vec<u8>)> {
+        d.ops
+            .iter()
+            .map(|op| match op {
+                StoreOp::Delete { table, key } => (*table, key.clone()),
+                StoreOp::Put { .. } => panic!("a deletion puts nothing"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deleting_a_message_takes_its_status_and_its_note_but_only_names_a_file() {
+        use crate::api::MediaKind;
+        let file = |kind| Content::File {
+            file_id: FileId([3; 16]),
+            name: "f".into(),
+            mime: "x/y".into(),
+            size: 1,
+            kind,
+        };
+        let key = message_key(&PeerId([5; 32]), 6, &MsgId([4; 16]));
+        let row = (Table::Messages, key.clone());
+        let status = (Table::MessageStatus, vec![4; 16]);
+
+        let text = stored(Content::Text {
+            text: "hi".into(),
+            reply_to: None,
+        });
+        let d = message_deletion(&key, Some(&text));
+        assert_eq!(deleted(&d), [row.clone(), status.clone()]);
+        assert_eq!((d.note, d.file), (None, None));
+
+        let voice = stored(file(MediaKind::Voice {
+            duration_ms: 1,
+            waveform: Vec::new(),
+        }));
+        let d = message_deletion(&key, Some(&voice));
+        let note = (Table::Media, vec![3; 16]);
+        assert_eq!(deleted(&d), [row.clone(), status.clone(), note]);
+        assert_eq!((d.note, d.file), (Some(FileId([3; 16])), None));
+
+        let d = message_deletion(&key, Some(&stored(file(MediaKind::File))));
+        assert_eq!(deleted(&d), [row.clone(), status.clone()]);
+        assert_eq!((d.note, d.file), (None, Some(FileId([3; 16]))));
+
+        let d = message_deletion(&key, None);
+        assert_eq!(deleted(&d), [row, status], "found by the key alone");
+        assert_eq!((d.note, d.file), (None, None));
+    }
+
+    #[test]
+    fn a_stored_status_overrides_the_one_kept_with_the_message() {
+        let v = Vault::new([1; 32]);
+        let msg = stored(Content::Text {
+            text: "hi".into(),
+            reply_to: None,
+        });
+        let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+        let sealed = v.seal(Table::Messages, &key, &msg, &mut OsRng);
+        let read = v.seal(
+            Table::MessageStatus,
+            msg.msg_id.as_bytes(),
+            &MessageStatus::Read,
+            &mut OsRng,
+        );
+        let open = |status: Option<&[u8]>| {
+            v.open_message_with_status(&key, &sealed, status)
+                .unwrap()
+                .status
+        };
+        assert_eq!(open(None), MessageStatus::Delivered);
+        assert_eq!(open(Some(&read)), MessageStatus::Read);
+        // Another message's status row does not apply to this one.
+        let other = v.seal(
+            Table::MessageStatus,
+            &[9; 16],
+            &MessageStatus::Read,
+            &mut OsRng,
+        );
+        assert_eq!(open(Some(&other)), MessageStatus::Delivered);
+        v.open_message_with_status(&key[1..], &sealed, Some(&read))
+            .unwrap_err();
+    }
+
     #[test]
     fn a_conversation_lies_within_its_range_and_no_other_does() {
         let p = PeerId([7; 32]);
@@ -437,6 +613,17 @@ mod tests {
             u64::MAX,
             [0xFF; 16]
         ));
+    }
+
+    #[test]
+    fn a_status_row_is_keyed_by_the_id_ending_its_message_key() {
+        let key = message_key(&PeerId([1; 32]), 7, &MsgId([9; 16]));
+        assert_eq!(message_id(&key), Some(MsgId([9; 16])));
+        for len in [0, 16, MESSAGE_KEY_LEN - 1, MESSAGE_KEY_LEN + 1] {
+            assert_eq!(message_id(&vec![9; len]), None, "{len}");
+        }
+        let d = message_deletion(&[9; 16], None);
+        assert_eq!(d.ops.len(), 1, "no status row for a key that names none");
     }
 
     #[test]

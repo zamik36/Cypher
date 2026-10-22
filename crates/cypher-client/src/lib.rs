@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cypher_core::envelope::MAX_INLINE_LEN;
+use cypher_core::ui::{self, UiConversation};
 use cypher_core::{
-    Command, Core, CoreError, Event, MediaKind, MessageStatus, Snapshot, StoredMessage, Table,
-    Vault, message_key, message_window, peer_messages,
+    Command, Core, CoreError, Effect, Event, MediaKind, Snapshot, StoredMessage, Table, Vault,
+    message_deletion, message_id, message_key, message_window, peer_messages,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, MsgId, PeerId};
@@ -28,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use driver::{Driver, FileEntry, Parts, SavedFile, file_key, now_ms, saved_key};
 use files::SourceStamp;
-use store::{End, FILES_TABLE, SAVED_TABLE, Store};
+use store::{End, FILES_TABLE, FORGET_TABLE, MessageRow, SAVED_TABLE, Store};
 
 pub use cypher_core::{Content, FailReason};
 pub use identity::{IdentityStore, Unlocked};
@@ -142,6 +143,10 @@ pub(crate) enum Request {
     Shutdown,
 }
 
+/// Messages deleted at a time when a conversation is forgotten, so a long
+/// one never sits in memory whole.
+const FORGET_PAGE: usize = 256;
+
 /// How far around the UI's time a deleted message is looked for: the UI
 /// stamps outgoing messages itself, a few milliseconds off the core.
 const DELETE_WINDOW_MS: u64 = 60_000;
@@ -163,25 +168,82 @@ fn check_tor(config: &Config) -> Result<(), ClientError> {
     Ok(())
 }
 
-/// Store operations that go with deleting `msg` besides its own row: its
-/// status, a media note's key, where a file was saved. Returns the media
-/// note whose sealed copy must go too.
-fn deletion_ops(msg: &StoredMessage, ops: &mut Vec<store::Op>) -> Option<FileId> {
-    ops.push(store::Op::Delete(
-        Table::MessageStatus.name(),
-        msg.msg_id.to_vec(),
-    ));
-    match &msg.content {
-        Content::File { file_id, kind, .. } if kind.is_media() => {
-            ops.push(store::Op::Delete(Table::Media.name(), file_id.to_vec()));
-            Some(*file_id)
-        }
-        Content::File { file_id, .. } => {
-            ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
-            None
-        }
-        Content::Text { .. } => None,
+/// Store operations that delete the message stored under `key` (`msg`,
+/// when readable): see [`message_deletion`]. Returns the media note whose
+/// sealed copy must go too.
+fn deletion_ops(
+    key: &[u8],
+    msg: Option<&StoredMessage>,
+    ops: &mut Vec<store::Op>,
+) -> Option<FileId> {
+    let deletion = message_deletion(key, msg);
+    ops.extend(deletion.ops.into_iter().map(store::Op::from));
+    if let Some(file_id) = deletion.file {
+        ops.push(store::Op::Delete(SAVED_TABLE, file_id.to_vec()));
     }
+    deletion.note
+}
+
+/// A contact whose forgetting did not finish: a crash cut it short, or it
+/// failed while the app ran on.
+struct Forgetting {
+    peer: PeerId,
+    /// Set when `peer` is a contact (or a request) again: only messages up
+    /// to this key, the newest when the forget began, are what it was
+    /// about; empty when there were none.
+    upto: Option<Vec<u8>>,
+}
+
+/// What a start reads from disk.
+struct Restored {
+    store: Store,
+    files: HashMap<FileId, FileEntry>,
+    /// Contacts whose forgetting did not finish.
+    forgetting: Vec<Forgetting>,
+    core: Core<OsRng>,
+    initial: Vec<Effect>,
+}
+
+/// Opens the store at `db` (in `dir`), reads the state and restores the
+/// core from it: all blocking on the disk or on decryption.
+fn restore(
+    seed: &IdentitySeed,
+    device: DeviceId,
+    dir: &Path,
+    db: &Path,
+) -> Result<Restored, ClientError> {
+    std::fs::create_dir_all(dir)?;
+    let store = Store::open(db)?;
+    let scan = |table: Table| store.blocking_scan(table.into());
+    let snapshot = Snapshot {
+        meta: scan(Table::Meta)?,
+        peers: scan(Table::Peers)?,
+        sessions: scan(Table::Sessions)?,
+        outbox: scan(Table::Outbox)?,
+        transfers: scan(Table::Transfers)?,
+    };
+    let vault = Vault::new(seed.derive_storage_key());
+    let files = load_files(&store, &vault)?;
+    let forgetting = store
+        .blocking_scan(FORGET_TABLE)?
+        .into_iter()
+        .filter_map(|(key, bound)| {
+            let peer = PeerId::from_bytes(&key)?;
+            let contact = snapshot.peers.iter().any(|(k, _)| *k == key);
+            Some(Forgetting {
+                peer,
+                upto: contact.then_some(bound),
+            })
+        })
+        .collect();
+    let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
+    Ok(Restored {
+        store,
+        files,
+        forgetting,
+        core,
+        initial,
+    })
 }
 
 /// A file about to be offered: its id, where it is, the name it goes by.
@@ -229,27 +291,16 @@ impl Client {
         let hex = peer_id.to_hex();
         let dir = config.data_dir.clone();
         let db = dir.join(format!("state-{}.db", hex.get(..16).unwrap_or(&hex)));
-        // Creating directories and opening SQLite block on the disk.
-        let store = tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&dir)?;
-            Store::open(&db)
-        })
-        .await
-        .map_err(|e| {
-            tracing::error!("opening the client's storage did not finish: {e}");
-            ClientError::Closed
-        })??;
-
-        let snapshot = Snapshot {
-            meta: store.scan(Table::Meta.name()).await?,
-            peers: store.scan(Table::Peers.name()).await?,
-            sessions: store.scan(Table::Sessions.name()).await?,
-            outbox: store.scan(Table::Outbox.name()).await?,
-            transfers: store.scan(Table::Transfers.name()).await?,
-        };
+        // Opening SQLite, reading the state and decrypting all of it block.
+        let restoring = IdentitySeed(*seed.as_bytes());
+        let Restored {
+            store,
+            files,
+            forgetting,
+            core,
+            initial,
+        } = blocking(move || restore(&restoring, device, &dir, &db)).await?;
         let vault = Vault::new(seed.derive_storage_key());
-        let files = load_files(&store, &vault).await?;
-        let (core, initial) = Core::restore(seed, device, &snapshot, now_ms(), OsRng)?;
 
         // Unbounded by design: the driver emits from synchronous code, at the
         // pace of the bounded network queue and the app's own requests.
@@ -286,6 +337,17 @@ impl Client {
                     require_onion: true,
                 })
                 .await?;
+        }
+        // A forget that cannot finish now keeps its marker for the next
+        // start rather than keep the client from starting.
+        for Forgetting { peer, upto } in forgetting {
+            let finished = match upto {
+                Some(upto) => client.delete_conversation(peer, upto).await,
+                None => client.forget_peer(peer).await,
+            };
+            if let Err(e) = finished {
+                tracing::warn!("finishing forgetting a contact failed: {e}");
+            }
         }
         Ok((client, events_rx))
     }
@@ -469,7 +531,7 @@ impl Client {
     ) -> Result<MediaSlice, ClientError> {
         let raw = self
             .store
-            .get(Table::Media.name(), file_id.to_vec())
+            .get(Table::Media.into(), file_id.to_vec())
             .await?
             .ok_or(ClientError::NotFound)?;
         let key = self.vault.open_media(&file_id, &raw)?;
@@ -532,28 +594,12 @@ impl Client {
         let to = before_ms.map_or(End::Through(last), |before| {
             End::Before(message_key(&peer, before, &MsgId([0; MsgId::LEN])))
         });
-        let rows = self
-            .store
-            .range_desc(Table::Messages.name(), from, to, limit)
-            .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for (key, value) in rows {
-            let mut msg = self.vault.open_message(&key, &value)?;
-            if let Some(status) = self
-                .store
-                .get(Table::MessageStatus.name(), msg.msg_id.to_vec())
-                .await?
-                .and_then(|raw| {
-                    self.vault
-                        .open::<MessageStatus>(Table::MessageStatus, msg.msg_id.as_bytes(), &raw)
-                        .ok()
-                })
-            {
-                msg.status = status;
-            }
-            out.push(msg);
-        }
-        Ok(out)
+        let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
+        blocking(move || {
+            let rows = store.blocking_messages(vec![(from, to)], limit)?;
+            open_messages(&vault, rows.first().map_or(&[], Vec::as_slice))
+        })
+        .await
     }
 
     /// Peers with an established session.
@@ -562,7 +608,7 @@ impl Client {
     pub async fn contacts(&self) -> Result<Vec<Contact>, ClientError> {
         Ok(self
             .store
-            .scan(Table::Peers.name())
+            .scan(Table::Peers.into())
             .await?
             .into_iter()
             .filter_map(|(key, sealed)| {
@@ -577,6 +623,49 @@ impl Client {
                 })
             })
             .collect())
+    }
+
+    /// Every conversation as the chat list shows it, the most recent first.
+    /// A contact row that cannot be read still lists its contact, unnamed;
+    /// a message row that cannot be read is left out.
+    pub async fn conversations(&self) -> Result<Vec<UiConversation>, ClientError> {
+        let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
+        blocking(move || {
+            let contacts: Vec<_> = store
+                .blocking_scan(Table::Peers.into())?
+                .into_iter()
+                .filter_map(|(key, sealed)| {
+                    let peer = PeerId::from_bytes(&key)?;
+                    Some((peer, vault.open_contact(&key, &sealed).unwrap_or_default()))
+                })
+                .collect();
+            let spans = contacts
+                .iter()
+                .map(|(peer, _)| {
+                    let (first, last) = peer_messages(peer);
+                    (first, End::Through(last))
+                })
+                .collect();
+            let recent = store.blocking_messages(spans, ui::UNREAD_WINDOW)?;
+            let entries = contacts
+                .into_iter()
+                .zip(&recent)
+                .map(|((peer, contact), rows)| {
+                    // A row that cannot be read is left out, not the list.
+                    let readable: Vec<_> = rows
+                        .iter()
+                        .filter_map(|(key, value, status)| {
+                            vault
+                                .open_message_with_status(key, value, status.as_deref())
+                                .ok()
+                        })
+                        .collect();
+                    ui::summary(&peer, contact, &readable)
+                })
+                .collect();
+            Ok(ui::chat_list(entries))
+        })
+        .await
     }
 
     /// Sets the name this user goes by; contacts receive it encrypted.
@@ -595,29 +684,57 @@ impl Client {
 
     /// Ends the session with `peer` and deletes the conversation: messages,
     /// their statuses, stored voice and video notes and where files were
-    /// saved. The saved files themselves stay where they are.
+    /// saved. The saved files themselves stay where they are. It goes a page
+    /// at a time; a marker kept until the last page is gone lets the next
+    /// start finish what a crash or a failure cut short.
     pub async fn forget_peer(&self, peer: PeerId) -> Result<(), ClientError> {
-        self.command(Command::RemovePeer { peer }).await?;
+        // The marker names the newest message too: should the contact come
+        // back before this finishes, what came after it is spared.
         let (first, last) = peer_messages(&peer);
-        let rows = self
+        let newest = self
             .store
-            .range_desc(
-                Table::Messages.name(),
-                first,
-                End::Through(last),
-                usize::MAX,
-            )
-            .await?;
-        let mut ops = Vec::with_capacity(rows.len() * 2);
-        let mut media = Vec::new();
-        for (key, sealed) in rows {
-            if let Ok(msg) = self.vault.open_message(&key, &sealed) {
-                media.extend(deletion_ops(&msg, &mut ops));
+            .range_desc(Table::Messages.into(), first, End::Through(last.clone()), 1)
+            .await?
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .unwrap_or_default();
+        let mark = store::Op::Put(FORGET_TABLE, peer.to_vec(), newest);
+        self.store.apply(vec![mark]).await?;
+        self.command(Command::RemovePeer { peer }).await?;
+        self.delete_conversation(peer, last).await
+    }
+
+    /// Deletes the messages with `peer` up to the key `upto`, a page at a
+    /// time, then the marker of its forgetting.
+    async fn delete_conversation(&self, peer: PeerId, upto: Vec<u8>) -> Result<(), ClientError> {
+        let (store, vault) = (self.store.clone(), Arc::clone(&self.vault));
+        let config = self.config.clone();
+        blocking(move || {
+            let (first, _) = peer_messages(&peer);
+            loop {
+                // Nothing lies before `first`: an empty bound takes nothing.
+                let page = store.blocking_range(
+                    Table::Messages.into(),
+                    first.clone(),
+                    End::Through(upto.clone()),
+                    FORGET_PAGE,
+                )?;
+                if page.is_empty() {
+                    let unmark = store::Op::Delete(FORGET_TABLE, peer.to_vec());
+                    return store.blocking_apply(vec![unmark]);
+                }
+                let mut ops = Vec::with_capacity(page.len() * 3);
+                let mut notes = Vec::new();
+                for (key, sealed) in &page {
+                    let msg = vault.open_message(key, sealed).ok();
+                    notes.extend(deletion_ops(key, msg.as_ref(), &mut ops));
+                }
+                store.blocking_apply(ops)?;
+                remove_notes(&config, notes)?;
             }
-            ops.push(store::Op::Delete(Table::Messages.name(), key));
-        }
-        self.store.apply(ops).await?;
-        self.remove_media_files(media).await
+        })
+        .await
     }
 
     /// Deletes one message from this device: its row, status, media and
@@ -633,10 +750,10 @@ impl Client {
         let (from, to) = message_window(&peer, near_ms, DELETE_WINDOW_MS);
         let (key, sealed) = self
             .store
-            .range_desc(Table::Messages.name(), from, End::Through(to), usize::MAX)
+            .range_desc(Table::Messages.into(), from, End::Through(to), usize::MAX)
             .await?
             .into_iter()
-            .find(|(key, _)| key.ends_with(msg_id.as_bytes()))
+            .find(|(key, _)| message_id(key) == Some(msg_id))
             .ok_or(ClientError::NotFound)?;
         let msg = self.vault.open_message(&key, &sealed)?;
         self.command(Command::DiscardOutgoing { msg_id }).await?;
@@ -644,23 +761,11 @@ impl Client {
             self.command(Command::CancelTransfer { file_id: *file_id })
                 .await?;
         }
-        let mut ops = vec![store::Op::Delete(Table::Messages.name(), key)];
-        let media = deletion_ops(&msg, &mut ops);
+        let mut ops = Vec::new();
+        let note = deletion_ops(&key, Some(&msg), &mut ops);
         self.store.apply(ops).await?;
-        self.remove_media_files(media).await
-    }
-
-    async fn remove_media_files(
-        &self,
-        media: impl IntoIterator<Item = FileId>,
-    ) -> Result<(), ClientError> {
-        for file_id in media {
-            match tokio::fs::remove_file(self.config.media_path(&file_id)).await {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
-        }
-        Ok(())
+        let config = self.config.clone();
+        blocking(move || remove_notes(&config, note)).await
     }
 
     /// Deletes every stored message and media note, and where files were
@@ -668,9 +773,9 @@ impl Client {
     pub async fn clear_history(&self) -> Result<(), ClientError> {
         self.store
             .apply(vec![
-                store::Op::Clear(Table::Messages.name()),
-                store::Op::Clear(Table::MessageStatus.name()),
-                store::Op::Clear(Table::Media.name()),
+                store::Op::Clear(Table::Messages.into()),
+                store::Op::Clear(Table::MessageStatus.into()),
+                store::Op::Clear(Table::Media.into()),
                 store::Op::Clear(SAVED_TABLE),
             ])
             .await?;
@@ -701,12 +806,44 @@ impl Client {
     }
 }
 
-async fn load_files(
-    store: &Store,
-    vault: &Vault,
-) -> Result<HashMap<FileId, FileEntry>, ClientError> {
+/// Deletes the sealed copies of voice and video notes; one already gone is
+/// fine.
+fn remove_notes(
+    config: &Config,
+    notes: impl IntoIterator<Item = FileId>,
+) -> Result<(), ClientError> {
+    for file_id in notes {
+        match std::fs::remove_file(config.media_path(&file_id)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Opens message rows read with their status rows.
+fn open_messages(vault: &Vault, rows: &[MessageRow]) -> Result<Vec<StoredMessage>, ClientError> {
+    rows.iter()
+        .map(|(key, value, status)| {
+            Ok(vault.open_message_with_status(key, value, status.as_deref())?)
+        })
+        .collect()
+}
+
+/// Runs disk work or decryption in bulk on a thread that may block, off the
+/// async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, ClientError> + Send + 'static,
+) -> Result<T, ClientError> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| {
+        tracing::error!("blocking work did not finish: {e}");
+        ClientError::Closed
+    })?
+}
+
+fn load_files(store: &Store, vault: &Vault) -> Result<HashMap<FileId, FileEntry>, ClientError> {
     let mut files = HashMap::new();
-    for (k, v) in store.scan(FILES_TABLE).await? {
+    for (k, v) in store.blocking_scan(FILES_TABLE)? {
         let Some(file_id) = FileId::from_bytes(&k) else {
             continue;
         };
@@ -725,6 +862,8 @@ async fn load_files(
 
 #[cfg(test)]
 mod tests {
+    use cypher_core::MessageStatus;
+
     use super::*;
 
     fn config(dir: &Path) -> Config {
@@ -756,9 +895,155 @@ mod tests {
         let sealed = client.vault.seal(Table::Messages, &key, msg, &mut OsRng);
         client
             .store
-            .apply(vec![store::Op::Put(Table::Messages.name(), key, sealed)])
+            .apply(vec![store::Op::Put(Table::Messages.into(), key, sealed)])
             .await
             .unwrap();
+    }
+
+    fn file(peer: PeerId, sent_at_ms: u64, id: u8, kind: MediaKind) -> StoredMessage {
+        StoredMessage {
+            content: Content::File {
+                file_id: FileId([id; FileId::LEN]),
+                name: format!("file {id}"),
+                mime: "audio/ogg".into(),
+                size: 10,
+                kind,
+            },
+            ..text(peer, sent_at_ms, id)
+        }
+    }
+
+    async fn started(dir: &Path) -> Client {
+        let seed = IdentitySeed::generate();
+        let (client, _events) = Client::start(&seed, DeviceId::FIRST, config(dir))
+            .await
+            .unwrap();
+        client
+    }
+
+    async fn put_status(client: &Client, msg_id: MsgId, status: MessageStatus) {
+        let sealed =
+            client
+                .vault
+                .seal(Table::MessageStatus, msg_id.as_bytes(), &status, &mut OsRng);
+        let op = store::Op::Put(Table::MessageStatus.into(), msg_id.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+    }
+
+    /// A voice note's key row and its sealed copy on disk.
+    async fn put_note(client: &Client, file_id: FileId) {
+        let key = cypher_core::MediaKey::from_desc(&cypher_core::envelope::FileDesc {
+            file_id,
+            name: "voice".into(),
+            mime: "audio/ogg".into(),
+            size: 10,
+            chunk_size: 64 * 1024,
+            key: [1; 32],
+            inline: None,
+        });
+        let sealed = client
+            .vault
+            .seal(Table::Media, file_id.as_bytes(), &key, &mut OsRng);
+        let op = store::Op::Put(Table::Media.into(), file_id.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+        let path = client.config.media_path(&file_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"sealed").unwrap();
+    }
+
+    /// Where a received file was saved, and the file itself.
+    async fn put_saved(client: &Client, file_id: FileId, dir: &Path) -> PathBuf {
+        let path = dir.join(format!("saved-{}", file_id.to_hex()));
+        std::fs::write(&path, b"plain").unwrap();
+        let location = path.to_str().unwrap().to_owned();
+        let sealed = client.vault.seal(
+            Table::Meta,
+            &saved_key(&file_id),
+            &SavedFile { location },
+            &mut OsRng,
+        );
+        let op = store::Op::Put(SAVED_TABLE, file_id.to_vec(), sealed);
+        client.store.apply(vec![op]).await.unwrap();
+        path
+    }
+
+    async fn keys(client: &Client, table: store::StoreTable) -> Vec<Vec<u8>> {
+        let rows = client.store.scan(table).await.unwrap();
+        rows.into_iter().map(|(k, _)| k).collect()
+    }
+
+    /// History shows each message with the latest status stored for it.
+    #[tokio::test]
+    async fn history_shows_the_latest_status_of_each_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        for msg in [text(peer, 1, 1), text(peer, 2, 2)] {
+            put(&client, &msg).await;
+        }
+        put_status(&client, MsgId([1; 16]), MessageStatus::Read).await;
+        let shown: Vec<_> = client
+            .history(peer, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.msg_id, m.status))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (MsgId([2; 16]), MessageStatus::Delivered),
+                (MsgId([1; 16]), MessageStatus::Read)
+            ]
+        );
+        client.shutdown().await;
+    }
+
+    /// Deleting a message or a conversation takes its rows, statuses and
+    /// sealed notes, and where files were saved; the saved files stay.
+    #[tokio::test]
+    async fn deleting_takes_rows_statuses_and_notes_but_not_saved_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let (peer, other) = (PeerId([4; 32]), PeerId([5; 32]));
+        let voice = MediaKind::Voice {
+            duration_ms: 1,
+            waveform: vec![1],
+        };
+        let msgs = [
+            text(peer, 1_000, 1),
+            text(peer, 2_000, 2),
+            file(peer, 3_000, 3, voice),
+            file(peer, 4_000, 4, MediaKind::File),
+            text(other, 1_000, 5),
+        ];
+        for msg in &msgs {
+            put(&client, msg).await;
+            put_status(&client, msg.msg_id, MessageStatus::Read).await;
+        }
+        put_note(&client, FileId([3; 16])).await;
+        let saved = put_saved(&client, FileId([4; 16]), dir.path()).await;
+
+        client
+            .delete_message(peer, MsgId([1; 16]), 1_000)
+            .await
+            .unwrap();
+        let ids = |n: &[u8]| n.iter().map(|&n| vec![n; 16]).collect::<Vec<_>>();
+        assert_eq!(
+            keys(&client, Table::MessageStatus.into()).await,
+            ids(&[2, 3, 4, 5])
+        );
+        assert_eq!(client.history(peer, None, 10).await.unwrap().len(), 3);
+
+        client.forget_peer(peer).await.unwrap();
+        assert!(client.history(peer, None, 10).await.unwrap().is_empty());
+        assert_eq!(keys(&client, Table::MessageStatus.into()).await, ids(&[5]));
+        assert!(keys(&client, Table::Media.into()).await.is_empty());
+        assert!(!client.config.media_path(&FileId([3; 16])).exists());
+        assert!(keys(&client, SAVED_TABLE).await.is_empty());
+        assert!(saved.exists(), "a saved file stays where it is");
+        assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+        client.shutdown().await;
     }
 
     /// Asking for Tor never ends in a direct connection to the relay: a
@@ -831,6 +1116,201 @@ mod tests {
         client.forget_peer(peer).await.unwrap();
         assert!(client.history(peer, None, 10).await.unwrap().is_empty());
         assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+        client.shutdown().await;
+    }
+
+    /// A conversation longer than a page is forgotten whole, along with
+    /// statuses and notes of every page and rows that cannot be read.
+    #[tokio::test]
+    async fn a_long_conversation_is_forgotten_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        let total = FORGET_PAGE * 2 + 3;
+        let mut ops = Vec::new();
+        for n in 0..total {
+            let mut msg = text(peer, u64::try_from(n).unwrap(), 0);
+            msg.msg_id = MsgId(u128::try_from(n).unwrap().to_be_bytes());
+            let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+            let sealed = client.vault.seal(Table::Messages, &key, &msg, &mut OsRng);
+            ops.push(store::Op::Put(Table::Messages.into(), key, sealed));
+        }
+        let unreadable = message_key(&peer, u64::MAX, &MsgId([9; 16]));
+        ops.push(store::Op::Put(
+            Table::Messages.into(),
+            unreadable,
+            b"x".to_vec(),
+        ));
+        client.store.apply(ops).await.unwrap();
+        put_status(&client, MsgId([9; 16]), MessageStatus::Read).await;
+        let voice = MediaKind::Voice {
+            duration_ms: 1,
+            waveform: vec![1],
+        };
+        put(&client, &file(peer, 5, 7, voice)).await;
+        put_note(&client, FileId([7; 16])).await;
+
+        client.forget_peer(peer).await.unwrap();
+        assert!(keys(&client, Table::Messages.into()).await.is_empty());
+        let statuses = keys(&client, Table::MessageStatus.into()).await;
+        assert!(statuses.is_empty(), "an unreadable row's status goes too");
+        assert!(keys(&client, Table::Media.into()).await.is_empty());
+        assert!(!client.config.media_path(&FileId([7; 16])).exists());
+        client.shutdown().await;
+    }
+
+    /// The status row the core writes when a message is read reaches the
+    /// store under the key history looks it up by.
+    #[tokio::test]
+    async fn a_status_the_core_writes_is_the_one_history_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        put(&client, &text(peer, 1, 1)).await;
+        let read = Command::MarkRead {
+            peer,
+            ids: vec![MsgId([1; 16])],
+        };
+        client.command(read).await.unwrap();
+        let mut status = MessageStatus::Delivered;
+        for _ in 0..100 {
+            status = client.history(peer, None, 1).await.unwrap()[0].status;
+            if status == MessageStatus::Read {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(status, MessageStatus::Read);
+        let statuses = keys(&client, Table::MessageStatus.into()).await;
+        assert_eq!(statuses, [vec![1; 16]]);
+        client.shutdown().await;
+    }
+
+    /// A message row that cannot be read is left out of the chat list
+    /// instead of failing it.
+    #[tokio::test]
+    async fn the_chat_list_passes_over_a_row_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = started(dir.path()).await;
+        let peer = PeerId([4; 32]);
+        let contact = store::Op::Put(Table::Peers.into(), peer.to_vec(), vec![0; 40]);
+        let unreadable = message_key(&peer, 9, &MsgId([9; 16]));
+        let broken = store::Op::Put(Table::Messages.into(), unreadable, b"x".to_vec());
+        client.store.apply(vec![contact, broken]).await.unwrap();
+        put(&client, &text(peer, 1, 1)).await;
+
+        let list = client.conversations().await.unwrap();
+        let shown: Vec<_> = list
+            .iter()
+            .map(|c| (c.peer_id.clone(), c.last_message_at, c.unread))
+            .collect();
+        assert_eq!(shown, [(peer.to_hex(), 1, 1)]);
+        client.shutdown().await;
+    }
+
+    /// Forgetting a contact that a crash cut short is finished at the next
+    /// start: nothing of the conversation stays behind for good, and the
+    /// contact's next message starts a fresh one.
+    #[tokio::test]
+    async fn a_forget_cut_short_is_finished_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let (peer, other) = (PeerId([4; 32]), PeerId([5; 32]));
+        let (client, _events) = start().await.unwrap();
+        for msg in [text(peer, 1, 1), text(peer, 2, 2), text(other, 1, 3)] {
+            put(&client, &msg).await;
+            put_status(&client, msg.msg_id, MessageStatus::Read).await;
+        }
+        // Where a crash right after the contact was removed leaves it.
+        let marker = store::Op::Put(FORGET_TABLE, peer.to_vec(), Vec::new());
+        client.store.apply(vec![marker]).await.unwrap();
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        assert!(client.history(peer, None, 10).await.unwrap().is_empty());
+        assert_eq!(
+            keys(&client, Table::MessageStatus.into()).await,
+            [vec![3; 16]]
+        );
+        assert!(
+            keys(&client, FORGET_TABLE).await.is_empty(),
+            "done for good"
+        );
+        assert_eq!(client.history(other, None, 10).await.unwrap().len(), 1);
+
+        // A forget that runs to the end leaves no marker either.
+        client.forget_peer(other).await.unwrap();
+        assert!(keys(&client, FORGET_TABLE).await.is_empty());
+        assert!(keys(&client, Table::Messages.into()).await.is_empty());
+        client.shutdown().await;
+    }
+
+    /// Marks `peer` as being forgotten up to the message at `upto_ms`, the
+    /// way a forget that failed after removing the contact leaves it.
+    async fn mark_forgetting(client: &Client, peer: PeerId, upto_ms: u64, id: u8) {
+        let bound = message_key(&peer, upto_ms, &MsgId([id; 16]));
+        let marker = store::Op::Put(FORGET_TABLE, peer.to_vec(), bound);
+        client.store.apply(vec![marker]).await.unwrap();
+    }
+
+    /// A contact taken back (or writing again as a request) after a forget
+    /// that did not finish keeps what came after it: the next start deletes
+    /// only what the forget was about.
+    #[tokio::test]
+    async fn a_forget_left_unfinished_spares_what_came_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let peer = PeerId([4; 32]);
+        let (client, _events) = start().await.unwrap();
+        put(&client, &text(peer, 1, 1)).await;
+        mark_forgetting(&client, peer, 1, 1).await;
+        // The contact is back, and wrote again.
+        let row = store::Op::Put(Table::Peers.into(), peer.to_vec(), vec![0; 40]);
+        client.store.apply(vec![row]).await.unwrap();
+        put(&client, &text(peer, 5, 5)).await;
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        let left: Vec<_> = client
+            .history(peer, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.msg_id)
+            .collect();
+        assert_eq!(left, [MsgId([5; 16])], "only what came after is kept");
+        assert_eq!(keys(&client, Table::Peers.into()).await, [peer.to_vec()]);
+        assert!(keys(&client, FORGET_TABLE).await.is_empty());
+        client.shutdown().await;
+    }
+
+    /// A forget that cannot be finished at start does not stop the client
+    /// from starting; its marker stays for the next try.
+    #[tokio::test]
+    async fn a_forget_that_cannot_finish_does_not_stop_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = IdentitySeed::generate();
+        let start = || Client::start(&seed, DeviceId::FIRST, config(dir.path()));
+        let peer = PeerId([4; 32]);
+        let (client, _events) = start().await.unwrap();
+        let voice = MediaKind::Voice {
+            duration_ms: 1,
+            waveform: vec![1],
+        };
+        put(&client, &file(peer, 1, 7, voice)).await;
+        mark_forgetting(&client, peer, 1, 7).await;
+        // A sealed copy that cannot be deleted.
+        let stuck = client.config.media_path(&FileId([7; 16]));
+        std::fs::create_dir_all(stuck.join("inside")).unwrap();
+        client.shutdown().await;
+        drop(client);
+
+        let (client, _events) = start().await.unwrap();
+        assert_eq!(keys(&client, FORGET_TABLE).await, [peer.to_vec()]);
         client.shutdown().await;
     }
 }

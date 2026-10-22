@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Row } from "../wasm/cypher_wasm.js";
-import { applyOps, clear, get, insertMissing, openDb, put, remove, scan } from "./idb";
+import { applyOps, clear, get, insertMissing, keys, messageRows, openDb, put, remove, scan } from "./idb";
 
 const key = (...b: number[]) => new Uint8Array(b);
 const rows = (list: [Uint8Array, Uint8Array][]) => list.map(([k, v]) => [[...k], [...v]]);
@@ -86,6 +86,31 @@ describe("idb", () => {
     ]);
   });
 
+  it("reads the latest messages of several ranges with their statuses in one go", async () => {
+    await applyOps(db, [
+      ...[1, 2, 3].flatMap((peer) =>
+        [1, 2, 3].map((i) => ({ kind: "put" as const, table: "messages", key: key(peer, i), value: key(peer, i) })),
+      ),
+      { kind: "put", table: "message_status", key: key(2), value: key(42) },
+    ]);
+    const span = (peer: number) => IDBKeyRange.bound(key(peer), key(peer, 9));
+    // A message's id is its key's last byte here.
+    const messageId = (k: Uint8Array<ArrayBuffer>) => k.subarray(k.length - 1);
+    const got = await messageRows(db, [span(1), span(3), span(5)], 2, messageId);
+    const shown = got.map((list) => list.map(([k, , s]) => [[...k], s ? [...s] : null]));
+    expect(shown).toEqual([
+      [
+        [[1, 3], null],
+        [[1, 2], [42]],
+      ],
+      [
+        [[3, 3], null],
+        [[3, 2], [42]],
+      ],
+      [],
+    ]);
+  });
+
   it("stores, reads, removes and clears plain values", async () => {
     await put(db, "identity", "current", key(1, 2));
     await put(db, "files", "f", "blob");
@@ -93,6 +118,7 @@ describe("idb", () => {
     expect([...((await get<Uint8Array>(db, "identity", "current")) ?? [])]).toEqual([1, 2]);
     await remove(db, "identity", "current");
     expect(await get(db, "identity", "current")).toBeUndefined();
+    expect(await keys(db, "files")).toEqual(["f"]);
     await clear(db, ["files"]);
     expect(await get(db, "files", "f")).toBeUndefined();
   });

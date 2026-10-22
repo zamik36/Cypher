@@ -1,5 +1,5 @@
 /** Minimal promise wrapper over IndexedDB for the worker's key-value tables. */
-import type { Op, Row } from "../wasm/cypher_wasm.js";
+import type { MessageRow, Op, Row } from "../wasm/cypher_wasm.js";
 
 export const STORES = [
   "meta",
@@ -83,6 +83,48 @@ export async function scan(
 }
 
 /**
+ * Up to `limit` rows of `messages` in each of `ranges`, newest first, each
+ * with its row in `message_status`, keyed by the id `messageId` reads from
+ * the message key (none when it reads none): one transaction for them all,
+ * rather than one per row.
+ */
+export async function messageRows(
+  db: IDBDatabase,
+  ranges: IDBKeyRange[],
+  limit: number,
+  messageId: (key: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer> | undefined,
+): Promise<MessageRow[][]> {
+  const tx = db.transaction(["messages", "message_status"], "readonly");
+  const messages = tx.objectStore("messages");
+  const statuses = tx.objectStore("message_status");
+  const out = ranges.map((range) => {
+    const rows: MessageRow[] = [];
+    const req = messages.openCursor(range, "prev");
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor || rows.length >= limit) return;
+      const row: MessageRow = [
+        new Uint8Array(cursor.key as ArrayBuffer),
+        new Uint8Array(cursor.value as ArrayBuffer),
+        undefined,
+      ];
+      rows.push(row);
+      const key = messageId(row[0]);
+      if (key) {
+        const status = statuses.get(key);
+        status.onsuccess = () => {
+          if (status.result !== undefined) row[2] = new Uint8Array(status.result as ArrayBuffer);
+        };
+      }
+      cursor.continue();
+    };
+    return rows;
+  });
+  await done(tx);
+  return out;
+}
+
+/**
  * Adds the rows whose keys are free, in one durable transaction; a row whose
  * key is taken leaves what is stored there as it is.
  */
@@ -100,6 +142,11 @@ export async function insertMissing(db: IDBDatabase, table: string, rows: Row[])
   await done(tx);
 }
 
+/** Every key of `table`. */
+export async function keys(db: IDBDatabase, table: string): Promise<IDBValidKey[]> {
+  return result(db.transaction(table, "readonly").objectStore(table).getAllKeys());
+}
+
 export async function get<T>(db: IDBDatabase, table: string, key: IDBValidKey): Promise<T | undefined> {
   return result(db.transaction(table, "readonly").objectStore(table).get(key)) as Promise<T | undefined>;
 }
@@ -110,8 +157,9 @@ export async function remove(db: IDBDatabase, table: string, key: IDBValidKey): 
   await done(tx);
 }
 
+/** Stores one value; resolves once it is durable. */
 export async function put(db: IDBDatabase, table: string, key: IDBValidKey, value: unknown): Promise<void> {
-  const tx = db.transaction(table, "readwrite");
+  const tx = db.transaction(table, "readwrite", { durability: "strict" });
   tx.objectStore(table).put(value, key);
   await done(tx);
 }
