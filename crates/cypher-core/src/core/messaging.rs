@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use cypher_crypto::{DeviceList, Header, InitHeader, PrekeyBundle, handshake};
+use cypher_crypto::{
+    CryptoError, DeviceList, Header, InitHeader, PrekeyBundle, Ratchet, handshake,
+};
 use cypher_types::{Addr, DeviceId, MsgId, PeerId};
 use cypher_wire::ClientMsg;
 use rand_core::CryptoRngCore;
@@ -12,6 +14,7 @@ use crate::envelope::{
     Body, Envelope, InboxAd, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody,
 };
 use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
+use crate::prekeys::InitSender;
 use crate::relay::RelayBody;
 use crate::share::ShareLink;
 use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key, session_key};
@@ -27,6 +30,39 @@ const MAX_PENDING_REQUESTS: usize = 20;
 /// key, which drivers range over to show and to delete a conversation, so
 /// a date anywhere up to `u64::MAX` would hide the row from both.
 const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
+
+// A session knows a copy among the messages it decrypted last. Greetings,
+// receipts and syncs take room there as texts do, so it holds several
+// inbox batches: one handed out again after its ack was lost still finds
+// its items there.
+const _: () =
+    assert!(cypher_crypto::double_ratchet::MAX_DECRYPTED >= 4 * cypher_wire::MAX_INBOX_BATCH);
+
+/// What came of decrypting a message that arrived.
+enum Opened {
+    /// Its plaintext, read for the first time.
+    New(Vec<u8>),
+    /// A byte-for-byte copy of one the session already read: an inbox item
+    /// handed out again after its ack was lost, or a frame replayed.
+    Copy,
+}
+
+impl Opened {
+    /// Decrypts a message in `ratchet`, telling a copy of one already read
+    /// from a failure.
+    fn decrypt(
+        ratchet: &mut Ratchet,
+        header: &Header,
+        ct: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, CoreError> {
+        match ratchet.decrypt(header, ct, b"", rng) {
+            Ok(pt) => Ok(Self::New(pt)),
+            Err(CryptoError::Duplicate) => Ok(Self::Copy),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
 
 /// An invite being joined by, while the host's devices answer one by one.
 pub(super) struct Joining {
@@ -496,8 +532,10 @@ impl<R: CryptoRngCore> Core<R> {
             None => self.decrypt_existing(sender, header, ct),
         };
         let plaintext = match result {
-            Ok(pt) => Zeroizing::new(pt),
-            Err(CoreError::Conflict) => return,
+            Ok(Opened::New(pt)) => Zeroizing::new(pt),
+            // Nothing in the session moved, and nothing is owed: what the
+            // message asked for (a receipt) went out when it was first read.
+            Ok(Opened::Copy) | Err(CoreError::Conflict) => return,
             Err(_) => {
                 self.emit(Event::Warning {
                     reason: FailReason::DecryptFailed,
@@ -538,11 +576,13 @@ impl<R: CryptoRngCore> Core<R> {
         sender: Addr,
         header: &Header,
         ct: &[u8],
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> Result<Opened, CoreError> {
         let session = self.sessions.get_mut(&sender).ok_or(CoreError::Crypto)?;
-        let pt = session.ratchet.decrypt(header, ct, b"", &mut self.rng)?;
-        session.pending_init = None;
-        Ok(pt)
+        let opened = Opened::decrypt(&mut session.ratchet, header, ct, &mut self.rng)?;
+        if matches!(opened, Opened::New(_)) {
+            session.pending_init = None;
+        }
+        Ok(opened)
     }
 
     fn accept_init(
@@ -551,7 +591,7 @@ impl<R: CryptoRngCore> Core<R> {
         init: &InitHeader,
         header: &Header,
         ct: &[u8],
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> Result<Opened, CoreError> {
         let Addr {
             peer: from,
             device: from_device,
@@ -559,7 +599,13 @@ impl<R: CryptoRngCore> Core<R> {
         if let Some(s) = self.sessions.get_mut(&sender)
             && s.accepted_ephemerals.contains(&init.ephemeral)
         {
-            return Ok(s.ratchet.decrypt(header, ct, b"", &mut self.rng)?);
+            return Opened::decrypt(&mut s.ratchet, header, ct, &mut self.rng);
+        }
+        // Accepted before, yet its session no longer knows it (replaced
+        // since, or the init forgotten among later ones): a copy, not a
+        // session to start again.
+        if self.prekeys.accepted_init(init.spk_id, &init.ephemeral) {
+            return Ok(Opened::Copy);
         }
 
         let own = from == self.peer_id;
@@ -570,12 +616,8 @@ impl<R: CryptoRngCore> Core<R> {
             // Quietly: a flood of strangers is not the user's problem.
             return Err(CoreError::Conflict);
         }
-        let known = self.prekeys.spk(init.spk_id).is_some()
-            && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
-        if !known {
-            self.resync_prekeys();
-            return Err(CoreError::Crypto);
-        }
+        let who = self.init_sender(from);
+        self.check_init_prekeys(init)?;
         let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
         let opk = match init.opk_id {
             Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
@@ -590,20 +632,19 @@ impl<R: CryptoRngCore> Core<R> {
             init,
         )?;
         let pt = ratchet.decrypt(header, ct, b"", &mut self.rng)?;
+        self.admit_init(init, who)?;
 
         // Both sides started a session at once: the lower device keeps its
-        // own and ignores the other's.
-        if self
+        // own and ignores the other's. Spent either way, so that a copy of
+        // it is refused once ours is confirmed.
+        let keep_ours = self
             .sessions
             .get(&sender)
             .is_some_and(Session::is_unconfirmed_initiator)
-            && (self.peer_id, self.device) < (from, from_device)
-        {
+            && (self.peer_id, self.device) < (from, from_device);
+        self.spend_init(init, who);
+        if keep_ours {
             return Err(CoreError::Conflict);
-        }
-        if let Some(id) = init.opk_id {
-            self.prekeys.take_opk(id);
-            self.persist_prekeys();
         }
 
         if !own {
@@ -617,7 +658,67 @@ impl<R: CryptoRngCore> Core<R> {
         self.sessions.insert(sender, fresh);
         self.requeue_for(sender);
         self.send_hello(sender);
-        Ok(pt)
+        Ok(Opened::New(pt))
+    }
+
+    /// Who `from` is, as far as how many of their inits are taken goes:
+    /// someone not (yet) taken as a contact is a request.
+    fn init_sender(&self, from: PeerId) -> InitSender {
+        if from != self.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
+            InitSender::Request(from)
+        } else {
+            InitSender::Contact(from)
+        }
+    }
+
+    /// Whether we hold the prekeys a new init names. Prekeys we lack (our
+    /// saved state fell behind what the server hands out) make us publish
+    /// fresh ones.
+    fn check_init_prekeys(&mut self, init: &InitHeader) -> Result<(), CoreError> {
+        let known = self.prekeys.spk(init.spk_id).is_some()
+            && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
+        if !known {
+            self.resync_prekeys();
+            return Err(CoreError::Crypto);
+        }
+        Ok(())
+    }
+
+    /// Whether an authenticated init from `sender` is within the limits on
+    /// remembered inits. Only authenticated ones are checked, so no one can
+    /// make us turn anyone away in another's name; the first refusal of a
+    /// kind is told (someone is being turned away), later ones are not.
+    fn admit_init(&mut self, init: &InitHeader, sender: InitSender) -> Result<(), CoreError> {
+        if self.prekeys.may_init(init.spk_id, sender) {
+            return Ok(());
+        }
+        if self.prekeys.first_refusal(init.spk_id, sender) {
+            self.emit(Event::Warning {
+                reason: FailReason::Rejected,
+            });
+        }
+        Err(CoreError::Conflict)
+    }
+
+    /// Spends what an authenticated init used: its one-time prekey, and a
+    /// place among the inits remembered, so that a copy of it is refused
+    /// later. Saved before anything goes out; a prekey that filled up is
+    /// rotated and published.
+    fn spend_init(&mut self, init: &InitHeader, sender: InitSender) {
+        if let Some(id) = init.opk_id {
+            self.prekeys.take_opk(id);
+        }
+        let rotated = self.prekeys.remember_init(
+            init.spk_id,
+            init.ephemeral,
+            sender,
+            self.now,
+            &mut self.rng,
+        );
+        self.persist_prekeys();
+        if rotated {
+            self.publish_keys(false);
+        }
     }
 
     /// Someone new is a request until their `Hello` names one of our

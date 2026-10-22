@@ -305,9 +305,6 @@ fn some_requests_fail_quietly() {
 /// items out again, which is no news to the user, nor a reason to start
 /// the session afresh.
 #[test]
-#[ignore = "known bug: an inbox item handed out again after its ack was lost no longer \
-            decrypts (its message key is spent), so each re-read warns DecryptFailed and \
-            restarts the session with the sender"]
 fn items_read_again_after_a_lost_confirmation_are_no_news() {
     for fault in [Fault::Ignore, Fault::Error(ErrorCode::Internal)] {
         let (w, from) = back_to_the_inbox(|m| matches!(m, ClientMsg::InboxAck { .. }), fault);

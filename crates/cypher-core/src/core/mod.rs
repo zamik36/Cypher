@@ -287,9 +287,26 @@ impl<R: CryptoRngCore> Core<R> {
             effects: Vec::new(),
         };
         core.adopt_legacy_sessions(legacy, &mut skipped);
+        if core.prekeys.take_unseeded() {
+            core.seed_accepted_inits();
+        }
         core.pick_up(&skipped, fresh_prekeys, inboxes_new);
         let effects = std::mem::take(&mut core.effects);
         Ok((core, effects))
+    }
+
+    /// Prekeys saved before the inits accepted were remembered with them:
+    /// the inits the sessions still remember are taken as accepted, so a
+    /// copy of one stays refused once its session forgets it.
+    fn seed_accepted_inits(&mut self) {
+        let mut ephemerals: Vec<[u8; 32]> = self
+            .sessions
+            .values()
+            .flat_map(|s| s.accepted_ephemerals.iter().copied())
+            .collect();
+        ephemerals.sort_unstable();
+        self.prekeys.seed_inits(&ephemerals);
+        self.persist_prekeys();
     }
 
     /// What a restored core stores, tells and asks for again: state it

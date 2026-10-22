@@ -14,6 +14,11 @@ pub enum CryptoError {
     TooManySkipped,
     #[error("session cannot send before it has received")]
     NotReady,
+    /// A byte-for-byte copy of a message the session already decrypted.
+    /// Told apart before any key is derived, not by a failed check, so it
+    /// says nothing about why authentication of other input fails.
+    #[error("message already decrypted")]
+    Duplicate,
 }
 
 impl From<CryptoError> for cypher_types::Error {

@@ -3,7 +3,7 @@
     reason = "test helpers fail loudly on broken fixtures"
 )]
 
-use cypher_crypto::double_ratchet::MAX_SKIP;
+use cypher_crypto::double_ratchet::{MAX_DECRYPTED, MAX_SKIP};
 use cypher_crypto::handshake::{self, InitHeader};
 use cypher_crypto::prekey::SignedPreKey;
 use cypher_crypto::{
@@ -224,7 +224,7 @@ fn chain_skipped_only_via_previous_counter() {
 }
 
 #[test]
-fn tampering_does_not_desync_and_replay_fails() {
+fn tampering_does_not_desync_and_a_replay_is_a_duplicate() {
     let (mut a, mut b) = establish(false);
     let m = send(&mut a, b"payload");
 
@@ -236,7 +236,130 @@ fn tampering_does_not_desync_and_replay_fails() {
     assert_eq!(recv(&mut b, &bad_header), Err(CryptoError::Aead));
 
     assert_eq!(recv(&mut b, &m).unwrap(), b"payload");
-    assert_eq!(recv(&mut b, &m), Err(CryptoError::Aead));
+    assert_eq!(recv(&mut b, &m), Err(CryptoError::Duplicate));
+}
+
+/// A message decrypted on each kind of path: in order, out of order from
+/// the skipped store, on a chain since left behind, on the current chain.
+/// A copy of any of them is a duplicate, and the session does not move.
+#[test]
+fn a_copy_of_a_decrypted_message_is_a_duplicate_and_changes_nothing() {
+    let (mut a, mut b) = establish(true);
+    let late = send(&mut a, b"late");
+    let in_order = send(&mut a, b"in order");
+    assert_eq!(recv(&mut b, &in_order).unwrap(), b"in order");
+    assert_eq!(recv(&mut b, &late).unwrap(), b"late");
+    let reply = send(&mut b, b"reply");
+    assert_eq!(recv(&mut a, &reply).unwrap(), b"reply");
+    let current = send(&mut a, b"current chain");
+    assert_eq!(recv(&mut b, &current).unwrap(), b"current chain");
+
+    for copy in [&late, &in_order, &current] {
+        let before = b.to_bytes();
+        assert_eq!(recv(&mut b, copy), Err(CryptoError::Duplicate));
+        assert_eq!(*b.to_bytes(), *before, "state untouched");
+    }
+    let next = send(&mut a, b"next");
+    assert_eq!(recv(&mut b, &next).unwrap(), b"next");
+    let back = send(&mut b, b"back");
+    assert_eq!(recv(&mut a, &back).unwrap(), b"back");
+}
+
+/// A message altered in any part (a copy of one read, or one never read),
+/// or read with other associated data, fails like any forgery, and no
+/// failure moves the session: the message it stood for still decrypts.
+#[test]
+fn altered_messages_fail_and_change_nothing() {
+    let (mut a, mut b) = establish(false);
+    let read = send(&mut a, b"read");
+    assert_eq!(recv(&mut b, &read).unwrap(), b"read");
+    let fresh = send(&mut a, b"fresh");
+
+    let mut body = read.clone();
+    body.1[0] ^= 1;
+    let mut tag = read.clone();
+    *tag.1.last_mut().unwrap() ^= 1;
+    let mut counter = read.clone();
+    counter.0.pn += 1;
+    let mut tampered = fresh.clone();
+    tampered.1[0] ^= 1;
+    let mut spent_position = fresh.clone();
+    spent_position.0.n = read.0.n;
+    let mut far_ahead = fresh.clone();
+    far_ahead.0.n += MAX_SKIP + 1;
+    let mut foreign_key = fresh.clone();
+    foreign_key.0.dh = [9; 32];
+    for (name, forged, error) in [
+        ("altered body", &body, CryptoError::Aead),
+        ("altered tag", &tag, CryptoError::Aead),
+        ("altered header", &counter, CryptoError::Aead),
+        ("tampered fresh message", &tampered, CryptoError::Aead),
+        (
+            "fresh at a spent position",
+            &spent_position,
+            CryptoError::Aead,
+        ),
+        ("far ahead", &far_ahead, CryptoError::TooManySkipped),
+        ("unknown ratchet key", &foreign_key, CryptoError::Aead),
+    ] {
+        let before = b.to_bytes();
+        assert_eq!(recv(&mut b, forged), Err(error), "{name}");
+        assert_eq!(*b.to_bytes(), *before, "{name}: state untouched");
+    }
+    let before = b.to_bytes();
+    assert_eq!(
+        b.decrypt(&read.0, &read.1, b"other context", &mut OsRng),
+        Err(CryptoError::Aead)
+    );
+    assert_eq!(*b.to_bytes(), *before, "other context: state untouched");
+
+    assert_eq!(recv(&mut b, &fresh).unwrap(), b"fresh");
+}
+
+/// A session knows copies of the last [`MAX_DECRYPTED`] messages it
+/// decrypted; a copy of an older one fails like any spent key.
+#[test]
+#[cfg_attr(miri, ignore = "hundreds of messages; minutes under Miri")]
+fn copies_are_known_for_the_last_messages_decrypted() {
+    let (mut a, mut b) = establish(false);
+    let sent: Vec<_> = (0..=MAX_DECRYPTED).map(|_| send(&mut a, b"x")).collect();
+    for m in &sent {
+        recv(&mut b, m).unwrap();
+    }
+    assert_eq!(recv(&mut b, &sent[0]), Err(CryptoError::Aead), "forgotten");
+    assert_eq!(recv(&mut b, &sent[1]), Err(CryptoError::Duplicate));
+    assert_eq!(
+        recv(&mut b, &sent[MAX_DECRYPTED]),
+        Err(CryptoError::Duplicate)
+    );
+}
+
+/// A session that replaces another takes over which messages the old one
+/// decrypted: a copy of one is a duplicate there too, and changes nothing.
+#[test]
+fn a_new_session_knows_the_copies_of_the_one_it_replaces() {
+    let (mut a, mut b) = establish(false);
+    let read = send(&mut a, b"read in the old session");
+    recv(&mut b, &read).unwrap();
+    let (mut a2, mut b2) = establish(false);
+    b2.inherit_decrypted(&mut b);
+
+    let before = b2.to_bytes();
+    assert_eq!(recv(&mut b2, &read), Err(CryptoError::Duplicate));
+    assert_eq!(*b2.to_bytes(), *before, "state untouched");
+    let fresh = send(&mut a2, b"new session");
+    assert_eq!(recv(&mut b2, &fresh).unwrap(), b"new session");
+}
+
+/// Which messages were decrypted is not saved: once restored, a copy of
+/// one fails like any message whose key is spent.
+#[test]
+fn a_restored_session_does_not_know_its_copies() {
+    let (mut a, mut b) = establish(false);
+    let read = send(&mut a, b"read");
+    assert_eq!(recv(&mut b, &read).unwrap(), b"read");
+    let mut restored = Ratchet::from_bytes(&b.to_bytes()).unwrap();
+    assert_eq!(recv(&mut restored, &read), Err(CryptoError::Aead));
 }
 
 #[test]
@@ -397,7 +520,7 @@ proptest! {
                     let (msg, body) = queue.remove(pick % queue.len());
                     prop_assert_eq!(recv(receiver, &msg).unwrap(), body);
                     if dup {
-                        prop_assert!(recv(receiver, &msg).is_err());
+                        prop_assert_eq!(recv(receiver, &msg), Err(CryptoError::Duplicate));
                     }
                 }
             }

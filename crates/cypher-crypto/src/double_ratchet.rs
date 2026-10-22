@@ -1,7 +1,8 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -16,6 +17,13 @@ pub const MAX_SKIP: u32 = 1000;
 
 /// Most skipped keys retained per session; the oldest are evicted first.
 const MAX_STORED_SKIPPED: usize = 2000;
+
+/// Messages a session remembers having decrypted, so that a copy of one
+/// coming again (an inbox item handed out again after its ack was lost, a
+/// frame replayed) is known as such rather than failing as if the session
+/// had drifted apart. The core holds it to several inbox batches; 8 KiB of
+/// digests per session.
+pub const MAX_DECRYPTED: usize = 256;
 
 const SNAPSHOT_VERSION: u8 = 2;
 const AAD_CONTEXT: &[u8] = b"cypher/v2";
@@ -98,6 +106,32 @@ impl Drop for SkippedKeys {
     }
 }
 
+/// Digests of the last [`MAX_DECRYPTED`] messages decrypted.
+#[derive(Default)]
+struct Decrypted {
+    set: HashSet<[u8; 32]>,
+    /// Oldest first.
+    order: VecDeque<[u8; 32]>,
+}
+
+impl Decrypted {
+    fn contains(&self, digest: &[u8; 32]) -> bool {
+        self.set.contains(digest)
+    }
+
+    fn insert(&mut self, digest: [u8; 32]) {
+        if !self.set.insert(digest) {
+            return;
+        }
+        self.order.push_back(digest);
+        while self.order.len() > MAX_DECRYPTED {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// Double Ratchet session state (Signal spec, HMAC chain KDF, AES-256-GCM).
 pub struct Ratchet {
     ad: [[u8; 32]; 2],
@@ -111,6 +145,9 @@ pub struct Ratchet {
     nr: u32,
     pn: u32,
     skipped: SkippedKeys,
+    /// The last [`MAX_DECRYPTED`] messages decrypted. In memory only: not
+    /// part of the snapshot.
+    decrypted: Decrypted,
 }
 
 struct Step {
@@ -150,6 +187,7 @@ impl Ratchet {
             nr: 0,
             pn: 0,
             skipped: SkippedKeys::default(),
+            decrypted: Decrypted::default(),
         })
     }
 
@@ -166,6 +204,7 @@ impl Ratchet {
             nr: 0,
             pn: 0,
             skipped: SkippedKeys::default(),
+            decrypted: Decrypted::default(),
         }
     }
 
@@ -201,6 +240,27 @@ impl Ratchet {
         Ok((header, ct))
     }
 
+    /// Takes over which messages `older`, the session this one replaces with
+    /// the same device, decrypted: a copy of one is a
+    /// [`CryptoError::Duplicate`] here too. What this session decrypted
+    /// counts as the more recent. Only for the same device: a digest does
+    /// not name the session it was read in.
+    pub fn inherit_decrypted(&mut self, older: &mut Self) {
+        let newer = std::mem::replace(&mut self.decrypted, std::mem::take(&mut older.decrypted));
+        for digest in newer.order {
+            self.decrypted.insert(digest);
+        }
+    }
+
+    /// Decrypts a message and moves the session on. On any error the
+    /// session is left exactly as it was.
+    ///
+    /// A byte-for-byte copy of one of the last [`MAX_DECRYPTED`] messages
+    /// decrypted fails with [`CryptoError::Duplicate`]: its key is spent, and
+    /// it carries nothing new. Only an exact copy does: a message at a spent
+    /// position that differs in any byte fails authentication, as it may
+    /// come from a peer whose state went back in time, which only a fresh
+    /// session repairs.
     pub fn decrypt(
         &mut self,
         header: &Header,
@@ -209,16 +269,22 @@ impl Ratchet {
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, CryptoError> {
         let aad = self.aad(header, extra_aad);
+        let digest = message_digest(header, extra_aad, ciphertext);
+        if self.decrypted.contains(&digest) {
+            return Err(CryptoError::Duplicate);
+        }
         let key = (header.dh, header.n);
         if let Some(mk) = self.skipped.get(&key) {
             let pt = open(mk, &aad, ciphertext)?;
             self.skipped.remove(&key);
+            self.decrypted.insert(digest);
             return Ok(pt);
         }
 
         let plan = self.plan(header, rng)?;
         let pt = open(&plan.mk, &aad, ciphertext)?;
         self.commit(header, plan);
+        self.decrypted.insert(digest);
         Ok(pt)
     }
 
@@ -329,6 +395,7 @@ impl Ratchet {
             nr: s.nr,
             pn: s.pn,
             skipped,
+            decrypted: Decrypted::default(),
         })
     }
 }
@@ -414,6 +481,23 @@ fn skip_chain(
         *ck = next;
     }
     Ok(ck)
+}
+
+/// What tells one message from any other: a hash of what travels of it
+/// (header and ciphertext) and the associated data the caller adds. The
+/// session's own identities are left out, so that a session that replaces
+/// another with the same device still knows its copies; the identities
+/// order differently depending on which side started the session. Not
+/// secret: all of it is in the clear.
+fn message_digest(header: &Header, extra_aad: &[u8], ciphertext: &[u8]) -> [u8; 32] {
+    let extra_len = u64::try_from(extra_aad.len()).unwrap_or(u64::MAX);
+    Sha256::new()
+        .chain_update(header.encode())
+        .chain_update(extra_len.to_le_bytes())
+        .chain_update(extra_aad)
+        .chain_update(ciphertext)
+        .finalize()
+        .into()
 }
 
 fn open(mk: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {

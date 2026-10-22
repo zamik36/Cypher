@@ -157,8 +157,10 @@ impl Session {
     }
 
     /// Keeps what belongs to the device rather than the old session: its
-    /// inbox and the inits seen from it. Our `Hello` goes out again.
-    pub(crate) fn carry_over(&mut self, old: Self) {
+    /// inbox, the inits seen from it and which of its messages were read,
+    /// so that a copy of one is still known. Our `Hello` goes out again.
+    pub(crate) fn carry_over(&mut self, mut old: Self) {
+        self.ratchet.inherit_decrypted(&mut old.ratchet);
         self.inbox = old.inbox;
         self.accepted_ephemerals = old.accepted_ephemerals;
     }
