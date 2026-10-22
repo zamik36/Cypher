@@ -487,7 +487,8 @@ fn deletion(vault: &Vault, key: &[u8], value: &[u8]) -> cypher_core::MessageDele
     cypher_core::message_deletion(key, msg.as_ref())
 }
 
-/// The key of the status row of the message stored under `key`.
+/// The id of the message stored under `key`, which also keys its status
+/// row; `undefined` for a key that is not a message key.
 #[wasm_bindgen(js_name = messageId, unchecked_return_type = "Uint8Array<ArrayBuffer> | undefined")]
 pub fn message_id(key: &[u8]) -> Option<Vec<u8>> {
     cypher_core::message_id(key).map(MsgId::to_vec)

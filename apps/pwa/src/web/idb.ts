@@ -84,14 +84,15 @@ export async function scan(
 
 /**
  * Up to `limit` rows of `messages` in each of `ranges`, newest first, each
- * with the row `statusKey` names in `message_status`: one transaction for
- * them all, rather than one per row.
+ * with its row in `message_status`, keyed by the id `messageId` reads from
+ * the message key (none when it reads none): one transaction for them all,
+ * rather than one per row.
  */
 export async function messageRows(
   db: IDBDatabase,
   ranges: IDBKeyRange[],
   limit: number,
-  statusKey: (key: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer> | undefined,
+  messageId: (key: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer> | undefined,
 ): Promise<MessageRow[][]> {
   const tx = db.transaction(["messages", "message_status"], "readonly");
   const messages = tx.objectStore("messages");
@@ -108,7 +109,7 @@ export async function messageRows(
         undefined,
       ];
       rows.push(row);
-      const key = statusKey(row[0]);
+      const key = messageId(row[0]);
       if (key) {
         const status = statuses.get(key);
         status.onsuccess = () => {

@@ -94,9 +94,9 @@ describe("idb", () => {
       { kind: "put", table: "message_status", key: key(2), value: key(42) },
     ]);
     const span = (peer: number) => IDBKeyRange.bound(key(peer), key(peer, 9));
-    // The status row of a message is named by its key's last byte here.
-    const statusKey = (k: Uint8Array<ArrayBuffer>) => k.subarray(k.length - 1);
-    const got = await messageRows(db, [span(1), span(3), span(5)], 2, statusKey);
+    // A message's id is its key's last byte here.
+    const messageId = (k: Uint8Array<ArrayBuffer>) => k.subarray(k.length - 1);
+    const got = await messageRows(db, [span(1), span(3), span(5)], 2, messageId);
     const shown = got.map((list) => list.map(([k, , s]) => [[...k], s ? [...s] : null]));
     expect(shown).toEqual([
       [
