@@ -46,6 +46,16 @@ pub(crate) async fn voice_start<R: Runtime>(
     .await
     .map_err(err)?
     .map_err(err)?;
+    keep_recorder(&state, ticket, recorder).await
+}
+
+/// Keeps `recorder`, started with `ticket`, as the note being recorded, or
+/// closes it again.
+pub(crate) async fn keep_recorder(
+    state: &AppState,
+    ticket: u64,
+    recorder: Recorder,
+) -> CmdResult<()> {
     let (recorder, reason) = match state.voice.keep(ticket, recorder) {
         Ok(()) => return Ok(()),
         Err(NotKept::AlreadyRecording(recorder)) => (recorder, "already recording"),
