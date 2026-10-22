@@ -17,6 +17,7 @@ import init, {
   type SealedIdentity,
 } from "../wasm/cypher_wasm.js";
 import { applyOps, clear, get, keys, messageRows, openDb, put, remove, scan, STORES } from "./idb";
+import { clearHistory } from "./clearing";
 import { deleteRows as deleteStoredRows } from "./deletion";
 import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
@@ -702,13 +703,11 @@ const handlers: Handlers = {
   history: (peer, limit, before) => history(peer, Math.min(limit, 500), before),
   sendMedia,
   mediaBlob,
-  clearHistory: async () => {
-    await clear(db, ["messages", "message_status", "media"]);
-    const root = await navigator.storage.getDirectory();
-    await Promise.all(
-      ["media", "downloads"].map((dir) => root.removeEntry(dir, { recursive: true }).catch(() => undefined)),
-    );
-  },
+  clearHistory: () =>
+    clearHistory({
+      clearRows: () => clear(db, ["messages", "message_status", "media"]),
+      root: () => navigator.storage.getDirectory(),
+    }),
 };
 
 self.onmessage = async ({ data: { id, method, args } }: MessageEvent<Request>) => {
