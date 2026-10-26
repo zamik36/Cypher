@@ -216,11 +216,13 @@ pub fn event(e: &Event) -> Option<(&'static str, UiPayload)> {
         }
         Event::TransferComplete { file_id } => ("file_complete", UiPayload::Text(file_id.to_hex())),
         Event::TransferFailed { file_id, reason } => ("file_failed", failed(file_id, *reason)),
-        Event::JoinFailed { reason, .. }
-        | Event::CreateLinkFailed { reason, .. }
-        | Event::Warning { reason } => ("error", UiPayload::Reason(*reason)),
+        Event::Warning { reason } => ("error", UiPayload::Reason(*reason)),
         Event::PushKey { .. } | Event::PushRegistered | Event::PushUnavailable => push(e),
-        Event::LinkCreated { .. } | Event::Bootstrap { .. } => return None,
+        // Answers to commands, which the command's caller reports itself.
+        Event::LinkCreated { .. } | Event::CreateLinkFailed { .. } | Event::JoinFailed { .. } => {
+            return None;
+        }
+        Event::Bootstrap { .. } => return None,
     })
 }
 
@@ -664,12 +666,6 @@ mod tests {
             }),
             ("error", json!("timeout"))
         );
-        let join = Event::JoinFailed {
-            id: CommandId(1),
-            link: "x".into(),
-            reason: FailReason::InvalidLink,
-        };
-        assert_eq!(ui(&join), ("error", json!("invalid_link")));
         let peer = PeerId([2; 32]);
         assert_eq!(
             ui(&Event::PeerAdded {
@@ -748,6 +744,16 @@ mod tests {
             Event::LinkCreated {
                 id: CommandId(1),
                 link: "l".into(),
+            },
+            // Answers to commands: the caller tells the user, not a toast.
+            Event::CreateLinkFailed {
+                id: CommandId(1),
+                reason: FailReason::Offline,
+            },
+            Event::JoinFailed {
+                id: CommandId(1),
+                link: "x".into(),
+                reason: FailReason::InvalidLink,
             },
             Event::Bootstrap {
                 relay_addr: String::new(),
