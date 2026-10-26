@@ -1123,13 +1123,14 @@ impl<R: CryptoRngCore> Core<R> {
     /// release that kept their skipped keys inside: in a line of their
     /// own, so that rows an earlier, unfinished attempt left are not
     /// theirs.
-    fn tidy_session_rows(&mut self, stale: Vec<Vec<u8>>, mut migrated: Vec<Addr>) {
+    fn tidy_session_rows(&mut self, stale: Vec<Vec<u8>>, migrated: HashSet<Addr>) {
         for key in stale {
             self.persist(StoreOp::Delete {
                 table: Table::Sessions,
                 key,
             });
         }
+        let mut migrated: Vec<Addr> = migrated.into_iter().collect();
         migrated.sort_unstable();
         for addr in migrated {
             let lineage = self.rng.next_u64();
@@ -1243,7 +1244,7 @@ struct LoadedSessions {
     /// of a session deleted or replaced since.
     stale: Vec<Vec<u8>>,
     /// Sessions read from a release that kept their skipped keys inside.
-    migrated: Vec<Addr>,
+    migrated: HashSet<Addr>,
 }
 
 /// Sessions with the devices of known contacts and our own other devices,
@@ -1277,9 +1278,11 @@ fn load_sessions(
         match Session::from_record(&record, now_ms) {
             Ok(session) if addr.peer == own || peers.contains_key(&addr.peer) => {
                 if record.migrated {
-                    load.out.migrated.push(addr);
+                    load.out.migrated.insert(addr);
                 }
-                load.present.insert(addr, record.spent.clone());
+                let mut spent = record.spent.clone();
+                spent.sort_unstable();
+                load.present.insert(addr, spent);
                 load.out.sessions.insert(addr, session);
             }
             Ok(_) => {}
@@ -1305,7 +1308,8 @@ fn load_sessions(
 struct SessionLoader<'a> {
     vault: &'a Vault,
     out: LoadedSessions,
-    /// Every session row there is, read or not, and what each spent.
+    /// Every session row there is, read or not, and what each spent
+    /// (sorted).
     present: HashMap<Addr, Vec<u64>>,
     /// The digests each restored session stored.
     decrypted: BTreeMap<Addr, Vec<(u64, [u8; 32])>>,
@@ -1330,7 +1334,7 @@ impl SessionLoader<'_> {
             // Its session is left behind, and so is it.
             return Ok(());
         };
-        if self.out.migrated.contains(&addr) || spent.contains(&seq) {
+        if self.out.migrated.contains(&addr) || spent.binary_search(&seq).is_ok() {
             self.out.stale.push(k.to_vec());
             return Ok(());
         }
@@ -1359,6 +1363,12 @@ impl SessionLoader<'_> {
             }
             return Ok(());
         };
+        if self.out.migrated.contains(&addr) {
+            // Releases that kept skipped keys inside kept no digests: it is
+            // left from an unfinished migration, and stored again.
+            self.out.stale.push(k.to_vec());
+            return Ok(());
+        }
         let Some(record) = skipped.open::<DecryptedRecord>(self.vault, Table::Sessions, k, v)?
         else {
             return Ok(());
