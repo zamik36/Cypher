@@ -14,6 +14,7 @@ mod replays;
 mod requests;
 pub(crate) mod rows;
 mod skipped;
+mod stops;
 mod transfers;
 
 use bytes::Bytes;

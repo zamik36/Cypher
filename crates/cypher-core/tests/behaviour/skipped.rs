@@ -31,7 +31,7 @@ fn warned(w: &World, i: usize, from: usize) -> bool {
 }
 
 /// A sends `texts` to B, which the server holds back from B.
-fn held(w: &mut World, texts: &[&str]) -> Vec<Bytes> {
+pub(super) fn held(w: &mut World, texts: &[&str]) -> Vec<Bytes> {
     w.hold_for(B, |w| {
         for text in texts {
             w.send_text(A, B, text);
@@ -87,19 +87,19 @@ fn late_messages_from_chains_left_behind_are_read_after_a_restart() {
 /// of [`late_messages_from_chains_left_behind_are_read_after_a_restart`],
 /// just before B restarts.
 #[derive(Deserialize)]
-struct Fixture {
-    seed: [u8; 32],
-    device: u32,
-    now: u64,
+pub(super) struct Fixture {
+    pub(super) seed: [u8; 32],
+    pub(super) device: u32,
+    pub(super) now: u64,
     /// `(table, key, sealed value)`.
-    rows: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    pub(super) rows: Vec<(u8, Vec<u8>, Vec<u8>)>,
     late: Vec<Vec<u8>>,
     texts: Vec<String>,
 }
 
-const FIXTURE: &[u8] = include_bytes!("../fixtures/session_v2.bin");
+pub(super) const FIXTURE: &[u8] = include_bytes!("../fixtures/session_v2.bin");
 
-fn snapshot(rows: &[(u8, Vec<u8>, Vec<u8>)]) -> Snapshot {
+pub(super) fn snapshot(rows: &[(u8, Vec<u8>, Vec<u8>)]) -> Snapshot {
     let pick = |t: Table| {
         rows.iter()
             .filter(|(table, ..)| *table == t as u8)
@@ -128,7 +128,7 @@ fn apply(rows: &mut Vec<(u8, Vec<u8>, Vec<u8>)>, effects: Vec<Effect>) -> Vec<Ev
     events
 }
 
-fn write(rows: &mut Vec<(u8, Vec<u8>, Vec<u8>)>, op: StoreOp) {
+pub(super) fn write(rows: &mut Vec<(u8, Vec<u8>, Vec<u8>)>, op: StoreOp) {
     match op {
         StoreOp::Put { table, key, value } => {
             rows.retain(|(t, k, _)| (*t, k) != (table as u8, &key));
@@ -329,7 +329,7 @@ impl Record for ContactV4 {
 }
 
 /// Client `i`'s stored rows, as `(table, key, sealed value)`.
-fn rows_of(w: &World, i: usize) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
+pub(super) fn rows_of(w: &World, i: usize) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
     w.clients[i]
         .kv
         .iter()
@@ -421,7 +421,7 @@ fn skipped_keys_are_stored_beside_their_session_and_go_with_it() {
 }
 
 /// How long a key set aside for a late message is kept: 30 days.
-const KEPT_MS: u64 = 30 * 24 * 3600 * 1000;
+pub(super) const KEPT_MS: u64 = 30 * 24 * 3600 * 1000;
 
 /// A key kept for a late message is kept 30 days and deleted once they are
 /// over: the message, coming later still, is not read, and warns.

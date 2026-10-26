@@ -75,7 +75,7 @@ fn sent_toward(w: &World, i: usize, to: usize) -> Vec<Bytes> {
 }
 
 /// A frame that hands `body` to client `to` from `from` over the session.
-fn over_session(from: Addr, body: Bytes) -> Bytes {
+pub(super) fn over_session(from: Addr, body: Bytes) -> Bytes {
     Frame::new(
         0,
         ServerMsg::Recv {
@@ -89,7 +89,7 @@ fn over_session(from: Addr, body: Bytes) -> Bytes {
 
 /// The body of the last end-to-end message client `i` was handed by the
 /// server.
-fn last_message_from(w: &World, i: usize) -> Bytes {
+pub(super) fn last_message_from(w: &World, i: usize) -> Bytes {
     let peer = w.peer(i);
     crate::delivered_bodies(w)
         .into_iter()
@@ -100,7 +100,7 @@ fn last_message_from(w: &World, i: usize) -> Bytes {
 }
 
 /// `body` with the last byte of its ciphertext (the AEAD tag) flipped.
-fn altered(body: &Bytes) -> Bytes {
+pub(super) fn altered(body: &Bytes) -> Bytes {
     let mut raw = body.to_vec();
     if let Some(last) = raw.last_mut() {
         *last ^= 1;
@@ -271,7 +271,7 @@ fn after_a_fresh_session_and_a_restart_copies_from_both_are_no_news() {
 }
 
 /// The init a frame delivered to client `to` carries, if any.
-fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
+pub(super) fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
     let body = match Frame::<ServerMsg>::decode(raw.clone()).ok()?.msg {
         ServerMsg::Recv { body, .. } => body,
         ServerMsg::RecvSealed { item } => open_item(w, to, &item)?.1,

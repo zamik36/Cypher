@@ -33,6 +33,32 @@ impl Record for Session {
     const VERSION: u8 = 3;
 }
 
+/// A skipped message key stored beside its session.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SkippedKey {
+    pub lineage: u64,
+    pub dh: [u8; 32],
+    pub n: u32,
+    pub mk: [u8; 32],
+    pub created_ms: u64,
+}
+
+impl Record for SkippedKey {
+    const VERSION: u8 = 1;
+}
+
+/// The digest of a message a session decrypted, stored beside it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DecryptedRow {
+    pub lineage: u64,
+    pub seq: u64,
+    pub digest: [u8; 32],
+}
+
+impl Record for DecryptedRow {
+    const VERSION: u8 = 1;
+}
+
 /// One device a message goes to.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Target {
