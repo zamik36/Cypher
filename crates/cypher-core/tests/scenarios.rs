@@ -431,6 +431,70 @@ fn invites_joined_at_once_answer_their_own_commands() {
     assert!(added.contains(&(CommandId(7), a)) && added.contains(&(CommandId(8), b)));
 }
 
+/// One invite joined twice at once (a double submit, a deep link and a
+/// paste): each join is answered under its own id, the contact added once.
+#[test]
+fn one_invite_joined_twice_at_once_answers_both() {
+    let mut w = World::new(2);
+    let a = w.peer(A);
+    let link = w.create_link(A);
+    for id in [5, 6] {
+        let (id, link) = (CommandId(id), link.clone());
+        w.queue(B, Command::JoinLink { id, link });
+    }
+    w.run();
+    let answers = answered(&w, B, |e| match e {
+        Event::PeerAdded {
+            peer,
+            joined: Some(id),
+        } => Some((*id, Some(*peer))),
+        Event::JoinFailed { id, .. } => Some((*id, None)),
+        _ => None,
+    });
+    assert_eq!(answers, [(CommandId(5), Some(a)), (CommandId(6), Some(a))]);
+    w.advance(30_000);
+    assert_eq!(
+        answered(&w, B, |e| matches!(e, Event::JoinFailed { .. })
+            .then_some(())),
+        []
+    );
+}
+
+/// One invite joined again while the first join of it is still fetching
+/// the host's keys: the second is answered as soon as the first is.
+#[test]
+fn an_invite_joined_again_while_its_keys_come_answers_both() {
+    let mut w = World::new(2);
+    let link = w.create_link(A);
+    w.server.faults.push(Rule::times(
+        1,
+        |m| matches!(m, ClientMsg::FetchKeys { .. }),
+        Fault::Ignore,
+    ));
+    let join = |id| Command::JoinLink {
+        id: CommandId(id),
+        link: link.clone(),
+    };
+    w.command(B, join(1));
+    w.command(B, join(2));
+    w.advance(30_000);
+    let answers = answered(&w, B, |e| match e {
+        Event::PeerAdded {
+            peer,
+            joined: Some(id),
+        } => Some((*id, Ok(*peer))),
+        Event::JoinFailed { id, reason, .. } => Some((*id, Err(*reason))),
+        _ => None,
+    });
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert!(
+        answers.iter().all(|(_, r)| *r == answers[0].1),
+        "{answers:?}"
+    );
+    assert!(answers.iter().any(|(id, _)| *id == CommandId(1)));
+    assert!(answers.iter().any(|(id, _)| *id == CommandId(2)));
+}
+
 /// An invite the server refuses fails its own command only, never another
 /// one made meanwhile.
 #[test]

@@ -652,9 +652,7 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::FetchKeys { addr, .. } => self.on_join_keys_failed(addr.peer, reason),
             Pending::FetchDevices { peer, purpose } => match (purpose, reason) {
                 (purpose, FailReason::NotFound) => self.on_devices(peer, purpose, None),
-                (DevicesFor::Join { id, link }, reason) => {
-                    self.emit(Event::JoinFailed { id, link, reason });
-                }
+                (DevicesFor::Join, reason) => self.join_failed(peer, Some(reason)),
                 (DevicesFor::Own | DevicesFor::Refresh, _) => {}
             },
             Pending::PublishDevices { linked, .. } => {
@@ -947,14 +945,16 @@ impl<R: CryptoRngCore> Core<R> {
             self.emit(Event::JoinFailed { id, link, reason });
             return;
         }
-        self.request(
-            ClientMsg::FetchDevices { peer },
-            Pending::FetchDevices {
-                peer,
-                purpose: DevicesFor::Join { id, link },
-            },
-            true,
-        );
+        if self.start_join(id, link, peer) {
+            self.request(
+                ClientMsg::FetchDevices { peer },
+                Pending::FetchDevices {
+                    peer,
+                    purpose: DevicesFor::Join,
+                },
+                true,
+            );
+        }
     }
 
     /// Sends a request and tracks it for correlation and timeout. Anonymous

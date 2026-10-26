@@ -27,14 +27,14 @@ const REFRESH_INTERVAL_MS: u64 = 10 * 60_000;
 const MAX_CONFLICTS: u8 = 3;
 
 /// Why a device list was asked for.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum DevicesFor {
     /// Our own: are we still on it?
     Own,
     /// A contact's, which may have changed.
     Refresh,
-    /// The host of an invite we are joining by, for `JoinLink` `id`.
-    Join { id: CommandId, link: String },
+    /// The host of an invite we are joining by (see `Core::joining`).
+    Join,
 }
 
 /// A device this one just linked, for `LinkDevice` `id`.
@@ -184,8 +184,13 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn on_devices(&mut self, peer: PeerId, purpose: DevicesFor, list: Option<&[u8]>) {
         let list = match list.map(DeviceList::decode) {
             Some(Ok(list)) if list.identity() == peer => Some(list),
-            // Forged or broken: as good as none.
-            Some(_) => return,
+            // Forged or broken: as good as none. A join waits no more for it.
+            Some(_) => {
+                if matches!(purpose, DevicesFor::Join) {
+                    self.join_failed(peer, None);
+                }
+                return;
+            }
             None => None,
         };
         match purpose {
@@ -195,7 +200,7 @@ impl<R: CryptoRngCore> Core<R> {
                     self.learn_devices(peer, list);
                 }
             }
-            DevicesFor::Join { id, link } => self.join_devices(id, &link, peer, list),
+            DevicesFor::Join => self.join_devices(peer, list),
         }
     }
 
