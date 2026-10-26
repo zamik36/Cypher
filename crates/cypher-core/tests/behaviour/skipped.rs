@@ -319,6 +319,28 @@ fn a_skipped_key_that_ran_out_meanwhile_is_deleted_after_a_restart() {
     assert_eq!(rows_beside(&rows_of(&w, B), a), 0);
 }
 
+/// B's clock ran ten days ahead when it set a key aside, and was set right
+/// later: the key is deleted 30 days after the clock was set right, not
+/// ten days past that, whether or not B restarted meanwhile.
+#[test]
+fn a_skipped_key_dated_ahead_of_the_clock_is_kept_thirty_days_by_it() {
+    const DAY_MS: u64 = 24 * 3600 * 1000;
+    let mut w = paired();
+    let a = addr(&w, A);
+    held(&mut w, &["late"]);
+    w.clients[B].ahead = 10 * DAY_MS;
+    w.send_text(A, B, "on time");
+    w.clients[B].ahead = 0;
+    w.advance(500);
+    w.restart(B);
+    w.now += KEPT_MS - 1_000;
+    w.advance(500);
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 1, "kept until then");
+
+    w.advance(1_000);
+    assert_eq!(rows_beside(&rows_of(&w, B), a), 0, "deleted once over");
+}
+
 /// B takes a message that makes it set a key aside, or one that takes a
 /// key set aside, and the app stops after any of the rows that message
 /// writes (the rest are lost). Restored from what was written, B neither

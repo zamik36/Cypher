@@ -628,6 +628,44 @@ fn skipped_keys_open_their_messages_for_a_limited_time() {
     assert_eq!(open(&mut restored, &late[1], last).unwrap(), b"late 2");
 }
 
+/// The clock went back after a key was set aside: the key is taken as set
+/// aside now, from then on, and is stored again with that date; it does
+/// not outlive [`MAX_SKIPPED_AGE_MS`] by the clock's error, nor keep the
+/// keys set aside after it from expiring.
+#[test]
+fn a_key_dated_ahead_of_the_clock_expires_by_the_clock() {
+    const DAY: u64 = 24 * 3600 * 1000;
+    let (mut a, mut b) = establish(false);
+    let ahead = send(&mut a, b"dated ahead");
+    let on_time = send(&mut a, b"on time");
+    b.decrypt(&on_time.0, &on_time.1, b"", NOW + 10 * DAY, &mut OsRng)
+        .unwrap();
+    let behind = send(&mut a, b"dated right");
+    recv(&mut b, &send(&mut a, b"next")).unwrap();
+    let mut stored = Stored::of(&mut b);
+
+    assert!(b.expire_skipped(NOW), "the date ahead is taken back");
+    let changes = b.take_changes();
+    assert!(changes.spent.is_empty());
+    let redated: Vec<u64> = changes.stored.iter().map(SkippedKey::created_ms).collect();
+    assert_eq!(redated, [NOW], "stored again, dated now");
+    for key in changes.stored {
+        stored.keys.insert(key.seq(), key);
+    }
+    assert!(!b.expire_skipped(NOW + MAX_SKIPPED_AGE_MS - 1));
+
+    assert!(b.expire_skipped(NOW + MAX_SKIPPED_AGE_MS), "both expire");
+    assert_eq!(b.take_changes().spent.len(), 2);
+    let mut restored = stored.load();
+    let at = NOW + MAX_SKIPPED_AGE_MS;
+    for m in [&ahead, &behind] {
+        assert_eq!(
+            restored.decrypt(&m.0, &m.1, b"", at, &mut OsRng),
+            Err(CryptoError::Aead)
+        );
+    }
+}
+
 /// A session that replaces another numbers its skipped keys on from the
 /// old one's, and every key the old one stored is to be deleted; the new
 /// session's keys still open its own late messages.

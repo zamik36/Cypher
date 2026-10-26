@@ -120,6 +120,10 @@ pub(super) struct SkippedKeys {
     next_seq: u64,
     stored_upto: u64,
     spent: Vec<u64>,
+    /// No key kept is dated later than this.
+    newest_ms: u64,
+    /// Stored keys whose date was taken back to the clock: to store again.
+    redated: Vec<u64>,
 }
 
 impl SkippedKeys {
@@ -151,16 +155,21 @@ impl SkippedKeys {
     }
 
     /// Drops every key that outlived [`MAX_SKIPPED_AGE_MS`] at `now_ms`;
-    /// whether there was one. Keys are dated as they are set aside, oldest
-    /// first, so a look at the oldest tells, unless a clock went back.
+    /// whether anything changed. A key dated ahead of `now_ms` (the clock
+    /// went back since it was set aside) is dated `now_ms` instead, and
+    /// stored again so dated: it lives its time by the clock as it is now.
+    /// Keys are then dated in the order they were set aside, give or take
+    /// the one tick the clock went back in, so a look at the oldest tells
+    /// whether any expired.
     pub(super) fn expire(&mut self, now_ms: u64) -> bool {
+        let changed = self.newest_ms > now_ms && self.redate(now_ms);
         if !self
             .by_seq
             .values()
             .next()
             .is_some_and(|oldest| oldest.expired(now_ms))
         {
-            return false;
+            return changed;
         }
         let expired: Vec<u64> = self
             .by_seq
@@ -172,6 +181,26 @@ impl SkippedKeys {
             self.drop_seq(seq);
         }
         true
+    }
+
+    /// Dates every key dated ahead of `now_ms` at `now_ms`, to be stored
+    /// again if stored; whether there was one.
+    fn redate(&mut self, now_ms: u64) -> bool {
+        let ahead: Vec<u64> = self
+            .by_seq
+            .iter()
+            .filter(|(_, e)| e.created_ms > now_ms)
+            .map(|(&seq, _)| seq)
+            .collect();
+        for &seq in &ahead {
+            if let Some(entry) = self.by_seq.get_mut(&seq) {
+                entry.created_ms = now_ms;
+            }
+        }
+        self.redated
+            .extend(ahead.iter().copied().filter(|&seq| seq < self.stored_upto));
+        self.newest_ms = now_ms;
+        !ahead.is_empty()
     }
 
     pub(super) fn remove(&mut self, k: &SkipKey) {
@@ -204,6 +233,7 @@ impl SkippedKeys {
         let seq = self.next_seq;
         // A session sets aside at most `u64::MAX` keys in its lifetime.
         self.next_seq = seq.saturating_add(1);
+        self.newest_ms = self.newest_ms.max(created_ms);
         self.index.insert(key, seq);
         self.by_seq.insert(
             seq,
@@ -227,6 +257,7 @@ impl SkippedKeys {
             return false;
         }
         self.index.insert(key, stored.seq);
+        self.newest_ms = self.newest_ms.max(stored.created_ms);
         self.by_seq.insert(
             stored.seq,
             Entry {
@@ -244,13 +275,18 @@ impl SkippedKeys {
         true
     }
 
-    /// What changed since the last call: keys to store, and the numbers of
-    /// stored keys that are gone. Everything kept counts as stored from now
-    /// on.
+    /// What changed since the last call: keys to store (new, or stored and
+    /// dated anew), and the numbers of stored keys that are gone.
+    /// Everything kept counts as stored from now on.
     pub(super) fn take_changes(&mut self) -> (Vec<SkippedKey>, Vec<u64>) {
-        let stored = self
-            .by_seq
-            .range(self.stored_upto..)
+        let mut redated = std::mem::take(&mut self.redated);
+        redated.sort_unstable();
+        redated.dedup();
+        let stored = redated
+            .into_iter()
+            .filter(|&seq| seq < self.stored_upto)
+            .filter_map(|seq| self.by_seq.get_key_value(&seq))
+            .chain(self.by_seq.range(self.stored_upto..))
             .map(|(&seq, e)| SkippedKey::new(seq, e.key.0, e.key.1, e.mk, e.created_ms))
             .collect();
         self.stored_upto = self.next_seq;
