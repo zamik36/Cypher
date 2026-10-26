@@ -4,12 +4,14 @@
 
 use bytes::Bytes;
 use cypher_core::{
-    Command, Content, Core, Effect, Event, FailReason, Input, Snapshot, StoreOp, Table, session_key,
+    Command, Content, Core, Effect, Event, FailReason, Input, Record, Snapshot, StoreOp, Table,
+    Vault, session_key,
 };
 use cypher_crypto::IdentitySeed;
 use cypher_types::{Addr, DeviceId};
 use rand::SeedableRng;
-use serde::Deserialize;
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use super::{addr, events_since, rows};
 use crate::harness::{Rng, World};
@@ -159,11 +161,79 @@ fn texts_of(events: &[Event]) -> Vec<&str> {
 #[test]
 fn a_session_stored_with_its_skipped_keys_inside_still_reads_late_messages() {
     let fixture: Fixture = postcard::from_bytes(FIXTURE).unwrap();
+    reads_the_late_messages(&fixture, fixture.rows.clone());
+}
+
+/// Releases before session record version 2 kept the same ratchet
+/// snapshot, skipped keys inside, in a session record of version 1, and
+/// before that inside the contact's own record (version 4). B's rows from
+/// the fixture, written back in those shapes, read the three messages too.
+#[test]
+fn older_session_and_contact_records_with_keys_inside_read_late_messages() {
+    let fixture: Fixture = postcard::from_bytes(FIXTURE).unwrap();
+    let vault = Vault::new(IdentitySeed(fixture.seed).derive_storage_key());
+    let is_session = |(t, k, _): &&(u8, Vec<u8>, Vec<u8>)| {
+        *t == Table::Sessions as u8 && k.len() == session_key_len()
+    };
+    let (_, session_key, sealed) = fixture.rows.iter().find(is_session).unwrap().clone();
+    let session: SessionV2 = vault.open(Table::Sessions, &session_key, &sealed).unwrap();
+    let is_peer = |(t, _, _): &&(u8, Vec<u8>, Vec<u8>)| *t == Table::Peers as u8;
+    let (_, peer_key, sealed) = fixture.rows.iter().find(is_peer).unwrap().clone();
+    let contact: ContactV7 = vault.open(Table::Peers, &peer_key, &sealed).unwrap();
+
+    let v1 = SessionV1 {
+        ratchet: session.ratchet.clone(),
+        pending_init: session.pending_init.clone(),
+        accepted_ephemerals: session.accepted_ephemerals.clone(),
+        inbox: None,
+        hello_sent: session.hello_sent,
+    };
+    let mut rows = fixture.rows.clone();
+    write(
+        &mut rows,
+        vault.put(Table::Sessions, session_key.clone(), &v1, &mut OsRng),
+    );
+    reads_the_late_messages(&fixture, rows);
+
+    let v4 = ContactV4 {
+        ratchet: session.ratchet,
+        pending_init: session.pending_init,
+        accepted_ephemerals: session.accepted_ephemerals,
+        identity_dh: contact.identity_dh,
+        inbox: None,
+        hello_sent: session.hello_sent,
+        alias: contact.alias,
+        name: contact.name,
+        request: contact.request,
+        blocked: contact.blocked,
+        via: contact.via,
+    };
+    let mut rows = fixture.rows.clone();
+    write(
+        &mut rows,
+        StoreOp::Delete {
+            table: Table::Sessions,
+            key: session_key,
+        },
+    );
+    write(
+        &mut rows,
+        vault.put(Table::Peers, peer_key, &v4, &mut OsRng),
+    );
+    reads_the_late_messages(&fixture, rows);
+}
+
+fn session_key_len() -> usize {
+    session_key(Addr::new(cypher_types::PeerId([0; 32]), DeviceId::FIRST)).len()
+}
+
+/// B, from `rows`, restored, stored again the way this release stores it
+/// and restored once more, reads the fixture's late messages, and nothing
+/// warns.
+fn reads_the_late_messages(fixture: &Fixture, mut rows: Vec<(u8, Vec<u8>, Vec<u8>)>) {
     let seed = IdentitySeed(fixture.seed);
     let device = DeviceId(fixture.device);
-    let mut rows = fixture.rows;
     let mut events = Vec::new();
-
     let restore = |rows: &[(u8, Vec<u8>, Vec<u8>)], seed_rng: u64| {
         Core::restore(
             &seed,
@@ -178,8 +248,8 @@ fn a_session_stored_with_its_skipped_keys_inside_still_reads_late_messages() {
     events.extend(apply(&mut rows, effects));
     let (mut core, effects) = restore(&rows, 1);
     events.extend(apply(&mut rows, effects));
-    for frame in fixture.late {
-        let effects = core.handle(Input::Frame(Bytes::from(frame)), fixture.now);
+    for frame in &fixture.late {
+        let effects = core.handle(Input::Frame(Bytes::from(frame.clone())), fixture.now);
         events.extend(apply(&mut rows, effects));
     }
 
@@ -188,6 +258,74 @@ fn a_session_stored_with_its_skipped_keys_inside_still_reads_late_messages() {
         !events.iter().any(|e| matches!(e, Event::Warning { .. })),
         "{events:?}"
     );
+}
+
+/// An inbox announcement as the records keep it.
+type Ad = (u32, [[u8; 32]; 2], [[u8; 32]; 2]);
+
+/// A session as record version 2 stored it, the one the fixture holds.
+#[derive(Serialize, Deserialize)]
+struct SessionV2 {
+    ratchet: Vec<u8>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    inbox: Option<Ad>,
+    hello_sent: bool,
+}
+
+impl Record for SessionV2 {
+    const VERSION: u8 = 2;
+}
+
+/// A session as record version 1 stored it.
+#[derive(Serialize, Deserialize)]
+struct SessionV1 {
+    ratchet: Vec<u8>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    inbox: Option<[u8; 32]>,
+    hello_sent: bool,
+}
+
+impl Record for SessionV1 {
+    const VERSION: u8 = 1;
+}
+
+/// A contact as version 7 stores it, the one the fixture holds.
+#[derive(Serialize, Deserialize)]
+struct ContactV7 {
+    identity_dh: [u8; 32],
+    alias: Option<String>,
+    name: Option<String>,
+    request: bool,
+    blocked: bool,
+    via: Option<String>,
+    devices: Option<Vec<u8>>,
+    inboxes: Vec<(u32, Ad)>,
+}
+
+impl Record for ContactV7 {
+    const VERSION: u8 = 7;
+}
+
+/// A contact and its one session as version 4 stored them.
+#[derive(Serialize, Deserialize)]
+struct ContactV4 {
+    ratchet: Vec<u8>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    identity_dh: [u8; 32],
+    inbox: Option<[u8; 32]>,
+    hello_sent: bool,
+    alias: Option<String>,
+    name: Option<String>,
+    request: bool,
+    blocked: bool,
+    via: Option<String>,
+}
+
+impl Record for ContactV4 {
+    const VERSION: u8 = 4;
 }
 
 /// Client `i`'s stored rows, as `(table, key, sealed value)`.
