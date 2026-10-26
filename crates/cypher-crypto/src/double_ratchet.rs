@@ -706,10 +706,6 @@ mod tests {
         .unwrap()
     }
 
-    /// A session stored before its skipped keys were kept apart: its keys
-    /// come out new, numbered from the start and dated by the clock it is
-    /// read at, to be stored; no stored key is taken back; and they open
-    /// their messages.
     /// A skipped key shows which message it is for, never the key.
     #[test]
     fn a_skipped_key_does_not_show_the_key() {
@@ -719,6 +715,10 @@ mod tests {
         assert!(!shown.contains("171") && !shown.to_lowercase().contains("ab, "));
     }
 
+    /// A session stored before its skipped keys were kept apart: its keys
+    /// come out new, numbered from the start and dated by the clock it is
+    /// read at, to be stored; no stored key is taken back; and they open
+    /// their messages.
     #[test]
     fn a_version_2_snapshot_gives_its_keys_out_to_store() {
         let (sk, ad) = ([1; 32], [[2; 32], [3; 32]]);

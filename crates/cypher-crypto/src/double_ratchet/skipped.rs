@@ -15,10 +15,10 @@ pub const MAX_STORED_SKIPPED: usize = 2000;
 /// message it opens was sent before then. Every way a message travels ends
 /// within 14 days of its sending: online delivery is immediate, and an
 /// inbox item lives 14 days at most (`INBOX_TTL_SECS` in signaling). Twice
-/// that leaves room for clocks that disagree. A key kept
-/// longer could only open a message that will not come, while it stays on
-/// the device for anyone who takes it to read that message from a copy
-/// made on the way.
+/// that leaves room for the device's clock being off. A key kept longer
+/// could only open a message that will not come, while it stays on the
+/// device for anyone who takes it to read that message from a copy made
+/// on the way.
 pub const MAX_SKIPPED_AGE_MS: u64 = 30 * 24 * 3600 * 1000;
 
 /// Which message a key opens: the sender's ratchet key and the message's
