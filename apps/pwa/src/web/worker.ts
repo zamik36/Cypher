@@ -22,15 +22,9 @@ import { deleteRows as deleteStoredRows } from "./deletion";
 import { applyEffects, EffectApplier, type EffectSinks, type Sink } from "./effects";
 import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import { offerFile, Refused, staleFiles, type Offering } from "./outgoing";
+import { failed, Replies } from "./replies";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
-import {
-  CommandError,
-  type ErrorKind,
-  type FailReason,
-  type IdentityKind,
-  toCmdErrorShape,
-  toCommandError,
-} from "@cypher/ui/errors";
+import { CommandError, type ErrorKind, type IdentityKind, toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -52,16 +46,12 @@ const sources = new Map<string, File>();
 const offerNames = new Map<string, string>();
 const openSinks = new Map<string, { handle: FileSystemSyncAccessHandle; name: string; sink: Sink }>();
 /** Commands waiting for their answer, by the id they went with. */
-const waiters = new Map<number, (r: Reply | CommandError) => void>();
-let nextCommand = 1;
+const replies = new Replies(REPLY_TIMEOUT_MS);
 
 const post = (msg: WorkerMessage) => self.postMessage(msg);
 
 /** A failure of `kind` for the UI, in the shape the desktop's commands fail with. */
 const failure = (kind: ErrorKind, message: string) => new CommandError({ kind, message });
-/** The core failed something, for `reason`. */
-const failed = (reason: string) =>
-  new CommandError({ kind: "failed", reason: reason as FailReason, message: `failed: ${reason}` });
 const identityFailure = (reason: IdentityKind, message: string) =>
   new CommandError({ kind: "identity", reason, message });
 
@@ -95,9 +85,7 @@ const sinks: EffectSinks = {
   anonymous: (data) => relay.send(data),
   event: onEvent,
   reply: (r) => {
-    const waiter = waiters.get(r.id);
-    waiters.delete(r.id);
-    waiter?.(r);
+    replies.answer(r);
   },
   readChunk: (request) => void readChunk(request),
   openSink: (fileId, len, sink) => openSink(fileId, len, sink).catch((e: unknown) => sinkFailed(fileId, e)),
@@ -131,7 +119,7 @@ function sinkFailed(fileId: string, e: unknown) {
 function storageFailed() {
   gateway.stop();
   relay.stop();
-  failWaiters(failed("storage_failed"));
+  replies.failAll(failed("storage_failed"));
   onEvent("error", "storage_failed");
   onEvent("disconnected", null);
 }
@@ -172,35 +160,8 @@ function onEvent(channel: string, payload: unknown) {
  * answers it, when that reply is `ok`; any other reply is why it failed.
  * Replies to other commands, and warnings, do not touch it.
  */
-async function request(cmd: Record<string, unknown>, ok: Reply["op"]): Promise<string> {
-  const id = nextCommand++;
-  const reply = new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      waiters.delete(id);
-      reject(failure("timed_out", "timed out"));
-    }, REPLY_TIMEOUT_MS);
-    waiters.set(id, (r) => {
-      clearTimeout(timer);
-      if (r instanceof CommandError) reject(r);
-      else if (r.op === ok) resolve(r.value);
-      else reject(failed(r.value));
-    });
-  });
-  try {
-    await serial(() => run({ ...cmd, id }));
-  } catch (e) {
-    const waiter = waiters.get(id);
-    waiters.delete(id);
-    waiter?.(toCommandError(e));
-  }
-  return reply;
-}
-
-/** Fails every command still waiting for its answer. */
-function failWaiters(e: CommandError) {
-  const waiting = [...waiters.values()];
-  waiters.clear();
-  for (const waiter of waiting) waiter(e);
+function request(cmd: Record<string, unknown>, ok: Reply["op"]): Promise<string> {
+  return replies.request((id) => serial(() => run({ ...cmd, id })), ok);
 }
 
 /** A reconnecting WebSocket carrying one wire frame per binary message. */
