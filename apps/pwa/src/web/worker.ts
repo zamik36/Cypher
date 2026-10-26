@@ -714,11 +714,18 @@ const handlers: Handlers = {
   history: (peer, limit, before) => history(peer, Math.min(limit, 500), before),
   sendMedia,
   mediaBlob,
+  // In the queue: no sink opens between the cancel and the emptying.
   clearHistory: () =>
-    clearHistory({
-      clearRows: () => clear(db, ["messages", "message_status", "media"]),
-      root: () => navigator.storage.getDirectory(),
-    }),
+    serial(() =>
+      clearHistory({
+        cancelWriting: async () => {
+          const writing = [...openSinks].filter(([, s]) => s.sink !== "history").map(([fileId]) => fileId);
+          for (const fileId of writing) await run({ type: "cancel_transfer", file_id: fileId });
+        },
+        clearRows: () => clear(db, ["messages", "message_status", "media"]),
+        root: () => navigator.storage.getDirectory(),
+      }),
+    ),
 };
 
 self.onmessage = async ({ data: { id, method, args } }: MessageEvent<Request>) => {
