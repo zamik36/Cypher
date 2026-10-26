@@ -491,6 +491,8 @@ function forget() {
   client = null;
   identity?.free();
   identity = null;
+  // Their answers would come from a client that is gone.
+  replies.failAll(failure("locked", "identity is locked"));
 }
 
 /** How far around the UI's time a deleted message is looked for. */
