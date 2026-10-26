@@ -47,7 +47,7 @@ pub(crate) async fn link_finish(
 ) -> CmdResult<(String, String)> {
     let (waiting, cancel) = state.linking.take().await.ok_or(ErrorKind::NotLinking)?;
     let linked = tokio::select! {
-        linked = waiting.linked() => linked.map_err(CmdError::from)?,
+        linked = waiting.linked() => linked?,
         () = cancel.cancelled() => return Err(ErrorKind::Cancelled.into()),
     };
     let unlocked = with_store(&state, move |s| s.adopt(linked, &passphrase)).await?;

@@ -23,10 +23,7 @@ pub(crate) async fn send_message(
     let peer = parse_peer(&peer_id)?;
     let reply_to = reply_to.as_deref().map(parse_msg).transpose()?;
     let client = state.client().await?;
-    let id = client
-        .send_text(peer, text, reply_to)
-        .await
-        .map_err(CmdError::from)?;
+    let id = client.send_text(peer, text, reply_to).await?;
     Ok(id.to_hex())
 }
 

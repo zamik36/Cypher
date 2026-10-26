@@ -35,12 +35,7 @@ pub(crate) async fn push_subscribe<R: Runtime>(
         p256dh,
         auth,
     };
-    state
-        .client()
-        .await?
-        .command(register)
-        .await
-        .map_err(CmdError::from)?;
+    state.client().await?.command(register).await?;
     Ok(true)
 }
 

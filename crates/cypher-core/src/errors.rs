@@ -90,7 +90,7 @@ impl fmt::Display for ErrorKind {
             Self::AlreadyRecording => "already recording",
             Self::NotRecording => "not recording",
             Self::NotLinking => "not waiting to be linked",
-            Self::Failed(reason) => return write!(f, "failed: {reason:?}"),
+            Self::Failed(reason) => return write!(f, "failed: {}", reason.name()),
             Self::Identity(kind) => return kind.fmt(f),
             Self::Internal => "internal error",
         };
@@ -98,19 +98,20 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// What is wrong with the identity file or the recovery phrase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IdentityKind {
-    /// This device has no identity.
-    Missing,
-    /// This device already has one.
-    Exists,
-    WeakPassphrase,
-    WrongPassphrase,
-    Corrupt,
-    InvalidMnemonic,
-    NicknameTooLong,
+named_enum! {
+    /// What is wrong with the identity file or the recovery phrase.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub enum IdentityKind {
+        /// This device has no identity.
+        Missing = "missing",
+        /// This device already has one.
+        Exists = "exists",
+        WeakPassphrase = "weak_passphrase",
+        WrongPassphrase = "wrong_passphrase",
+        Corrupt = "corrupt",
+        InvalidMnemonic = "invalid_mnemonic",
+        NicknameTooLong = "nickname_too_long",
+    }
 }
 
 /// What an identity file's failure means to the user; both clients map it
@@ -249,6 +250,8 @@ mod tests {
         ErrorKind::Internal,
     ];
 
+    /// The golden names of the identity kinds. Exhaustive: a new kind does
+    /// not compile until it is named here.
     fn identity_name(kind: IdentityKind) -> &'static str {
         match kind {
             IdentityKind::Missing => "missing",
@@ -260,16 +263,6 @@ mod tests {
             IdentityKind::NicknameTooLong => "nickname_too_long",
         }
     }
-
-    const IDENTITY: [IdentityKind; 7] = [
-        IdentityKind::Missing,
-        IdentityKind::Exists,
-        IdentityKind::WeakPassphrase,
-        IdentityKind::WrongPassphrase,
-        IdentityKind::Corrupt,
-        IdentityKind::InvalidMnemonic,
-        IdentityKind::NicknameTooLong,
-    ];
 
     fn json_of(e: &CmdError) -> Value {
         serde_json::to_value(e).unwrap()
@@ -288,13 +281,15 @@ mod tests {
 
     #[test]
     fn failures_carry_the_core_reason_and_identity_failures_theirs() {
-        for reason in FailReason::ALL {
+        for &reason in FailReason::ALL {
             let e = CmdError::from(reason);
             let shape = json_of(&e);
             assert_eq!(shape["kind"], "failed");
-            assert_eq!(shape["reason"], serde_json::to_value(reason).unwrap());
+            assert_eq!(shape["reason"], reason.name());
+            assert_eq!(e.message, format!("failed: {}", reason.name()));
         }
-        for kind in IDENTITY {
+        for &kind in IdentityKind::ALL {
+            assert_eq!(kind.name(), identity_name(kind));
             let e = CmdError::from(kind);
             assert_eq!(
                 json_of(&e),
@@ -337,7 +332,7 @@ mod tests {
             .collect();
         assert_eq!(union("ErrorKind"), kinds);
         let reasons = FailReason::ALL
-            .into_iter()
+            .iter()
             .map(|r| {
                 serde_json::to_value(r)
                     .unwrap()
@@ -347,9 +342,9 @@ mod tests {
             })
             .collect();
         assert_eq!(union("FailReason"), reasons);
-        let identity = IDENTITY
-            .into_iter()
-            .map(|k| identity_name(k).to_owned())
+        let identity = IdentityKind::ALL
+            .iter()
+            .map(|k| identity_name(*k).to_owned())
             .collect();
         assert_eq!(union("IdentityKind"), identity);
     }

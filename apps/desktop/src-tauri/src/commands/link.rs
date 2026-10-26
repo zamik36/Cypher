@@ -1,4 +1,4 @@
-use cypher_core::{CmdError, Command, CommandId, Event};
+use cypher_core::{Command, CommandId, Event};
 use serde::Serialize;
 use tauri::State;
 
@@ -39,10 +39,7 @@ pub(crate) async fn join_link(state: State<'_, AppState>, link_id: String) -> Cm
     let (client, mut events) = state.client_and_events().await?;
     let id = state.command_id();
     let link = link_id.trim().to_owned();
-    client
-        .command(Command::JoinLink { id, link })
-        .await
-        .map_err(CmdError::from)?;
+    client.command(Command::JoinLink { id, link }).await?;
     await_event(&mut events, joined(id)).await
 }
 

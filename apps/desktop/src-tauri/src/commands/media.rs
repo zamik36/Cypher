@@ -103,8 +103,7 @@ pub(crate) async fn voice_stop(
         .client()
         .await?
         .send_media(peer, recording.webm, "voice.webm", "audio/webm", kind)
-        .await
-        .map_err(CmdError::from)?;
+        .await?;
     Ok(Some(MediaSent {
         msg_id: msg_id.to_hex(),
         file_id: file_id.to_hex(),
@@ -209,8 +208,7 @@ pub(crate) async fn send_video_note(
         .client()
         .await?
         .send_media(peer, video, file_name, &mime, kind)
-        .await
-        .map_err(CmdError::from)?;
+        .await?;
     Ok(MediaSent {
         msg_id: msg_id.to_hex(),
         file_id: file_id.to_hex(),

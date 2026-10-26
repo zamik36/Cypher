@@ -378,51 +378,31 @@ pub enum Sink {
     History,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailReason {
-    NotFound,
-    InvalidLink,
-    SelfLink,
-    InvalidKeys,
-    Timeout,
-    Offline,
-    Rejected,
-    Cancelled,
-    SourceUnavailable,
-    Corrupted,
-    Unauthorized,
-    ServerError,
-    DecryptFailed,
-    /// The server answered a share link with an identity other than the one
-    /// the link was made for: possibly a key substitution.
-    KeyMismatch,
-    /// The driver could not make state durable and stopped the client.
-    StorageFailed,
-    /// The server speaks another protocol version: the app must be updated.
-    UpdateRequired,
-}
-
-impl FailReason {
-    /// Every reason, for the tests that pin the names frontends key on.
-    pub const ALL: [Self; 16] = [
-        Self::NotFound,
-        Self::InvalidLink,
-        Self::SelfLink,
-        Self::InvalidKeys,
-        Self::Timeout,
-        Self::Offline,
-        Self::Rejected,
-        Self::Cancelled,
-        Self::SourceUnavailable,
-        Self::Corrupted,
-        Self::Unauthorized,
-        Self::ServerError,
-        Self::DecryptFailed,
-        Self::KeyMismatch,
-        Self::StorageFailed,
-        Self::UpdateRequired,
-    ];
+named_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum FailReason {
+        NotFound = "not_found",
+        InvalidLink = "invalid_link",
+        SelfLink = "self_link",
+        InvalidKeys = "invalid_keys",
+        Timeout = "timeout",
+        Offline = "offline",
+        Rejected = "rejected",
+        Cancelled = "cancelled",
+        SourceUnavailable = "source_unavailable",
+        Corrupted = "corrupted",
+        Unauthorized = "unauthorized",
+        ServerError = "server_error",
+        DecryptFailed = "decrypt_failed",
+        /// The server answered a share link with an identity other than the
+        /// one the link was made for: possibly a key substitution.
+        KeyMismatch = "key_mismatch",
+        /// The driver could not make state durable and stopped the client.
+        StorageFailed = "storage_failed",
+        /// The server speaks another protocol version: the app must be
+        /// updated.
+        UpdateRequired = "update_required",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

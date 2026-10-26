@@ -44,10 +44,7 @@ pub(crate) async fn get_history(
 ) -> CmdResult<Vec<UiMessage>> {
     let peer = parse_peer(&peer_id)?;
     let client = state.client().await?;
-    let history = client
-        .history(peer, before, limit.min(500))
-        .await
-        .map_err(CmdError::from)?;
+    let history = client.history(peer, before, limit.min(500)).await?;
     Ok(history.iter().map(ui::message).collect())
 }
 

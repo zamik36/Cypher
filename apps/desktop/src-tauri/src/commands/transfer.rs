@@ -282,8 +282,7 @@ pub(crate) async fn send_pick<R: Runtime>(
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
     let (msg_id, file_id) = client
         .send_file(peer, &path, mime.essence_str(), MediaKind::File)
-        .await
-        .map_err(CmdError::from)?;
+        .await?;
     Ok((msg_id, file_id, display_name(&path), size))
 }
 
@@ -333,12 +332,7 @@ async fn send_content<R: Runtime>(
 /// taken at its word; a path must still exist.
 async fn saved_location(state: &AppState, file_id: &str) -> CmdResult<Option<String>> {
     let id = parse_file(file_id)?;
-    let location = state
-        .client()
-        .await?
-        .saved_file(id)
-        .await
-        .map_err(CmdError::from)?;
+    let location = state.client().await?.saved_file(id).await?;
     Ok(location.filter(|l| l.starts_with("content://") || Path::new(l).exists()))
 }
 
@@ -518,8 +512,7 @@ pub(crate) async fn cancel_transfer(state: State<'_, AppState>, file_id: String)
         .client()
         .await?
         .command(Command::CancelTransfer { file_id: id })
-        .await
-        .map_err(CmdError::from)?;
+        .await?;
     state.transfers.offers.forget(&id);
     Ok(())
 }

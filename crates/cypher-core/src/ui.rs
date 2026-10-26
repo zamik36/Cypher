@@ -706,7 +706,8 @@ mod tests {
     #[test]
     fn failure_reasons_reach_the_ui_by_their_stable_names() {
         let file_id = FileId([3; 16]);
-        for reason in FailReason::ALL {
+        for &reason in FailReason::ALL {
+            assert_eq!(reason.name(), ui_name(reason));
             let name = json!(ui_name(reason));
             let failed = ui(&Event::TransferFailed { file_id, reason }).1;
             assert_eq!(failed["reason"], name);
@@ -721,7 +722,7 @@ mod tests {
             assert_eq!(ui(&link_failed), ("link_failed", name));
         }
         let names: std::collections::BTreeSet<_> =
-            FailReason::ALL.into_iter().map(ui_name).collect();
+            FailReason::ALL.iter().copied().map(ui_name).collect();
         assert_eq!(names.len(), FailReason::ALL.len(), "names are unique");
     }
 
