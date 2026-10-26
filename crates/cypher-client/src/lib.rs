@@ -47,16 +47,9 @@ pub enum ClientError {
     Core(#[from] CoreError),
     #[error("client stopped")]
     Closed,
-    #[error("an identity already exists")]
-    IdentityExists,
-    #[error("passphrase is too short")]
-    WeakPassphrase,
-    #[error("wrong passphrase")]
-    WrongPassphrase,
-    #[error("identity file is corrupt")]
-    CorruptIdentity,
-    #[error("invalid recovery phrase")]
-    InvalidMnemonic,
+    /// The identity file or the recovery phrase.
+    #[error("{0}")]
+    Identity(IdentityKind),
     #[error("invalid input")]
     InvalidInput,
     #[error("not found")]
@@ -89,11 +82,7 @@ impl From<ClientError> for CmdError {
                 ErrorKind::Failed(FailReason::UpdateRequired)
             }
             ClientError::Closed => ErrorKind::Stopped,
-            ClientError::IdentityExists => ErrorKind::Identity(IdentityKind::Exists),
-            ClientError::WeakPassphrase => ErrorKind::Identity(IdentityKind::WeakPassphrase),
-            ClientError::WrongPassphrase => ErrorKind::Identity(IdentityKind::WrongPassphrase),
-            ClientError::CorruptIdentity => ErrorKind::Identity(IdentityKind::Corrupt),
-            ClientError::InvalidMnemonic => ErrorKind::Identity(IdentityKind::InvalidMnemonic),
+            ClientError::Identity(kind) => ErrorKind::Identity(*kind),
             ClientError::NotFound => ErrorKind::NotFound,
             ClientError::NotReady => ErrorKind::NotReady,
             ClientError::Expired => ErrorKind::Expired,
@@ -1080,23 +1069,7 @@ mod tests {
                 ErrorKind::Failed(FailReason::UpdateRequired),
             ),
             (
-                ClientError::WrongPassphrase,
-                ErrorKind::Identity(IdentityKind::WrongPassphrase),
-            ),
-            (
-                ClientError::WeakPassphrase,
-                ErrorKind::Identity(IdentityKind::WeakPassphrase),
-            ),
-            (
-                ClientError::CorruptIdentity,
-                ErrorKind::Identity(IdentityKind::Corrupt),
-            ),
-            (
-                ClientError::InvalidMnemonic,
-                ErrorKind::Identity(IdentityKind::InvalidMnemonic),
-            ),
-            (
-                ClientError::IdentityExists,
+                ClientError::Identity(IdentityKind::Exists),
                 ErrorKind::Identity(IdentityKind::Exists),
             ),
             (ClientError::Core(CoreError::Storage), ErrorKind::Internal),
@@ -1104,6 +1077,32 @@ mod tests {
         for (e, kind) in cases {
             let message = e.to_string();
             assert_eq!(CmdError::from(e), CmdError::new(kind, message));
+        }
+    }
+
+    /// An identity file fails with the kind the web client reports for the
+    /// same failure: both map it through the core.
+    #[test]
+    fn identity_file_failures_are_the_kinds_both_clients_report() {
+        use cypher_crypto::identity_file::IdentityFileError;
+        let all = [
+            (
+                IdentityFileError::WeakPassphrase,
+                IdentityKind::WeakPassphrase,
+            ),
+            (
+                IdentityFileError::InvalidNickname,
+                IdentityKind::NicknameTooLong,
+            ),
+            (
+                IdentityFileError::WrongPassphrase,
+                IdentityKind::WrongPassphrase,
+            ),
+            (IdentityFileError::Corrupt, IdentityKind::Corrupt),
+        ];
+        for (e, kind) in all {
+            let native = CmdError::from(ClientError::from(e));
+            assert_eq!(native.kind, ErrorKind::Identity(kind));
         }
     }
 

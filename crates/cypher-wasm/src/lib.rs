@@ -33,15 +33,10 @@ fn thrown(e: impl Into<CmdError>) -> JsValue {
     to_js(&e).unwrap_or_else(|_| JsValue::from_str(&e.message))
 }
 
-/// What is wrong with an identity file, as the UI words it.
+/// What is wrong with an identity file, as the UI words it (the kind the
+/// native client gives for it too).
 fn identity_error(e: IdentityFileError) -> CmdError {
-    let kind = match e {
-        IdentityFileError::WeakPassphrase => IdentityKind::WeakPassphrase,
-        IdentityFileError::InvalidNickname => IdentityKind::NicknameTooLong,
-        IdentityFileError::WrongPassphrase => IdentityKind::WrongPassphrase,
-        IdentityFileError::Corrupt => IdentityKind::Corrupt,
-    };
-    CmdError::new(ErrorKind::Identity(kind), e.to_string())
+    CmdError::new(ErrorKind::Identity(e.into()), e.to_string())
 }
 
 /// Renders `text` as an SVG QR code.

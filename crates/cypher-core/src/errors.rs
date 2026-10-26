@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use cypher_crypto::identity_file::IdentityFileError;
 use serde::Serialize;
 
 use crate::api::FailReason;
@@ -110,6 +111,19 @@ pub enum IdentityKind {
     Corrupt,
     InvalidMnemonic,
     NicknameTooLong,
+}
+
+/// What an identity file's failure means to the user; both clients map it
+/// here, so they word it alike.
+impl From<IdentityFileError> for IdentityKind {
+    fn from(e: IdentityFileError) -> Self {
+        match e {
+            IdentityFileError::WeakPassphrase => Self::WeakPassphrase,
+            IdentityFileError::InvalidNickname => Self::NicknameTooLong,
+            IdentityFileError::WrongPassphrase => Self::WrongPassphrase,
+            IdentityFileError::Corrupt => Self::Corrupt,
+        }
+    }
 }
 
 impl fmt::Display for IdentityKind {
