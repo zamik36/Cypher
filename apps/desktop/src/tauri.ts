@@ -3,7 +3,7 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { toCommandError } from "@cypher/ui/errors";
+import { toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
 import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 
 let stopLevels: UnlistenFn | null = null;
@@ -90,7 +90,8 @@ async function sendBytes(peerId: string, file: File): Promise<TransferInfo> {
  * Sends `files` in order, as the native side sends a batch: a file that
  * cannot be sent does not stop the others, whose cards the UI needs. When
  * none went, the first error is the answer; when some did, each file left
- * out is told to the UI as an error event, `<name>: <reason>`.
+ * out is told to the UI (`file_not_sent`), which words why. Telling it is
+ * best effort: the cards of the files sent are the answer either way.
  */
 async function sendEach(files: File[], send: (file: File) => Promise<TransferInfo>): Promise<TransferInfo[]> {
   const sent: TransferInfo[] = [];
@@ -105,7 +106,11 @@ async function sendEach(files: File[], send: (file: File) => Promise<TransferInf
   const [first] = failed;
   if (sent.length === 0 && first) throw first[1];
   for (const [name, e] of failed) {
-    await emit("cypher://error", `${name}: ${e instanceof Error ? e.message : String(e)}`);
+    try {
+      await emit("cypher://file_not_sent", { name, error: toCmdErrorShape(e) });
+    } catch (told) {
+      console.warn("telling the UI of a file left out failed", told);
+    }
   }
   return sent;
 }

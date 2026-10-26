@@ -165,6 +165,7 @@ export async function startApp(): Promise<() => void> {
       if (hasTransfer(file_id)) upsertTransfer({ file_id, status: "error", error: reasonText(reason) });
     }),
     onError(toastError),
+    api.on("file_not_sent", ({ name, error }) => addToast(`${name}: ${reasonText(error)}`, "error")),
     onClientReady(clientReady),
     onAnonymityLevel(({ level }) => setOnionUp(level > 0)),
     api.on("push_key", (key) => void onPushKey(key)),

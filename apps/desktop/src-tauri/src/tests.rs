@@ -1395,11 +1395,11 @@ mod offline {
         ];
 
         let handle = desktop.app.handle();
-        let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let told = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let heard = Arc::clone(&told);
-        tauri::Listener::listen(handle, "cypher://error", move |event| {
-            let message: String = serde_json::from_str(event.payload()).unwrap();
-            heard.lock().unwrap().push(message);
+        tauri::Listener::listen(handle, "cypher://file_not_sent", move |event| {
+            let told: Value = serde_json::from_str(event.payload()).unwrap();
+            heard.lock().unwrap().push(told);
         });
         let sent = send_all(handle, &client, peer, batch).await.unwrap();
         let sent = serde_json::to_value(sent).unwrap();
@@ -1415,8 +1415,10 @@ mod offline {
             let told = told.lock().unwrap();
             (told.len() == 1).then(|| told[0].clone())
         };
-        let message = eventually(|| async { told_once() }).await;
-        assert!(message.starts_with("gone.txt: "), "{message}");
+        // By name and kind, for the UI to word in the user's language.
+        let not_sent = eventually(|| async { told_once() }).await;
+        assert_eq!(not_sent["name"], "gone.txt");
+        assert_eq!(not_sent["error"]["kind"], "internal", "{not_sent}");
 
         // Nothing went: the error is the answer, with no event besides.
         let none = vec![FilePath::Path(file("gone.txt"))];

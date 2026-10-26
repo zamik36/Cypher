@@ -61,8 +61,8 @@ pub(crate) async fn browse_and_send<R: Runtime>(
 /// Sends `files` to `peer` in order; the cards of the files sent. A file
 /// that cannot be sent does not stop the others, whose cards the UI needs
 /// to follow them. When none went, the first error is the answer; when
-/// some did, each file left out is told to the UI as an error event,
-/// `<name>: <reason>`.
+/// some did, each file left out is told to the UI (`file_not_sent`, its
+/// name and error), which words why in the user's language.
 pub(crate) async fn send_all<R: Runtime>(
     app: &AppHandle<R>,
     client: &Client,
@@ -89,10 +89,17 @@ pub(crate) async fn send_all<R: Runtime>(
     {
         return Err(e);
     }
-    for (name, e) in failed {
-        let _ = app.emit("cypher://error", format!("{name}: {e}"));
+    for (name, error) in failed {
+        let _ = app.emit("cypher://file_not_sent", NotSent { name, error });
     }
     Ok(sent)
+}
+
+/// A file of a batch left out while the others went.
+#[derive(Clone, Serialize)]
+struct NotSent {
+    name: String,
+    error: CmdError,
 }
 
 /// How a picked file is named to the user.

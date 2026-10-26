@@ -38,7 +38,18 @@ describe("sendFiles", () => {
     expect(sent).toEqual([{ file_name: "a.txt" }, { file_name: "c.txt" }]);
     expect(sentNames()).toEqual(["a.txt", "b.txt", "c.txt"]);
     // Told to the UI as the native side tells it about a batch's leftovers.
-    expect(emit).toHaveBeenCalledWith("cypher://error", "b.txt: too large");
+    expect(emit).toHaveBeenCalledWith("cypher://file_not_sent", {
+      name: "b.txt",
+      error: { kind: "internal", message: "too large" },
+    });
+  });
+
+  it("keeps the cards when the UI cannot be told of a file left out", async () => {
+    invoke.mockRejectedValueOnce(new Error("too large")).mockResolvedValueOnce({ file_name: "b.txt" });
+    emit.mockRejectedValue(new Error("no listener"));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const sent = await tauriPlatform.sendFiles("peer", [file("a.txt"), file("b.txt")]);
+    expect(sent).toEqual([{ file_name: "b.txt" }]);
   });
 
   it("fails with the first error when no file went", async () => {
