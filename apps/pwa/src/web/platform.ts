@@ -160,7 +160,7 @@ export const webPlatform: Platform = {
   },
   fileSaved: (fileId) => call("fileSaved", fileId),
   openFile: async (file) => save(file.name, await call("savedBlob", file.file_id)),
-  revealFile: () => Promise.reject(new Error("unsupported")),
+  revealFile: () => Promise.reject(new CommandError({ kind: "unsupported", message: "unsupported" })),
   generateQr: (linkId) => call("qr", linkId),
   safetyNumber: (peerId) => call("safetyNumber", peerId),
   reconnect: () => call("reconnect"),
@@ -168,13 +168,13 @@ export const webPlatform: Platform = {
     await call("command", { type: "trust_server_key" });
   },
   startVoice: async (onLevel) => {
-    if (voice) throw new Error("already recording");
+    if (voice) throw new CommandError({ kind: "already_recording", message: "already recording" });
     voice = await WebVoiceRecorder.start(onLevel);
   },
   stopVoice: async (peerId) => {
     const recorder = voice;
     voice = null;
-    if (!recorder) throw new Error("not recording");
+    if (!recorder) throw new CommandError({ kind: "not_recording", message: "not recording" });
     const clip = await recorder.stop();
     if (clip.durationMs < MIN_VOICE_MS) return null;
     return call("sendMedia", peerId, clip.blob, clip.mime, "voice", clip.durationMs, { frames: clip.frames });
