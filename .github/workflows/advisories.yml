@@ -80,12 +80,13 @@ jobs:
       # optional p256/p384/p521 0.13 features, but nothing enables them, so
       # no build compiles it and cargo deny, which resolves features, does not
       # report it. The guard fails the job as soon as a build pulls it in.
+      # Drop the ignore once arti's ssh-key fork moves to p256 0.14.
       - name: cargo audit
         run: |
-          if cargo tree --manifest-path ${{ matrix.lockfile.dir }}/Cargo.toml --all-features \
-              --target all -e normal,build,dev --prefix none \
-              | grep -E '^crypto-bigint v0\.[0-6]\.'; then
-            echo "::error::a build now compiles crypto-bigint before 0.7 (RUSTSEC-2026-0387)"
+          tree=$(cargo tree --locked --manifest-path ${{ matrix.lockfile.dir }}/Cargo.toml \
+            --all-features --target all -e normal,build,dev --prefix none)
+          if grep -E '^crypto-bigint v0\.([0-6]\.|7\.[0-5]( |$))' <<<"$tree"; then
+            echo "::error::a build now compiles crypto-bigint before 0.7.6 (RUSTSEC-2026-0387)"
             exit 1
           fi
           ignores=$(grep -oE '^\s*"RUSTSEC-[0-9]+-[0-9]+"' .deny.toml | tr -d ' "' | sed 's/^/--ignore=/')
