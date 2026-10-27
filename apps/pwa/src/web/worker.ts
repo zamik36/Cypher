@@ -24,7 +24,7 @@ import { buildHistory, importHistory, type HistoryDirs } from "./history";
 import { offerFile, Refused, staleFiles, type Offering } from "./outgoing";
 import { failed, Replies } from "./replies";
 import type { Method, Methods, Request, WorkerMessage } from "./protocol";
-import { CommandError, type ErrorKind, type IdentityKind, toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
+import { CommandError, type IdentityKind, type PlainKind, toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -51,7 +51,7 @@ const replies = new Replies(REPLY_TIMEOUT_MS);
 const post = (msg: WorkerMessage) => self.postMessage(msg);
 
 /** A failure of `kind` for the UI, in the shape the desktop's commands fail with. */
-const failure = (kind: ErrorKind, message: string) => new CommandError({ kind, message });
+const failure = (kind: PlainKind, message: string) => new CommandError({ kind, message });
 const identityFailure = (reason: IdentityKind, message: string) =>
   new CommandError({ kind: "identity", reason, message });
 

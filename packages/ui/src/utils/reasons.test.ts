@@ -38,7 +38,6 @@ describe("reasonText", () => {
     );
     const wrong = failure({ kind: "identity", reason: "wrong_passphrase", message: "wrong passphrase" });
     expect(reasonText(wrong)).toBe(t().identity_err_wrong_passphrase);
-    expect(reasonText(failure({ kind: "failed", message: "failed" }))).toBe(t().error_failed);
   });
 
   it("shows an internal error, or anything else, as it says itself", () => {

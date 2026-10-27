@@ -56,37 +56,43 @@ export type FailReason =
 export type IdentityKind =
   "missing" | "exists" | "weak_passphrase" | "wrong_passphrase" | "corrupt" | "invalid_mnemonic" | "nickname_too_long";
 
-/** A failure as it crosses from the platform: plain data. */
-export interface CmdErrorShape {
-  kind: ErrorKind;
-  reason?: FailReason | IdentityKind | undefined;
-  /** English, for logs and for what the UI has no words for. */
-  message: string;
-}
+/** A kind that carries no reason. */
+export type PlainKind = Exclude<ErrorKind, "failed" | "identity">;
+
+/**
+ * A failure as it crosses from the platform, plain data: `failed` and
+ * `identity` say why in `reason`, the other kinds have none. `message` is
+ * English, for logs and for what the UI has no words for.
+ */
+export type CmdErrorShape =
+  | { kind: "failed"; reason: FailReason; message: string }
+  | { kind: "identity"; reason: IdentityKind; message: string }
+  | { kind: PlainKind; message: string };
 
 /** A command's failure, thrown to the UI. */
-export class CommandError extends Error implements CmdErrorShape {
+export class CommandError extends Error {
   readonly kind: ErrorKind;
   readonly reason: FailReason | IdentityKind | undefined;
+  /** The failure as the platform reported it. */
+  readonly shape: CmdErrorShape;
 
   constructor(shape: CmdErrorShape) {
     super(shape.message);
     this.name = "CommandError";
     this.kind = shape.kind;
-    this.reason = shape.reason;
+    this.reason = "reason" in shape ? shape.reason : undefined;
+    this.shape = shape;
   }
-}
-
-/** Builds a failure of `kind`, with its `reason`, told by `message`. */
-export function cmdError(kind: ErrorKind, message: string, reason?: FailReason | IdentityKind): CmdErrorShape {
-  return reason === undefined ? { kind, message } : { kind, reason, message };
 }
 
 /** Whether `value` has the shape of a platform's failure. */
 export function isCmdErrorShape(value: unknown): value is CmdErrorShape {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
-  return typeof v["kind"] === "string" && typeof v["message"] === "string";
+  const reasoned = v["kind"] === "failed" || v["kind"] === "identity";
+  return (
+    typeof v["kind"] === "string" && typeof v["message"] === "string" && (!reasoned || typeof v["reason"] === "string")
+  );
 }
 
 /**
@@ -94,11 +100,8 @@ export function isCmdErrorShape(value: unknown): value is CmdErrorShape {
  * (an exception, a platform's own text) as an `internal` failure.
  */
 export function toCmdErrorShape(e: unknown): CmdErrorShape {
-  if (isCmdErrorShape(e)) {
-    return e.reason === undefined
-      ? { kind: e.kind, message: e.message }
-      : { kind: e.kind, reason: e.reason, message: e.message };
-  }
+  if (e instanceof CommandError) return { ...e.shape };
+  if (isCmdErrorShape(e)) return { ...e };
   return { kind: "internal", message: e instanceof Error ? e.message : String(e) };
 }
 
