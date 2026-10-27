@@ -103,13 +103,13 @@ describe("updates", () => {
     expect(trace).toEqual(["download", "invoke lock", "install", "relaunch"]);
   });
 
-  it("starts the app over when installing fails after the client stopped", async () => {
+  it("does not relaunch when installing fails, and says why", async () => {
     const trace: string[] = [];
     offer(trace);
     await tauriPlatform.updates?.check();
     const update = (await check.mock.results[0]?.value) as { install: ReturnType<typeof vi.fn> };
     update.install.mockRejectedValueOnce(new Error("installer gone"));
     await expect(tauriPlatform.updates?.install()).rejects.toThrow("installer gone");
-    expect(trace).toEqual(["download", "invoke lock", "relaunch"]);
+    expect(trace).toEqual(["download", "invoke lock"]);
   });
 });
