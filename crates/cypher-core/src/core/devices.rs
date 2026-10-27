@@ -182,16 +182,22 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// A device list the server gave (`None`: it has none for `peer`).
     pub(super) fn on_devices(&mut self, peer: PeerId, purpose: DevicesFor, list: Option<&[u8]>) {
-        let list = match list.map(DeviceList::decode) {
-            Some(Ok(list)) if list.identity() == peer => Some(list),
-            // Forged or broken: as good as none. A join waits no more for it.
-            Some(_) => {
+        let refused = match list.map(DeviceList::decode) {
+            Some(Ok(list)) if list.identity() == peer => Ok(Some(list)),
+            // Another identity's: the server substitutes keys.
+            Some(Ok(_)) => Err(FailReason::KeyMismatch),
+            Some(Err(_)) => Err(FailReason::InvalidKeys),
+            None => Ok(None),
+        };
+        // Forged or broken: as good as none, and a join of it fails at once.
+        let list = match refused {
+            Ok(list) => list,
+            Err(reason) => {
                 if matches!(purpose, DevicesFor::Join) {
-                    self.join_failed(peer, None);
+                    self.join_failed(peer, reason);
                 }
                 return;
             }
-            None => None,
         };
         match purpose {
             DevicesFor::Own => self.on_own_devices(list),

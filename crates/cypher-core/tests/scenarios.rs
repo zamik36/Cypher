@@ -460,6 +460,32 @@ fn one_invite_joined_twice_at_once_answers_both() {
     );
 }
 
+/// A device list the server forged for the host (another identity's) fails
+/// every join of the invite at once, as a key substitution, instead of
+/// leaving them to time out.
+#[test]
+fn a_forged_device_list_fails_the_joins_at_once() {
+    let mut w = World::new(3);
+    let a = w.peer(A);
+    let link = w.create_link(A);
+    let forged = w.server.devices.get(&w.peer(C)).cloned().unwrap();
+    w.server.devices.insert(a, forged);
+    for id in [5, 6] {
+        let (id, link) = (CommandId(id), link.clone());
+        w.queue(B, Command::JoinLink { id, link });
+    }
+    w.run();
+    let answers = answered(&w, B, |e| match e {
+        Event::JoinFailed { id, reason, .. } => Some((*id, Err(*reason))),
+        Event::PeerAdded {
+            joined: Some(id), ..
+        } => Some((*id, Ok(()))),
+        _ => None,
+    });
+    let refused = Err(FailReason::KeyMismatch);
+    assert_eq!(answers, [(CommandId(5), refused), (CommandId(6), refused)]);
+}
+
 /// One invite joined again while the first join of it is still fetching
 /// the host's keys: the second is answered as soon as the first is.
 #[test]

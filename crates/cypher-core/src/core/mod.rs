@@ -652,7 +652,7 @@ impl<R: CryptoRngCore> Core<R> {
             Pending::FetchKeys { addr, .. } => self.on_join_keys_failed(addr.peer, reason),
             Pending::FetchDevices { peer, purpose } => match (purpose, reason) {
                 (purpose, FailReason::NotFound) => self.on_devices(peer, purpose, None),
-                (DevicesFor::Join, reason) => self.join_failed(peer, Some(reason)),
+                (DevicesFor::Join, reason) => self.join_failed(peer, reason),
                 (DevicesFor::Own | DevicesFor::Refresh, _) => {}
             },
             Pending::PublishDevices { linked, .. } => {

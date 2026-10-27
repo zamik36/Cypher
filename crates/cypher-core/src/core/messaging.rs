@@ -360,13 +360,9 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// Joining `peer`'s invite failed before any of its devices was asked:
-    /// every join of it hears why. Without `reason` (a forged device list),
-    /// the join is only dropped.
-    pub(super) fn join_failed(&mut self, peer: PeerId, reason: Option<FailReason>) {
+    /// every join of it hears why.
+    pub(super) fn join_failed(&mut self, peer: PeerId, reason: FailReason) {
         let Some(Joining { ids, link, .. }) = self.joining.remove(&peer) else {
-            return;
-        };
-        let Some(reason) = reason else {
             return;
         };
         for id in ids {
