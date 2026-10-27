@@ -2,6 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import UpdateBanner from "./UpdateBanner";
 import { registerPlatform, type Platform } from "../platform";
+import { watchForLock } from "../stores/lock";
+import { toasts } from "../stores/toasts";
+import { t } from "../i18n";
 
 function withUpdates(updates: Platform["updates"]) {
   registerPlatform({ ...(updates ? { updates } : {}), devices: {} } as unknown as Platform);
@@ -53,5 +56,33 @@ describe("UpdateBanner", () => {
     await waitFor(() => expect(install).toHaveBeenCalledOnce());
     const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Update and restart" });
     await waitFor(() => expect(retry.disabled).toBe(false));
+  });
+
+  it("locks the app, saying why, when an install failed after the client stopped", async () => {
+    const lock = vi.fn();
+    const stopWatching = watchForLock(lock);
+    const stopped = { kind: "locked", message: "installer gone" };
+    const install = vi.fn<() => Promise<void>>().mockRejectedValue(stopped);
+    withUpdates({ check: () => Promise.resolve("0.4.0"), install });
+    render(() => <UpdateBanner />);
+    await screen.findByTestId("update-banner");
+    fireEvent.click(screen.getByRole("button", { name: "Update and restart" }));
+    await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+    expect(toasts.map((toast) => toast.message)).toContain(t().app_update_failed_locked);
+    stopWatching();
+  });
+
+  it("leaves the app unlocked when an install failed before the client stopped", async () => {
+    const lock = vi.fn();
+    const stopWatching = watchForLock(lock);
+    const install = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("download failed"));
+    withUpdates({ check: () => Promise.resolve("0.4.0"), install });
+    render(() => <UpdateBanner />);
+    await screen.findByTestId("update-banner");
+    fireEvent.click(screen.getByRole("button", { name: "Update and restart" }));
+    await waitFor(() => expect(install).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(lock).not.toHaveBeenCalled();
+    stopWatching();
   });
 });

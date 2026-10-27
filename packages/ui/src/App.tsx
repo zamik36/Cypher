@@ -12,6 +12,7 @@ import { watchForLock } from "./stores/lock";
 import { reset } from "./stores/nav";
 import { setNickname } from "./stores/profile";
 import { toastError } from "./stores/toasts";
+import ToastContainer from "./components/ToastContainer";
 import { closeToTray } from "./stores/window";
 import { t } from "./i18n";
 
@@ -61,7 +62,16 @@ export default function App() {
   });
 
   return (
-    <Show when={unlocked()} fallback={<IdentityView onUnlocked={(id, nick) => void handleUnlocked(id, nick)} />}>
+    <Show
+      when={unlocked()}
+      fallback={
+        <>
+          <IdentityView onUnlocked={(id, nick) => void handleUnlocked(id, nick)} />
+          {/* Why the app locked, when it locked itself. */}
+          <ToastContainer />
+        </>
+      }
+    >
       <AppShell />
     </Show>
   );

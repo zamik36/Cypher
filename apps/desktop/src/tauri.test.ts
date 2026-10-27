@@ -109,7 +109,11 @@ describe("updates", () => {
     await tauriPlatform.updates?.check();
     const update = (await check.mock.results[0]?.value) as { install: ReturnType<typeof vi.fn> };
     update.install.mockRejectedValueOnce(new Error("installer gone"));
-    await expect(tauriPlatform.updates?.install()).rejects.toThrow("installer gone");
+    // The client is stopped by now: the UI locks, saying why.
+    await expect(tauriPlatform.updates?.install()).rejects.toMatchObject({
+      kind: "locked",
+      message: "installer gone",
+    });
     expect(trace).toEqual(["download", "invoke lock"]);
   });
 });

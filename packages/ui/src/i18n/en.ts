@@ -69,6 +69,7 @@ const en = {
   app_update_install: "Update and restart",
   app_update_installing: "Updating…",
   app_update_later: "Later",
+  app_update_failed_locked: "The update could not be installed. Unlock to go on with this version.",
   server_key_title: "The server's key changed",
   server_key_text:
     "The server shows another key than the first time you connected, so Cypher does not use its anonymous channel. Someone may be impersonating it.",

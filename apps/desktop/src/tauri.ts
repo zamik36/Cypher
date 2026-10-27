@@ -3,7 +3,7 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
+import { CommandError, toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
 import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 
 let stopLevels: UnlistenFn | null = null;
@@ -64,9 +64,14 @@ const updates: Platform["updates"] = {
     await offered.download();
     // On Windows, installing ends the app at once, without the exit that
     // stops the client elsewhere: it is stopped here, as on exit. Should
-    // installing fail, the failure is the answer and nothing relaunches.
+    // installing fail, nothing relaunches and the failure says the client
+    // is stopped (`locked`), for the UI to lock too.
     await command("lock");
-    await offered.install();
+    try {
+      await offered.install();
+    } catch (e) {
+      throw new CommandError({ kind: "locked", message: e instanceof Error ? e.message : String(e) });
+    }
     await relaunch();
   },
 };
