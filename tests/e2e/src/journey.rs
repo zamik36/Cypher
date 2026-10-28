@@ -9,7 +9,8 @@ use cypher_client::{Client, ClientError, Config, Content};
 use cypher_core::{Command, CommandId, Event, MediaKind, MessageStatus};
 use cypher_crypto::IdentitySeed;
 use cypher_types::{FileId, PeerId};
-use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+use p256::elliptic_curve::Generate as _;
+use p256::elliptic_curve::sec1::ToSec1Point as _;
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -582,12 +583,10 @@ async fn register_for_push(b: &mut Peer) {
     assert_eq!(key.len(), 65);
     let register = Command::RegisterPush {
         endpoint: "https://push.invalid/up-b".into(),
-        p256dh: *p256::SecretKey::random(&mut rand::rngs::OsRng)
+        p256dh: p256::SecretKey::generate()
             .public_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .first_chunk::<65>()
-            .unwrap(),
+            .to_uncompressed_point()
+            .into(),
         auth: [1; 16],
     };
     b.client.command(register).await.unwrap();
