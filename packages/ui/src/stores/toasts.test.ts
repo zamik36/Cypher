@@ -19,7 +19,7 @@ describe("toasts", () => {
   });
 
   it("shows failures in the user's language", () => {
-    toastError(new Error("Cancelled"));
+    toastError(new Error("cancelled"));
     toastError("something unknown");
     expect(toasts.map((t) => [t.message, t.type])).toEqual([
       ["Cancelled.", "error"],

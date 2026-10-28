@@ -1,4 +1,5 @@
 /** Messages between the UI thread and the core worker. */
+import type { CmdErrorShape } from "@cypher/ui/errors";
 import type { ChatEntry } from "../wasm/cypher_wasm.js";
 
 export interface Methods {
@@ -59,6 +60,6 @@ export interface Request<M extends Method = Method> {
 
 export type WorkerMessage =
   | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: string }
+  | { id: number; ok: false; error: CmdErrorShape }
   | { event: string; payload: unknown }
   | { download: { fileId: string; name: string; blob: Blob } };

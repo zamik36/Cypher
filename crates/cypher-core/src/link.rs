@@ -153,6 +153,7 @@ impl Provision {
         if now_ms >= self.expires_at {
             self.expires_at = u64::MAX;
             effects.push(Effect::Emit(Event::LinkFailed {
+                id: None,
                 reason: FailReason::Timeout,
             }));
             effects.push(Effect::Disconnect { reconnect: false });
@@ -291,6 +292,7 @@ mod tests {
         assert!(effects.iter().any(|e| matches!(
             e,
             Effect::Emit(Event::LinkFailed {
+                id: None,
                 reason: FailReason::Timeout
             })
         )));

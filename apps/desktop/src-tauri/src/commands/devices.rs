@@ -1,11 +1,11 @@
 //! Several devices on one identity: a new device waits to be linked, a
 //! device of the identity links or unlinks others.
 
-use cypher_core::{Command, Event};
+use cypher_core::{CmdError, Command, CommandId, ErrorKind, Event};
 use tauri::State;
 
 use super::identity::{activate, with_store};
-use crate::session::{AppState, CmdResult, await_event, err};
+use crate::session::{AppState, CmdResult, await_event};
 
 /// A name for this device to suggest; the user may change it.
 #[tauri::command]
@@ -30,7 +30,8 @@ pub(crate) async fn link_start(
     name: String,
 ) -> CmdResult<String> {
     let addr = addr.trim();
-    cypher_transport::split_host_port(addr).map_err(err)?;
+    cypher_transport::split_host_port(addr)
+        .map_err(|e| CmdError::new(ErrorKind::Invalid, e.to_string()))?;
     let waiting = cypher_client::provision(addr.to_owned(), state.tls(), &name);
     let offer = waiting.offer().to_owned();
     state.linking.start(waiting).await;
@@ -44,14 +45,10 @@ pub(crate) async fn link_finish(
     state: State<'_, AppState>,
     passphrase: String,
 ) -> CmdResult<(String, String)> {
-    let (waiting, cancel) = state
-        .linking
-        .take()
-        .await
-        .ok_or("not waiting to be linked")?;
+    let (waiting, cancel) = state.linking.take().await.ok_or(ErrorKind::NotLinking)?;
     let linked = tokio::select! {
-        linked = waiting.linked() => linked.map_err(err)?,
-        () = cancel.cancelled() => return Err("cancelled".to_owned()),
+        linked = waiting.linked() => linked?,
+        () = cancel.cancelled() => return Err(ErrorKind::Cancelled.into()),
     };
     let unlocked = with_store(&state, move |s| s.adopt(linked, &passphrase)).await?;
     let nickname = unlocked.nickname.clone();
@@ -68,10 +65,6 @@ pub(crate) async fn link_cancel(state: State<'_, AppState>) -> CmdResult<()> {
 /// Links the new device whose offer the user scanned or pasted; with
 /// `history`, it also gets the message history.
 #[tauri::command]
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "waits for one reply among all the client's events"
-)]
 pub(crate) async fn link_device(
     state: State<'_, AppState>,
     offer: String,
@@ -79,16 +72,28 @@ pub(crate) async fn link_device(
 ) -> CmdResult<()> {
     let (client, mut events) = state.client_and_events().await?;
     let history = history.unwrap_or(false);
+    let id = state.command_id();
     client
-        .command(Command::LinkDevice { offer, history })
-        .await
-        .map_err(err)?;
-    await_event(&mut events, |e| match e {
-        Event::DeviceLinked { .. } => Some(Ok(())),
-        Event::LinkFailed { reason } => Some(Err(format!("{reason:?}"))),
+        .command(Command::LinkDevice { id, offer, history })
+        .await?;
+    await_event(&mut events, device_linked(id)).await
+}
+
+/// The answer to `LinkDevice` `id`; a failure of another change to the
+/// device list is not its answer.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "picks one reply among all the client's events"
+)]
+pub(crate) fn device_linked(id: CommandId) -> impl FnMut(&Event) -> Option<CmdResult<()>> {
+    move |e| match e {
+        Event::DeviceLinked { id: i, .. } if *i == id => Some(Ok(())),
+        Event::LinkFailed {
+            id: Some(i),
+            reason,
+        } if *i == id => Some(Err((*reason).into())),
         _ => None,
-    })
-    .await
+    }
 }
 
 /// Takes another device off this identity's list.
@@ -99,7 +104,7 @@ pub(crate) async fn unlink_device(state: State<'_, AppState>, device: u32) -> Cm
         .await?
         .command(Command::UnlinkDevice { device })
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }
 
 /// Stops handing over, or receiving, the message history.
@@ -110,7 +115,7 @@ pub(crate) async fn cancel_history(state: State<'_, AppState>) -> CmdResult<()> 
         .await?
         .command(Command::CancelHistory)
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }
 
 /// Puts this device on a full list in place of `device`.
@@ -121,5 +126,5 @@ pub(crate) async fn replace_device(state: State<'_, AppState>, device: u32) -> C
         .await?
         .command(Command::ReplaceDevice { device })
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }

@@ -55,8 +55,8 @@ describe("offerFile", () => {
   });
 
   it("keeps the bytes when the command failed after its offer may have gone out", async () => {
-    const { o, trace, cmds } = offering(new Error("StorageFailed"));
-    await expect(offerFile(o, { type: "send_file" }, file())).rejects.toThrow("StorageFailed");
+    const { o, trace, cmds } = offering(new Error("storage_failed"));
+    await expect(offerFile(o, { type: "send_file" }, file())).rejects.toThrow("storage_failed");
     expect(trace).toEqual([`keep ${String(cmds[0]?.["file_id"])}`, "run"]);
   });
 });

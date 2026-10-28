@@ -1,11 +1,24 @@
-import { convertFileSrc, invoke, type InvokeArgs } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { convertFileSrc, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import { CommandError, toCmdErrorShape, toCommandError } from "@cypher/ui/errors";
 import type { ConversationEntry, LinkInfo, MediaSent, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
 
 let stopLevels: UnlistenFn | null = null;
+
+/**
+ * Runs a command; a failure is thrown as a `CommandError`, whose `kind`
+ * (and `reason`) the UI words for the user.
+ */
+async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  try {
+    return await tauriInvoke<T>(cmd, args, options);
+  } catch (e) {
+    throw toCommandError(e);
+  }
+}
 
 const isAndroid = /Android/i.test(navigator.userAgent);
 
@@ -48,10 +61,61 @@ const updates: Platform["updates"] = {
   },
   install: async () => {
     if (!offered) return;
-    await offered.downloadAndInstall();
+    await offered.download();
+    // On Windows, installing ends the app at once, without the exit that
+    // stops the client elsewhere: it is stopped here, as on exit. Should
+    // installing fail, nothing relaunches and the failure says the client
+    // is stopped (`locked`), for the UI to lock too.
+    await command("lock");
+    try {
+      await offered.install();
+    } catch (e) {
+      throw new CommandError({ kind: "locked", message: e instanceof Error ? e.message : String(e) });
+    }
     await relaunch();
   },
 };
+
+/** Offers one file the webview holds to `peerId`. */
+async function sendBytes(peerId: string, file: File): Promise<TransferInfo> {
+  const payload = isAndroid ? { data: await base64Of(file) } : new Uint8Array(await file.arrayBuffer());
+  return invoke<TransferInfo>("send_bytes", payload, {
+    headers: {
+      "x-peer": peerId,
+      "x-name": encodeURIComponent(file.name || "file"),
+      "x-mime": encodeURIComponent(file.type || "application/octet-stream"),
+    },
+  });
+}
+
+/**
+ * Sends `files` in order, as the native side sends a batch: a file that
+ * cannot be sent does not stop the others, whose cards the UI needs. When
+ * none went, the first error is the answer; when some did, each file left
+ * out is told to the UI (`file_not_sent`), which words why. Telling it is
+ * best effort: the cards of the files sent are the answer either way.
+ */
+async function sendEach(files: File[], send: (file: File) => Promise<TransferInfo>): Promise<TransferInfo[]> {
+  const sent: TransferInfo[] = [];
+  const failed: [string, unknown][] = [];
+  for (const file of files) {
+    try {
+      sent.push(await send(file));
+    } catch (e) {
+      failed.push([file.name || "file", e]);
+    }
+  }
+  const [first] = failed;
+  if (sent.length === 0 && first) throw first[1];
+  for (const [name, e] of failed) {
+    try {
+      await emit("cypher://file_not_sent", { name, error: toCmdErrorShape(e) });
+    } catch (told) {
+      console.warn("telling the UI of a file left out failed", told);
+    }
+  }
+  return sent;
+}
 
 /** Runs a command that returns nothing. */
 async function command(cmd: string, args?: InvokeArgs): Promise<void> {
@@ -96,22 +160,7 @@ export const tauriPlatform: Platform = {
   markRead: (peerId, msgIds) => command("mark_read", { peerId, msgIds }),
   pickAndSend: (peerId) => invoke<TransferInfo[]>("browse_and_send", { peerId }),
   sendDropped: (peerId, dropId) => invoke<TransferInfo[]>("send_dropped", { peerId, id: dropId }),
-  sendFiles: async (peerId, files) => {
-    const sent: TransferInfo[] = [];
-    for (const file of files) {
-      const payload = isAndroid ? { data: await base64Of(file) } : new Uint8Array(await file.arrayBuffer());
-      sent.push(
-        await invoke<TransferInfo>("send_bytes", payload, {
-          headers: {
-            "x-peer": peerId,
-            "x-name": encodeURIComponent(file.name || "file"),
-            "x-mime": encodeURIComponent(file.type || "application/octet-stream"),
-          },
-        }),
-      );
-    }
-    return sent;
-  },
+  sendFiles: (peerId, files) => sendEach(files, (file) => sendBytes(peerId, file)),
   acceptFile: (fileId) => command("accept_file", { fileId }),
   cancelTransfer: (fileId) => command("cancel_transfer", { fileId }),
   fileSaved: (fileId) => invoke<boolean>("file_saved", { fileId }),

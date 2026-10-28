@@ -98,7 +98,7 @@ describe("applyEffects", () => {
     await applyEffects(
       [
         { kind: "event", channel: "connected", payload: null },
-        { kind: "reply", op: "joined", value: "peer" },
+        { kind: "reply", op: "joined", id: 1, value: "peer" },
         { kind: "read_chunk", file_id: "f", index: 2, offset: 0, len: 4, headroom: 0 },
         { kind: "open_sink", file_id: "f", len: 10, sink: "media" },
         { kind: "write_chunk", file_id: "f", offset: 4, data: bytes(1) },

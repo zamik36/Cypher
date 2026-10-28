@@ -1,54 +1,106 @@
+import type { ErrorKind, FailReason, IdentityKind } from "../errors";
+import { isCmdErrorShape } from "../errors";
 import { t } from "../i18n";
 
-/**
- * A failure in the user's language. Both platforms report the core's
- * `FailReason` name (e.g. `KeyMismatch`); anything else is shown as is.
- */
-export function reasonText(error: unknown): string {
-  const raw = rawReason(error);
-  const tr = t();
-  const known: Record<string, string> = {
-    InvalidLink: tr.join_invalid_link,
-    NotFound: tr.join_not_found,
-    SelfLink: tr.join_self_link,
-    KeyMismatch: tr.join_key_mismatch,
-    InvalidKeys: tr.join_invalid_keys,
-    Timeout: tr.join_timeout,
-    Offline: tr.join_offline,
-    UpdateRequired: tr.error_update_required,
-    StorageFailed: tr.error_storage_failed,
-    Corrupted: tr.error_corrupted,
-    Rejected: tr.error_rejected,
-    Cancelled: tr.error_cancelled,
-    SourceUnavailable: tr.error_source_unavailable,
-    Unauthorized: tr.error_unauthorized,
-    ServerError: tr.error_server,
-    DecryptFailed: tr.error_decrypt_failed,
-    // The desktop's client is still starting, or missed a reply.
+type Words = ReturnType<typeof t>;
+
+/** Every kind of failure in words; a kind left out fails to typecheck. */
+function kindText(tr: Words): Record<ErrorKind, string> {
+  return {
+    locked: tr.error_locked,
+    not_connected: tr.join_offline,
     connecting: tr.error_connecting,
+    stopped: tr.error_stopped,
+    timed_out: tr.join_timeout,
     lagged: tr.error_lagged,
-    // Opening a received file.
+    cancelled: tr.error_cancelled,
+    invalid: tr.error_invalid,
+    too_large: tr.error_too_large,
+    unsupported: tr.error_unsupported,
+    not_found: tr.error_not_found,
+    not_ready: tr.error_not_ready,
+    expired: tr.error_expired,
+    not_saved: tr.file_missing,
     unsafe_type: tr.file_unsafe,
     no_app: tr.file_no_app,
-    not_saved: tr.file_missing,
-    // Identity file and recovery phrase, as both platforms word them.
-    "wrong passphrase": tr.identity_err_wrong_passphrase,
-    "passphrase is too short": tr.identity_err_short,
-    "identity file is corrupt": tr.identity_err_corrupt,
-    "identity data is corrupt": tr.identity_err_corrupt,
-    "invalid recovery phrase": tr.identity_err_bad_phrase,
-    "an identity already exists": tr.identity_err_exists,
-    "nickname is too long": tr.identity_err_nickname,
+    unknown_offer: tr.error_unknown_offer,
+    no_downloads: tr.error_no_downloads,
+    name_taken: tr.error_name_taken,
+    drop_gone: tr.error_drop_gone,
+    already_recording: tr.error_already_recording,
+    not_recording: tr.error_not_recording,
+    not_linking: tr.error_not_linking,
+    // Worded by their reason; these are for a reason the UI does not know.
+    failed: tr.error_failed,
+    identity: tr.error_failed,
+    internal: tr.error_failed,
   };
-  return known[raw] ?? raw;
 }
 
-/** The failure as the platform reported it. */
-function rawReason(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** Every reason the core gives, in its events and in `failed` errors. */
+function failText(tr: Words): Record<FailReason, string> {
+  return {
+    invalid_link: tr.join_invalid_link,
+    not_found: tr.join_not_found,
+    self_link: tr.join_self_link,
+    key_mismatch: tr.join_key_mismatch,
+    invalid_keys: tr.join_invalid_keys,
+    timeout: tr.join_timeout,
+    offline: tr.join_offline,
+    update_required: tr.error_update_required,
+    storage_failed: tr.error_storage_failed,
+    corrupted: tr.error_corrupted,
+    rejected: tr.error_rejected,
+    cancelled: tr.error_cancelled,
+    source_unavailable: tr.error_source_unavailable,
+    unauthorized: tr.error_unauthorized,
+    server_error: tr.error_server,
+    decrypt_failed: tr.error_decrypt_failed,
+  };
+}
+
+function identityText(tr: Words): Record<IdentityKind, string> {
+  return {
+    missing: tr.identity_err_missing,
+    exists: tr.identity_err_exists,
+    weak_passphrase: tr.identity_err_short,
+    wrong_passphrase: tr.identity_err_wrong_passphrase,
+    corrupt: tr.identity_err_corrupt,
+    invalid_mnemonic: tr.identity_err_bad_phrase,
+    nickname_too_long: tr.identity_err_nickname,
+  };
+}
+
+/** Looks `key` up among `words`' own keys only. */
+function lookup<K extends string>(words: Record<K, string>, key: unknown): string | undefined {
+  return typeof key === "string" && Object.prototype.hasOwnProperty.call(words, key) ? words[key as K] : undefined;
+}
+
+/**
+ * A failure in the user's language: a command's error (`{kind, reason?,
+ * message}`, from either platform), or a core reason an event carried
+ * (`key_mismatch`). Anything else, and an `internal` error, is shown as it
+ * says itself.
+ */
+export function reasonText(error: unknown): string {
+  const tr = t();
+  if (isCmdErrorShape(error)) {
+    switch (error.kind) {
+      case "failed":
+        return lookup(failText(tr), error.reason) ?? tr.error_failed;
+      case "identity":
+        return lookup(identityText(tr), error.reason) ?? tr.error_failed;
+      case "internal":
+        return error.message || tr.error_failed;
+      default:
+        return kindText(tr)[error.kind];
+    }
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  return lookup(failText(tr), raw) ?? raw;
 }
 
 /** Whether a command failed only because the client is still starting. */
 export function isConnecting(error: unknown): boolean {
-  return rawReason(error) === "connecting";
+  return isCmdErrorShape(error) && error.kind === "connecting";
 }

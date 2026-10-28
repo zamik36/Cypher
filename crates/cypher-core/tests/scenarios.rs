@@ -14,11 +14,13 @@ mod harness;
 use std::hash::{DefaultHasher, Hasher};
 
 use bytes::Bytes;
-use cypher_core::{Command, Content, Event, FailReason, MediaKind, MessageStatus, Table, Vault};
+use cypher_core::{
+    Command, CommandId, Content, Event, FailReason, MediaKind, MessageStatus, Table, Vault,
+};
 use cypher_crypto::IdentitySeed;
 use cypher_types::{DeviceId, FileId, PeerId};
-use cypher_wire::{Frame, ServerMsg};
-use harness::World;
+use cypher_wire::{ClientMsg, ErrorCode, Frame, ServerMsg};
+use harness::{Fault, Rule, World};
 
 const A: usize = 0;
 const B: usize = 1;
@@ -39,17 +41,11 @@ fn join_link_establishes_session_both_ways_and_either_side_writes_first() {
     assert!(w.has_event(B, |e| matches!(
         e,
         Event::PeerAdded {
-            initiated_by_us: true,
+            joined: Some(_),
             ..
         }
     )));
-    assert!(w.has_event(A, |e| matches!(
-        e,
-        Event::PeerAdded {
-            initiated_by_us: false,
-            ..
-        }
-    )));
+    assert!(w.has_event(A, |e| matches!(e, Event::PeerAdded { joined: None, .. })));
 
     let from_host = w.send_text(A, B, "hi from host");
     let from_joiner = w.send_text(B, A, "hi from joiner");
@@ -121,7 +117,13 @@ fn a_second_joiner_on_a_used_invite_waits_as_a_request() {
         },
     );
     let link = w.create_link(A);
-    w.command(B, Command::JoinLink { link: link.clone() });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link.clone(),
+        },
+    );
     let (a, b, c) = (w.peer(A), w.peer(B), w.peer(C));
     assert!(w.has_event(
         A,
@@ -131,7 +133,13 @@ fn a_second_joiner_on_a_used_invite_waits_as_a_request() {
     assert_eq!(w.contact_name(B, a).as_deref(), Some("Alice"));
 
     // The same invite again, say intercepted: a request, told nothing.
-    w.command(C, Command::JoinLink { link });
+    w.command(
+        C,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(w.has_event(
         A,
         |e| matches!(e, Event::ContactRequest { peer } if *peer == c)
@@ -217,8 +225,20 @@ fn a_joiner_whose_prekey_is_gone_starts_again() {
 fn a_joiner_waiting_to_be_accepted_does_not_start_again() {
     let mut w = World::new(3);
     let link = w.create_link(A);
-    w.command(B, Command::JoinLink { link: link.clone() });
-    w.command(C, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link.clone(),
+        },
+    );
+    w.command(
+        C,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     let fetches = w.server.key_fetches;
     w.advance(30 * 60_000);
     assert_eq!(w.server.key_fetches, fetches, "no new keys fetched");
@@ -367,12 +387,169 @@ fn host_can_message_first_right_after_join() {
     assert_eq!(w.status_of(A, id), Some(MessageStatus::Delivered));
 }
 
+/// What `pick` takes from the events client `i` has seen, in order.
+fn answered<T>(w: &World, i: usize, pick: impl Fn(&Event) -> Option<T>) -> Vec<T> {
+    w.clients[i].events.iter().filter_map(pick).collect()
+}
+
+/// Two invites asked for at once: each answer names its own command.
+#[test]
+fn invites_made_at_once_answer_their_own_commands() {
+    let mut w = World::new(1);
+    for id in [1, 2] {
+        w.queue(A, Command::CreateLink { id: CommandId(id) });
+    }
+    w.run();
+    let made = answered(&w, A, |e| match e {
+        Event::LinkCreated { id, link } => Some((*id, link.clone())),
+        _ => None,
+    });
+    let ids: Vec<_> = made.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, [CommandId(1), CommandId(2)]);
+    assert_ne!(made[0].1, made[1].1, "each command has its own invite");
+}
+
+/// Two invites joined at once: each new contact names the join it answers.
+#[test]
+fn invites_joined_at_once_answer_their_own_commands() {
+    let mut w = World::new(3);
+    let (a, b) = (w.peer(A), w.peer(B));
+    let (by_a, by_b) = (w.create_link(A), w.create_link(B));
+    for (id, link) in [(7, by_a), (8, by_b)] {
+        let id = CommandId(id);
+        w.queue(C, Command::JoinLink { id, link });
+    }
+    w.run();
+    let added = answered(&w, C, |e| match e {
+        Event::PeerAdded {
+            peer,
+            joined: Some(id),
+        } => Some((*id, *peer)),
+        _ => None,
+    });
+    assert_eq!(added.len(), 2, "{added:?}");
+    assert!(added.contains(&(CommandId(7), a)) && added.contains(&(CommandId(8), b)));
+}
+
+/// One invite joined twice at once (a double submit, a deep link and a
+/// paste): each join is answered under its own id, the contact added once.
+#[test]
+fn one_invite_joined_twice_at_once_answers_both() {
+    let mut w = World::new(2);
+    let a = w.peer(A);
+    let link = w.create_link(A);
+    for id in [5, 6] {
+        let (id, link) = (CommandId(id), link.clone());
+        w.queue(B, Command::JoinLink { id, link });
+    }
+    w.run();
+    let answers = answered(&w, B, |e| match e {
+        Event::PeerAdded {
+            peer,
+            joined: Some(id),
+        } => Some((*id, Some(*peer))),
+        Event::JoinFailed { id, .. } => Some((*id, None)),
+        _ => None,
+    });
+    assert_eq!(answers, [(CommandId(5), Some(a)), (CommandId(6), Some(a))]);
+    w.advance(30_000);
+    assert_eq!(
+        answered(&w, B, |e| matches!(e, Event::JoinFailed { .. })
+            .then_some(())),
+        []
+    );
+}
+
+/// A device list the server forged for the host (another identity's) fails
+/// every join of the invite at once, as a key substitution, instead of
+/// leaving them to time out.
+#[test]
+fn a_forged_device_list_fails_the_joins_at_once() {
+    let mut w = World::new(3);
+    let a = w.peer(A);
+    let link = w.create_link(A);
+    let forged = w.server.devices.get(&w.peer(C)).cloned().unwrap();
+    w.server.devices.insert(a, forged);
+    for id in [5, 6] {
+        let (id, link) = (CommandId(id), link.clone());
+        w.queue(B, Command::JoinLink { id, link });
+    }
+    w.run();
+    let answers = answered(&w, B, |e| match e {
+        Event::JoinFailed { id, reason, .. } => Some((*id, Err(*reason))),
+        Event::PeerAdded {
+            joined: Some(id), ..
+        } => Some((*id, Ok(()))),
+        _ => None,
+    });
+    let refused = Err(FailReason::KeyMismatch);
+    assert_eq!(answers, [(CommandId(5), refused), (CommandId(6), refused)]);
+}
+
+/// One invite joined again while the first join of it is still fetching
+/// the host's keys: the second is answered as soon as the first is.
+#[test]
+fn an_invite_joined_again_while_its_keys_come_answers_both() {
+    let mut w = World::new(2);
+    let link = w.create_link(A);
+    w.server.faults.push(Rule::times(
+        1,
+        |m| matches!(m, ClientMsg::FetchKeys { .. }),
+        Fault::Ignore,
+    ));
+    let join = |id| Command::JoinLink {
+        id: CommandId(id),
+        link: link.clone(),
+    };
+    w.command(B, join(1));
+    w.command(B, join(2));
+    w.advance(30_000);
+    let answers = answered(&w, B, |e| match e {
+        Event::PeerAdded {
+            peer,
+            joined: Some(id),
+        } => Some((*id, Ok(*peer))),
+        Event::JoinFailed { id, reason, .. } => Some((*id, Err(*reason))),
+        _ => None,
+    });
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert!(
+        answers.iter().all(|(_, r)| *r == answers[0].1),
+        "{answers:?}"
+    );
+    assert!(answers.iter().any(|(id, _)| *id == CommandId(1)));
+    assert!(answers.iter().any(|(id, _)| *id == CommandId(2)));
+}
+
+/// An invite the server refuses fails its own command only, never another
+/// one made meanwhile.
+#[test]
+fn a_refused_invite_fails_only_its_own_command() {
+    let mut w = World::new(1);
+    w.server.faults.push(Rule::times(
+        1,
+        |m| matches!(m, ClientMsg::CreateLink),
+        Fault::Error(ErrorCode::RateLimited),
+    ));
+    w.queue(A, Command::CreateLink { id: CommandId(3) });
+    w.queue(A, Command::CreateLink { id: CommandId(4) });
+    w.run();
+    let answers = answered(&w, A, |e| match e {
+        Event::CreateLinkFailed { id, reason } => Some((*id, Some(*reason))),
+        Event::LinkCreated { id, .. } => Some((*id, None)),
+        _ => None,
+    });
+    let refused = (CommandId(3), Some(FailReason::Offline));
+    assert_eq!(answers, [refused, (CommandId(4), None)]);
+}
+
 #[test]
 fn link_errors_are_reported_not_hung() {
     let mut w = World::new(2);
     w.command(
         B,
         Command::JoinLink {
+            id: CommandId(0),
             link: "not a link".into(),
         },
     );
@@ -387,6 +564,7 @@ fn link_errors_are_reported_not_hung() {
     w.command(
         B,
         Command::JoinLink {
+            id: CommandId(0),
             link: "not-a-link".into(),
         },
     );
@@ -401,6 +579,7 @@ fn link_errors_are_reported_not_hung() {
     w.command(
         B,
         Command::JoinLink {
+            id: CommandId(0),
             link: format!("{}-{}", "a".repeat(26), "b".repeat(26)),
         },
     );
@@ -413,7 +592,13 @@ fn link_errors_are_reported_not_hung() {
     )));
 
     let own = w.create_link(A);
-    w.command(A, Command::JoinLink { link: own });
+    w.command(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: own,
+        },
+    );
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::JoinFailed {
@@ -1019,8 +1204,20 @@ fn simultaneous_mutual_join_converges() {
     let link_b = w.create_link(B);
     w.clients[A].events.clear();
     w.clients[B].events.clear();
-    w.command(B, Command::JoinLink { link: link_a });
-    w.command(A, Command::JoinLink { link: link_b });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link_a,
+        },
+    );
+    w.command(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link_b,
+        },
+    );
     w.send_text(A, B, "ping");
     w.send_text(B, A, "pong");
     assert_eq!(w.texts(B), ["ping"]);
@@ -1174,7 +1371,13 @@ fn waiting_for_the_relay(require_onion: bool) -> (World, String) {
 #[test]
 fn a_join_made_while_waiting_for_the_relay_goes_through_it() {
     let (mut w, link) = waiting_for_the_relay(false);
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(!w.has_event(B, |e| matches!(e, Event::JoinFailed { .. })));
     assert!(!w.has_event(B, |e| matches!(e, Event::PeerAdded { .. })));
 
@@ -1188,13 +1391,25 @@ fn a_join_made_while_waiting_for_the_relay_goes_through_it() {
 #[test]
 fn without_the_relay_a_join_falls_back_only_when_allowed() {
     let (mut w, link) = waiting_for_the_relay(false);
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     w.advance(11_000);
     assert!(w.has_event(B, |e| matches!(e, Event::PeerAdded { .. })));
     assert!(w.server.session_intro_ops > 0);
 
     let (mut w, link) = waiting_for_the_relay(true);
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     w.advance(11_000);
     assert!(w.has_event(B, |e| matches!(
         e,
@@ -1210,7 +1425,13 @@ fn without_the_relay_a_join_falls_back_only_when_allowed() {
 #[test]
 fn a_join_waiting_for_the_relay_fails_with_the_connection() {
     let (mut w, link) = waiting_for_the_relay(false);
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     w.disconnect(B);
     assert!(w.has_event(B, |e| matches!(
         e,
@@ -1280,7 +1501,13 @@ fn a_link_answered_with_another_identity_is_refused() {
     let mut w = World::new(3);
     let link = w.create_link(A);
     w.hijack_link(&link, C);
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(w.has_event(B, |e| matches!(
         e,
         Event::JoinFailed {
@@ -1663,6 +1890,7 @@ fn linking_hands_over_the_identity_and_lists_the_new_device() {
     w.command(
         A,
         Command::LinkDevice {
+            id: CommandId(0),
             offer,
             history: false,
         },
@@ -1715,7 +1943,14 @@ fn history_to_hand_over() -> (World, FileId, usize) {
 
 fn link(w: &mut World, laptop: usize, history: bool) {
     let offer = w.offer(laptop);
-    w.command(A, Command::LinkDevice { offer, history });
+    w.command(
+        A,
+        Command::LinkDevice {
+            id: CommandId(0),
+            offer,
+            history,
+        },
+    );
     assert!(w.finish_linking(laptop));
 }
 
@@ -1867,6 +2102,7 @@ fn a_link_that_cannot_work_fails() {
     w.command(
         A,
         Command::LinkDevice {
+            id: CommandId(0),
             offer,
             history: false,
         },
@@ -1874,7 +2110,8 @@ fn a_link_that_cannot_work_fails() {
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::LinkFailed {
-            reason: FailReason::Offline
+            reason: FailReason::Offline,
+            ..
         }
     )));
 
@@ -1884,6 +2121,7 @@ fn a_link_that_cannot_work_fails() {
     w.command(
         A,
         Command::LinkDevice {
+            id: CommandId(0),
             offer: taken.to_text(),
             history: false,
         },
@@ -1891,12 +2129,14 @@ fn a_link_that_cannot_work_fails() {
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::LinkFailed {
-            reason: FailReason::Rejected
+            reason: FailReason::Rejected,
+            ..
         }
     )));
     w.command(
         A,
         Command::LinkDevice {
+            id: CommandId(0),
             offer: "not an offer".into(),
             history: false,
         },
@@ -1904,7 +2144,8 @@ fn a_link_that_cannot_work_fails() {
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::LinkFailed {
-            reason: FailReason::InvalidLink
+            reason: FailReason::InvalidLink,
+            ..
         }
     )));
     assert!(!w.has_event(phone, |e| matches!(e, Event::LinkedHere)));
@@ -1920,6 +2161,7 @@ fn unlinking_a_device_stops_it() {
     w.command(
         A,
         Command::LinkDevice {
+            id: CommandId(0),
             offer,
             history: false,
         },
@@ -1933,7 +2175,8 @@ fn unlinking_a_device_stops_it() {
     assert!(w.has_event(A, |e| matches!(
         e,
         Event::LinkFailed {
-            reason: FailReason::Rejected
+            reason: FailReason::Rejected,
+            ..
         }
     )));
 }
@@ -1979,7 +2222,8 @@ fn a_device_with_no_room_replaces_the_one_the_user_picks() {
     assert!(w.has_event(seventh, |e| matches!(
         e,
         Event::LinkFailed {
-            reason: FailReason::Rejected
+            reason: FailReason::Rejected,
+            ..
         }
     )));
 
@@ -2124,7 +2368,7 @@ mod legacy {
 /// guards against.
 mod security {
     use cypher_core::{
-        Command, Event, MessageStatus, Table, message_key, peer_messages, session_key,
+        Command, CommandId, Event, MessageStatus, Table, message_key, peer_messages, session_key,
     };
     use cypher_crypto::IdentitySeed;
     use cypher_types::{Addr, DeviceId, MsgId};
@@ -2169,8 +2413,20 @@ mod security {
 
         // A stranger on a used invite, still a request.
         let link = w.create_link(A);
-        w.command(D, Command::JoinLink { link: link.clone() });
-        w.command(E, Command::JoinLink { link });
+        w.command(
+            D,
+            Command::JoinLink {
+                id: CommandId(0),
+                link: link.clone(),
+            },
+        );
+        w.command(
+            E,
+            Command::JoinLink {
+                id: CommandId(0),
+                link,
+            },
+        );
         let e = w.peer(E);
         assert!(w.contact(A, e).request);
         let before = rows(&w, A, Table::MessageStatus);
@@ -2325,10 +2581,11 @@ mod security {
                 reply_to: None,
             },
         );
-        w.command(B, Command::CreateLink);
+        w.command(B, Command::CreateLink { id: CommandId(0) });
         w.command(
             B,
             Command::LinkDevice {
+                id: CommandId(0),
                 offer,
                 history: false,
             },
@@ -2409,7 +2666,13 @@ mod security {
         w.serve_keys_of(b1, c1);
         let fetches = w.server.key_fetches;
         let link = w.create_link(B);
-        w.command(A, Command::JoinLink { link });
+        w.command(
+            A,
+            Command::JoinLink {
+                id: CommandId(0),
+                link,
+            },
+        );
         w.advance(10_000);
         assert!(w.server.key_fetches > fetches, "the keys were asked for");
         assert!(!w.clients[A].kv.contains_key(&session_row(b1)));
@@ -2424,7 +2687,13 @@ mod security {
         let (b1, b2) = (Addr::new(b, DeviceId::FIRST), Addr::new(b, DeviceId(2)));
         w.serve_keys_of(b1, b2);
         let link = w.create_link(B);
-        w.command(A, Command::JoinLink { link });
+        w.command(
+            A,
+            Command::JoinLink {
+                id: CommandId(0),
+                link,
+            },
+        );
         w.advance(10_000);
         assert!(!w.clients[A].kv.contains_key(&session_row(b1)));
         assert!(

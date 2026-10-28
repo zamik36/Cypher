@@ -1,4 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // OPFS folders list their files as async iterables.
+    "lib": ["ES2021", "DOM", "DOM.Iterable", "DOM.AsyncIterable", "WebWorker.ImportScripts"]
+  },
   "include": ["src"]
 }

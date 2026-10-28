@@ -3,13 +3,13 @@
 
 use std::path::Path;
 
-use cypher_core::Event;
+use cypher_core::{CmdError, Event};
 use cypher_types::FileId;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_cypher_files::Files;
 
 use crate::dto;
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 /// Publishes a received file, then tells the webview it is complete. A file
 /// that cannot be published stays in app storage and still opens.
@@ -28,7 +28,7 @@ async fn publish<R: Runtime>(app: &AppHandle<R>, file_id: FileId) -> CmdResult<(
         return Ok(());
     };
     let client = state.client().await?;
-    let Some(location) = client.saved_file(file_id).await.map_err(err)? else {
+    let Some(location) = client.saved_file(file_id).await? else {
         return Ok(());
     };
     // Only what was received into app storage; sent files stay put.
@@ -44,7 +44,7 @@ async fn publish<R: Runtime>(app: &AppHandle<R>, file_id: FileId) -> CmdResult<(
         handle.state::<Files<R>>().publish(&location, &name, "")
     })
     .await
-    .map_err(err)?
-    .map_err(err)?;
-    client.move_saved_file(file_id, uri).await.map_err(err)
+    .map_err(CmdError::internal)?
+    .map_err(CmdError::internal)?;
+    Ok(client.move_saved_file(file_id, uri).await?)
 }

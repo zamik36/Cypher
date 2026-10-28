@@ -1,7 +1,9 @@
 import { createSignal, onMount, Show } from "solid-js";
 import "./Overlays.css";
 import { api } from "../platform";
-import { toastError } from "../stores/toasts";
+import { isCmdErrorShape } from "../errors";
+import { lockNow } from "../stores/lock";
+import { addToast, toastError } from "../stores/toasts";
 import { t } from "../i18n";
 
 /**
@@ -26,8 +28,15 @@ export default function UpdateBanner() {
     try {
       await api.updates?.install();
     } catch (e) {
-      toastError(e);
       setBusy(false);
+      if (isCmdErrorShape(e) && e.kind === "locked") {
+        // The client was stopped for the install: the app locks the way it
+        // always does, and the unlock screen says why.
+        addToast(t().app_update_failed_locked, "error");
+        lockNow();
+      } else {
+        toastError(e);
+      }
     }
   }
 

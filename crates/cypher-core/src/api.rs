@@ -45,10 +45,21 @@ pub enum Input {
     Tick,
 }
 
+/// Ties the events that answer a command to it: the driver picks the id
+/// (unique among its commands in flight), the answer echoes it. Never
+/// stored; it lives as long as the command's requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CommandId(pub u64);
+
 #[derive(Debug, Clone)]
 pub enum Command {
-    CreateLink,
+    /// Answered with [`Event::LinkCreated`] or [`Event::CreateLinkFailed`].
+    CreateLink {
+        id: CommandId,
+    },
+    /// Answered with [`Event::PeerAdded`] (`joined`) or [`Event::JoinFailed`].
     JoinLink {
+        id: CommandId,
         link: String,
     },
     SendText {
@@ -134,8 +145,10 @@ pub enum Command {
     DisablePush,
     /// Hands this identity to the new device that shows `offer`, then
     /// lists it among the identity's devices; with `history`, the new
-    /// device also gets the message history once it asks.
+    /// device also gets the message history once it asks. Answered with
+    /// [`Event::DeviceLinked`] or [`Event::LinkFailed`].
     LinkDevice {
+        id: CommandId,
         offer: String,
         history: bool,
     },
@@ -236,14 +249,17 @@ pub enum Event {
         this: u32,
         devices: Vec<(u32, String)>,
     },
-    /// A new device was linked to this identity.
+    /// A new device was linked to this identity, as `LinkDevice` `id` asked.
     DeviceLinked {
+        id: CommandId,
         device: u32,
         name: String,
     },
-    /// Linking a device did not work: on the device linking another, or on
-    /// a new device whose offer expired.
+    /// Linking a device did not work: on the device linking another (for
+    /// `LinkDevice` `id`, or a device list change without one), or on a new
+    /// device whose offer expired.
     LinkFailed {
+        id: Option<CommandId>,
         reason: FailReason,
     },
     /// The new device received its identity; the driver takes it from the
@@ -266,15 +282,24 @@ pub enum Event {
         server: String,
     },
     LinkCreated {
+        id: CommandId,
         link: String,
     },
+    /// The server did not make the invite `CreateLink` `id` asked for.
+    CreateLinkFailed {
+        id: CommandId,
+        reason: FailReason,
+    },
     JoinFailed {
+        id: CommandId,
         link: String,
         reason: FailReason,
     },
+    /// A new contact: one we joined by `JoinLink` `joined`, or (`None`)
+    /// one who joined by our invite.
     PeerAdded {
         peer: PeerId,
-        initiated_by_us: bool,
+        joined: Option<CommandId>,
     },
     /// Someone started a session without one of our invites; they stay a
     /// request until `AcceptContact`.
@@ -353,29 +378,31 @@ pub enum Sink {
     History,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailReason {
-    NotFound,
-    InvalidLink,
-    SelfLink,
-    InvalidKeys,
-    Timeout,
-    Offline,
-    Rejected,
-    Cancelled,
-    SourceUnavailable,
-    Corrupted,
-    Unauthorized,
-    ServerError,
-    DecryptFailed,
-    /// The server answered a share link with an identity other than the one
-    /// the link was made for: possibly a key substitution.
-    KeyMismatch,
-    /// The driver could not make state durable and stopped the client.
-    StorageFailed,
-    /// The server speaks another protocol version: the app must be updated.
-    UpdateRequired,
+named_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum FailReason {
+        NotFound = "not_found",
+        InvalidLink = "invalid_link",
+        SelfLink = "self_link",
+        InvalidKeys = "invalid_keys",
+        Timeout = "timeout",
+        Offline = "offline",
+        Rejected = "rejected",
+        Cancelled = "cancelled",
+        SourceUnavailable = "source_unavailable",
+        Corrupted = "corrupted",
+        Unauthorized = "unauthorized",
+        ServerError = "server_error",
+        DecryptFailed = "decrypt_failed",
+        /// The server answered a share link with an identity other than the
+        /// one the link was made for: possibly a key substitution.
+        KeyMismatch = "key_mismatch",
+        /// The driver could not make state durable and stopped the client.
+        StorageFailed = "storage_failed",
+        /// The server speaks another protocol version: the app must be
+        /// updated.
+        UpdateRequired = "update_required",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

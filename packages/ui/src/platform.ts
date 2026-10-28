@@ -1,4 +1,5 @@
 /** Contract between the shared UI and a runtime (Tauri desktop or browser). */
+import type { CmdErrorShape } from "./errors";
 
 export type MessageStatus = "pending" | "sent" | "queued" | "delivered" | "read" | "failed";
 
@@ -136,6 +137,8 @@ export interface Events {
   file_complete: string;
   file_failed: { file_id: string; reason: string };
   error: string;
+  /** A file of a batch was left out while the others went: its name, and why. */
+  file_not_sent: { name: string; error: CmdErrorShape };
   anonymity_level: AnonymityLevelPayload;
   /** This device was taken off its identity's list; it stopped. */
   unlinked: null;

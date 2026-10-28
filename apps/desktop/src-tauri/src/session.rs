@@ -2,11 +2,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use cypher_client::{Client, Config, TorConfig, Unlocked};
-use cypher_core::Event;
+use cypher_core::{CmdError, CommandId, ErrorKind, Event};
 use cypher_types::PeerId;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex, MutexGuard, broadcast};
@@ -17,11 +17,9 @@ use crate::ephemeral::{Linking, Transfers, Voice};
 
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub(crate) type CmdResult<T> = Result<T, String>;
-
-pub(crate) fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
+/// A command's answer, or why it failed in the shape the UI reads
+/// (`{kind, reason?, message}`).
+pub(crate) type CmdResult<T> = Result<T, CmdError>;
 
 struct Session {
     client: Client,
@@ -89,6 +87,8 @@ pub(crate) struct AppState {
     /// meanwhile say `connecting` (the UI retries once connected) rather
     /// than `not connected`.
     connecting: AtomicBool,
+    /// The id of the next command whose answer is waited for.
+    next_command: AtomicU64,
     identity: Mutex<Option<Arc<Unlocked>>>,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Endpoint>,
@@ -107,6 +107,7 @@ impl AppState {
             tls,
             lifecycle: Mutex::default(),
             connecting: AtomicBool::new(false),
+            next_command: AtomicU64::new(1),
             identity: Mutex::default(),
             session: Mutex::default(),
             endpoint: Mutex::default(),
@@ -116,6 +117,12 @@ impl AppState {
             #[cfg(test)]
             held_start: Mutex::default(),
         }
+    }
+
+    /// A fresh id for a command whose answer is waited for, so the answer
+    /// is told apart from those of other commands in flight.
+    pub(crate) fn command_id(&self) -> CommandId {
+        CommandId(self.next_command.fetch_add(1, Ordering::Relaxed))
     }
 
     pub(crate) fn tls(&self) -> Arc<rustls::ClientConfig> {
@@ -143,7 +150,7 @@ impl AppState {
         let identity = self.identity.lock().await;
         let own = identity
             .as_ref()
-            .ok_or("identity is locked")?
+            .ok_or(ErrorKind::Locked)?
             .seed
             .derive_identity()
             .peer_id();
@@ -171,7 +178,7 @@ impl AppState {
             old.close().await;
         }
         let identity = self.identity.lock().await.clone();
-        let identity = identity.ok_or("identity is locked")?;
+        let identity = identity.ok_or(ErrorKind::Locked)?;
         let config = Config {
             gateway_addr: endpoint.gateway_addr.clone(),
             tls: Arc::clone(&self.tls),
@@ -185,14 +192,11 @@ impl AppState {
         *self.endpoint.lock().await = endpoint;
         #[cfg(test)]
         drop(self.held_start.lock().await);
-        let (client, mut rx) = Client::start(&identity.seed, identity.device, config)
-            .await
-            .map_err(err)?;
+        let (client, mut rx) = Client::start(&identity.seed, identity.device, config).await?;
         // Before anything else is sent: contacts greeted later hear it too.
         client
             .set_profile_name(Some(identity.nickname.clone()))
-            .await
-            .map_err(err)?;
+            .await?;
         let (events, _) = broadcast::channel(256);
         let (tx, offers) = (events.clone(), self.transfers.offers.clone());
         let pump = tokio::spawn(async move {
@@ -233,11 +237,11 @@ impl AppState {
     }
 
     /// Why there is no client: one is being started, or none is.
-    fn no_client(&self) -> String {
+    fn no_client(&self) -> CmdError {
         if self.connecting.load(Ordering::Acquire) {
-            "connecting".to_owned()
+            ErrorKind::Connecting.into()
         } else {
-            "not connected".to_owned()
+            ErrorKind::NotConnected.into()
         }
     }
 
@@ -317,14 +321,18 @@ pub(crate) async fn await_event_within<T>(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
-                Err(broadcast::error::RecvError::Closed) => return Err("client stopped".to_owned()),
+                Err(broadcast::error::RecvError::Closed) => return Err(ErrorKind::Stopped.into()),
             }
         }
     })
     .await;
     waited.unwrap_or_else(|_| {
-        let reason = if lagged { "lagged" } else { "timed out" };
-        Err(reason.to_owned())
+        let kind = if lagged {
+            ErrorKind::Lagged
+        } else {
+            ErrorKind::TimedOut
+        };
+        Err(kind.into())
     })
 }
 
@@ -338,7 +346,7 @@ pub(crate) fn tls_from_env() -> CmdResult<Arc<rustls::ClientConfig>> {
     }
     #[cfg(debug_assertions)]
     if let Some(pem) = option_env!("CYPHER_DEV_CA_PEM") {
-        return cypher_tls::make_client_config_with_pem(pem).map_err(err);
+        return cypher_tls::make_client_config_with_pem(pem).map_err(CmdError::internal);
     }
     tls(None)
 }
@@ -349,6 +357,6 @@ pub(crate) fn tls(dev_ca: Option<&Path>) -> CmdResult<Arc<rustls::ClientConfig>>
     let Some(path) = dev_ca else {
         return Ok(cypher_tls::make_client_config());
     };
-    let pem = std::fs::read_to_string(path).map_err(err)?;
-    cypher_tls::make_client_config_with_pem(&pem).map_err(err)
+    let pem = std::fs::read_to_string(path).map_err(CmdError::internal)?;
+    cypher_tls::make_client_config_with_pem(&pem).map_err(CmdError::internal)
 }

@@ -1,7 +1,8 @@
+use cypher_core::{CmdError, ErrorKind};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::dto;
-use crate::session::{AppState, CmdResult, Endpoint, err};
+use crate::session::{AppState, CmdResult, Endpoint};
 
 fn clean_bridges(lines: Vec<String>) -> Vec<String> {
     lines
@@ -21,7 +22,8 @@ pub(crate) async fn connect_to_gateway<R: Runtime>(
     bridges: Vec<String>,
 ) -> CmdResult<String> {
     let addr = addr.trim();
-    cypher_transport::split_host_port(addr).map_err(err)?;
+    cypher_transport::split_host_port(addr)
+        .map_err(|e| CmdError::new(ErrorKind::Invalid, e.to_string()))?;
     let endpoint = Endpoint {
         gateway_addr: addr.to_owned(),
         anonymous,
@@ -65,11 +67,16 @@ pub(crate) async fn trust_server_key(state: State<'_, AppState>) -> CmdResult<()
         .await?
         .command(cypher_core::Command::TrustServerKey)
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }
 
 /// Takes the session back after another device took it over.
 #[tauri::command]
 pub(crate) async fn reconnect(state: State<'_, AppState>) -> CmdResult<()> {
-    state.client().await?.reconnect().await.map_err(err)
+    state
+        .client()
+        .await?
+        .reconnect()
+        .await
+        .map_err(CmdError::from)
 }

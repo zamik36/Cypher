@@ -3,10 +3,10 @@
 //! the onion relay; the plugin gets the subscription from the phone's
 //! distributor. Desktops stay connected in the tray and have no push.
 
-use cypher_core::Command;
+use cypher_core::{CmdError, Command, ErrorKind};
 use tauri::{AppHandle, Runtime, State};
 
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 /// Asks the server for its push key; it arrives as `push_key`.
 #[tauri::command]
@@ -16,7 +16,7 @@ pub(crate) async fn push_enable(state: State<'_, AppState>) -> CmdResult<()> {
         .await?
         .command(Command::EnablePush)
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }
 
 /// Subscribes this phone with the server's key (hex) and registers the
@@ -35,7 +35,7 @@ pub(crate) async fn push_subscribe<R: Runtime>(
         p256dh,
         auth,
     };
-    state.client().await?.command(register).await.map_err(err)?;
+    state.client().await?.command(register).await?;
     Ok(true)
 }
 
@@ -51,10 +51,14 @@ pub(crate) async fn push_disable<R: Runtime>(
         .await?
         .command(Command::DisablePush)
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }
 
 type Subscription = (String, [u8; 65], [u8; 16]);
+
+fn invalid_key() -> CmdError {
+    CmdError::new(ErrorKind::Invalid, "invalid push key")
+}
 
 #[cfg(target_os = "android")]
 async fn subscribe<R: Runtime>(
@@ -66,22 +70,22 @@ async fn subscribe<R: Runtime>(
     use tauri::Manager as _;
     use tauri_plugin_cypher_push::Push;
 
-    let key = hex(key_hex).ok_or("invalid push key")?;
+    let key = hex(key_hex).ok_or_else(invalid_key)?;
     let vapid = B64.encode(key);
     let answer =
         tauri::async_runtime::spawn_blocking(move || app.state::<Push<R>>().subscribe(&vapid))
             .await
-            .map_err(err)?
-            .map_err(err)?;
+            .map_err(CmdError::internal)?
+            .map_err(CmdError::internal)?;
     if answer.status != "ok" {
         return Ok(None);
     }
-    let p256dh = B64.decode(&answer.p256dh).map_err(err)?;
-    let auth = B64.decode(&answer.auth).map_err(err)?;
+    let p256dh = B64.decode(&answer.p256dh).map_err(|_| invalid_key())?;
+    let auth = B64.decode(&answer.auth).map_err(|_| invalid_key())?;
     Ok(Some((
         answer.endpoint,
-        p256dh.try_into().map_err(|_| "invalid push key")?,
-        auth.try_into().map_err(|_| "invalid push key")?,
+        p256dh.try_into().map_err(|_| invalid_key())?,
+        auth.try_into().map_err(|_| invalid_key())?,
     )))
 }
 
@@ -91,7 +95,7 @@ async fn subscribe<R: Runtime>(
     _app: AppHandle<R>,
     key_hex: &str,
 ) -> CmdResult<Option<Subscription>> {
-    hex(key_hex).ok_or("invalid push key")?;
+    hex(key_hex).ok_or_else(invalid_key)?;
     Ok(None)
 }
 
@@ -102,8 +106,8 @@ async fn unsubscribe<R: Runtime>(app: AppHandle<R>) -> CmdResult<()> {
 
     tauri::async_runtime::spawn_blocking(move || app.state::<Push<R>>().unsubscribe())
         .await
-        .map_err(err)?
-        .map_err(err)
+        .map_err(CmdError::internal)?
+        .map_err(CmdError::internal)
 }
 
 #[cfg(not(target_os = "android"))]
