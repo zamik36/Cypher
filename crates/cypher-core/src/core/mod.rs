@@ -675,9 +675,8 @@ impl<R: CryptoRngCore> Core<R> {
                 reason,
             }),
             Pending::SessionKeys { addr } => {
-                // The device is gone: nothing more goes to it.
                 if reason == FailReason::NotFound {
-                    self.drop_targets(addr);
+                    self.on_keys_missing(addr);
                 }
             }
             Pending::Bootstrap => {

@@ -29,6 +29,12 @@ const MAX_RETRY_MS: u64 = 10 * 60_000;
 const MAX_DOUBLINGS: u32 = 10;
 /// Messages to one contact kept for a receipt; older ones are let go.
 const MAX_AWAITING_PER_PEER: usize = 500;
+/// How long messages wait for a device of ours that has yet to publish its
+/// keys (one just linked, not online since), and how many at most: it
+/// usually comes up within minutes; one that does not is let go of
+/// message by message.
+const NEW_DEVICE_WAIT_MS: u64 = 24 * 60 * 60_000;
+const MAX_FOR_NEW_DEVICE: usize = 128;
 /// How long messages to a device go as ourselves after its token was
 /// used up for the hour.
 const SEALED_PAUSE_MS: u64 = 60 * 60_000;
@@ -698,6 +704,36 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist(op);
         self.outbox.insert(msg_id, item);
         self.trim_awaiting(&peer);
+    }
+
+    /// The server has no keys for `addr`. A contact's device is gone, and
+    /// nothing more goes to it. One of ours still on our list has yet to
+    /// publish them: what was written for it lately waits until it does
+    /// (looked up again as often as [`Core::open_session`] allows), or
+    /// until it is heard from, and the rest goes.
+    pub(super) fn on_keys_missing(&mut self, addr: Addr) {
+        let listed = addr.peer == self.peer_id && self.devices_of(addr.peer).contains(&addr.device);
+        if !listed {
+            self.drop_targets(addr);
+            return;
+        }
+        let mut waiting: Vec<(u64, MsgId)> = self
+            .outbox
+            .values()
+            .filter(|i| i.peer == addr.peer && i.targets.iter().any(|t| t.device == addr.device))
+            .map(|i| {
+                let written = Envelope::decode(&i.envelope).map_or(0, |e| e.sent_at_ms);
+                (written, i.msg_id)
+            })
+            .collect();
+        // Newest first.
+        waiting.sort_unstable_by(|a, b| b.cmp(a));
+        let now = self.now;
+        for (n, (written, id)) in waiting.into_iter().enumerate() {
+            if n >= MAX_FOR_NEW_DEVICE || now.saturating_sub(written) >= NEW_DEVICE_WAIT_MS {
+                self.drop_target(id, addr.device);
+            }
+        }
     }
 
     /// Forgets `addr` as a target of everything on its way.

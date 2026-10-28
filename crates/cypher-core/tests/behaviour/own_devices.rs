@@ -1,7 +1,8 @@
 //! What a device just linked to its identity learns of the messages its
-//! siblings send while it is still setting up, before their contacts
-//! reached it: kept until they do, also across a restart; not for ever,
-//! not when the contact was forgotten meanwhile, and not from strangers.
+//! siblings send while it is still setting up: before it is online, as it
+//! connects, and before their contacts reached it. Kept until they do, also
+//! across a restart; not for ever, not when the contact was forgotten
+//! meanwhile, and not from strangers.
 
 use bytes::Bytes;
 use cypher_core::envelope::{Body, Envelope, SyncBody};
@@ -15,7 +16,7 @@ use cypher_types::{Addr, DeviceId, MsgId, PeerId};
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
 use rand::rngs::OsRng;
 
-use super::addr;
+use super::{addr, rows};
 use crate::harness::{Fault, Rule, World};
 use crate::{A, B, C, pattern};
 
@@ -120,6 +121,69 @@ fn has_both(w: &World, sibling: usize, laptop: usize, sent: [MsgId; 2]) {
         assert_eq!(here, there, "the laptop has {id:?} as the sibling does");
     }
     assert_eq!(on_laptop.len(), 2, "nothing else, nothing twice");
+}
+
+/// A sends before the laptop was ever online: the laptop has not published
+/// its keys yet, so A cannot reach it until it does.
+#[test]
+fn messages_sent_before_the_new_device_connects_reach_it() {
+    let (mut w, sibling, laptop) = linked_offline(2);
+    let sent = queue_text_and_file(&mut w);
+    w.run();
+    w.connect(laptop);
+    w.run();
+    w.advance(10 * 60_000);
+    has_both(&w, sibling, laptop, sent);
+}
+
+/// A sends while the laptop connects for the first time.
+#[test]
+fn messages_sent_as_the_new_device_connects_reach_it() {
+    let (mut w, sibling, laptop) = linked_offline(2);
+    w.connect(laptop);
+    let sent = queue_text_and_file(&mut w);
+    w.run();
+    w.advance(10 * 60_000);
+    has_both(&w, sibling, laptop, sent);
+}
+
+/// The messages client `i` has on their way to `device` of its own.
+fn waiting_for(w: &World, i: usize, device: DeviceId) -> usize {
+    rows::outbox(w, i)
+        .iter()
+        .filter(|row| row.targets.iter().any(|t| t.device == device))
+        .count()
+}
+
+/// A laptop that never comes up after it was linked does not keep its
+/// siblings' messages for it for ever: the last 128 wait, for a day.
+#[test]
+fn messages_for_a_new_device_that_never_comes_up_are_let_go() {
+    let (mut w, _, laptop) = linked_offline(2);
+    let device = w.clients[laptop].device;
+    let b = w.peer(B);
+    for n in 0..130 {
+        let msg_id = w.msg_id();
+        w.queue(
+            A,
+            Command::SendText {
+                peer: b,
+                msg_id,
+                text: format!("number {n}"),
+                reply_to: None,
+            },
+        );
+    }
+    w.run();
+    assert_eq!(waiting_for(&w, A, device), 128, "the last ones wait");
+    w.advance(30 * 60_000);
+    assert_eq!(waiting_for(&w, A, device), 128, "and keep waiting");
+
+    w.disconnect(A);
+    w.now += DAY_MS;
+    w.connect(A);
+    w.advance(20 * 60_000);
+    assert_eq!(waiting_for(&w, A, device), 0, "a day later, none");
 }
 
 /// The laptop asked while its siblings were away; A comes back and sends
