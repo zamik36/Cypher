@@ -24,14 +24,14 @@ static SESSION: LazyLock<Vec<u8>> = LazyLock::new(|| {
     )
     .unwrap();
     let (h, ct) = a.encrypt(b"seed", b"").unwrap();
-    b.decrypt(&h, &ct, b"", &mut OsRng).unwrap();
+    b.decrypt(&h, &ct, b"", 0, &mut OsRng).unwrap();
     b.to_bytes().to_vec()
 });
 
 fuzz_target!(|data: &[u8]| {
-    let mut ratchet = Ratchet::from_bytes(&SESSION).unwrap();
+    let mut ratchet = Ratchet::from_bytes(&SESSION, 0).unwrap();
     if let Ok(header) = Header::decode(data.get(..40).unwrap_or_default()) {
-        let _ = ratchet.decrypt(&header, &data[40..], b"", &mut OsRng);
+        let _ = ratchet.decrypt(&header, &data[40..], b"", 0, &mut OsRng);
     }
-    let _ = Ratchet::from_bytes(data);
+    let _ = Ratchet::from_bytes(data, 0);
 });

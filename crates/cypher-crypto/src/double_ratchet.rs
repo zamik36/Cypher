@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+mod skipped;
+
+use std::collections::{HashSet, VecDeque};
 
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
@@ -10,22 +12,26 @@ use crate::aead;
 use crate::error::CryptoError;
 use crate::kdf::{kdf_ck, kdf_rk, message_keys};
 
+pub use skipped::{MAX_SKIPPED_AGE_MS, MAX_STORED_SKIPPED, SkippedKey};
+use skipped::{SkipKey, SkippedKeys};
+
 pub const HEADER_LEN: usize = 40;
 
 /// Most message keys a single incoming message may force us to derive.
 pub const MAX_SKIP: u32 = 1000;
 
-/// Most skipped keys retained per session; the oldest are evicted first.
-const MAX_STORED_SKIPPED: usize = 2000;
-
 /// Messages a session remembers having decrypted, so that a copy of one
 /// coming again (an inbox item handed out again after its ack was lost, a
 /// frame replayed) is known as such rather than failing as if the session
 /// had drifted apart. The core holds it to several inbox batches; 8 KiB of
-/// digests per session.
+/// digests per session, stored one by one as they come
+/// ([`Ratchet::take_changes`]).
 pub const MAX_DECRYPTED: usize = 256;
 
-const SNAPSHOT_VERSION: u8 = 2;
+/// Version 3 keeps the skipped keys out of the snapshot: they are stored
+/// one by one ([`SkippedKey`]). Version 2 held them inside.
+const SNAPSHOT_VERSION: u8 = 3;
+const SNAPSHOT_V2: u8 = 2;
 const AAD_CONTEXT: &[u8] = b"cypher/v2";
 /// Context, both identity keys and the ratchet header.
 const AAD_FIXED_LEN: usize = AAD_CONTEXT.len() + 64 + HEADER_LEN;
@@ -59,59 +65,31 @@ impl Header {
     }
 }
 
-type SkipKey = ([u8; 32], u32);
-
-#[derive(Default)]
-struct SkippedKeys {
-    keys: HashMap<SkipKey, [u8; 32]>,
-    order: VecDeque<SkipKey>,
+/// What changed in a session beside its snapshot since it was last
+/// stored ([`Ratchet::take_changes`]).
+#[derive(Debug, Default)]
+pub struct Changes {
+    /// Skipped keys set aside: to store before the snapshot that counts
+    /// them.
+    pub stored: Vec<SkippedKey>,
+    /// Numbers of stored skipped keys that are gone (used, evicted,
+    /// expired, or dropped with a session replaced): to delete after it.
+    pub spent: Vec<u64>,
+    /// Messages decrypted, `(number, digest)`: to store after it. The
+    /// numbers go up by one per message; the oldest beyond
+    /// [`MAX_DECRYPTED`] are forgotten.
+    pub decrypted: Vec<(u64, [u8; 32])>,
 }
 
-impl SkippedKeys {
-    fn get(&self, k: &SkipKey) -> Option<&[u8; 32]> {
-        self.keys.get(k)
-    }
-
-    fn remove(&mut self, k: &SkipKey) {
-        if let Some(mut mk) = self.keys.remove(k) {
-            mk.zeroize();
-        }
-    }
-
-    fn insert(&mut self, k: SkipKey, mk: [u8; 32]) {
-        while self.keys.len() >= MAX_STORED_SKIPPED {
-            match self.order.pop_front() {
-                Some(oldest) => self.remove(&oldest),
-                None => break,
-            }
-        }
-        if self.order.len() >= 2 * MAX_STORED_SKIPPED {
-            let keys = &self.keys;
-            self.order.retain(|k| keys.contains_key(k));
-        }
-        self.keys.insert(k, mk);
-        self.order.push_back(k);
-    }
-
-    fn iter_ordered(&self) -> impl Iterator<Item = (SkipKey, [u8; 32])> + '_ {
-        self.order
-            .iter()
-            .filter_map(|k| self.keys.get(k).map(|mk| (*k, *mk)))
-    }
-}
-
-impl Drop for SkippedKeys {
-    fn drop(&mut self) {
-        self.keys.values_mut().for_each(Zeroize::zeroize);
-    }
-}
-
-/// Digests of the last [`MAX_DECRYPTED`] messages decrypted.
+/// Digests of the last [`MAX_DECRYPTED`] messages decrypted, each with its
+/// number. Those from `stored_upto` on are new since last stored.
 #[derive(Default)]
 struct Decrypted {
     set: HashSet<[u8; 32]>,
     /// Oldest first.
-    order: VecDeque<[u8; 32]>,
+    order: VecDeque<(u64, [u8; 32])>,
+    next_seq: u64,
+    stored_upto: u64,
 }
 
 impl Decrypted {
@@ -123,12 +101,42 @@ impl Decrypted {
         if !self.set.insert(digest) {
             return;
         }
-        self.order.push_back(digest);
+        self.order.push_back((self.next_seq, digest));
+        // A session decrypts at most `u64::MAX` messages in its lifetime.
+        self.next_seq = self.next_seq.saturating_add(1);
         while self.order.len() > MAX_DECRYPTED {
-            if let Some(oldest) = self.order.pop_front() {
+            if let Some((_, oldest)) = self.order.pop_front() {
                 self.set.remove(&oldest);
             }
         }
+    }
+
+    /// The digests new since the last call; all count as stored after.
+    fn take_changes(&mut self) -> Vec<(u64, [u8; 32])> {
+        let stored_upto = self.stored_upto;
+        self.stored_upto = self.next_seq;
+        self.order
+            .iter()
+            .filter(|(seq, _)| *seq >= stored_upto)
+            .copied()
+            .collect()
+    }
+
+    /// The digests stored before, in any order: the last [`MAX_DECRYPTED`]
+    /// of them by number are kept, and numbering goes on after them.
+    fn restored(mut stored: Vec<(u64, [u8; 32])>) -> Self {
+        stored.sort_unstable_by_key(|(seq, _)| *seq);
+        stored.dedup_by_key(|(seq, _)| *seq);
+        let mut out = Self::default();
+        let from = stored.len().saturating_sub(MAX_DECRYPTED);
+        for &(seq, digest) in stored.get(from..).unwrap_or_default() {
+            if out.set.insert(digest) {
+                out.order.push_back((seq, digest));
+            }
+            out.next_seq = seq.saturating_add(1);
+        }
+        out.stored_upto = out.next_seq;
+        out
     }
 }
 
@@ -144,8 +152,10 @@ pub struct Ratchet {
     ns: u32,
     nr: u32,
     pn: u32,
+    /// Kept apart from the snapshot, see [`Ratchet::take_changes`].
     skipped: SkippedKeys,
-    /// The last [`MAX_DECRYPTED`] messages decrypted. In memory only: not
+    /// The last [`MAX_DECRYPTED`] messages decrypted. Kept apart from the
+    /// snapshot, see [`Ratchet::take_changes`].
     /// part of the snapshot.
     decrypted: Decrypted,
 }
@@ -240,20 +250,30 @@ impl Ratchet {
         Ok((header, ct))
     }
 
-    /// Takes over which messages `older`, the session this one replaces with
-    /// the same device, decrypted: a copy of one is a
-    /// [`CryptoError::Duplicate`] here too. What this session decrypted
-    /// counts as the more recent. Only for the same device: a digest does
-    /// not name the session it was read in.
-    pub fn inherit_decrypted(&mut self, older: &mut Self) {
+    /// Takes over from `older`, the session this one replaces with the same
+    /// device, which messages it decrypted, so that a copy of one is a
+    /// [`CryptoError::Duplicate`] here too (what this session decrypted
+    /// counts as the more recent), and the numbering of skipped keys. Its
+    /// skipped keys are dropped: every stored one is spent here
+    /// ([`Ratchet::take_changes`]), and this session's own keys are
+    /// numbered on from them. Only for the same device, and only for a
+    /// session not stored yet: a digest does not name the session it was
+    /// read in, and this session's keys get new numbers.
+    pub fn inherit(&mut self, older: &mut Self) {
         let newer = std::mem::replace(&mut self.decrypted, std::mem::take(&mut older.decrypted));
-        for digest in newer.order {
+        for (_, digest) in newer.order {
             self.decrypted.insert(digest);
+        }
+        let own = std::mem::replace(&mut self.skipped, older.skipped.successor());
+        for (key, mk, created_ms) in own.iter() {
+            self.skipped.insert(key, *mk, created_ms);
         }
     }
 
-    /// Decrypts a message and moves the session on. On any error the
-    /// session is left exactly as it was.
+    /// Decrypts a message and moves the session on; keys it sets aside for
+    /// messages it skips are dated `now_ms`, and a key kept longer than
+    /// [`MAX_SKIPPED_AGE_MS`] opens nothing. On any error the session is
+    /// left exactly as it was.
     ///
     /// A byte-for-byte copy of one of the last [`MAX_DECRYPTED`] messages
     /// decrypted fails with [`CryptoError::Duplicate`]: its key is spent, and
@@ -266,6 +286,7 @@ impl Ratchet {
         header: &Header,
         ciphertext: &[u8],
         extra_aad: &[u8],
+        now_ms: u64,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, CryptoError> {
         let aad = self.aad(header, extra_aad);
@@ -274,7 +295,7 @@ impl Ratchet {
             return Err(CryptoError::Duplicate);
         }
         let key = (header.dh, header.n);
-        if let Some(mk) = self.skipped.get(&key) {
+        if let Some(mk) = self.skipped.get(&key, now_ms) {
             let pt = open(mk, &aad, ciphertext)?;
             self.skipped.remove(&key);
             self.decrypted.insert(digest);
@@ -283,7 +304,7 @@ impl Ratchet {
 
         let plan = self.plan(header, rng)?;
         let pt = open(&plan.mk, &aad, ciphertext)?;
-        self.commit(header, plan);
+        self.commit(header, plan, now_ms);
         self.decrypted.insert(digest);
         Ok(pt)
     }
@@ -323,9 +344,9 @@ impl Ratchet {
         })
     }
 
-    fn commit(&mut self, h: &Header, mut plan: Plan) {
+    fn commit(&mut self, h: &Header, mut plan: Plan, now_ms: u64) {
         for (k, mk) in plan.skipped.drain(..) {
-            self.skipped.insert(k, *mk);
+            self.skipped.insert(k, *mk, now_ms);
         }
         if let Some(step) = plan.step.take() {
             self.pn = self.ns;
@@ -351,6 +372,10 @@ impl Ratchet {
         aad
     }
 
+    /// The session's state without its skipped keys, which are stored one
+    /// by one ([`Ratchet::take_changes`]). It names the sequence number the
+    /// next skipped key gets, which tells keys stored ahead of a state that
+    /// was itself never stored.
     pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
         let snapshot = Snapshot {
             version: SNAPSHOT_VERSION,
@@ -363,7 +388,7 @@ impl Ratchet {
             ns: self.ns,
             nr: self.nr,
             pn: self.pn,
-            skipped: self.skipped.iter_ordered().collect(),
+            next_skipped: self.skipped.next_seq(),
         };
         #[expect(
             clippy::expect_used,
@@ -373,30 +398,86 @@ impl Ratchet {
         Zeroizing::new(bytes)
     }
 
-    pub fn from_bytes(b: &[u8]) -> Result<Self, CryptoError> {
-        let s: Snapshot = postcard::from_bytes(b).map_err(|_| CryptoError::Malformed)?;
-        if s.version != SNAPSHOT_VERSION || s.skipped.len() > MAX_STORED_SKIPPED {
-            return Err(CryptoError::Malformed);
-        }
-        let dhs = StaticSecret::from(s.dhs);
-        let mut skipped = SkippedKeys::default();
-        for (k, mk) in &s.skipped {
-            skipped.insert(*k, *mk);
-        }
+    /// A session from its snapshot, without skipped keys: those stored are
+    /// taken back by [`Ratchet::restore_skipped`]. A snapshot of version 2
+    /// held its keys inside: they come out new, dated `now_ms`, to be
+    /// stored ([`Ratchet::take_changes`]), and no stored key is taken back.
+    pub fn from_bytes(b: &[u8], now_ms: u64) -> Result<Self, CryptoError> {
+        let (state, skipped) = match b.first() {
+            Some(&SNAPSHOT_VERSION) => {
+                let s: Snapshot = postcard::from_bytes(b).map_err(|_| CryptoError::Malformed)?;
+                (s.state(), SkippedKeys::stored_until(s.next_skipped))
+            }
+            Some(&SNAPSHOT_V2) => {
+                let s: SnapshotV2 = postcard::from_bytes(b).map_err(|_| CryptoError::Malformed)?;
+                if s.skipped.len() > MAX_STORED_SKIPPED {
+                    return Err(CryptoError::Malformed);
+                }
+                (s.state(), SkippedKeys::unstored(&s.skipped, now_ms))
+            }
+            _ => return Err(CryptoError::Malformed),
+        };
+        let dhs = StaticSecret::from(state.dhs);
         Ok(Self {
-            ad: s.ad,
-            rk: s.rk,
+            ad: state.ad,
+            rk: state.rk,
             dhs_pub: PublicKey::from(&dhs).to_bytes(),
             dhs,
-            dhr: s.dhr,
-            cks: s.cks,
-            ckr: s.ckr,
-            ns: s.ns,
-            nr: s.nr,
-            pn: s.pn,
+            dhr: state.dhr,
+            cks: state.cks,
+            ckr: state.ckr,
+            ns: state.ns,
+            nr: state.nr,
+            pn: state.pn,
             skipped,
             decrypted: Decrypted::default(),
         })
+    }
+
+    /// Takes a skipped key stored before back in. Refused, to be deleted,
+    /// when the snapshot this session came from does not count it as
+    /// stored (it was stored ahead of a state that never was), or it is a
+    /// copy. The oldest beyond [`MAX_STORED_SKIPPED`] are dropped.
+    pub fn restore_skipped(&mut self, key: &SkippedKey) -> bool {
+        self.skipped.restore(key)
+    }
+
+    /// What changed beside the snapshot since the last call: skipped keys
+    /// to store before the snapshot and to delete after it, and digests of
+    /// messages decrypted to store after it.
+    pub fn take_changes(&mut self) -> Changes {
+        let (stored, spent) = self.skipped.take_changes();
+        Changes {
+            stored,
+            spent,
+            decrypted: self.decrypted.take_changes(),
+        }
+    }
+
+    /// Takes back which messages this session decrypted, as stored before
+    /// (`(number, digest)`, in any order), so that a copy of one is a
+    /// [`CryptoError::Duplicate`] across a restart too.
+    pub fn restore_decrypted(&mut self, stored: Vec<(u64, [u8; 32])>) {
+        self.decrypted = Decrypted::restored(stored);
+    }
+
+    /// The numbers of the digests this session remembers: what deleting it
+    /// deletes.
+    pub fn decrypted_seqs(&self) -> impl Iterator<Item = u64> + '_ {
+        self.decrypted.order.iter().map(|(seq, _)| *seq)
+    }
+
+    /// The sequence numbers of every skipped key stored for this session,
+    /// whether still kept or gone since: what deleting it deletes.
+    pub fn stored_skipped(&self) -> impl Iterator<Item = u64> + '_ {
+        self.skipped.stored_seqs()
+    }
+
+    /// Drops the skipped keys kept longer than [`MAX_SKIPPED_AGE_MS`] at
+    /// `now_ms`; whether there were any, which then are to be deleted
+    /// ([`Ratchet::take_changes`]).
+    pub fn expire_skipped(&mut self, now_ms: u64) -> bool {
+        self.skipped.expire(now_ms)
     }
 }
 
@@ -407,7 +488,7 @@ impl std::fmt::Debug for Ratchet {
             .field("ns", &self.ns)
             .field("nr", &self.nr)
             .field("pn", &self.pn)
-            .field("skipped", &self.skipped.keys.len())
+            .field("skipped", &self.skipped.len())
             .finish_non_exhaustive()
     }
 }
@@ -415,6 +496,28 @@ impl std::fmt::Debug for Ratchet {
 impl Drop for Ratchet {
     fn drop(&mut self) {
         self.rk.zeroize();
+        self.cks.zeroize();
+        self.ckr.zeroize();
+    }
+}
+
+/// What a snapshot holds of a session besides its skipped keys.
+struct State {
+    ad: [[u8; 32]; 2],
+    rk: [u8; 32],
+    dhs: [u8; 32],
+    dhr: Option<[u8; 32]>,
+    cks: Option<[u8; 32]>,
+    ckr: Option<[u8; 32]>,
+    ns: u32,
+    nr: u32,
+    pn: u32,
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        self.rk.zeroize();
+        self.dhs.zeroize();
         self.cks.zeroize();
         self.ckr.zeroize();
     }
@@ -432,10 +535,68 @@ struct Snapshot {
     ns: u32,
     nr: u32,
     pn: u32,
-    skipped: Vec<(SkipKey, [u8; 32])>,
+    next_skipped: u64,
+}
+
+impl Snapshot {
+    fn state(&self) -> State {
+        State {
+            ad: self.ad,
+            rk: self.rk,
+            dhs: self.dhs,
+            dhr: self.dhr,
+            cks: self.cks,
+            ckr: self.ckr,
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+        }
+    }
 }
 
 impl Drop for Snapshot {
+    fn drop(&mut self) {
+        self.rk.zeroize();
+        self.dhs.zeroize();
+        self.cks.zeroize();
+        self.ckr.zeroize();
+    }
+}
+
+/// [`Snapshot`] as version 2 stored it, skipped keys inside.
+#[derive(Deserialize)]
+struct SnapshotV2 {
+    #[expect(dead_code, reason = "read to tell the version only")]
+    version: u8,
+    ad: [[u8; 32]; 2],
+    rk: [u8; 32],
+    dhs: [u8; 32],
+    dhr: Option<[u8; 32]>,
+    cks: Option<[u8; 32]>,
+    ckr: Option<[u8; 32]>,
+    ns: u32,
+    nr: u32,
+    pn: u32,
+    skipped: Vec<(SkipKey, [u8; 32])>,
+}
+
+impl SnapshotV2 {
+    fn state(&self) -> State {
+        State {
+            ad: self.ad,
+            rk: self.rk,
+            dhs: self.dhs,
+            dhr: self.dhr,
+            cks: self.cks,
+            ckr: self.ckr,
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+        }
+    }
+}
+
+impl Drop for SnapshotV2 {
     fn drop(&mut self) {
         self.rk.zeroize();
         self.dhs.zeroize();
@@ -503,4 +664,87 @@ fn message_digest(header: &Header, extra_aad: &[u8], ciphertext: &[u8]) -> [u8; 
 fn open(mk: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let keys = message_keys(mk);
     aead::open(&keys.key, &keys.nonce, aad, ciphertext)
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::rngs::OsRng;
+    use serde::Serialize;
+
+    use super::*;
+
+    /// [`SnapshotV2`] as that version wrote it.
+    #[derive(Serialize)]
+    struct V2 {
+        version: u8,
+        ad: [[u8; 32]; 2],
+        rk: [u8; 32],
+        dhs: [u8; 32],
+        dhr: Option<[u8; 32]>,
+        cks: Option<[u8; 32]>,
+        ckr: Option<[u8; 32]>,
+        ns: u32,
+        nr: u32,
+        pn: u32,
+        skipped: Vec<(SkipKey, [u8; 32])>,
+    }
+
+    fn as_version_2(r: &Ratchet) -> Vec<u8> {
+        postcard::to_allocvec(&V2 {
+            version: SNAPSHOT_V2,
+            ad: r.ad,
+            rk: r.rk,
+            dhs: r.dhs.to_bytes(),
+            dhr: r.dhr,
+            cks: r.cks,
+            ckr: r.ckr,
+            ns: r.ns,
+            nr: r.nr,
+            pn: r.pn,
+            skipped: r.skipped.iter().map(|(k, mk, _)| (k, *mk)).collect(),
+        })
+        .unwrap()
+    }
+
+    /// A skipped key shows which message it is for, never the key.
+    #[test]
+    fn a_skipped_key_does_not_show_the_key() {
+        let key = SkippedKey::new(7, [1; 32], 3, [0xAB; 32], 5);
+        let shown = format!("{key:?}");
+        assert!(shown.contains("seq: 7"), "{shown}");
+        assert!(!shown.contains("171") && !shown.to_lowercase().contains("ab, "));
+    }
+
+    /// A session stored before its skipped keys were kept apart: its keys
+    /// come out new, numbered from the start and dated by the clock it is
+    /// read at, to be stored; no stored key is taken back; and they open
+    /// their messages.
+    #[test]
+    fn a_version_2_snapshot_gives_its_keys_out_to_store() {
+        let (sk, ad) = ([1; 32], [[2; 32], [3; 32]]);
+        let spk = StaticSecret::random_from_rng(OsRng);
+        let spk_pub = PublicKey::from(&spk).to_bytes();
+        let mut a = Ratchet::init_initiator(&sk, ad, &spk_pub, &mut OsRng).unwrap();
+        let mut b = Ratchet::init_responder(&sk, ad, spk);
+        let late: Vec<_> = (0..3).map(|_| a.encrypt(b"late", b"").unwrap()).collect();
+        let (h, ct) = a.encrypt(b"on time", b"").unwrap();
+        b.decrypt(&h, &ct, b"", 5, &mut OsRng).unwrap();
+
+        let mut read = Ratchet::from_bytes(&as_version_2(&b), 77).unwrap();
+        let stored = SkippedKey::new(0, late[0].0.dh, 0, [9; 32], 1);
+        assert!(
+            !read.restore_skipped(&stored),
+            "nothing stored to take back"
+        );
+        let changes = read.take_changes();
+        let seqs: Vec<u64> = changes.stored.iter().map(SkippedKey::seq).collect();
+        assert_eq!(seqs, [0, 1, 2]);
+        assert!(changes.stored.iter().all(|k| k.created_ms() == 77));
+        assert!(changes.spent.is_empty());
+        assert_eq!(read.to_bytes().first(), Some(&SNAPSHOT_VERSION));
+        for (h, ct) in late.iter().rev() {
+            assert_eq!(read.decrypt(h, ct, b"", 80, &mut OsRng).unwrap(), b"late");
+        }
+        assert_eq!(read.take_changes().spent, [2, 1, 0]);
+    }
 }

@@ -17,7 +17,7 @@ use crate::envelope::{Body, Envelope, InboxAd};
 use crate::link::{LinkOffer, seal_handover};
 use crate::peer::{Peer, Session};
 use crate::relay;
-use crate::store::{META_DEVICES, StoreOp, Table, session_key};
+use crate::store::{META_DEVICES, Table};
 
 /// How often a device makes sure it is still on its identity's list.
 const OWN_CHECK_MS: u64 = 60 * 60_000;
@@ -464,10 +464,7 @@ impl<R: CryptoRngCore> Core<R> {
             let Some(session) = self.sessions.remove(&addr) else {
                 continue;
             };
-            self.persist(StoreOp::Delete {
-                table: Table::Sessions,
-                key: session_key(addr),
-            });
+            self.delete_session(addr, &session);
             self.drop_targets(addr);
             self.say_farewell(addr, session, &farewell);
         }
@@ -629,11 +626,9 @@ impl<R: CryptoRngCore> Core<R> {
             .filter(|d| !p.lists(*d))
             .collect();
         for addr in gone {
-            self.sessions.remove(&addr);
-            self.persist(StoreOp::Delete {
-                table: Table::Sessions,
-                key: session_key(addr),
-            });
+            if let Some(session) = self.sessions.remove(&addr) {
+                self.delete_session(addr, &session);
+            }
             self.cancel_transfers_with_device(addr);
         }
         for device in unreached {
