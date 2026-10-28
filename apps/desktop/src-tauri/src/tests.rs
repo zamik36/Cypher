@@ -157,18 +157,65 @@ fn recorder(samples: usize) -> Recorder {
     Recorder::from_samples(RATE, &wave).unwrap()
 }
 
-/// Polls `probe` until it yields a value or the wait runs out.
-async fn eventually<T, F: Future<Output = Option<T>>>(mut probe: impl FnMut() -> F) -> T {
-    tokio::time::timeout(WAIT, async {
-        loop {
-            if let Some(v) = probe().await {
-                return v;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+/// Polls `probe` until it yields a value.
+async fn poll<T, F: Future<Output = Option<T>>>(mut probe: impl FnMut() -> F) -> T {
+    loop {
+        if let Some(v) = probe().await {
+            return v;
         }
-    })
-    .await
-    .expect("condition met in time")
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Polls `probe` until it yields a value or the wait runs out.
+async fn eventually<T, F: Future<Output = Option<T>>>(probe: impl FnMut() -> F) -> T {
+    tokio::time::timeout(WAIT, poll(probe))
+        .await
+        .expect("condition met in time")
+}
+
+/// [`eventually`], which says what `report` finds when the wait runs out.
+async fn eventually_or<T, F, R>(probe: impl FnMut() -> F, report: impl FnOnce() -> R) -> T
+where
+    F: Future<Output = Option<T>>,
+    R: Future<Output = String>,
+{
+    match tokio::time::timeout(WAIT, poll(probe)).await {
+        Ok(v) => v,
+        Err(elapsed) => panic!(
+            "{elapsed}: condition not met; what was found:\n{}",
+            report().await
+        ),
+    }
+}
+
+/// Every event the clients it listens to told, in order, for a report.
+#[derive(Clone, Default)]
+struct EventLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl EventLog {
+    /// Keeps what `desktop`'s client tells from now on, marked `who`, until
+    /// that client stops or the task is aborted.
+    async fn listen(&self, desktop: &Desktop, who: &'static str) -> tokio::task::JoinHandle<()> {
+        let (_, mut events) = desktop.state().client_and_events().await.unwrap();
+        let log = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let line = match events.recv().await {
+                    Ok(e) => format!("{who}: {e:?}"),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        format!("{who}: ({n} events missed)")
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                log.0.lock().unwrap().push(line);
+            }
+        })
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 /// `connect` returns before the session is up (the UI waits for
@@ -1630,6 +1677,11 @@ async fn a_note_goes_out_beside_a_second_device(
     let (finished, _) = tokio::join!(finish, link);
     finished.unwrap();
     laptop.connect(gateway).await;
+    let log = EventLog::default();
+    let listening = [
+        log.listen(&laptop, "laptop").await,
+        log.listen(a, "A").await,
+    ];
 
     // Larger than a message carries inline, so it goes in chunks.
     let note: Vec<u8> = (0..300_000u32).map(|i| i.to_le_bytes()[1]).collect();
@@ -1651,17 +1703,73 @@ async fn a_note_goes_out_beside_a_second_device(
     };
     assert_eq!(eventually(|| whole(b)).await, note, "B's copy");
     let history = json!({ "peerId": b_id, "limit": 10, "before": null });
-    let synced = eventually(|| {
-        let history = history.clone();
-        let laptop = &laptop;
-        let file = &file;
-        async move {
-            let list = laptop.call("get_history", history).await.ok()?;
-            list.as_array()?
-                .iter()
-                .any(|m| m["file"]["file_id"] == file.as_str())
-                .then_some(())
-        }
-    });
+    let synced = eventually_or(
+        || {
+            let history = history.clone();
+            let laptop = &laptop;
+            let file = &file;
+            async move {
+                let list = laptop.call("get_history", history).await.ok()?;
+                list.as_array()?
+                    .iter()
+                    .any(|m| m["file"]["file_id"] == file.as_str())
+                    .then_some(())
+            }
+        },
+        || second_device_report(a, &laptop, b_id, &file, &log),
+    );
     synced.await;
+    for task in listening {
+        task.abort();
+    }
+}
+
+/// Why the laptop does not show the note `file` A sent B: what both keep of
+/// the conversation, whom the laptop knows, and every event since the send.
+/// What waits inside the cores (records held for a contact, A's outbox) is
+/// not reachable from here.
+async fn second_device_report(
+    a: &Desktop,
+    laptop: &Desktop,
+    b_id: &str,
+    file: &str,
+    log: &EventLog,
+) -> String {
+    use std::fmt::Write as _;
+    let all = json!({ "peerId": b_id, "limit": 500, "before": null });
+    let mut out = format!("the note: file {file}\n");
+    for (who, desktop) in [("laptop", laptop), ("A", a)] {
+        let _ = writeln!(out, "{who} history with B, newest first:");
+        match desktop.call("get_history", all.clone()).await {
+            Ok(Value::Array(list)) => {
+                for m in list {
+                    let _ = writeln!(
+                        out,
+                        "  {} out={} at={} {} file={} {}",
+                        m["msg_id"],
+                        m["outgoing"],
+                        m["timestamp"],
+                        m["status"],
+                        m["file"]["file_id"],
+                        m["file"]["kind"],
+                    );
+                }
+            }
+            other => {
+                let _ = writeln!(out, "  {other:?}");
+            }
+        }
+        let chats = desktop.call("get_conversations", json!({})).await;
+        let _ = writeln!(out, "{who} conversations: {chats:?}");
+    }
+    let contacts = match laptop.state().client().await {
+        Ok(client) => format!("{:#?}", client.contacts().await),
+        Err(e) => format!("no client: {e:?}"),
+    };
+    let _ = writeln!(out, "laptop contacts: {contacts}");
+    let _ = writeln!(out, "events since the send:");
+    for line in log.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+    out
 }
