@@ -331,35 +331,103 @@ fn over_session(from: Addr, body: Vec<u8>) -> Bytes {
     .encode()
 }
 
-/// A stranger, C, starts a session with the laptop from its published keys
-/// and tells it of `n` messages "sent" to B, as only the laptop's own
-/// devices may.
-fn stranger_tells_of_sent(w: &mut World, laptop: usize, n: usize) {
-    let identity = IdentitySeed(w.clients[C].seed).derive_identity();
+/// Device `device` of client `from`'s identity starts a session with the
+/// laptop from its published keys and sends it `bodies`.
+fn write_to_laptop(w: &mut World, from: usize, device: DeviceId, laptop: usize, bodies: Vec<Body>) {
+    let identity = IdentitySeed(w.clients[from].seed).derive_identity();
     let bundle = w.bundle_of(addr(w, laptop));
-    let (mut ratchet, init) =
-        handshake::initiate(&identity, DeviceId::FIRST, &bundle, &mut OsRng).unwrap();
-    let from = Addr::new(identity.peer_id(), DeviceId::FIRST);
-    let b = w.peer(B);
-    for n in 0..n {
-        let msg_id = w.msg_id();
+    let (mut ratchet, init) = handshake::initiate(&identity, device, &bundle, &mut OsRng).unwrap();
+    let from = Addr::new(identity.peer_id(), device);
+    for body in bodies {
         let envelope = Envelope {
             msg_id: w.msg_id(),
             sent_at_ms: w.now,
-            body: Body::Sync(SyncBody::Sent {
-                peer: b,
-                msg_id,
-                sent_at_ms: w.now,
-                content: Content::Text {
-                    text: format!("forged {n}"),
-                    reply_to: None,
-                },
-            }),
+            body,
         };
         let (header, ct) = ratchet.encrypt(&envelope.encode(), b"").unwrap();
         let body = relay::message_body(Some(&init), &header, &ct);
         w.inject(laptop, over_session(from, body));
     }
+}
+
+/// A record of a text "sent" to `peer`.
+fn sent_to(w: &mut World, peer: PeerId, text: String) -> Body {
+    Body::Sync(SyncBody::Sent {
+        peer,
+        msg_id: w.msg_id(),
+        sent_at_ms: w.now,
+        content: Content::Text {
+            text,
+            reply_to: None,
+        },
+    })
+}
+
+/// A stranger, C, tells the laptop of `n` messages "sent" to B, as only
+/// the laptop's own devices may.
+fn stranger_tells_of_sent(w: &mut World, laptop: usize, n: usize) {
+    let b = w.peer(B);
+    let bodies = (0..n)
+        .map(|n| sent_to(w, b, format!("forged {n}")))
+        .collect();
+    write_to_laptop(w, C, DeviceId::FIRST, laptop, bodies);
+}
+
+/// While the laptop waits for its siblings, a device of its identity it
+/// does not know of yet tells it of a message sent to C, whom no other
+/// device knows; the siblings then answer, without C. After `days`, C
+/// writes to the laptop. The world and the laptop.
+fn record_for_c_then_state(days: u64) -> (World, usize) {
+    let (mut w, sibling, laptop) = linked_offline(3);
+    ask_while_siblings_away(&mut w, sibling, laptop);
+    let c = w.peer(C);
+    let record = sent_to(&mut w, c, "to C, from a new sibling".into());
+    write_to_laptop(&mut w, A, DeviceId(77), laptop, vec![record]);
+    w.connect(A);
+    w.connect(sibling);
+    w.advance(10 * 60_000);
+    assert!(
+        !w.contact(laptop, w.peer(B)).request,
+        "the siblings answered"
+    );
+    assert!(!w.has_session(laptop, c), "without C");
+    if days > 0 {
+        for i in [A, B, sibling, laptop] {
+            w.disconnect(i);
+        }
+        w.now += days * DAY_MS;
+        for i in [A, B, sibling, laptop] {
+            w.connect(i);
+        }
+        w.advance(1_000);
+    }
+    let hello = Body::Text {
+        text: "hi, it's C".into(),
+        reply_to: None,
+    };
+    write_to_laptop(&mut w, C, DeviceId::FIRST, laptop, vec![hello]);
+    assert!(w.contact(laptop, c).request, "C wrote as a stranger");
+    (w, laptop)
+}
+
+/// A State reply without a record's contact leaves the record waiting: it
+/// is shown once the contact turns up.
+#[test]
+fn a_record_outlives_a_state_reply_without_its_contact() {
+    let (w, laptop) = record_for_c_then_state(0);
+    let to_c: Vec<_> = messages(&w, laptop, w.peer(C))
+        .into_iter()
+        .filter(|m| m.outgoing)
+        .collect();
+    assert_eq!(to_c.len(), 1, "{to_c:?}");
+}
+
+/// ... until its day is over.
+#[test]
+fn a_record_outlives_a_state_reply_without_its_contact_until_it_expires() {
+    let (w, laptop) = record_for_c_then_state(1);
+    let messages = messages(&w, laptop, w.peer(C));
+    assert!(messages.iter().all(|m| !m.outgoing), "{messages:?}");
 }
 
 /// Only the laptop's own devices tell it of messages sent: a stranger's
