@@ -1,4 +1,5 @@
 /** Browser voice notes: MediaRecorder for the file, an analyser for the meter. */
+import { CommandError } from "@cypher/ui/errors";
 
 const TYPES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"];
 /** One loudness sample per 20 ms, matching the native encoder's frames. */
@@ -45,7 +46,7 @@ export class WebVoiceRecorder {
 
   static async start(onLevel: (level: number) => void): Promise<WebVoiceRecorder> {
     const mimeType = TYPES.find((t) => MediaRecorder.isTypeSupported(t));
-    if (!mimeType) throw new Error("voice recording is not supported here");
+    if (!mimeType) throw new CommandError({ kind: "unsupported", message: "voice recording is not supported here" });
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });

@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use cypher_core::IdentityKind;
 use cypher_crypto::IdentitySeed;
 use cypher_crypto::identity_file::{self, IdentityFileError};
 use cypher_types::DeviceId;
@@ -21,12 +22,7 @@ pub struct IdentityStore {
 
 impl From<IdentityFileError> for ClientError {
     fn from(e: IdentityFileError) -> Self {
-        match e {
-            IdentityFileError::WeakPassphrase => Self::WeakPassphrase,
-            IdentityFileError::InvalidNickname => Self::InvalidInput,
-            IdentityFileError::WrongPassphrase => Self::WrongPassphrase,
-            IdentityFileError::Corrupt => Self::CorruptIdentity,
-        }
+        Self::Identity(e.into())
     }
 }
 
@@ -59,7 +55,7 @@ impl IdentityStore {
         passphrase: &str,
     ) -> Result<Unlocked, ClientError> {
         let seed = IdentitySeed::from_mnemonic(mnemonic.trim())
-            .map_err(|_| ClientError::InvalidMnemonic)?;
+            .map_err(|_| ClientError::Identity(IdentityKind::InvalidMnemonic))?;
         // A new device of the profile: the ones it had may still be in use,
         // and two installs as one device would push each other out.
         self.save_new(seed, DeviceId::random(&mut OsRng), nickname, passphrase)
@@ -73,7 +69,7 @@ impl IdentityStore {
         passphrase: &str,
     ) -> Result<Unlocked, ClientError> {
         if self.exists() {
-            return Err(ClientError::IdentityExists);
+            return Err(ClientError::Identity(IdentityKind::Exists));
         }
         let blob = identity_file::seal(
             &linked.seed,
@@ -120,7 +116,11 @@ impl IdentityStore {
     }
 
     pub fn unlock(&self, passphrase: &str) -> Result<Unlocked, ClientError> {
-        Ok(identity_file::open(&fs::read(&self.path)?, passphrase)?)
+        let sealed = fs::read(&self.path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => ClientError::Identity(IdentityKind::Missing),
+            _ => e.into(),
+        })?;
+        Ok(identity_file::open(&sealed, passphrase)?)
     }
 
     fn save_new(
@@ -131,7 +131,7 @@ impl IdentityStore {
         passphrase: &str,
     ) -> Result<Unlocked, ClientError> {
         if self.exists() {
-            return Err(ClientError::IdentityExists);
+            return Err(ClientError::Identity(IdentityKind::Exists));
         }
         let blob = identity_file::seal(&seed, device, nickname, passphrase, &mut OsRng)?;
         write_atomic(&self.path, &blob)?;
@@ -174,12 +174,32 @@ mod tests {
         assert_eq!(unlocked.nickname, "alice");
         assert!(matches!(
             store.unlock("wrong passphrase!"),
-            Err(ClientError::WrongPassphrase)
+            Err(ClientError::Identity(IdentityKind::WrongPassphrase))
         ));
         assert!(matches!(
             store.create("bob", PASS),
-            Err(ClientError::IdentityExists)
+            Err(ClientError::Identity(IdentityKind::Exists))
         ));
+    }
+
+    /// What the UI is told when there is no identity, or the nickname is
+    /// too long: the identity kinds the web client reports for the same.
+    #[test]
+    fn a_missing_file_and_a_long_nickname_are_identity_failures() {
+        use cypher_core::{CmdError, ErrorKind, IdentityKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = IdentityStore::new(dir.path());
+        let kind = |e: ClientError| CmdError::from(e).kind;
+        let missing = store.unlock(PASS).map(|_| ()).unwrap_err();
+        assert_eq!(kind(missing), ErrorKind::Identity(IdentityKind::Missing));
+        let long = "n".repeat(identity_file::MAX_NICKNAME_BYTES + 1);
+        let refused = store.create(&long, PASS).map(|_| ()).unwrap_err();
+        assert_eq!(
+            kind(refused),
+            ErrorKind::Identity(IdentityKind::NicknameTooLong)
+        );
+        assert!(!store.exists());
     }
 
     #[test]
@@ -208,11 +228,11 @@ mod tests {
         let store = IdentityStore::new(dir.path());
         assert!(matches!(
             store.create("a", "short"),
-            Err(ClientError::WeakPassphrase)
+            Err(ClientError::Identity(IdentityKind::WeakPassphrase))
         ));
         assert!(matches!(
             store.import("not words", "a", PASS),
-            Err(ClientError::InvalidMnemonic)
+            Err(ClientError::Identity(IdentityKind::InvalidMnemonic))
         ));
         assert!(!store.exists());
     }

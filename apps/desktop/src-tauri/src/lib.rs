@@ -13,7 +13,9 @@ mod shell;
 #[cfg(test)]
 mod tests;
 
-use commands::{chat, devices, identity, link, media, push, qr, settings, transfer};
+use commands::{
+    chat, contacts, conversations, devices, identity, link, media, push, qr, settings, transfer,
+};
 use tauri::{Emitter, Manager, Runtime};
 
 #[cfg(mobile)]
@@ -179,13 +181,13 @@ macro_rules! app_commands {
             identity::erase_device,
             identity::lock,
             identity::export_mnemonic,
-            identity::get_conversations,
-            identity::get_history,
-            identity::clear_chat_history,
-            identity::rename_peer,
-            identity::accept_contact,
-            identity::set_blocked,
-            identity::delete_conversation,
+            conversations::get_conversations,
+            conversations::get_history,
+            conversations::clear_chat_history,
+            contacts::rename_peer,
+            contacts::accept_contact,
+            contacts::set_blocked,
+            conversations::delete_conversation,
             settings::connect_to_gateway,
             settings::apply_anonymous_settings,
             settings::reconnect,

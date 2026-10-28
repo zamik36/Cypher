@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cypher_client::{Client, ClientError, Config, Content};
-use cypher_core::{Command, Event, MediaKind, MessageStatus};
+use cypher_core::{Command, CommandId, Event, MediaKind, MessageStatus};
 use cypher_crypto::IdentitySeed;
 use cypher_types::{FileId, PeerId};
-use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+use p256::elliptic_curve::Generate as _;
+use p256::elliptic_curve::sec1::ToSec1Point as _;
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -221,6 +222,7 @@ async fn has_text(peer: &Peer, from: PeerId, text: &str) -> bool {
 async fn link_from(a: &mut Peer, offer: &str, history: bool) {
     for _ in 0..50 {
         let link = Command::LinkDevice {
+            id: CommandId(1),
             offer: offer.to_owned(),
             history,
         };
@@ -319,14 +321,23 @@ fn pattern(len: usize) -> Vec<u8> {
 }
 
 async fn pair_through_a_link(a: &mut Peer, b: &mut Peer) {
-    a.client.command(Command::CreateLink).await.unwrap();
+    a.client
+        .command(Command::CreateLink { id: CommandId(2) })
+        .await
+        .unwrap();
     let link = a
         .wait(|e| match e {
-            Event::LinkCreated { link } => Some(link.clone()),
+            Event::LinkCreated { link, .. } => Some(link.clone()),
             _ => None,
         })
         .await;
-    b.client.command(Command::JoinLink { link }).await.unwrap();
+    b.client
+        .command(Command::JoinLink {
+            id: CommandId(3),
+            link,
+        })
+        .await
+        .unwrap();
     b.wait(|e| matches!(e, Event::PeerAdded { .. }).then_some(()))
         .await;
     a.wait(|e| matches!(e, Event::PeerAdded { .. }).then_some(()))
@@ -572,12 +583,10 @@ async fn register_for_push(b: &mut Peer) {
     assert_eq!(key.len(), 65);
     let register = Command::RegisterPush {
         endpoint: "https://push.invalid/up-b".into(),
-        p256dh: *p256::SecretKey::random(&mut rand::rngs::OsRng)
+        p256dh: p256::SecretKey::generate()
             .public_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .first_chunk::<65>()
-            .unwrap(),
+            .to_uncompressed_point()
+            .into(),
         auth: [1; 16],
     };
     b.client.command(register).await.unwrap();

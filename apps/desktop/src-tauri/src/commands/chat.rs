@@ -1,15 +1,15 @@
-use cypher_core::Command;
+use cypher_core::{CmdError, Command, ErrorKind};
 use cypher_types::{MsgId, PeerId};
 use tauri::State;
 
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 pub(crate) fn parse_peer(hex: &str) -> CmdResult<PeerId> {
-    PeerId::from_hex(hex).ok_or_else(|| "invalid peer id".to_owned())
+    PeerId::from_hex(hex).ok_or_else(|| CmdError::new(ErrorKind::Invalid, "invalid peer id"))
 }
 
 fn parse_msg(hex: &str) -> CmdResult<MsgId> {
-    MsgId::from_hex(hex).ok_or_else(|| "invalid message id".to_owned())
+    MsgId::from_hex(hex).ok_or_else(|| CmdError::new(ErrorKind::Invalid, "invalid message id"))
 }
 
 /// Returns the message id so the UI can track delivery status.
@@ -23,7 +23,7 @@ pub(crate) async fn send_message(
     let peer = parse_peer(&peer_id)?;
     let reply_to = reply_to.as_deref().map(parse_msg).transpose()?;
     let client = state.client().await?;
-    let id = client.send_text(peer, text, reply_to).await.map_err(err)?;
+    let id = client.send_text(peer, text, reply_to).await?;
     Ok(id.to_hex())
 }
 
@@ -41,7 +41,7 @@ pub(crate) async fn delete_message(
         .await?
         .delete_message(peer, msg, timestamp)
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }
 
 /// The number to compare with `peer_id` out of band (60 digits).
@@ -70,5 +70,5 @@ pub(crate) async fn mark_read(
         .await?
         .command(Command::MarkRead { peer, ids })
         .await
-        .map_err(err)
+        .map_err(CmdError::from)
 }

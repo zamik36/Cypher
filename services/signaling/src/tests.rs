@@ -857,11 +857,12 @@ async fn push_handler(outcome: Outcome) -> Option<(Handler, Sent)> {
 
 /// A device's push subscription for `owner`'s inbox.
 fn subscribe(owner: &Inbox, endpoint: &str) -> ClientMsg {
-    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
-    let point = p256::SecretKey::random(&mut OsRng)
+    use p256::elliptic_curve::Generate as _;
+    use p256::elliptic_curve::sec1::ToSec1Point as _;
+    let point = p256::SecretKey::generate()
         .public_key()
-        .to_encoded_point(false);
-    owner.register(endpoint, point.as_bytes().try_into().unwrap())
+        .to_uncompressed_point();
+    owner.register(endpoint, point.into())
 }
 
 fn put(inbox: [u8; 32]) -> ClientMsg {

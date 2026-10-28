@@ -6,7 +6,9 @@ use std::hash::{DefaultHasher, Hash};
 
 use bytes::Bytes;
 use cypher_core::link::Provision;
-use cypher_core::{Command, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault, history};
+use cypher_core::{
+    Command, CommandId, Core, Effect, Event, Input, Snapshot, StoreOp, Table, Vault, history,
+};
 use cypher_crypto::identity::verify_signature;
 use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::onion::{self, ReplyKey};
@@ -479,13 +481,13 @@ impl World {
     }
 
     pub(crate) fn create_link(&mut self, i: usize) -> String {
-        self.command(i, Command::CreateLink);
+        self.command(i, Command::CreateLink { id: CommandId(0) });
         self.clients[i]
             .events
             .iter()
             .rev()
             .find_map(|e| match e {
-                Event::LinkCreated { link } => Some(link.clone()),
+                Event::LinkCreated { link, .. } => Some(link.clone()),
                 _ => None,
             })
             .expect("link created")
@@ -577,7 +579,13 @@ impl World {
     /// `joiner` joins a fresh link created by `host`.
     pub(crate) fn pair(&mut self, host: usize, joiner: usize) {
         let link = self.create_link(host);
-        self.command(joiner, Command::JoinLink { link });
+        self.command(
+            joiner,
+            Command::JoinLink {
+                id: CommandId(0),
+                link,
+            },
+        );
     }
 
     pub(crate) fn send_text(&mut self, from: usize, to: usize, text: &str) -> MsgId {

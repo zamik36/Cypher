@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cypher_client::Client;
-use cypher_core::{Command, MediaKind};
+use cypher_core::{CmdError, Command, ErrorKind, MediaKind};
 use cypher_types::{FileId, MsgId, PeerId};
 use serde::Serialize;
 use tauri::ipc::Request;
@@ -12,7 +12,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use super::chat::parse_peer;
 use super::ipc;
-use crate::session::{AppState, CmdResult, err};
+use crate::session::{AppState, CmdResult};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct TransferInfo {
@@ -53,7 +53,7 @@ pub(crate) async fn browse_and_send<R: Runtime>(
     app.dialog().file().pick_files(move |files| {
         let _ = tx.send(files.unwrap_or_default());
     });
-    let picked = rx.await.map_err(err)?;
+    let picked = rx.await.map_err(CmdError::internal)?;
     let client = state.client().await?;
     send_all(&app, &client, peer, picked).await
 }
@@ -61,8 +61,8 @@ pub(crate) async fn browse_and_send<R: Runtime>(
 /// Sends `files` to `peer` in order; the cards of the files sent. A file
 /// that cannot be sent does not stop the others, whose cards the UI needs
 /// to follow them. When none went, the first error is the answer; when
-/// some did, each file left out is told to the UI as an error event,
-/// `<name>: <reason>`.
+/// some did, each file left out is told to the UI (`file_not_sent`, its
+/// name and error), which words why in the user's language.
 pub(crate) async fn send_all<R: Runtime>(
     app: &AppHandle<R>,
     client: &Client,
@@ -89,10 +89,17 @@ pub(crate) async fn send_all<R: Runtime>(
     {
         return Err(e);
     }
-    for (name, e) in failed {
-        let _ = app.emit("cypher://error", format!("{name}: {e}"));
+    for (name, error) in failed {
+        let _ = app.emit("cypher://file_not_sent", NotSent { name, error });
     }
     Ok(sent)
+}
+
+/// A file of a batch left out while the others went.
+#[derive(Clone, Serialize)]
+struct NotSent {
+    name: String,
+    error: CmdError,
 }
 
 /// How a picked file is named to the user.
@@ -171,9 +178,9 @@ pub(crate) async fn send_dropped<R: Runtime>(
 ) -> CmdResult<Vec<TransferInfo>> {
     let peer = parse_peer(&peer_id)?;
     let paths = {
-        let mut dropped = state.transfers.dropped.lock().map_err(err)?;
+        let mut dropped = state.transfers.dropped.lock().map_err(CmdError::internal)?;
         if dropped.id != id || dropped.paths.is_empty() {
-            return Err("this drop is gone".into());
+            return Err(ErrorKind::DropGone.into());
         }
         std::mem::take(&mut dropped.paths)
     };
@@ -216,14 +223,16 @@ pub(crate) async fn send_bytes(
     // Before anything is written: without a client, nothing is staged.
     let client = state.client().await?;
     let dir = state.paths().data.join("staging");
-    tokio::fs::create_dir_all(&dir).await.map_err(err)?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(CmdError::internal)?;
     let staged = dir.join(staging_name());
     let size = data.len() as u64;
     // An owned buffer (decoded on Android) moves to the writing thread; a
     // borrowed one is copied, as the write outlives the request.
     if let Err(e) = tokio::fs::write(&staged, data.into_owned()).await {
         discard(&staged).await;
-        return Err(err(e));
+        return Err(CmdError::internal(e));
     }
     let (msg_id, file_id) = send_staged(&client, peer, &staged, &name, &mime).await?;
     Ok(TransferInfo::outgoing(msg_id, file_id, name, size))
@@ -242,7 +251,7 @@ async fn send_staged(
     if sent.is_err() {
         discard(staged).await;
     }
-    sent.map_err(err)
+    sent.map_err(CmdError::from)
 }
 
 /// Deletes what is left of a staged copy; one already gone is fine.
@@ -266,12 +275,14 @@ pub(crate) async fn send_pick<R: Runtime>(
             Err(()) => return send_content(app, client, peer, url.as_str()).await,
         },
     };
-    let size = tokio::fs::metadata(&path).await.map_err(err)?.len();
+    let size = tokio::fs::metadata(&path)
+        .await
+        .map_err(CmdError::internal)?
+        .len();
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
     let (msg_id, file_id) = client
         .send_file(peer, &path, mime.essence_str(), MediaKind::File)
-        .await
-        .map_err(err)?;
+        .await?;
     Ok((msg_id, file_id, display_name(&path), size))
 }
 
@@ -289,14 +300,14 @@ async fn send_content<R: Runtime>(
             .stage(&uri)
     })
     .await
-    .map_err(err)?
-    .map_err(err)?;
+    .map_err(CmdError::internal)?
+    .map_err(CmdError::internal)?;
     let path = Path::new(&staged.path);
     let size = match tokio::fs::metadata(path).await {
         Ok(meta) => meta.len(),
         Err(e) => {
             discard(path).await;
-            return Err(err(e));
+            return Err(CmdError::internal(e));
         }
     };
     let (msg_id, file_id) = send_staged(client, peer, path, &staged.name, &staged.mime).await?;
@@ -311,14 +322,17 @@ async fn send_content<R: Runtime>(
     _peer: PeerId,
     _uri: &str,
 ) -> CmdResult<(MsgId, FileId, String, u64)> {
-    Err("unsupported file location".into())
+    Err(CmdError::new(
+        ErrorKind::Unsupported,
+        "unsupported file location",
+    ))
 }
 
 /// Where a finished file is, if it is still there. A `content://` URI is
 /// taken at its word; a path must still exist.
 async fn saved_location(state: &AppState, file_id: &str) -> CmdResult<Option<String>> {
-    let id = FileId::from_hex(file_id).ok_or("invalid file id")?;
-    let location = state.client().await?.saved_file(id).await.map_err(err)?;
+    let id = parse_file(file_id)?;
+    let location = state.client().await?.saved_file(id).await?;
     Ok(location.filter(|l| l.starts_with("content://") || Path::new(l).exists()))
 }
 
@@ -335,7 +349,9 @@ pub(crate) async fn open_file<R: Runtime>(
     state: State<'_, AppState>,
     file_id: String,
 ) -> CmdResult<()> {
-    let location = saved_location(&state, &file_id).await?.ok_or("not_saved")?;
+    let location = saved_location(&state, &file_id)
+        .await?
+        .ok_or(ErrorKind::NotSaved)?;
     open_location(app, location).await
 }
 
@@ -347,8 +363,15 @@ async fn open_location<R: Runtime>(app: AppHandle<R>, location: String) -> CmdRe
             .open(&location)
     })
     .await
-    .map_err(err)?
-    .map_err(err)
+    .map_err(CmdError::internal)?
+    .map_err(|e| {
+        // The Kotlin side's word for it.
+        if e.to_string() == "no_app" {
+            ErrorKind::NoApp.into()
+        } else {
+            CmdError::internal(e)
+        }
+    })
 }
 
 #[cfg(not(target_os = "android"))]
@@ -356,26 +379,28 @@ async fn open_location<R: Runtime>(app: AppHandle<R>, location: String) -> CmdRe
 async fn open_location<R: Runtime>(_app: AppHandle<R>, location: String) -> CmdResult<()> {
     if runs_code(Path::new(&location)) {
         // Opening would run it: the user can still do so from the folder.
-        return Err("unsafe_type".into());
+        return Err(ErrorKind::UnsafeType.into());
     }
-    tauri_plugin_opener::open_path(&location, None::<&str>).map_err(err)
+    tauri_plugin_opener::open_path(&location, None::<&str>).map_err(CmdError::internal)
 }
 
 /// Shows a finished file in the system's file manager (desktop only).
 #[tauri::command]
 pub(crate) async fn reveal_file(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
-    let location = saved_location(&state, &file_id).await?.ok_or("not_saved")?;
+    let location = saved_location(&state, &file_id)
+        .await?
+        .ok_or(ErrorKind::NotSaved)?;
     reveal_location(&location)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reveal_location(location: &str) -> CmdResult<()> {
-    tauri_plugin_opener::reveal_item_in_dir(location).map_err(err)
+    tauri_plugin_opener::reveal_item_in_dir(location).map_err(CmdError::internal)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn reveal_location(_location: &str) -> CmdResult<()> {
-    Err("unsupported".into())
+    Err(ErrorKind::Unsupported.into())
 }
 
 /// Extensions the system runs rather than shows: never opened from a chat.
@@ -432,9 +457,9 @@ fn runs_code(path: &Path) -> bool {
 /// if accepting fails.
 #[tauri::command]
 pub(crate) async fn accept_file(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
-    let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
+    let id = parse_file(&file_id)?;
     let offers = &state.transfers.offers;
-    let (name, ticket) = offers.take(&id).ok_or("unknown offer")?;
+    let (name, ticket) = offers.take(&id).ok_or(ErrorKind::UnknownOffer)?;
     let accepted = accept_as(&state, id, &name, ticket).await;
     if accepted.is_err() {
         offers.restore(id, name, ticket);
@@ -447,18 +472,24 @@ async fn accept_as(state: &AppState, id: FileId, name: &str, ticket: u64) -> Cmd
         .paths()
         .downloads
         .clone()
-        .ok_or("no downloads folder")?;
+        .ok_or(ErrorKind::NoDownloads)?;
     let client = state.client().await?;
     let name = name.to_owned();
     let dest = tokio::task::spawn_blocking(move || reserve_download(&dir, &name))
         .await
-        .map_err(err)?
-        .map_err(err)?;
+        .map_err(CmdError::internal)?
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                CmdError::new(ErrorKind::NameTaken, e.to_string())
+            } else {
+                CmdError::internal(e)
+            }
+        })?;
     // Noted before the client hears of it: its failure may come at once.
     state.transfers.offers.accepted(id, dest.clone(), ticket);
     if let Err(e) = client.accept_file(id, dest.clone()).await {
         release_reservation(&dest).await;
-        return Err(err(e));
+        return Err(e.into());
     }
     Ok(())
 }
@@ -476,15 +507,18 @@ pub(crate) async fn release_reservation(path: &Path) {
 
 #[tauri::command]
 pub(crate) async fn cancel_transfer(state: State<'_, AppState>, file_id: String) -> CmdResult<()> {
-    let id = FileId::from_hex(&file_id).ok_or("invalid file id")?;
+    let id = parse_file(&file_id)?;
     state
         .client()
         .await?
         .command(Command::CancelTransfer { file_id: id })
-        .await
-        .map_err(err)?;
+        .await?;
     state.transfers.offers.forget(&id);
     Ok(())
+}
+
+fn parse_file(hex: &str) -> CmdResult<FileId> {
+    FileId::from_hex(hex).ok_or_else(|| CmdError::new(ErrorKind::Invalid, "invalid file id"))
 }
 
 fn display_name(path: &Path) -> String {

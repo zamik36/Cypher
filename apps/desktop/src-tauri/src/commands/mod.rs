@@ -3,6 +3,8 @@
 #![expect(clippy::unreachable, reason = "expanded by #[tauri::command]")]
 
 pub(crate) mod chat;
+pub(crate) mod contacts;
+pub(crate) mod conversations;
 pub(crate) mod devices;
 pub(crate) mod identity;
 pub(crate) mod ipc;

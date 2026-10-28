@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::outbox::OutboxItem;
 use super::{Conn, Core, Pending};
-use crate::api::{Effect, Event, FailReason};
+use crate::api::{CommandId, Effect, Event, FailReason};
 use crate::envelope::{Body, Envelope, InboxAd};
 use crate::link::{LinkOffer, seal_handover};
 use crate::peer::{Peer, Session};
@@ -27,14 +27,22 @@ const REFRESH_INTERVAL_MS: u64 = 10 * 60_000;
 const MAX_CONFLICTS: u8 = 3;
 
 /// Why a device list was asked for.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum DevicesFor {
     /// Our own: are we still on it?
     Own,
     /// A contact's, which may have changed.
     Refresh,
-    /// The host of an invite we are joining by.
-    Join { link: String },
+    /// The host of an invite we are joining by (see `Core::joining`).
+    Join,
+}
+
+/// A device this one just linked, for `LinkDevice` `id`.
+#[derive(Debug)]
+pub(super) struct Linked {
+    pub(super) id: CommandId,
+    device: DeviceId,
+    name: String,
 }
 
 /// Our own devices as kept in `meta`.
@@ -174,11 +182,22 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// A device list the server gave (`None`: it has none for `peer`).
     pub(super) fn on_devices(&mut self, peer: PeerId, purpose: DevicesFor, list: Option<&[u8]>) {
-        let list = match list.map(DeviceList::decode) {
-            Some(Ok(list)) if list.identity() == peer => Some(list),
-            // Forged or broken: as good as none.
-            Some(_) => return,
-            None => None,
+        let refused = match list.map(DeviceList::decode) {
+            Some(Ok(list)) if list.identity() == peer => Ok(Some(list)),
+            // Another identity's: the server substitutes keys.
+            Some(Ok(_)) => Err(FailReason::KeyMismatch),
+            Some(Err(_)) => Err(FailReason::InvalidKeys),
+            None => Ok(None),
+        };
+        // Forged or broken: as good as none, and a join of it fails at once.
+        let list = match refused {
+            Ok(list) => list,
+            Err(reason) => {
+                if matches!(purpose, DevicesFor::Join) {
+                    self.join_failed(peer, reason);
+                }
+                return;
+            }
         };
         match purpose {
             DevicesFor::Own => self.on_own_devices(list),
@@ -187,7 +206,7 @@ impl<R: CryptoRngCore> Core<R> {
                     self.learn_devices(peer, list);
                 }
             }
-            DevicesFor::Join { link } => self.join_devices(&link, peer, list),
+            DevicesFor::Join => self.join_devices(peer, list),
         }
     }
 
@@ -253,6 +272,7 @@ impl<R: CryptoRngCore> Core<R> {
         match next {
             Some(list) => self.publish_own(list),
             None => self.emit(Event::LinkFailed {
+                id: None,
                 reason: FailReason::Rejected,
             }),
         }
@@ -262,7 +282,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.publish_listing(list, None);
     }
 
-    fn publish_listing(&mut self, list: DeviceList, linked: Option<(DeviceId, String)>) {
+    fn publish_listing(&mut self, list: DeviceList, linked: Option<Linked>) {
         let encoded = Bytes::from(list.encode());
         self.request(
             ClientMsg::PublishDevices { list: encoded },
@@ -272,16 +292,13 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// The server took our list, with a device this one just linked.
-    pub(super) fn on_own_published(
-        &mut self,
-        list: DeviceList,
-        linked: Option<(DeviceId, String)>,
-    ) {
+    pub(super) fn on_own_published(&mut self, list: DeviceList, linked: Option<Linked>) {
         self.devices.conflicts = 0;
-        if let Some((device, name)) = linked {
+        if let Some(Linked { id, device, name }) = linked {
             self.devices.names.retain(|(d, _)| *d != device.0);
             self.devices.names.push((device.0, name.clone()));
             self.emit(Event::DeviceLinked {
+                id,
                 device: device.0,
                 name,
             });
@@ -291,9 +308,10 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Hands this identity to the new device whose offer the user scanned:
     /// sealed to the offer's key, straight to its throwaway session.
-    pub(super) fn link_device(&mut self, text: &str, history: bool) {
+    pub(super) fn link_device(&mut self, id: CommandId, text: &str, history: bool) {
         let Some(offer) = LinkOffer::parse(text) else {
             return self.emit(Event::LinkFailed {
+                id: Some(id),
                 reason: FailReason::InvalidLink,
             });
         };
@@ -313,7 +331,10 @@ impl<R: CryptoRngCore> Core<R> {
         let body = seal_handover(&offer, &self.seed, &nickname, &mut self.rng);
         let (None, Some(body)) = (reason, body) else {
             let reason = reason.unwrap_or(FailReason::ServerError);
-            return self.emit(Event::LinkFailed { reason });
+            return self.emit(Event::LinkFailed {
+                id: Some(id),
+                reason,
+            });
         };
         let req_id = self.alloc_req();
         let deadline = self.now.saturating_add(super::REQUEST_TIMEOUT_MS);
@@ -327,12 +348,12 @@ impl<R: CryptoRngCore> Core<R> {
             self.grant_history(offer.device);
         }
         self.pending
-            .insert(req_id, (Pending::LinkSend { offer }, deadline));
+            .insert(req_id, (Pending::LinkSend { id, offer }, deadline));
         self.transmit(req_id, send);
     }
 
     /// The new device has the identity: list it.
-    pub(super) fn on_link_sent(&mut self, offer: LinkOffer, status: DeliveryStatus) {
+    pub(super) fn on_link_sent(&mut self, id: CommandId, offer: LinkOffer, status: DeliveryStatus) {
         let next = match status {
             DeliveryStatus::Delivered => self
                 .devices
@@ -342,10 +363,16 @@ impl<R: CryptoRngCore> Core<R> {
             DeliveryStatus::Offline | DeliveryStatus::Busy | DeliveryStatus::Queued => None,
         };
         if let Some(list) = next {
-            self.publish_listing(list, Some((offer.device, offer.name)));
+            let linked = Linked {
+                id,
+                device: offer.device,
+                name: offer.name,
+            };
+            self.publish_listing(list, Some(linked));
         } else {
             self.revoke_history(offer.device);
             self.emit(Event::LinkFailed {
+                id: Some(id),
                 reason: FailReason::Offline,
             });
         }
@@ -366,6 +393,7 @@ impl<R: CryptoRngCore> Core<R> {
                 self.publish_own(list);
             }
             None => self.emit(Event::LinkFailed {
+                id: None,
                 reason: FailReason::Rejected,
             }),
         }

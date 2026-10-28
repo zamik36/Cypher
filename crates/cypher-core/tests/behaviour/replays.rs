@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use cypher_core::relay::{self, RelayBody};
-use cypher_core::{Command, Event, FailReason, Table, session_key};
+use cypher_core::{Command, CommandId, Event, FailReason, Table, session_key};
 use cypher_crypto::{IdentitySeed, InitHeader, handshake};
 use cypher_types::{Addr, DeviceId};
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
@@ -428,8 +428,20 @@ fn the_init_turned_away_when_both_joined_at_once_stays_refused() {
     let mut w = World::new(2);
     let link_a = w.create_link(A);
     let link_b = w.create_link(B);
-    w.queue(B, Command::JoinLink { link: link_a });
-    w.queue(A, Command::JoinLink { link: link_b });
+    w.queue(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link_a,
+        },
+    );
+    w.queue(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link_b,
+        },
+    );
     w.run();
     let (low, high) = if (w.peer(A), w.clients[A].device) < (w.peer(B), w.clients[B].device) {
         (A, B)

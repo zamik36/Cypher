@@ -4,7 +4,7 @@
 
 use cypher_core::envelope::MAX_TEXT_LEN;
 use cypher_core::relay::RelayBody;
-use cypher_core::{Command, Event, FailReason, MessageStatus};
+use cypher_core::{Command, CommandId, Event, FailReason, MessageStatus};
 use cypher_types::{Addr, DeviceId, PeerId};
 
 use super::{addr, rows};
@@ -42,12 +42,24 @@ fn an_invite_admits_for_a_day() {
     let mut w = World::new(3);
     let link = w.create_link(A);
     w.now += DAY_MS - 1;
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(admitted(&w, A, B), "a moment before the day is over");
 
     let link = w.create_link(A);
     w.now += DAY_MS;
-    w.command(C, Command::JoinLink { link });
+    w.command(
+        C,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(waits(&w, A, C), "a day old: only a request");
 }
 
@@ -59,11 +71,24 @@ fn an_invite_admits_one_contact_and_leaves_the_others_valid() {
     w.command(
         B,
         Command::JoinLink {
+            id: CommandId(0),
             link: first.clone(),
         },
     );
-    w.command(C, Command::JoinLink { link: first });
-    w.command(D, Command::JoinLink { link: second });
+    w.command(
+        C,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: first,
+        },
+    );
+    w.command(
+        D,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: second,
+        },
+    );
     assert!(admitted(&w, A, B));
     assert!(waits(&w, A, C), "used once already");
     assert!(admitted(&w, A, D), "another invite still admits");
@@ -78,6 +103,7 @@ fn of_more_than_32_invites_the_oldest_is_forgotten() {
         w.command(
             B,
             Command::JoinLink {
+                id: CommandId(0),
                 link: links[0].clone(),
             },
         );
@@ -85,6 +111,7 @@ fn of_more_than_32_invites_the_oldest_is_forgotten() {
         w.command(
             C,
             Command::JoinLink {
+                id: CommandId(0),
                 link: links[1].clone(),
             },
         );
@@ -97,7 +124,13 @@ fn an_invite_survives_a_restart() {
     let mut w = World::new(2);
     let link = w.create_link(A);
     w.restart(A);
-    w.command(B, Command::JoinLink { link });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(admitted(&w, A, B));
 }
 
@@ -128,12 +161,30 @@ fn at_most_twenty_strangers_wait_for_an_answer() {
     let late = WAITING + 2;
     let mut w = World::new(late + 1);
     let link = w.create_link(A);
-    w.command(B, Command::JoinLink { link: link.clone() });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link.clone(),
+        },
+    );
     for i in 2..late {
-        w.command(i, Command::JoinLink { link: link.clone() });
+        w.command(
+            i,
+            Command::JoinLink {
+                id: CommandId(0),
+                link: link.clone(),
+            },
+        );
     }
     assert_eq!(requests(&w, A), WAITING);
-    w.command(late, Command::JoinLink { link });
+    w.command(
+        late,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert!(!w.has_session(A, w.peer(late)), "one too many");
     assert_eq!(requests(&w, A), WAITING);
     assert!(!w.has_event(A, |e| matches!(e, Event::Warning { .. })));
@@ -151,9 +202,21 @@ fn at_most_twenty_strangers_wait_for_an_answer() {
 fn contacts_and_own_devices_get_through_while_strangers_wait() {
     let mut w = World::new(22);
     let link = w.create_link(A);
-    w.command(B, Command::JoinLink { link: link.clone() });
+    w.command(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link.clone(),
+        },
+    );
     for i in 2..22 {
-        w.command(i, Command::JoinLink { link: link.clone() });
+        w.command(
+            i,
+            Command::JoinLink {
+                id: CommandId(0),
+                link: link.clone(),
+            },
+        );
     }
     assert_eq!(requests(&w, A), 20);
     w.send_text(A, B, "one");
@@ -192,7 +255,7 @@ fn join_outcome(w: &World, i: usize) -> (usize, Vec<FailReason>) {
             matches!(
                 e,
                 Event::PeerAdded {
-                    initiated_by_us: true,
+                    joined: Some(_),
                     ..
                 }
             )
@@ -217,7 +280,13 @@ fn joining_succeeds_once_when_any_device_of_the_host_answers() {
         let b = w.peer(B);
         w.remove_keys(Addr::new(b, DeviceId(missing)));
         let link = w.create_link(B);
-        w.command(A, Command::JoinLink { link });
+        w.command(
+            A,
+            Command::JoinLink {
+                id: CommandId(0),
+                link,
+            },
+        );
         assert_eq!(
             join_outcome(&w, A),
             (1, Vec::new()),
@@ -235,7 +304,13 @@ fn joining_fails_once_when_no_device_of_the_host_answers() {
     w.remove_keys(Addr::new(b, DeviceId(1)));
     w.remove_keys(Addr::new(b, DeviceId(2)));
     let link = w.create_link(B);
-    w.command(A, Command::JoinLink { link });
+    w.command(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link,
+        },
+    );
     assert_eq!(join_outcome(&w, A), (0, vec![FailReason::NotFound]));
 }
 
@@ -245,8 +320,20 @@ fn crossing_joins() -> World {
     let mut w = World::new(2);
     let link_a = w.create_link(A);
     let link_b = w.create_link(B);
-    w.queue(B, Command::JoinLink { link: link_a });
-    w.queue(A, Command::JoinLink { link: link_b });
+    w.queue(
+        B,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link_a,
+        },
+    );
+    w.queue(
+        A,
+        Command::JoinLink {
+            id: CommandId(0),
+            link: link_b,
+        },
+    );
     w.run();
     w
 }
