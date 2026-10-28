@@ -809,6 +809,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.restart_unanswered_inits();
         self.check_own_devices();
+        self.ask_siblings_again();
         self.retransmit_expired();
         self.flush_outbox();
     }

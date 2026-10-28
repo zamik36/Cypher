@@ -111,6 +111,17 @@ fn queue_text_and_file(w: &mut World) -> [MsgId; 2] {
 /// The laptop ends up with both messages, stored as the sibling that knew B
 /// all along stored them, and with nothing else for B.
 fn has_both(w: &World, sibling: usize, laptop: usize, sent: [MsgId; 2]) {
+    has_sent(w, sibling, laptop, sent);
+    assert_eq!(
+        messages(w, laptop, w.peer(B)).len(),
+        2,
+        "nothing else, nothing twice"
+    );
+}
+
+/// The laptop has the messages, stored as the sibling that knew B all along
+/// stored them.
+fn has_sent(w: &World, sibling: usize, laptop: usize, sent: [MsgId; 2]) {
     let b = w.peer(B);
     let on_laptop = messages(w, laptop, b);
     let on_sibling = messages(w, sibling, b);
@@ -120,11 +131,12 @@ fn has_both(w: &World, sibling: usize, laptop: usize, sent: [MsgId; 2]) {
         assert!(there.is_some(), "the sibling has {id:?}");
         assert_eq!(here, there, "the laptop has {id:?} as the sibling does");
     }
-    assert_eq!(on_laptop.len(), 2, "nothing else, nothing twice");
 }
 
 /// A sends before the laptop was ever online: the laptop has not published
-/// its keys yet, so A cannot reach it until it does.
+/// its keys yet, so A cannot reach it until it does. They go out as soon
+/// as the laptop first writes to A (asking what it knows), not at A's next
+/// look for its keys ten minutes on.
 #[test]
 fn messages_sent_before_the_new_device_connects_reach_it() {
     let (mut w, sibling, laptop) = linked_offline(2);
@@ -132,8 +144,58 @@ fn messages_sent_before_the_new_device_connects_reach_it() {
     w.run();
     w.connect(laptop);
     w.run();
-    w.advance(10 * 60_000);
+    w.advance(5_000);
     has_both(&w, sibling, laptop, sent);
+}
+
+/// The order a slow machine showed: A sends while the laptop is not online
+/// yet; the laptop comes up, and B, who heard of it from A, greets it
+/// before the laptop has looked at its own list (that look is lost here,
+/// so it comes an hour later). Knowing B, as a stranger, does not keep the
+/// laptop from asking its siblings: B ends up a contact there, and the
+/// laptop has what A sent.
+#[test]
+fn a_contact_greeting_the_new_device_first_does_not_keep_it_from_asking() {
+    let (mut w, sibling, laptop) = linked_offline(2);
+    let sent = queue_text_and_file(&mut w);
+    w.run();
+    let a = w.peer(A);
+    w.server.faults.push(Rule::times(
+        1,
+        move |m| matches!(m, ClientMsg::FetchDevices { peer } if *peer == a),
+        Fault::Ignore,
+    ));
+    w.connect(laptop);
+    w.run();
+    let b = w.peer(B);
+    let hello = Body::Hello {
+        inbox: [0; 32],
+        name: Some("bob".into()),
+        via: None,
+        ad: None,
+    };
+    write_to_laptop(&mut w, B, DeviceId::FIRST, laptop, vec![hello]);
+    assert!(w.contact(laptop, b).request, "B greeted the laptop first");
+
+    w.advance(61 * 60_000);
+    assert!(!w.contact(laptop, b).request, "the siblings told it of B");
+    has_both(&w, sibling, laptop, sent);
+}
+
+/// A new device whose request for what its siblings know gets lost asks
+/// again, a minute later.
+#[test]
+fn a_new_device_asks_its_siblings_again() {
+    let (mut w, _, laptop) = linked_offline(2);
+    let b = w.peer(B);
+    let laptop_device = w.clients[laptop].device;
+    w.lose_messages_from(laptop, 2);
+    w.connect(laptop);
+    w.run();
+    assert!(!w.has_session(laptop, b), "both requests were lost");
+    w.advance(70_000);
+    assert!(!w.contact(laptop, b).request, "asked again, and answered");
+    assert_eq!(waiting_for(&w, A, laptop_device), 0);
 }
 
 /// A sends while the laptop connects for the first time.

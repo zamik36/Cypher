@@ -10,6 +10,13 @@ use crate::api::{Content, Event, MessageStatus, StoredMessage};
 use crate::envelope::{Body, ContactState, MAX_STATE_CONTACTS, SyncBody};
 use crate::peer::{Peer, clean_name};
 
+/// First wait before a new device asks its siblings again; it doubles with
+/// each ask.
+const STATE_ASK_MS: u64 = 60_000;
+/// Asks while the app runs, the first included: the last one goes about an
+/// hour after the first.
+const MAX_STATE_ASKS: u32 = 7;
+
 impl<R: CryptoRngCore> Core<R> {
     /// Tells this identity's other devices; nothing when there are none.
     pub(super) fn sync(&mut self, body: SyncBody) {
@@ -71,18 +78,38 @@ impl<R: CryptoRngCore> Core<R> {
         self.sync_contact(peer);
     }
 
-    /// A device just on its identity's list, knowing no one yet, asks its
-    /// siblings once for what they know.
+    /// A device new to its identity's list asks its siblings for what they
+    /// know, whoever else (a contact greeting it first) it knows already:
+    /// once each time the app starts, then again as [`ask_siblings_again`]
+    /// says, until one of them answers.
+    ///
+    /// [`ask_siblings_again`]: Self::ask_siblings_again
     pub(super) fn ask_siblings(&mut self) {
-        if self.devices.asked || !self.peers.is_empty() {
-            return;
+        if self.devices.awaiting_state && self.devices.state_asks == 0 {
+            self.send_state_request();
         }
+    }
+
+    /// The siblings did not answer (the request was lost, or turned away
+    /// as two sessions crossed): asked again after a minute, then twice as
+    /// long each time, [`MAX_STATE_ASKS`] times in all while the app runs.
+    pub(super) fn ask_siblings_again(&mut self) {
+        let due = self.devices.awaiting_state
+            && (1..MAX_STATE_ASKS).contains(&self.devices.state_asks)
+            && self.now >= self.devices.next_state_ask;
+        if due {
+            self.send_state_request();
+        }
+    }
+
+    fn send_state_request(&mut self) {
         if self.devices_of(self.peer_id).is_empty() {
             return;
         }
-        self.devices.asked = true;
-        self.persist_own_devices();
-        self.open_history();
+        let asks = self.devices.state_asks;
+        let wait = STATE_ASK_MS.saturating_mul(1 << asks.min(MAX_STATE_ASKS));
+        self.devices.state_asks = asks.saturating_add(1);
+        self.devices.next_state_ask = self.now.saturating_add(wait);
         self.sync(SyncBody::StateRequest);
     }
 
@@ -132,6 +159,10 @@ impl<R: CryptoRngCore> Core<R> {
                 contacts,
                 links,
             } => {
+                if self.devices.awaiting_state {
+                    self.devices.awaiting_state = false;
+                    self.persist_own_devices();
+                }
                 if profile.is_some() {
                     self.adopt_profile_name(profile.as_deref());
                 }
