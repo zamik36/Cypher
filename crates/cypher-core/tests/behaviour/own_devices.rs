@@ -147,6 +147,35 @@ fn messages_sent_as_the_new_device_connects_reach_it() {
     has_both(&w, sibling, laptop, sent);
 }
 
+/// The laptop has its keys published but has not asked its siblings yet
+/// (its first look at its own list was lost). An hour later everyone comes
+/// back at once and A sends as the laptop asks: each starts a session with
+/// the other at the same time.
+#[test]
+fn messages_sent_as_the_new_device_asks_reach_it() {
+    let (mut w, sibling, laptop) = linked_offline(2);
+    let a = w.peer(A);
+    w.server.faults.push(Rule::times(
+        1,
+        move |m| matches!(m, ClientMsg::FetchDevices { peer } if *peer == a),
+        Fault::Ignore,
+    ));
+    w.connect(laptop);
+    w.run();
+    assert!(!w.has_session(laptop, w.peer(B)), "it has not asked yet");
+    for i in [A, B, sibling, laptop] {
+        w.disconnect(i);
+    }
+    w.now += 60 * 60_000;
+    for i in [A, B, sibling, laptop] {
+        w.connect(i);
+    }
+    let sent = queue_text_and_file(&mut w);
+    w.run();
+    w.advance(30 * 60_000);
+    has_both(&w, sibling, laptop, sent);
+}
+
 /// The messages client `i` has on their way to `device` of its own.
 fn waiting_for(w: &World, i: usize, device: DeviceId) -> usize {
     rows::outbox(w, i)
