@@ -94,19 +94,14 @@ impl<R: CryptoRngCore> Core<R> {
                 msg_id,
                 sent_at_ms,
                 content,
-            } => {
-                if self.peers.contains_key(&peer) {
-                    self.store_message(StoredMessage {
-                        msg_id,
-                        peer,
-                        outgoing: true,
-                        sent_at_ms,
-                        status: MessageStatus::Sent,
-                        content,
-                    });
-                    self.await_receipts(peer, msg_id);
-                }
-            }
+            } => self.on_sent(StoredMessage {
+                msg_id,
+                peer,
+                outgoing: true,
+                sent_at_ms,
+                status: MessageStatus::Sent,
+                content,
+            }),
             SyncBody::Read { peer, ids } => {
                 if self.peers.contains_key(&peer) {
                     for id in ids {
@@ -119,6 +114,7 @@ impl<R: CryptoRngCore> Core<R> {
                 self.emit(Event::ContactsChanged);
             }
             SyncBody::Removed { peer } => {
+                self.forget_held(&peer);
                 self.remove_peer(&peer);
                 self.emit(Event::ContactsChanged);
             }
@@ -147,6 +143,19 @@ impl<R: CryptoRngCore> Core<R> {
                 }
                 self.emit(Event::ContactsChanged);
             }
+        }
+    }
+
+    /// A message another device of ours sent: shown here as sent, and this
+    /// one takes the contact's receipts for it too. A device setting up
+    /// may hear of it before it knows the contact: then it waits for them.
+    fn on_sent(&mut self, msg: StoredMessage) {
+        let (peer, msg_id) = (msg.peer, msg.msg_id);
+        if self.peers.contains_key(&peer) {
+            self.store_message(msg);
+            self.await_receipts(peer, msg_id);
+        } else {
+            self.hold_sent(msg);
         }
     }
 

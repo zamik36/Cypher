@@ -29,6 +29,12 @@ const MAX_RETRY_MS: u64 = 10 * 60_000;
 const MAX_DOUBLINGS: u32 = 10;
 /// Messages to one contact kept for a receipt; older ones are let go.
 const MAX_AWAITING_PER_PEER: usize = 500;
+/// How long messages wait for a device of ours that has yet to publish its
+/// keys (one just linked, not online since), and how many at most: it
+/// usually comes up within minutes; one that does not is let go of
+/// message by message.
+const NEW_DEVICE_WAIT_MS: u64 = 24 * 60 * 60_000;
+const MAX_FOR_NEW_DEVICE: usize = 128;
 /// How long messages to a device go as ourselves after its token was
 /// used up for the hour.
 const SEALED_PAUSE_MS: u64 = 60 * 60_000;
@@ -700,6 +706,53 @@ impl<R: CryptoRngCore> Core<R> {
         self.trim_awaiting(&peer);
     }
 
+    /// The server has no keys for `addr`. A contact's device is gone, and
+    /// nothing more goes to it. One of ours still on our list has yet to
+    /// publish them: what was written for it lately waits until it does
+    /// (looked up again as often as [`Core::open_session`] allows), or
+    /// until it is heard from, and the rest goes.
+    pub(super) fn on_keys_missing(&mut self, addr: Addr) {
+        if addr.peer != self.peer_id || !self.lists_own(addr.device) {
+            self.drop_targets(addr);
+            return;
+        }
+        let mut waiting: Vec<(u64, MsgId)> = self
+            .outbox
+            .values()
+            .filter(|i| i.peer == addr.peer && i.targets.iter().any(|t| t.device == addr.device))
+            .map(|i| {
+                let written = Envelope::decode(&i.envelope).map_or(0, |e| e.sent_at_ms);
+                (written, i.msg_id)
+            })
+            .collect();
+        // Newest first.
+        waiting.sort_unstable_by(|a, b| b.cmp(a));
+        let now = self.now;
+        for (n, (written, id)) in waiting.into_iter().enumerate() {
+            if n >= MAX_FOR_NEW_DEVICE || now.saturating_sub(written) >= NEW_DEVICE_WAIT_MS {
+                self.drop_target(id, addr.device);
+            }
+        }
+    }
+
+    /// Forgets as targets the devices of ours our list no longer has, with
+    /// a session or (one just linked, never online) without.
+    pub(super) fn drop_unlisted_own_targets(&mut self) {
+        let own = self.peer_id;
+        let mut unlisted: Vec<DeviceId> = self
+            .outbox
+            .values()
+            .filter(|i| i.peer == own)
+            .flat_map(OutboxItem::devices)
+            .filter(|d| !self.lists_own(*d))
+            .collect();
+        unlisted.sort_unstable();
+        unlisted.dedup();
+        for device in unlisted {
+            self.drop_targets(Addr::new(own, device));
+        }
+    }
+
     /// Forgets `addr` as a target of everything on its way.
     pub(super) fn drop_targets(&mut self, addr: Addr) {
         let ids: Vec<MsgId> = self
@@ -786,6 +839,11 @@ impl<R: CryptoRngCore> Core<R> {
     /// session: what is in flight, and what the server took but the device
     /// never confirmed (it may have been lost with the old session).
     pub(super) fn requeue_for(&mut self, addr: Addr) {
+        // A device of ours off our list gets nothing more; one newer than
+        // the list this device knows has nothing waiting for it yet.
+        if addr.peer == self.peer_id && !self.lists_own(addr.device) {
+            return;
+        }
         let mut confirmed_none = Vec::new();
         for item in self.outbox.values_mut().filter(|i| i.peer == addr.peer) {
             let msg_id = item.msg_id;

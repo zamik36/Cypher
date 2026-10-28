@@ -29,7 +29,7 @@ const MAX_PENDING_REQUESTS: usize = 20;
 /// dated later is dated this far ahead instead: its date is in its storage
 /// key, which drivers range over to show and to delete a conversation, so
 /// a date anywhere up to `u64::MAX` would hide the row from both.
-const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
+pub(super) const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
 
 // A session knows a copy among the messages it decrypted last. Greetings,
 // receipts and syncs take room there as texts do, so it holds several
@@ -482,7 +482,12 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        if addr.peer != self.peer_id && !self.peers.contains_key(&addr.peer) {
+        let known = if addr.peer == self.peer_id {
+            self.lists_own(addr.device)
+        } else {
+            self.peers.contains_key(&addr.peer)
+        };
+        if !known {
             return;
         }
         let Some((mut fresh, _)) = self.initiate(addr, base, opk) else {

@@ -105,6 +105,15 @@ impl Devices {
 }
 
 impl<R: CryptoRngCore> Core<R> {
+    /// Whether our own list, as this device knows it, has `device`: only
+    /// those of our devices get anything from this one.
+    pub(super) fn lists_own(&self, device: DeviceId) -> bool {
+        self.devices
+            .own
+            .as_ref()
+            .is_some_and(|l| l.contains(device))
+    }
+
     /// The devices of `peer` a message goes to; for this identity, its
     /// other devices.
     pub(super) fn devices_of(&self, peer: PeerId) -> Vec<DeviceId> {
@@ -436,6 +445,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// before the farewell goes out on it: should the app stop in between,
     /// no message key is ever used for a second, different message.
     fn forget_unlisted_own(&mut self) {
+        self.drop_unlisted_own_targets();
         let Some(list) = &self.devices.own else {
             return;
         };
