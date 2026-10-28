@@ -1243,8 +1243,7 @@ fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, Co
             .unwrap_or_default(),
         devices: Devices::from_record(load_meta::<OwnDevices>(vault, meta, META_DEVICES, skipped)?),
         history: load_meta::<History>(vault, meta, META_HISTORY, skipped)?.unwrap_or_default(),
-        held: load_meta::<HeldSent>(vault, meta, crate::store::META_HELD, skipped)?
-            .unwrap_or_default(),
+        held: HeldSent::load(vault, meta, skipped)?,
         servers: load_meta::<ServerKeys>(vault, meta, META_SERVERS, skipped)?.unwrap_or_default(),
         inbox: load_meta::<InboxEpochs>(vault, meta, META_INBOX, skipped)?,
     })

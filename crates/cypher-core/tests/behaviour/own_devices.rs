@@ -265,13 +265,25 @@ fn contacts_arrive(w: &mut World) {
     w.advance(10 * 60_000);
 }
 
+/// The rows client `i` keeps records waiting for their contact in, one
+/// each.
+fn held_rows(w: &World, i: usize) -> usize {
+    w.clients[i]
+        .kv
+        .keys()
+        .filter(|(t, key)| *t == Table::Meta as u8 && key.starts_with(b"held_sent:"))
+        .count()
+}
+
 #[test]
 fn records_wait_for_their_contact_across_a_restart() {
     let (mut w, sibling, laptop, sent) = held_on_the_laptop(2);
+    assert_eq!(held_rows(&w, laptop), 2, "a row each");
     w.restart(laptop);
     contacts_arrive(&mut w);
     assert!(w.has_session(laptop, w.peer(B)));
     has_both(&w, sibling, laptop, sent);
+    assert_eq!(held_rows(&w, laptop), 0, "gone once stored");
 }
 
 #[test]
