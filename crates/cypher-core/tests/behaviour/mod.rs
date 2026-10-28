@@ -9,6 +9,7 @@
 
 mod contacts;
 mod outbox;
+mod own_devices;
 mod properties;
 mod replays;
 mod requests;

@@ -80,6 +80,9 @@ pub(crate) const META_DEVICES: &[u8] = b"devices";
 pub(crate) const META_HISTORY: &[u8] = b"history";
 pub(crate) const META_SERVERS: &[u8] = b"servers";
 pub(crate) const META_INBOX: &[u8] = b"inbox";
+/// Messages our other devices sent to contacts this device does not know
+/// yet.
+pub(crate) const META_HELD: &[u8] = b"held_sent";
 
 /// What the UI shows of a contact: the name the user gave them, the one
 /// they go by, and whether they are a request or blocked.

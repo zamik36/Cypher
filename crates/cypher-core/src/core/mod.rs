@@ -1,6 +1,7 @@
 mod anon;
 mod devices;
 mod files;
+mod held;
 mod history;
 mod inbox;
 mod messaging;
@@ -33,6 +34,7 @@ use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Opened, Readiness};
 use devices::{Devices, DevicesFor, OwnDevices};
+use held::HeldSent;
 use history::History;
 use inbox::InboxEpochs;
 use messaging::Joining;
@@ -204,6 +206,7 @@ pub struct Core<R> {
     joining: HashMap<PeerId, Joining>,
     devices: Devices,
     history: History,
+    held: HeldSent,
     recent: RecentIds,
     progress_at: HashMap<FileId, u64>,
     /// Chunks read from disk for the devices waiting for them.
@@ -277,6 +280,7 @@ impl<R: CryptoRngCore> Core<R> {
             joining: HashMap::new(),
             devices: own.devices,
             history: own.history,
+            held: own.held,
             recent: RecentIds::default(),
             progress_at: HashMap::new(),
             reads: HashMap::new(),
@@ -378,6 +382,7 @@ impl<R: CryptoRngCore> Core<R> {
             }
             Input::Tick => self.on_tick(),
         }
+        self.place_held();
         std::mem::take(&mut self.effects)
     }
 
@@ -1226,6 +1231,7 @@ struct Own {
     links: Vec<(String, u64)>,
     devices: Devices,
     history: History,
+    held: HeldSent,
     servers: ServerKeys,
     inbox: Option<InboxEpochs>,
 }
@@ -1238,6 +1244,8 @@ fn load_own(vault: &Vault, meta: &Rows, skipped: &mut Skipped) -> Result<Own, Co
             .unwrap_or_default(),
         devices: Devices::from_record(load_meta::<OwnDevices>(vault, meta, META_DEVICES, skipped)?),
         history: load_meta::<History>(vault, meta, META_HISTORY, skipped)?.unwrap_or_default(),
+        held: load_meta::<HeldSent>(vault, meta, crate::store::META_HELD, skipped)?
+            .unwrap_or_default(),
         servers: load_meta::<ServerKeys>(vault, meta, META_SERVERS, skipped)?.unwrap_or_default(),
         inbox: load_meta::<InboxEpochs>(vault, meta, META_INBOX, skipped)?,
     })
