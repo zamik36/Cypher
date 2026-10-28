@@ -482,7 +482,12 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        if addr.peer != self.peer_id && !self.peers.contains_key(&addr.peer) {
+        let known = if addr.peer == self.peer_id {
+            self.lists_own(addr.device)
+        } else {
+            self.peers.contains_key(&addr.peer)
+        };
+        if !known {
             return;
         }
         let Some((mut fresh, _)) = self.initiate(addr, base, opk) else {

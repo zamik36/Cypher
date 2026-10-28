@@ -712,8 +712,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// (looked up again as often as [`Core::open_session`] allows), or
     /// until it is heard from, and the rest goes.
     pub(super) fn on_keys_missing(&mut self, addr: Addr) {
-        let listed = addr.peer == self.peer_id && self.devices_of(addr.peer).contains(&addr.device);
-        if !listed {
+        if addr.peer != self.peer_id || !self.lists_own(addr.device) {
             self.drop_targets(addr);
             return;
         }
@@ -733,6 +732,24 @@ impl<R: CryptoRngCore> Core<R> {
             if n >= MAX_FOR_NEW_DEVICE || now.saturating_sub(written) >= NEW_DEVICE_WAIT_MS {
                 self.drop_target(id, addr.device);
             }
+        }
+    }
+
+    /// Forgets as targets the devices of ours our list no longer has, with
+    /// a session or (one just linked, never online) without.
+    pub(super) fn drop_unlisted_own_targets(&mut self) {
+        let own = self.peer_id;
+        let mut unlisted: Vec<DeviceId> = self
+            .outbox
+            .values()
+            .filter(|i| i.peer == own)
+            .flat_map(OutboxItem::devices)
+            .filter(|d| !self.lists_own(*d))
+            .collect();
+        unlisted.sort_unstable();
+        unlisted.dedup();
+        for device in unlisted {
+            self.drop_targets(Addr::new(own, device));
         }
     }
 
@@ -822,6 +839,11 @@ impl<R: CryptoRngCore> Core<R> {
     /// session: what is in flight, and what the server took but the device
     /// never confirmed (it may have been lost with the old session).
     pub(super) fn requeue_for(&mut self, addr: Addr) {
+        // A device of ours off our list gets nothing more; one newer than
+        // the list this device knows has nothing waiting for it yet.
+        if addr.peer == self.peer_id && !self.lists_own(addr.device) {
+            return;
+        }
         let mut confirmed_none = Vec::new();
         for item in self.outbox.values_mut().filter(|i| i.peer == addr.peer) {
             let msg_id = item.msg_id;

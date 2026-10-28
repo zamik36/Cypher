@@ -186,6 +186,41 @@ fn messages_for_a_new_device_that_never_comes_up_are_let_go() {
     assert_eq!(waiting_for(&w, A, device), 0, "a day later, none");
 }
 
+/// A takes the laptop off the list before it was ever online: what waited
+/// for it is let go then, and nothing reaches it once it comes up, not even
+/// after it learns B.
+#[test]
+fn a_new_device_taken_off_the_list_gets_nothing() {
+    let (mut w, _, laptop) = linked_offline(2);
+    let device = w.clients[laptop].device;
+    let b = w.peer(B);
+    for n in 0..130 {
+        let msg_id = w.msg_id();
+        w.queue(
+            A,
+            Command::SendText {
+                peer: b,
+                msg_id,
+                text: format!("number {n}"),
+                reply_to: None,
+            },
+        );
+    }
+    w.run();
+    assert_eq!(waiting_for(&w, A, device), 128);
+    w.command(A, Command::UnlinkDevice { device: device.0 });
+    assert_eq!(waiting_for(&w, A, device), 0, "let go with the listing");
+
+    w.connect(laptop);
+    w.run();
+    w.advance(25 * 60_000);
+    assert_eq!(waiting_for(&w, A, device), 0);
+    assert!(
+        messages(&w, laptop, b).is_empty(),
+        "nothing A sent reached the laptop"
+    );
+}
+
 /// The laptop asked while its siblings were away; A comes back and sends
 /// before it reads what the laptop asked.
 #[test]
