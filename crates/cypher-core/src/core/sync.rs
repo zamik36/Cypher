@@ -8,7 +8,7 @@ use cypher_types::{Addr, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
 use super::Core;
-use crate::api::{Content, Event, MessageStatus, StoredMessage};
+use crate::api::{Content, Event, FailReason, MessageStatus, StoredMessage};
 use crate::envelope::{
     Body, ContactState, MAX_STATE_CONTACTS, MAX_STATE_PARTS, StatePart, SyncBody,
 };
@@ -45,14 +45,22 @@ impl StateReply {
     }
 }
 
+/// More contacts than a complete, bounded state reply can represent.
+#[derive(Debug)]
+struct StateOverflow;
+
 /// A complete state reply, split into envelopes that each fit an inbox item.
+/// Refuse an unrepresentable reply rather than sending a plausible prefix.
 fn state_bodies(
     profile: Option<&str>,
     links: &[(String, u64)],
     contacts: &[ContactState],
     id: MsgId,
     request: Option<MsgId>,
-) -> Vec<SyncBody> {
+) -> Result<Vec<SyncBody>, StateOverflow> {
+    if contacts.len() > MAX_STATE_CONTACTS * MAX_STATE_PARTS as usize {
+        return Err(StateOverflow);
+    }
     let mut parts: Vec<Vec<ContactState>> = contacts
         .chunks(MAX_STATE_CONTACTS)
         .map(<[ContactState]>::to_vec)
@@ -61,7 +69,7 @@ fn state_bodies(
         parts.push(Vec::new());
     }
     let total = u32::try_from(parts.len()).unwrap_or(u32::MAX);
-    parts
+    Ok(parts
         .into_iter()
         .enumerate()
         .map(|(n, contacts)| {
@@ -82,7 +90,7 @@ fn state_bodies(
                 }),
             }
         })
-        .collect()
+        .collect())
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -326,7 +334,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     /// Everything a new device should know, in parts that each fit an
-    /// inbox item.
+    /// inbox item. No part goes out if the complete state cannot fit.
     fn send_state(&mut self, to: Addr, request: Option<MsgId>) {
         let mut peers: Vec<PeerId> = self.peers.keys().copied().collect();
         peers.sort_unstable();
@@ -335,13 +343,18 @@ impl<R: CryptoRngCore> Core<R> {
             .filter_map(|p| self.contact_state(p))
             .collect();
         let id = self.random_id();
-        let bodies = state_bodies(
+        let Ok(bodies) = state_bodies(
             self.profile_name.as_deref(),
             &self.own_links,
             &contacts,
             id,
             request,
-        );
+        ) else {
+            self.emit(Event::Warning {
+                reason: FailReason::TooLarge,
+            });
+            return;
+        };
         for body in bodies {
             self.send_control_to(to, Body::Sync(body));
         }
@@ -388,6 +401,7 @@ impl<R: CryptoRngCore> Core<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Effect;
     use crate::envelope::Envelope;
 
     fn contact(n: u8) -> ContactState {
@@ -414,7 +428,8 @@ mod tests {
                 &contacts,
                 MsgId([9; 16]),
                 Some(MsgId([7; 16])),
-            );
+            )
+            .expect("a small state reply fits");
             assert_eq!(bodies.len(), expected_total);
             let mut read = Vec::new();
             for (n, body) in bodies.into_iter().enumerate() {
@@ -792,7 +807,8 @@ mod tests {
         let contacts: Vec<_> = (0..max)
             .map(|n| contact(u8::try_from(n % 256).unwrap_or_default()))
             .collect();
-        let bodies = state_bodies(None, &[], &contacts, MsgId([9; 16]), None);
+        let bodies =
+            state_bodies(None, &[], &contacts, MsgId([9; 16]), None).expect("the exact limit fits");
         assert_eq!(bodies.len(), MAX_STATE_PARTS as usize);
         assert!(bodies.iter().all(|body| match body {
             SyncBody::State {
@@ -800,5 +816,38 @@ mod tests {
             } => part.valid(),
             _ => false,
         }));
+
+        let mut overflow = contacts;
+        overflow.push(contact(255));
+        state_bodies(None, &[], &overflow, MsgId([9; 16]), None).unwrap_err();
+    }
+
+    #[test]
+    fn oversized_state_replies_send_no_parts_and_leave_requester_waiting() {
+        let mut core = requested_core(0);
+        core.outbox.clear();
+        core.effects.clear();
+        for n in 0..=MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS {
+            let mut peer = [0_u8; 32];
+            peer[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            core.peers.insert(PeerId(peer), Peer::new([0; 32]));
+        }
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        core.on_sync(
+            sender,
+            SyncBody::StateRequest {
+                request: Some(MsgId([8; 16])),
+            },
+        );
+
+        assert!(core.outbox.is_empty(), "not even one State part goes out");
+        assert_eq!(core.effects.len(), 1);
+        assert!(matches!(
+            core.effects[0],
+            Effect::Emit(Event::Warning {
+                reason: FailReason::TooLarge
+            })
+        ));
+        assert!(core.devices.awaiting_state);
     }
 }
