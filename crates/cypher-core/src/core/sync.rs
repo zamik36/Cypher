@@ -2,7 +2,6 @@
 //! the user did on it, and a new device asks them for what they know.
 
 use std::collections::BTreeSet;
-use std::collections::hash_map::Entry;
 
 use cypher_crypto::DeviceList;
 use cypher_types::{Addr, MsgId, PeerId};
@@ -10,7 +9,9 @@ use rand_core::CryptoRngCore;
 
 use super::Core;
 use crate::api::{Content, Event, MessageStatus, StoredMessage};
-use crate::envelope::{Body, ContactState, MAX_STATE_CONTACTS, StatePart, SyncBody};
+use crate::envelope::{
+    Body, ContactState, MAX_STATE_CONTACTS, MAX_STATE_PARTS, StatePart, SyncBody,
+};
 use crate::peer::{Peer, clean_name};
 
 /// First wait before a new device asks its siblings again; it doubles with
@@ -19,6 +20,9 @@ const STATE_ASK_MS: u64 = 60_000;
 /// Asks while the app runs, the first included: the last one goes about an
 /// hour after the first.
 const MAX_STATE_ASKS: u32 = 7;
+/// Two replies can cross while a retry is in flight. A third is refused
+/// rather than evicting either and mixing their completion state.
+const MAX_STATE_REPLIES: usize = 2;
 
 /// Parts received from one sibling for one state reply. This is deliberately
 /// not persisted: a restart asks again if the reply was not completed.
@@ -26,6 +30,7 @@ const MAX_STATE_ASKS: u32 = 7;
 pub(super) struct StateReply {
     id: MsgId,
     total: u32,
+    started_with_zero: bool,
     parts: BTreeSet<u32>,
 }
 
@@ -34,6 +39,7 @@ impl StateReply {
         Self {
             id: part.id,
             total: part.total,
+            started_with_zero: part.index == 0,
             parts: BTreeSet::new(),
         }
     }
@@ -46,7 +52,12 @@ fn state_bodies(
     contacts: &[ContactState],
     id: MsgId,
 ) -> Vec<SyncBody> {
+    let take = contacts
+        .len()
+        .min(MAX_STATE_CONTACTS * MAX_STATE_PARTS as usize);
     let mut parts: Vec<Vec<ContactState>> = contacts
+        .get(..take)
+        .unwrap_or_default()
         .chunks(MAX_STATE_CONTACTS)
         .map(<[ContactState]>::to_vec)
         .collect();
@@ -154,10 +165,16 @@ impl<R: CryptoRngCore> Core<R> {
     /// as two sessions crossed): asked again after a minute, then twice as
     /// long each time, [`MAX_STATE_ASKS`] times in all while the app runs.
     pub(super) fn ask_siblings_again(&mut self) {
-        let due = self.devices.awaiting_state
-            && (1..MAX_STATE_ASKS).contains(&self.devices.state_asks)
-            && self.now >= self.devices.next_state_ask;
-        if due {
+        if !self.devices.awaiting_state {
+            return;
+        }
+        if self.devices.state_asks >= MAX_STATE_ASKS {
+            if self.now >= self.devices.next_state_ask {
+                self.devices.state_replies.clear();
+            }
+            return;
+        }
+        if self.devices.state_asks > 0 && self.now >= self.devices.next_state_ask {
             self.send_state_request();
         }
     }
@@ -254,37 +271,46 @@ impl<R: CryptoRngCore> Core<R> {
         if complete && self.devices.awaiting_state {
             self.devices.awaiting_state = false;
             self.persist_own_devices();
+            self.devices.state_replies.clear();
         }
         self.emit(Event::ContactsChanged);
     }
 
-    /// Whether this part completes a reply. A new reply starts at part zero;
-    /// a later part of another reply cannot complete the one being tracked.
+    /// Tracks two interleaved replies per sibling. Duplicate parts are
+    /// idempotent; only the last reply can complete, and a third ID cannot
+    /// displace either one. A late part zero does not displace a reply that
+    /// already started at a later part.
     fn state_part_complete(&mut self, sender: Addr, part: StatePart) -> bool {
-        let reply = match self.devices.state_replies.entry(sender) {
-            Entry::Vacant(slot) => {
-                if part.index != 0 {
-                    return false;
+        if !part.valid() {
+            return false;
+        }
+        let replies = self.devices.state_replies.entry(sender).or_default();
+        let index = match replies.iter().position(|reply| reply.id == part.id) {
+            Some(index) => index,
+            None if replies.len() >= MAX_STATE_REPLIES => return false,
+            None => {
+                let reply = StateReply::new(part);
+                let last = replies
+                    .last()
+                    .is_none_or(|current| current.started_with_zero || part.index != 0);
+                if last {
+                    replies.push(reply);
+                    replies.len() - 1
+                } else {
+                    replies.insert(replies.len() - 1, reply);
+                    replies.len() - 2
                 }
-                slot.insert(StateReply::new(part))
-            }
-            Entry::Occupied(slot) => {
-                let reply = slot.into_mut();
-                if reply.id != part.id || reply.total != part.total {
-                    if part.index != 0 {
-                        return false;
-                    }
-                    *reply = StateReply::new(part);
-                }
-                reply
             }
         };
-        reply.parts.insert(part.index);
-        let complete = reply.parts.len() == part.total as usize;
-        if complete {
-            self.devices.state_replies.remove(&sender);
+        let newest = index + 1 == replies.len();
+        let Some(reply) = replies.get_mut(index) else {
+            return false;
+        };
+        if reply.total != part.total {
+            return false;
         }
-        complete
+        reply.parts.insert(part.index);
+        newest && reply.parts.len() == part.total as usize
     }
 
     /// A message another device of ours sent: shown here as sent, and this
@@ -409,5 +435,127 @@ mod tests {
             }
             assert_eq!(read, contacts);
         }
+    }
+
+    fn waiting_core(now: u64) -> Core<rand::rngs::OsRng> {
+        use super::super::Snapshot;
+        use cypher_types::DeviceId;
+
+        let seed = cypher_crypto::IdentitySeed([1; 32]);
+        let (mut core, _) = Core::restore(
+            &seed,
+            DeviceId(2),
+            &Snapshot::default(),
+            now,
+            rand::rngs::OsRng,
+        )
+        .unwrap();
+        core.devices.own =
+            Some(DeviceList::sign(&core.identity, 1, [DeviceId::FIRST, DeviceId(2)]).unwrap());
+        core.devices.awaiting_state = true;
+        core
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "mirrors the optional part argument"
+    )]
+    fn part(id: u8, index: u32, total: u32) -> Option<StatePart> {
+        Some(StatePart {
+            id: MsgId([id; 16]),
+            index,
+            total,
+        })
+    }
+
+    #[test]
+    fn state_tracking_bounds_parts_and_response_ids() {
+        let mut core = waiting_core(0);
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        core.on_state(
+            sender,
+            None,
+            Vec::new(),
+            Vec::new(),
+            part(1, 0, MAX_STATE_PARTS + 1),
+        );
+        assert!(core.devices.state_replies.is_empty());
+
+        core.on_state(
+            sender,
+            None,
+            Vec::new(),
+            Vec::new(),
+            part(1, 0, MAX_STATE_PARTS),
+        );
+        core.on_state(sender, None, Vec::new(), Vec::new(), part(2, 1, 2));
+        core.on_state(sender, None, Vec::new(), Vec::new(), part(3, 1, 2));
+        let replies = &core.devices.state_replies[&sender];
+        assert_eq!(replies.len(), MAX_STATE_REPLIES);
+        assert_eq!(replies[0].id, MsgId([1; 16]));
+        assert_eq!(replies[0].parts.len(), 1);
+        assert_eq!(replies[1].id, MsgId([2; 16]));
+    }
+
+    #[test]
+    fn the_first_complete_reply_clears_every_siblings_parts() {
+        let mut core = waiting_core(0);
+        let first = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let second = Addr::new(core.peer_id, cypher_types::DeviceId(3));
+        core.on_state(first, None, Vec::new(), Vec::new(), part(1, 0, 2));
+        core.on_state(second, None, Vec::new(), Vec::new(), part(2, 0, 2));
+        assert_eq!(core.devices.state_replies.len(), 2);
+
+        core.on_state(first, None, Vec::new(), Vec::new(), part(1, 1, 2));
+        assert!(!core.devices.awaiting_state);
+        assert!(core.devices.state_replies.is_empty());
+    }
+
+    #[test]
+    fn state_retries_follow_the_whole_schedule_and_restart_bounded() {
+        let mut core = waiting_core(0);
+        core.ask_siblings();
+        assert_eq!(core.devices.state_asks, 1);
+
+        for (expected, minute) in (2_u32..=MAX_STATE_ASKS).zip([1, 3, 7, 15, 31, 63]) {
+            core.now = minute * STATE_ASK_MS - 1;
+            core.ask_siblings_again();
+            assert_eq!(core.devices.state_asks, expected - 1, "early at {minute}");
+            core.now = minute * STATE_ASK_MS;
+            core.ask_siblings_again();
+            assert_eq!(core.devices.state_asks, expected, "due at {minute}");
+        }
+
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        core.on_state(sender, None, Vec::new(), Vec::new(), part(1, 0, 2));
+        core.now = 127 * STATE_ASK_MS - 1;
+        core.ask_siblings_again();
+        assert_eq!(core.devices.state_replies.len(), 1);
+        assert_eq!(core.devices.state_asks, MAX_STATE_ASKS);
+        core.now = 127 * STATE_ASK_MS;
+        core.ask_siblings_again();
+        assert!(core.devices.state_replies.is_empty());
+        assert_eq!(core.devices.state_asks, MAX_STATE_ASKS);
+        assert!(core.devices.awaiting_state);
+
+        let mut restarted = waiting_core(core.now);
+        restarted.ask_siblings();
+        assert_eq!(restarted.devices.state_asks, 1);
+        assert_eq!(restarted.devices.next_state_ask, 128 * STATE_ASK_MS);
+    }
+
+    #[test]
+    fn state_replies_never_exceed_the_part_limit() {
+        let contacts: Vec<_> = (0..=MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS)
+            .map(|n| contact(u8::try_from(n % 256).unwrap_or_default()))
+            .collect();
+        let bodies = state_bodies(None, &[], &contacts, MsgId([9; 16]));
+        assert_eq!(bodies.len(), MAX_STATE_PARTS as usize);
+        assert!(bodies.iter().all(|body| match body {
+            SyncBody::State {
+                part: Some(part), ..
+            } => part.valid(),
+            _ => false,
+        }));
     }
 }

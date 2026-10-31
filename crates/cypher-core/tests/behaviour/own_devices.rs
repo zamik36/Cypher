@@ -709,8 +709,6 @@ fn out_of_order_and_duplicate_state_parts_do_not_complete_early() {
     );
     restart_checks_state_incomplete(&mut w, laptop, true);
 
-    // A non-zero part cannot start a reply after the restart. In particular,
-    // these three parts do not make a complete set: part two was not kept.
     write_to_laptop(
         &mut w,
         A,
@@ -718,16 +716,10 @@ fn out_of_order_and_duplicate_state_parts_do_not_complete_early() {
         laptop,
         vec![part(2), part(0), part(1)],
     );
-    restart_checks_state_incomplete(&mut w, laptop, true);
-
-    write_to_laptop(
-        &mut w,
-        A,
-        DeviceId::FIRST,
-        laptop,
-        vec![part(0), part(1), part(2)],
-    );
     restart_checks_state_incomplete(&mut w, laptop, false);
+    for n in 0..3 {
+        assert!(w.has_session(laptop, PeerId([n; 32])));
+    }
 }
 
 #[test]
@@ -759,6 +751,28 @@ fn a_late_part_of_an_old_state_reply_cannot_complete_a_new_one() {
         ],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
+}
+
+#[test]
+fn late_part_zero_does_not_reset_an_interleaved_new_reply() {
+    let (mut w, laptop) = waiting_for_a_state_reply();
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![
+            state_body(7, 2, 3, vec![synthetic_contact(2)]),
+            state_body(6, 0, 2, vec![synthetic_contact(6)]),
+            state_body(7, 0, 3, vec![synthetic_contact(0)]),
+            state_body(6, 0, 2, vec![synthetic_contact(6)]),
+            state_body(7, 1, 3, vec![synthetic_contact(1)]),
+        ],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, false);
+    for n in 0..3 {
+        assert!(w.has_session(laptop, PeerId([n; 32])));
+    }
 }
 
 #[test]

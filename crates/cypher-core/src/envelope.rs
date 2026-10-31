@@ -21,6 +21,9 @@ pub const MAX_POSTER_LEN: usize = 16 * 1024;
 pub const MAX_RECEIPT_IDS: usize = 512;
 /// Contacts in one `SyncBody::State`, so it fits an inbox item.
 pub const MAX_STATE_CONTACTS: usize = 50;
+/// Parts in one marked state reply: at most 51,200 contacts, while each
+/// received index still needs its own tracking entry.
+pub const MAX_STATE_PARTS: u32 = 1024;
 /// Invites in one `SyncBody::State`.
 pub const MAX_STATE_LINKS: usize = 32;
 /// A contact's name as this user gave it, in bytes.
@@ -153,6 +156,12 @@ pub struct StatePart {
     pub total: u32,
 }
 
+impl StatePart {
+    pub(crate) fn valid(self) -> bool {
+        self.total > 0 && self.total <= MAX_STATE_PARTS && self.index < self.total
+    }
+}
+
 /// A contact as one device keeps it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactState {
@@ -211,7 +220,7 @@ impl SyncBody {
                     && contacts.iter().all(ContactState::valid)
                     && links.len() <= MAX_STATE_LINKS
                     && links.iter().all(|(code, _)| code.len() <= MAX_LINK_LEN)
-                    && part.is_none_or(|p| p.total > 0 && p.index < p.total)
+                    && part.is_none_or(StatePart::valid)
             }
             Self::History { desc } => desc.inline.is_none() && desc.validate().is_ok(),
         }
@@ -605,6 +614,14 @@ mod tests {
 
     #[test]
     fn state_part_numbers_are_validated() {
+        assert!(
+            StatePart {
+                id: MsgId([8; 16]),
+                index: MAX_STATE_PARTS - 1,
+                total: MAX_STATE_PARTS,
+            }
+            .valid()
+        );
         for part in [
             StatePart {
                 id: MsgId([8; 16]),
@@ -615,6 +632,11 @@ mod tests {
                 id: MsgId([8; 16]),
                 index: 2,
                 total: 2,
+            },
+            StatePart {
+                id: MsgId([8; 16]),
+                index: 0,
+                total: MAX_STATE_PARTS + 1,
             },
         ] {
             let encoded = Envelope {

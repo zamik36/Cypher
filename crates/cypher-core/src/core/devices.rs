@@ -94,7 +94,7 @@ impl crate::Record for OwnDevices {
 /// What a device knows of its identity's devices and its contacts' lookups.
 #[derive(Default)]
 pub(super) struct Devices {
-    own: Option<DeviceList>,
+    pub(super) own: Option<DeviceList>,
     joined: bool,
     announced: u64,
     /// Persisted: see [`OwnDevices::awaiting_state`].
@@ -104,7 +104,7 @@ pub(super) struct Devices {
     pub(super) state_asks: u32,
     pub(super) next_state_ask: u64,
     /// Incomplete state replies by sibling; cleared when one is complete.
-    pub(super) state_replies: HashMap<Addr, StateReply>,
+    pub(super) state_replies: HashMap<Addr, Vec<StateReply>>,
     names: Vec<(u32, String)>,
     last_check: Option<u64>,
     conflicts: u8,
@@ -723,7 +723,7 @@ mod tests {
             assert_eq!(read.list.as_deref(), Some(&[1, 2, 3][..]));
             assert!(read.joined);
             assert_eq!(read.announced, 7);
-            assert!(!read.awaiting_state);
+            assert!(read.awaiting_state);
             assert_eq!(read.names, [(2, "Laptop".to_owned())]);
         }
         assert!(OwnDevices::upgrade(0, &[]).is_err());
