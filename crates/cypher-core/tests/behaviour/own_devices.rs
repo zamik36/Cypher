@@ -9,12 +9,14 @@ use cypher_core::envelope::{Body, ContactState, Envelope, StatePart, SyncBody};
 use cypher_core::link::Provision;
 use cypher_core::relay;
 use cypher_core::{
-    Command, CommandId, Content, MediaKind, StoredMessage, Table, Vault, peer_messages,
+    Command, CommandId, Content, MediaKind, Record, StoreOp, StoredMessage, Table, Vault,
+    peer_messages,
 };
 use cypher_crypto::{IdentitySeed, handshake};
 use cypher_types::{Addr, DeviceId, MsgId, PeerId};
 use cypher_wire::{ClientMsg, Frame, ServerMsg};
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use super::{addr, rows};
 use crate::harness::{Fault, Rule, World};
@@ -558,11 +560,96 @@ fn state_body(id: u8, index: u32, total: u32, contacts: Vec<ContactState>) -> Bo
     })
 }
 
+#[derive(Serialize, Deserialize)]
+struct DevicesV2 {
+    list: Option<Vec<u8>>,
+    joined: bool,
+    announced: u64,
+    awaiting_state: bool,
+    names: Vec<(u32, String)>,
+}
+
+impl Record for DevicesV2 {
+    const VERSION: u8 = 2;
+}
+
+#[derive(Serialize, Deserialize)]
+struct DevicesV1 {
+    list: Option<Vec<u8>>,
+    joined: bool,
+    announced: u64,
+    asked: bool,
+    names: Vec<(u32, String)>,
+}
+
+impl Record for DevicesV1 {
+    const VERSION: u8 = 1;
+}
+
+fn store_devices_as_v1(w: &mut World, i: usize, asked: bool) {
+    let key = b"devices".to_vec();
+    let row = (Table::Meta as u8, key.clone());
+    let vault = Vault::new(IdentitySeed(w.clients[i].seed).derive_storage_key());
+    let current: DevicesV2 = vault
+        .open(Table::Meta, &key, &w.clients[i].kv[&row])
+        .unwrap();
+    assert!(current.awaiting_state);
+    let old = DevicesV1 {
+        list: current.list,
+        joined: current.joined,
+        announced: current.announced,
+        asked,
+        names: current.names,
+    };
+    let StoreOp::Put { value, .. } = vault.put(Table::Meta, key, &old, &mut OsRng) else {
+        unreachable!("a put")
+    };
+    w.clients[i].kv.insert(row, value);
+}
+
 /// A laptop with a persisted device list whose siblings have not answered.
 fn waiting_for_a_state_reply() -> (World, usize) {
     let (mut w, sibling, laptop) = linked_offline(2);
     ask_while_siblings_away(&mut w, sibling, laptop);
     (w, laptop)
+}
+
+fn state_requests(w: &World, i: usize) -> Vec<MsgId> {
+    rows::outbox(w, i)
+        .into_iter()
+        .filter_map(|row| {
+            let envelope = Envelope::decode(&row.envelope).ok()?;
+            matches!(envelope.body, Body::Sync(SyncBody::StateRequest)).then_some(row.msg_id)
+        })
+        .collect()
+}
+
+#[test]
+fn migrated_devices_reconcile_once_whichever_asked_flag_was_stored() {
+    for asked in [false, true] {
+        let (mut w, sibling, laptop) = linked_offline(2);
+        ask_while_siblings_away(&mut w, sibling, laptop);
+        store_devices_as_v1(&mut w, laptop, asked);
+        let before = state_requests(&w, laptop);
+        w.restart(laptop);
+        let migrated = state_requests(&w, laptop);
+        assert_eq!(migrated.len(), before.len() + 1, "asked={asked}");
+        assert!(before.iter().all(|id| migrated.contains(id)));
+        assert!(!w.has_session(laptop, w.peer(B)), "no response yet");
+
+        w.connect(A);
+        w.connect(sibling);
+        w.run();
+        assert!(!w.contact(laptop, w.peer(B)).request, "asked={asked}");
+
+        let answered = state_requests(&w, laptop);
+        w.restart(laptop);
+        let restarted = state_requests(&w, laptop);
+        assert!(
+            restarted.iter().all(|id| answered.contains(id)),
+            "the answered v2 record must not ask again"
+        );
+    }
 }
 
 /// A restart asks again exactly while the last reply is still incomplete.

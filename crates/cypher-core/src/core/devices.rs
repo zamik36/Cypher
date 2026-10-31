@@ -65,8 +65,9 @@ pub(crate) struct OwnDevices {
 impl crate::Record for OwnDevices {
     const VERSION: u8 = 2;
 
-    /// Version 1 kept whether this device had asked its siblings once, not
-    /// whether they answered: such a device is taken as answered.
+    /// Version 1 kept only whether this device had asked, so the response
+    /// may have been lost. Reconcile once after migration; a complete reply
+    /// persists `awaiting_state = false` and prevents later requests.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, crate::CoreError> {
         #[derive(Deserialize)]
         struct V1 {
@@ -84,7 +85,7 @@ impl crate::Record for OwnDevices {
             list: v1.list,
             joined: v1.joined,
             announced: v1.announced,
-            awaiting_state: false,
+            awaiting_state: true,
             names: v1.names,
         })
     }
@@ -697,10 +698,10 @@ mod tests {
     use super::*;
     use crate::Record as _;
 
-    /// A record from before devices kept whether their siblings answered:
-    /// read as answered, the rest as it was.
+    /// Both old `asked` values need one reconciliation because neither
+    /// proves that a response arrived.
     #[test]
-    fn own_devices_of_version_1_are_read_as_answered() {
+    fn own_devices_of_version_1_are_reconciled_after_migration() {
         #[derive(Serialize)]
         struct V1 {
             list: Option<Vec<u8>>,
