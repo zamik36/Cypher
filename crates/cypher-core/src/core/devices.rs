@@ -11,6 +11,7 @@ use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 
 use super::outbox::OutboxItem;
+use super::sync::StateReply;
 use super::{Conn, Core, Pending};
 use crate::api::{CommandId, Effect, Event, FailReason};
 use crate::envelope::{Body, Envelope, InboxAd};
@@ -101,6 +102,8 @@ pub(super) struct Devices {
     /// the app started, the next time no sooner than `next_state_ask`.
     pub(super) state_asks: u32,
     pub(super) next_state_ask: u64,
+    /// Incomplete state replies by sibling; cleared when one is complete.
+    pub(super) state_replies: HashMap<Addr, StateReply>,
     names: Vec<(u32, String)>,
     last_check: Option<u64>,
     conflicts: u8,

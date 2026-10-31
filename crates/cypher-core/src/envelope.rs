@@ -135,10 +135,22 @@ pub enum SyncBody {
         profile: Option<String>,
         contacts: Vec<ContactState>,
         links: Vec<(String, u64)>,
+        /// Which part of one complete reply this is. Appended last: an older
+        /// peer reads `None`, and an older reader ignores it as padding.
+        part: Option<StatePart>,
     },
     /// The message history, for a device just linked: an archive
     /// ([`crate::history`]) sent as a file.
     History { desc: FileDesc },
+}
+
+/// One part of a complete state reply. Parts may arrive in any order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatePart {
+    /// The same for every part of one reply, different for a retry's reply.
+    pub id: MsgId,
+    pub index: u32,
+    pub total: u32,
 }
 
 /// A contact as one device keeps it.
@@ -190,6 +202,7 @@ impl SyncBody {
                 profile,
                 contacts,
                 links,
+                part,
             } => {
                 profile
                     .as_ref()
@@ -198,6 +211,7 @@ impl SyncBody {
                     && contacts.iter().all(ContactState::valid)
                     && links.len() <= MAX_STATE_LINKS
                     && links.iter().all(|(code, _)| code.len() <= MAX_LINK_LEN)
+                    && part.is_none_or(|p| p.total > 0 && p.index < p.total)
             }
             Self::History { desc } => desc.inline.is_none() && desc.validate().is_ok(),
         }
@@ -488,6 +502,134 @@ mod tests {
                 ads: None,
             }
         );
+    }
+
+    /// `State` before replies were split into marked parts. The variant
+    /// ordinals and the three original fields are unchanged.
+    #[derive(Serialize, Deserialize)]
+    enum OldSyncBody {
+        _Sent,
+        _Read,
+        _Contact,
+        _Removed,
+        _Profile,
+        _Link,
+        _StateRequest,
+        State {
+            profile: Option<String>,
+            contacts: Vec<ContactState>,
+            links: Vec<(String, u64)>,
+        },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum OldSyncEnvelopeBody {
+        _Hello,
+        _Text,
+        _File,
+        _FileCtl,
+        _Receipt,
+        _Devices,
+        Sync(OldSyncBody),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldSyncEnvelope {
+        msg_id: MsgId,
+        sent_at_ms: u64,
+        body: OldSyncEnvelopeBody,
+    }
+
+    #[test]
+    fn state_parts_travel_both_ways_with_older_peers() {
+        let contact = ContactState {
+            peer: PeerId([4; 32]),
+            identity_dh: [5; 32],
+            alias: Some("Bob".into()),
+            name: None,
+            request: false,
+            blocked: false,
+            via: None,
+            devices: None,
+        };
+        let mut old = postcard::to_allocvec(&OldSyncEnvelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: OldSyncEnvelopeBody::Sync(OldSyncBody::State {
+                profile: Some("Alice".into()),
+                contacts: vec![contact.clone()],
+                links: vec![("invite".into(), 7)],
+            }),
+        })
+        .unwrap();
+        old.resize(padded_len(old.len()), 0);
+        assert_eq!(
+            Envelope::decode(&old).unwrap().body,
+            Body::Sync(SyncBody::State {
+                profile: Some("Alice".into()),
+                contacts: vec![contact.clone()],
+                links: vec![("invite".into(), 7)],
+                part: None,
+            })
+        );
+
+        let new = Envelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: Body::Sync(SyncBody::State {
+                profile: Some("Alice".into()),
+                contacts: vec![contact.clone()],
+                links: vec![("invite".into(), 7)],
+                part: Some(StatePart {
+                    id: MsgId([8; 16]),
+                    index: 1,
+                    total: 2,
+                }),
+            }),
+        }
+        .encode();
+        let (read, padding) = postcard::take_from_bytes::<OldSyncEnvelope>(&new).unwrap();
+        let OldSyncEnvelopeBody::Sync(OldSyncBody::State {
+            profile,
+            contacts,
+            links,
+        }) = read.body
+        else {
+            panic!("the old reader sees its State variant");
+        };
+        assert_eq!(profile.as_deref(), Some("Alice"));
+        assert_eq!(contacts, [contact]);
+        assert_eq!(links, [("invite".into(), 7)]);
+        assert!(!padding.is_empty(), "the new part is trailing padding");
+    }
+
+    #[test]
+    fn state_part_numbers_are_validated() {
+        for part in [
+            StatePart {
+                id: MsgId([8; 16]),
+                index: 0,
+                total: 0,
+            },
+            StatePart {
+                id: MsgId([8; 16]),
+                index: 2,
+                total: 2,
+            },
+        ] {
+            let encoded = Envelope {
+                msg_id: MsgId([1; 16]),
+                sent_at_ms: 5,
+                body: Body::Sync(SyncBody::State {
+                    profile: None,
+                    contacts: Vec::new(),
+                    links: Vec::new(),
+                    part: Some(part),
+                }),
+            }
+            .encode();
+            Envelope::decode(&encoded).unwrap_err();
+        }
     }
 
     #[test]

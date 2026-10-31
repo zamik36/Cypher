@@ -5,7 +5,7 @@
 //! meanwhile, and not from strangers.
 
 use bytes::Bytes;
-use cypher_core::envelope::{Body, Envelope, SyncBody};
+use cypher_core::envelope::{Body, ContactState, Envelope, StatePart, SyncBody};
 use cypher_core::link::Provision;
 use cypher_core::relay;
 use cypher_core::{
@@ -227,10 +227,7 @@ fn messages_sent_as_the_new_device_asks_reach_it() {
     ));
     w.restart(laptop);
     assert_eq!(w.sends_to(laptop, a_addr).len(), asked_a + 1);
-    assert_eq!(
-        w.sends_to(laptop, sibling_addr).len(),
-        asked_sibling + 1
-    );
+    assert_eq!(w.sends_to(laptop, sibling_addr).len(), asked_sibling + 1);
 
     w.connect(A);
     w.connect(sibling);
@@ -533,4 +530,200 @@ fn a_stranger_cannot_fill_the_records_kept() {
     assert!(w.contact(laptop, c).request, "the stranger got through");
     contacts_arrive(&mut w);
     has_both(&w, sibling, laptop, sent);
+}
+
+fn synthetic_contact(n: u8) -> ContactState {
+    ContactState {
+        peer: PeerId([n; 32]),
+        identity_dh: [n.wrapping_add(1); 32],
+        alias: None,
+        name: None,
+        request: false,
+        blocked: false,
+        via: None,
+        devices: None,
+    }
+}
+
+fn state_body(id: u8, index: u32, total: u32, contacts: Vec<ContactState>) -> Body {
+    Body::Sync(SyncBody::State {
+        profile: None,
+        contacts,
+        links: Vec::new(),
+        part: Some(StatePart {
+            id: MsgId([id; 16]),
+            index,
+            total,
+        }),
+    })
+}
+
+/// A laptop with a persisted device list whose siblings have not answered.
+fn waiting_for_a_state_reply() -> (World, usize) {
+    let (mut w, sibling, laptop) = linked_offline(2);
+    ask_while_siblings_away(&mut w, sibling, laptop);
+    (w, laptop)
+}
+
+/// A restart asks again exactly while the last reply is still incomplete.
+/// Counting only across the restart excludes ordinary outbox retransmits.
+fn restart_checks_state_incomplete(w: &mut World, laptop: usize, incomplete: bool) {
+    let a = addr(w, A);
+    let before = w.sends_to(laptop, a).len();
+    w.restart(laptop);
+    assert_eq!(
+        w.sends_to(laptop, a).len(),
+        before + usize::from(incomplete),
+        "incomplete={incomplete}"
+    );
+}
+
+#[test]
+fn a_state_reply_completes_only_after_all_contacts_arrive() {
+    let (mut w, laptop) = waiting_for_a_state_reply();
+    let first = (0..50).map(synthetic_contact).collect();
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![state_body(1, 0, 2, first)],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, true);
+
+    let first = (0..50).map(synthetic_contact).collect();
+    let second = (50..52).map(synthetic_contact).collect();
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![state_body(2, 0, 2, first), state_body(2, 1, 2, second)],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, false);
+    for n in 0..52 {
+        assert!(
+            w.has_session(laptop, PeerId([n; 32])),
+            "contact {n} arrived"
+        );
+    }
+}
+
+#[test]
+fn out_of_order_and_duplicate_state_parts_do_not_complete_early() {
+    let (mut w, laptop) = waiting_for_a_state_reply();
+    let part = |index| state_body(3, index, 3, vec![synthetic_contact(index as u8)]);
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![part(0), part(2), part(2)],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, true);
+
+    // A non-zero part cannot start a reply after the restart. In particular,
+    // these three parts do not make a complete set: part two was not kept.
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![part(2), part(0), part(1)],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, true);
+
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![part(0), part(1), part(2)],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, false);
+}
+
+#[test]
+fn a_late_part_of_an_old_state_reply_cannot_complete_a_new_one() {
+    let (mut w, laptop) = waiting_for_a_state_reply();
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![
+            state_body(4, 0, 2, vec![synthetic_contact(0)]),
+            state_body(5, 0, 3, vec![synthetic_contact(1)]),
+            state_body(5, 1, 3, vec![synthetic_contact(2)]),
+            state_body(4, 1, 2, vec![synthetic_contact(3)]),
+        ],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, true);
+
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![
+            state_body(5, 0, 3, vec![synthetic_contact(1)]),
+            state_body(5, 1, 3, vec![synthetic_contact(2)]),
+            state_body(5, 2, 3, vec![synthetic_contact(4)]),
+        ],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, false);
+}
+
+#[test]
+fn a_restart_discards_an_incomplete_state_reply() {
+    let (mut w, laptop) = waiting_for_a_state_reply();
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![state_body(6, 0, 2, vec![synthetic_contact(0)])],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, true);
+
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![state_body(6, 1, 2, vec![synthetic_contact(1)])],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, true);
+
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![
+            state_body(6, 0, 2, vec![synthetic_contact(0)]),
+            state_body(6, 1, 2, vec![synthetic_contact(1)]),
+        ],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, false);
+}
+
+#[test]
+fn an_unmarked_state_reply_from_an_old_sibling_still_completes() {
+    let (mut w, laptop) = waiting_for_a_state_reply();
+    let contact = synthetic_contact(200);
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![Body::Sync(SyncBody::State {
+            profile: None,
+            contacts: vec![contact.clone()],
+            links: Vec::new(),
+            part: None,
+        })],
+    );
+    restart_checks_state_incomplete(&mut w, laptop, false);
+    assert!(w.has_session(laptop, contact.peer));
 }

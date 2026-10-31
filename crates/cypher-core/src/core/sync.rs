@@ -1,13 +1,16 @@
 //! Keeping the devices of one identity alike: each tells the others what
 //! the user did on it, and a new device asks them for what they know.
 
+use std::collections::BTreeSet;
+use std::collections::hash_map::Entry;
+
 use cypher_crypto::DeviceList;
 use cypher_types::{Addr, MsgId, PeerId};
 use rand_core::CryptoRngCore;
 
 use super::Core;
 use crate::api::{Content, Event, MessageStatus, StoredMessage};
-use crate::envelope::{Body, ContactState, MAX_STATE_CONTACTS, SyncBody};
+use crate::envelope::{Body, ContactState, MAX_STATE_CONTACTS, StatePart, SyncBody};
 use crate::peer::{Peer, clean_name};
 
 /// First wait before a new device asks its siblings again; it doubles with
@@ -16,6 +19,63 @@ const STATE_ASK_MS: u64 = 60_000;
 /// Asks while the app runs, the first included: the last one goes about an
 /// hour after the first.
 const MAX_STATE_ASKS: u32 = 7;
+
+/// Parts received from one sibling for one state reply. This is deliberately
+/// not persisted: a restart asks again if the reply was not completed.
+#[derive(Debug)]
+pub(super) struct StateReply {
+    id: MsgId,
+    total: u32,
+    parts: BTreeSet<u32>,
+}
+
+impl StateReply {
+    fn new(part: StatePart) -> Self {
+        Self {
+            id: part.id,
+            total: part.total,
+            parts: BTreeSet::new(),
+        }
+    }
+}
+
+/// A complete state reply, split into envelopes that each fit an inbox item.
+fn state_bodies(
+    profile: Option<&str>,
+    links: &[(String, u64)],
+    contacts: &[ContactState],
+    id: MsgId,
+) -> Vec<SyncBody> {
+    let mut parts: Vec<Vec<ContactState>> = contacts
+        .chunks(MAX_STATE_CONTACTS)
+        .map(<[ContactState]>::to_vec)
+        .collect();
+    if parts.is_empty() {
+        parts.push(Vec::new());
+    }
+    let total = u32::try_from(parts.len()).unwrap_or(u32::MAX);
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(n, contacts)| {
+            let first = n == 0;
+            SyncBody::State {
+                profile: if first {
+                    profile.map(str::to_owned)
+                } else {
+                    None
+                },
+                contacts,
+                links: if first { links.to_vec() } else { Vec::new() },
+                part: Some(StatePart {
+                    id,
+                    index: u32::try_from(n).unwrap_or(u32::MAX),
+                    total,
+                }),
+            }
+        })
+        .collect()
+}
 
 impl<R: CryptoRngCore> Core<R> {
     /// Tells this identity's other devices; nothing when there are none.
@@ -158,23 +218,73 @@ impl<R: CryptoRngCore> Core<R> {
                 profile,
                 contacts,
                 links,
-            } => {
-                if self.devices.awaiting_state {
-                    self.devices.awaiting_state = false;
-                    self.persist_own_devices();
-                }
-                if profile.is_some() {
-                    self.adopt_profile_name(profile.as_deref());
-                }
-                for contact in contacts {
-                    self.adopt_contact(contact);
-                }
-                for (code, at_ms) in links {
-                    self.adopt_link(&code, at_ms);
-                }
-                self.emit(Event::ContactsChanged);
-            }
+                part,
+            } => self.on_state(sender, profile.as_deref(), contacts, links, part),
         }
+    }
+
+    /// A sibling's state, or one marked part of it. Contents take effect as
+    /// they arrive, but only a whole reply ends the retries.
+    fn on_state(
+        &mut self,
+        sender: Addr,
+        profile: Option<&str>,
+        contacts: Vec<ContactState>,
+        links: Vec<(String, u64)>,
+        part: Option<StatePart>,
+    ) {
+        let complete = match part {
+            Some(part) if self.devices.awaiting_state => self.state_part_complete(sender, part),
+            Some(_) => false,
+            // Older siblings did not mark parts. Keep accepting their replies
+            // as before; marked replies complete only whole.
+            None => true,
+        };
+        if profile.is_some() {
+            self.adopt_profile_name(profile);
+        }
+        for contact in contacts {
+            self.adopt_contact(contact);
+        }
+        for (code, at_ms) in links {
+            self.adopt_link(&code, at_ms);
+        }
+        // Persist completion after the last part's contents, so a crash
+        // cannot leave a completed flag over missing contacts.
+        if complete && self.devices.awaiting_state {
+            self.devices.awaiting_state = false;
+            self.persist_own_devices();
+        }
+        self.emit(Event::ContactsChanged);
+    }
+
+    /// Whether this part completes a reply. A new reply starts at part zero;
+    /// a later part of another reply cannot complete the one being tracked.
+    fn state_part_complete(&mut self, sender: Addr, part: StatePart) -> bool {
+        let reply = match self.devices.state_replies.entry(sender) {
+            Entry::Vacant(slot) => {
+                if part.index != 0 {
+                    return false;
+                }
+                slot.insert(StateReply::new(part))
+            }
+            Entry::Occupied(slot) => {
+                let reply = slot.into_mut();
+                if reply.id != part.id || reply.total != part.total {
+                    if part.index != 0 {
+                        return false;
+                    }
+                    *reply = StateReply::new(part);
+                }
+                reply
+            }
+        };
+        reply.parts.insert(part.index);
+        let complete = reply.parts.len() == part.total as usize;
+        if complete {
+            self.devices.state_replies.remove(&sender);
+        }
+        complete
     }
 
     /// A message another device of ours sent: shown here as sent, and this
@@ -199,29 +309,10 @@ impl<R: CryptoRngCore> Core<R> {
             .into_iter()
             .filter_map(|p| self.contact_state(p))
             .collect();
-        let mut parts: Vec<Vec<ContactState>> = contacts
-            .chunks(MAX_STATE_CONTACTS)
-            .map(<[ContactState]>::to_vec)
-            .collect();
-        if parts.is_empty() {
-            parts.push(Vec::new());
-        }
-        for (n, contacts) in parts.into_iter().enumerate() {
-            let first = n == 0;
-            let state = SyncBody::State {
-                profile: if first {
-                    self.profile_name.clone()
-                } else {
-                    None
-                },
-                contacts,
-                links: if first {
-                    self.own_links.clone()
-                } else {
-                    Vec::new()
-                },
-            };
-            self.send_control_to(to, Body::Sync(state));
+        let id = self.random_id();
+        let bodies = state_bodies(self.profile_name.as_deref(), &self.own_links, &contacts, id);
+        for body in bodies {
+            self.send_control_to(to, Body::Sync(body));
         }
     }
 
@@ -259,6 +350,64 @@ impl<R: CryptoRngCore> Core<R> {
     fn adopt_link(&mut self, code: &str, at_ms: u64) {
         if !self.own_links.iter().any(|(c, _)| c == code) {
             self.remember_link(code, at_ms);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contact(n: u8) -> ContactState {
+        ContactState {
+            peer: PeerId([n; 32]),
+            identity_dh: [n.wrapping_add(1); 32],
+            alias: None,
+            name: None,
+            request: false,
+            blocked: false,
+            via: None,
+            devices: None,
+        }
+    }
+
+    #[test]
+    fn state_replies_split_only_their_contacts() {
+        for count in [0_u8, 50, 51, 100] {
+            let contacts: Vec<_> = (0..count).map(contact).collect();
+            let expected_total = usize::from(count).div_ceil(MAX_STATE_CONTACTS).max(1);
+            let bodies = state_bodies(
+                Some("Alice"),
+                &[("invite".into(), 7)],
+                &contacts,
+                MsgId([9; 16]),
+            );
+            assert_eq!(bodies.len(), expected_total);
+            let mut read = Vec::new();
+            for (n, body) in bodies.into_iter().enumerate() {
+                let SyncBody::State {
+                    profile,
+                    contacts,
+                    links,
+                    part,
+                } = body
+                else {
+                    panic!("state_bodies returns only State");
+                };
+                assert_eq!(profile.as_deref(), (n == 0).then_some("Alice"));
+                assert_eq!(links.len(), usize::from(n == 0));
+                assert!(contacts.len() <= MAX_STATE_CONTACTS);
+                assert_eq!(
+                    part,
+                    Some(StatePart {
+                        id: MsgId([9; 16]),
+                        index: u32::try_from(n).unwrap(),
+                        total: u32::try_from(expected_total).unwrap(),
+                    })
+                );
+                read.extend(contacts);
+            }
+            assert_eq!(read, contacts);
         }
     }
 }
