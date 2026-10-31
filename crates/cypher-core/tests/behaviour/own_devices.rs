@@ -547,7 +547,13 @@ fn synthetic_contact(n: u8) -> ContactState {
     }
 }
 
-fn state_body(id: u8, index: u32, total: u32, contacts: Vec<ContactState>) -> Body {
+fn state_body_for_request(
+    request: MsgId,
+    id: u8,
+    index: u32,
+    total: u32,
+    contacts: Vec<ContactState>,
+) -> Body {
     Body::Sync(SyncBody::State {
         profile: None,
         contacts,
@@ -556,8 +562,20 @@ fn state_body(id: u8, index: u32, total: u32, contacts: Vec<ContactState>) -> Bo
             id: MsgId([id; 16]),
             index,
             total,
+            request: Some(request),
         }),
     })
+}
+
+fn correlated_body(
+    w: &World,
+    laptop: usize,
+    id: u8,
+    index: u32,
+    total: u32,
+    contacts: Vec<ContactState>,
+) -> Body {
+    state_body_for_request(only_state_request(w, laptop), id, index, total, contacts)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -608,20 +626,46 @@ fn store_devices_as_v1(w: &mut World, i: usize, asked: bool) {
 }
 
 /// A laptop with a persisted device list whose siblings have not answered.
+/// Send acknowledgements stay lost too, keeping the plaintext requests in
+/// the outbox so these tests can correlate synthetic responses with them.
 fn waiting_for_a_state_reply() -> (World, usize) {
     let (mut w, sibling, laptop) = linked_offline(2);
+    let own = w.peer(laptop);
+    w.server.faults.push(Rule::always(
+        move |m| matches!(m, ClientMsg::Send { to, .. } if *to == own),
+        Fault::Ignore,
+    ));
     ask_while_siblings_away(&mut w, sibling, laptop);
     (w, laptop)
 }
 
-fn state_requests(w: &World, i: usize) -> Vec<MsgId> {
+fn state_request_rows(w: &World, i: usize) -> Vec<(MsgId, MsgId)> {
     rows::outbox(w, i)
         .into_iter()
         .filter_map(|row| {
             let envelope = Envelope::decode(&row.envelope).ok()?;
-            matches!(envelope.body, Body::Sync(SyncBody::StateRequest)).then_some(row.msg_id)
+            let Body::Sync(SyncBody::StateRequest {
+                request: Some(request),
+            }) = envelope.body
+            else {
+                return None;
+            };
+            Some((row.msg_id, request))
         })
         .collect()
+}
+
+fn state_requests(w: &World, i: usize) -> Vec<MsgId> {
+    state_request_rows(w, i)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn only_state_request(w: &World, i: usize) -> MsgId {
+    let requests = state_request_rows(w, i);
+    assert_eq!(requests.len(), 1, "one request to correlate with");
+    requests[0].1
 }
 
 #[test]
@@ -654,29 +698,30 @@ fn migrated_devices_reconcile_once_whichever_asked_flag_was_stored() {
 
 /// A restart asks again exactly while the last reply is still incomplete.
 /// Counting only across the restart excludes ordinary outbox retransmits.
-fn restart_checks_state_incomplete(w: &mut World, laptop: usize, incomplete: bool) {
-    let a = addr(w, A);
-    let before = w.sends_to(laptop, a).len();
+/// Returns the new request ID, so the next synthetic response names it.
+fn restart_checks_state_incomplete(
+    w: &mut World,
+    laptop: usize,
+    incomplete: bool,
+) -> Option<MsgId> {
+    let before = state_request_rows(w, laptop);
     w.restart(laptop);
-    assert_eq!(
-        w.sends_to(laptop, a).len(),
-        before + usize::from(incomplete),
-        "incomplete={incomplete}"
-    );
+    let after = state_request_rows(w, laptop);
+    let added: Vec<_> = after
+        .iter()
+        .filter(|(id, _)| before.iter().all(|(old, _)| old != id))
+        .collect();
+    assert_eq!(added.len(), usize::from(incomplete));
+    added.first().map(|(_, request)| *request)
 }
 
 #[test]
 fn a_state_reply_completes_only_after_all_contacts_arrive() {
     let (mut w, laptop) = waiting_for_a_state_reply();
     let first = (0..50).map(synthetic_contact).collect();
-    write_to_laptop(
-        &mut w,
-        A,
-        DeviceId::FIRST,
-        laptop,
-        vec![state_body(1, 0, 2, first)],
-    );
-    restart_checks_state_incomplete(&mut w, laptop, true);
+    let response = correlated_body(&w, laptop, 1, 0, 2, first);
+    write_to_laptop(&mut w, A, DeviceId::FIRST, laptop, vec![response]);
+    let request = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
 
     let first = (0..50).map(synthetic_contact).collect();
     let second = (50..52).map(synthetic_contact).collect();
@@ -685,7 +730,10 @@ fn a_state_reply_completes_only_after_all_contacts_arrive() {
         A,
         DeviceId::FIRST,
         laptop,
-        vec![state_body(2, 0, 2, first), state_body(2, 1, 2, second)],
+        vec![
+            state_body_for_request(request, 2, 0, 2, first),
+            state_body_for_request(request, 2, 1, 2, second),
+        ],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
     for n in 0..52 {
@@ -699,22 +747,25 @@ fn a_state_reply_completes_only_after_all_contacts_arrive() {
 #[test]
 fn out_of_order_and_duplicate_state_parts_do_not_complete_early() {
     let (mut w, laptop) = waiting_for_a_state_reply();
-    let part = |index| state_body(3, index, 3, vec![synthetic_contact(index as u8)]);
+    let initial = only_state_request(&w, laptop);
+    let part = |request, index| {
+        state_body_for_request(request, 3, index, 3, vec![synthetic_contact(index as u8)])
+    };
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
-        vec![part(0), part(2), part(2)],
+        vec![part(initial, 0), part(initial, 2), part(initial, 2)],
     );
-    restart_checks_state_incomplete(&mut w, laptop, true);
+    let request = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
 
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
-        vec![part(2), part(0), part(1)],
+        vec![part(request, 2), part(request, 0), part(request, 1)],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
     for n in 0..3 {
@@ -725,29 +776,45 @@ fn out_of_order_and_duplicate_state_parts_do_not_complete_early() {
 #[test]
 fn a_late_part_of_an_old_state_reply_cannot_complete_a_new_one() {
     let (mut w, laptop) = waiting_for_a_state_reply();
+    let old = only_state_request(&w, laptop);
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![state_body_for_request(
+            old,
+            4,
+            1,
+            2,
+            vec![synthetic_contact(0)],
+        )],
+    );
+
+    let current = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
         vec![
-            state_body(4, 0, 2, vec![synthetic_contact(0)]),
-            state_body(5, 0, 3, vec![synthetic_contact(1)]),
-            state_body(5, 1, 3, vec![synthetic_contact(2)]),
-            state_body(4, 1, 2, vec![synthetic_contact(3)]),
+            state_body_for_request(current, 5, 0, 3, vec![synthetic_contact(1)]),
+            state_body_for_request(old, 4, 0, 2, vec![synthetic_contact(2)]),
         ],
     );
-    restart_checks_state_incomplete(&mut w, laptop, true);
 
+    // A is now whole, B is not. A restart must therefore ask again, and the
+    // response that completes state is the one for that newest request.
+    let newest = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
         vec![
-            state_body(5, 0, 3, vec![synthetic_contact(1)]),
-            state_body(5, 1, 3, vec![synthetic_contact(2)]),
-            state_body(5, 2, 3, vec![synthetic_contact(4)]),
+            state_body_for_request(newest, 6, 0, 3, vec![synthetic_contact(1)]),
+            state_body_for_request(newest, 6, 1, 3, vec![synthetic_contact(3)]),
+            state_body_for_request(newest, 6, 2, 3, vec![synthetic_contact(4)]),
         ],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
@@ -756,17 +823,20 @@ fn a_late_part_of_an_old_state_reply_cannot_complete_a_new_one() {
 #[test]
 fn late_part_zero_does_not_reset_an_interleaved_new_reply() {
     let (mut w, laptop) = waiting_for_a_state_reply();
+    let old = only_state_request(&w, laptop);
+    let current = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
         vec![
-            state_body(7, 2, 3, vec![synthetic_contact(2)]),
-            state_body(6, 0, 2, vec![synthetic_contact(6)]),
-            state_body(7, 0, 3, vec![synthetic_contact(0)]),
-            state_body(6, 0, 2, vec![synthetic_contact(6)]),
-            state_body(7, 1, 3, vec![synthetic_contact(1)]),
+            state_body_for_request(old, 7, 2, 3, vec![synthetic_contact(2)]),
+            state_body_for_request(current, 6, 0, 2, vec![synthetic_contact(6)]),
+            state_body_for_request(old, 7, 0, 3, vec![synthetic_contact(0)]),
+            state_body_for_request(current, 6, 0, 2, vec![synthetic_contact(6)]),
+            state_body_for_request(old, 7, 1, 3, vec![synthetic_contact(1)]),
+            state_body_for_request(current, 6, 1, 2, vec![synthetic_contact(7)]),
         ],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
@@ -778,23 +848,38 @@ fn late_part_zero_does_not_reset_an_interleaved_new_reply() {
 #[test]
 fn a_restart_discards_an_incomplete_state_reply() {
     let (mut w, laptop) = waiting_for_a_state_reply();
+    let old = only_state_request(&w, laptop);
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
-        vec![state_body(6, 0, 2, vec![synthetic_contact(0)])],
+        vec![state_body_for_request(
+            old,
+            6,
+            0,
+            2,
+            vec![synthetic_contact(0)],
+        )],
     );
     restart_checks_state_incomplete(&mut w, laptop, true);
 
+    // The second half makes the pre-restart response whole, but it answers a
+    // request that the restart superseded and must not complete state.
     write_to_laptop(
         &mut w,
         A,
         DeviceId::FIRST,
         laptop,
-        vec![state_body(6, 1, 2, vec![synthetic_contact(1)])],
+        vec![state_body_for_request(
+            old,
+            6,
+            1,
+            2,
+            vec![synthetic_contact(1)],
+        )],
     );
-    restart_checks_state_incomplete(&mut w, laptop, true);
+    let current = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
 
     write_to_laptop(
         &mut w,
@@ -802,15 +887,15 @@ fn a_restart_discards_an_incomplete_state_reply() {
         DeviceId::FIRST,
         laptop,
         vec![
-            state_body(6, 0, 2, vec![synthetic_contact(0)]),
-            state_body(6, 1, 2, vec![synthetic_contact(1)]),
+            state_body_for_request(current, 7, 0, 2, vec![synthetic_contact(0)]),
+            state_body_for_request(current, 7, 1, 2, vec![synthetic_contact(1)]),
         ],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
 }
 
 #[test]
-fn an_unmarked_state_reply_from_an_old_sibling_still_completes() {
+fn an_unmarked_state_reply_applies_but_does_not_complete_a_correlated_request() {
     let (mut w, laptop) = waiting_for_a_state_reply();
     let contact = synthetic_contact(200);
     write_to_laptop(
@@ -824,6 +909,14 @@ fn an_unmarked_state_reply_from_an_old_sibling_still_completes() {
             links: Vec::new(),
             part: None,
         })],
+    );
+    let current = restart_checks_state_incomplete(&mut w, laptop, true).unwrap();
+    write_to_laptop(
+        &mut w,
+        A,
+        DeviceId::FIRST,
+        laptop,
+        vec![state_body_for_request(current, 8, 0, 1, Vec::new())],
     );
     restart_checks_state_incomplete(&mut w, laptop, false);
     assert!(w.has_session(laptop, contact.peer));

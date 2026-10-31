@@ -29,8 +29,8 @@ const MAX_STATE_REPLIES: usize = 2;
 #[derive(Debug)]
 pub(super) struct StateReply {
     id: MsgId,
+    request: Option<MsgId>,
     total: u32,
-    started_with_zero: bool,
     parts: BTreeSet<u32>,
 }
 
@@ -38,8 +38,8 @@ impl StateReply {
     fn new(part: StatePart) -> Self {
         Self {
             id: part.id,
+            request: part.request,
             total: part.total,
-            started_with_zero: part.index == 0,
             parts: BTreeSet::new(),
         }
     }
@@ -51,13 +51,9 @@ fn state_bodies(
     links: &[(String, u64)],
     contacts: &[ContactState],
     id: MsgId,
+    request: Option<MsgId>,
 ) -> Vec<SyncBody> {
-    let take = contacts
-        .len()
-        .min(MAX_STATE_CONTACTS * MAX_STATE_PARTS as usize);
     let mut parts: Vec<Vec<ContactState>> = contacts
-        .get(..take)
-        .unwrap_or_default()
         .chunks(MAX_STATE_CONTACTS)
         .map(<[ContactState]>::to_vec)
         .collect();
@@ -82,6 +78,7 @@ fn state_bodies(
                     id,
                     index: u32::try_from(n).unwrap_or(u32::MAX),
                     total,
+                    request,
                 }),
             }
         })
@@ -183,11 +180,16 @@ impl<R: CryptoRngCore> Core<R> {
         if self.devices_of(self.peer_id).is_empty() {
             return;
         }
+        let request = self.random_id();
         let asks = self.devices.state_asks;
         let wait = STATE_ASK_MS.saturating_mul(1 << asks.min(MAX_STATE_ASKS));
         self.devices.state_asks = asks.saturating_add(1);
         self.devices.next_state_ask = self.now.saturating_add(wait);
-        self.sync(SyncBody::StateRequest);
+        self.devices.state_request = Some(request);
+        self.devices.state_replies.clear();
+        self.sync(SyncBody::StateRequest {
+            request: Some(request),
+        });
     }
 
     /// What another device of this identity says.
@@ -226,8 +228,8 @@ impl<R: CryptoRngCore> Core<R> {
                 self.adopt_profile_name(name.as_deref());
             }
             SyncBody::Link { code, at_ms } => self.adopt_link(&code, at_ms),
-            SyncBody::StateRequest => {
-                self.send_state(sender);
+            SyncBody::StateRequest { request } => {
+                self.send_state(sender, request);
                 self.serve_history(sender.device);
             }
             SyncBody::History { desc } => self.on_history_offer(sender, desc),
@@ -253,9 +255,9 @@ impl<R: CryptoRngCore> Core<R> {
         let complete = match part {
             Some(part) if self.devices.awaiting_state => self.state_part_complete(sender, part),
             Some(_) => false,
-            // Older siblings did not mark parts. Keep accepting their replies
-            // as before; marked replies complete only whole.
-            None => true,
+            // An unmarked response proves nothing about a correlated request.
+            // With no such request, retain the old best-effort compatibility.
+            None => self.devices.state_request.is_none(),
         };
         if profile.is_some() {
             self.adopt_profile_name(profile);
@@ -276,41 +278,38 @@ impl<R: CryptoRngCore> Core<R> {
         self.emit(Event::ContactsChanged);
     }
 
-    /// Tracks two interleaved replies per sibling. Duplicate parts are
-    /// idempotent; only the last reply can complete, and a third ID cannot
-    /// displace either one. A late part zero does not displace a reply that
-    /// already started at a later part.
+    /// Tracks two responses to the current request per sibling. Duplicate
+    /// parts are idempotent; a third response ID cannot displace either one.
+    /// Older or uncorrelated responses still apply their contents elsewhere,
+    /// but never enter this tracker and never complete the current request.
     fn state_part_complete(&mut self, sender: Addr, part: StatePart) -> bool {
         if !part.valid() {
             return false;
+        }
+        match (self.devices.state_request, part.request) {
+            (Some(current), Some(request)) if current == request => {}
+            // A legacy exchange has no request on either side. There is no
+            // ordering information to infer, so any whole marked reply does.
+            (None, None) => {}
+            _ => return false,
         }
         let replies = self.devices.state_replies.entry(sender).or_default();
         let index = match replies.iter().position(|reply| reply.id == part.id) {
             Some(index) => index,
             None if replies.len() >= MAX_STATE_REPLIES => return false,
             None => {
-                let reply = StateReply::new(part);
-                let last = replies
-                    .last()
-                    .is_none_or(|current| current.started_with_zero || part.index != 0);
-                if last {
-                    replies.push(reply);
-                    replies.len() - 1
-                } else {
-                    replies.insert(replies.len() - 1, reply);
-                    replies.len() - 2
-                }
+                replies.push(StateReply::new(part));
+                replies.len() - 1
             }
         };
-        let newest = index + 1 == replies.len();
         let Some(reply) = replies.get_mut(index) else {
             return false;
         };
-        if reply.total != part.total {
+        if reply.request != part.request || reply.total != part.total {
             return false;
         }
         reply.parts.insert(part.index);
-        newest && reply.parts.len() == part.total as usize
+        reply.parts.len() == part.total as usize
     }
 
     /// A message another device of ours sent: shown here as sent, and this
@@ -328,7 +327,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Everything a new device should know, in parts that each fit an
     /// inbox item.
-    fn send_state(&mut self, to: Addr) {
+    fn send_state(&mut self, to: Addr, request: Option<MsgId>) {
         let mut peers: Vec<PeerId> = self.peers.keys().copied().collect();
         peers.sort_unstable();
         let contacts: Vec<ContactState> = peers
@@ -336,7 +335,13 @@ impl<R: CryptoRngCore> Core<R> {
             .filter_map(|p| self.contact_state(p))
             .collect();
         let id = self.random_id();
-        let bodies = state_bodies(self.profile_name.as_deref(), &self.own_links, &contacts, id);
+        let bodies = state_bodies(
+            self.profile_name.as_deref(),
+            &self.own_links,
+            &contacts,
+            id,
+            request,
+        );
         for body in bodies {
             self.send_control_to(to, Body::Sync(body));
         }
@@ -383,6 +388,7 @@ impl<R: CryptoRngCore> Core<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope::Envelope;
 
     fn contact(n: u8) -> ContactState {
         ContactState {
@@ -407,6 +413,7 @@ mod tests {
                 &[("invite".into(), 7)],
                 &contacts,
                 MsgId([9; 16]),
+                Some(MsgId([7; 16])),
             );
             assert_eq!(bodies.len(), expected_total);
             let mut read = Vec::new();
@@ -429,6 +436,7 @@ mod tests {
                         id: MsgId([9; 16]),
                         index: u32::try_from(n).unwrap(),
                         total: u32::try_from(expected_total).unwrap(),
+                        request: Some(MsgId([7; 16])),
                     })
                 );
                 read.extend(contacts);
@@ -456,16 +464,77 @@ mod tests {
         core
     }
 
+    fn requested_core(now: u64) -> Core<rand::rngs::OsRng> {
+        let mut core = waiting_core(now);
+        core.ask_siblings();
+        core
+    }
+
+    fn current_request(core: &Core<rand::rngs::OsRng>) -> MsgId {
+        core.devices.state_request.unwrap()
+    }
+
+    fn outbox_state_requests(core: &Core<rand::rngs::OsRng>) -> Vec<MsgId> {
+        core.outbox
+            .values()
+            .filter_map(|item| {
+                let envelope = Envelope::decode(item.envelope()).ok()?;
+                let Body::Sync(SyncBody::StateRequest {
+                    request: Some(request),
+                }) = envelope.body
+                else {
+                    return None;
+                };
+                Some(request)
+            })
+            .collect()
+    }
+
+    fn assert_due_state_request(
+        core: &Core<rand::rngs::OsRng>,
+        requests: &mut Vec<MsgId>,
+        expected: u32,
+        minute: u64,
+    ) {
+        let after = outbox_state_requests(core);
+        assert_eq!(after.len(), expected as usize, "due at {minute}");
+        assert!(requests.iter().all(|id| after.contains(id)));
+        assert_eq!(
+            after.iter().filter(|id| !requests.contains(id)).count(),
+            1,
+            "one new request due at {minute}"
+        );
+        assert_eq!(
+            after.iter().collect::<BTreeSet<_>>().len(),
+            after.len(),
+            "request IDs are unique at {minute}"
+        );
+        *requests = after;
+    }
+
+    fn state_part(request: Option<MsgId>, id: u8, index: u32, total: u32) -> StatePart {
+        StatePart {
+            id: MsgId([id; 16]),
+            index,
+            total,
+            request,
+        }
+    }
+
     #[expect(
         clippy::unnecessary_wraps,
         reason = "mirrors the optional part argument"
     )]
     fn part(id: u8, index: u32, total: u32) -> Option<StatePart> {
-        Some(StatePart {
-            id: MsgId([id; 16]),
-            index,
-            total,
-        })
+        Some(state_part(None, id, index, total))
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "mirrors the optional part argument"
+    )]
+    fn reply(request: MsgId, id: u8, index: u32, total: u32) -> Option<StatePart> {
+        Some(state_part(Some(request), id, index, total))
     }
 
     #[test]
@@ -512,44 +581,218 @@ mod tests {
     }
 
     #[test]
+    fn only_the_current_response_completes_when_old_parts_arrive_late() {
+        let mut core = requested_core(0);
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let current = current_request(&core);
+        let old = MsgId([250; 16]);
+        assert_ne!(old, current);
+
+        // The old A1, new B0, late A0 sequence used to complete A and stop
+        // listening before B arrived. Every response still applies its data.
+        for (part, n) in [
+            (reply(old, 1, 1, 2), 1),
+            (reply(current, 2, 0, 2), 2),
+            (reply(old, 1, 0, 2), 3),
+        ] {
+            core.on_state(sender, None, vec![contact(n)], Vec::new(), part);
+        }
+        assert!(core.devices.awaiting_state);
+        let replies = &core.devices.state_replies[&sender];
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].id, MsgId([2; 16]));
+        assert_eq!(replies[0].parts, BTreeSet::from([0]));
+        for n in 1..=3 {
+            assert!(core.peers.contains_key(&PeerId([n; 32])));
+        }
+
+        core.on_state(
+            sender,
+            None,
+            vec![contact(4)],
+            Vec::new(),
+            reply(current, 2, 1, 2),
+        );
+        assert!(!core.devices.awaiting_state);
+        assert!(core.devices.state_replies.is_empty());
+
+        core.on_state(
+            sender,
+            None,
+            vec![contact(5)],
+            Vec::new(),
+            reply(old, 1, 0, 2),
+        );
+        assert!(!core.devices.awaiting_state);
+        assert!(core.devices.state_replies.is_empty());
+        assert!(core.peers.contains_key(&PeerId([5; 32])));
+    }
+
+    #[test]
+    fn a_current_response_can_finish_last_part_first_with_duplicates() {
+        let mut core = requested_core(0);
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let request = current_request(&core);
+        for index in [2, 0, 2] {
+            core.on_state(
+                sender,
+                None,
+                Vec::new(),
+                Vec::new(),
+                reply(request, 1, index, 3),
+            );
+            assert!(core.devices.awaiting_state);
+        }
+        core.on_state(
+            sender,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reply(request, 1, 1, 3),
+        );
+        assert!(!core.devices.awaiting_state);
+    }
+
+    #[test]
+    fn a_retry_supersedes_the_old_request_without_ordering_random_ids() {
+        let mut core = requested_core(0);
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let first = current_request(&core);
+        core.on_state(sender, None, Vec::new(), Vec::new(), reply(first, 1, 0, 2));
+
+        core.now = STATE_ASK_MS;
+        core.ask_siblings_again();
+        let second = current_request(&core);
+        assert_ne!(first, second);
+        assert!(core.devices.state_replies.is_empty());
+
+        core.on_state(sender, None, Vec::new(), Vec::new(), reply(first, 1, 1, 2));
+        assert!(core.devices.awaiting_state);
+        assert!(core.devices.state_replies.is_empty());
+
+        core.on_state(sender, None, Vec::new(), Vec::new(), reply(second, 2, 1, 2));
+        core.on_state(sender, None, Vec::new(), Vec::new(), reply(second, 2, 0, 2));
+        assert!(!core.devices.awaiting_state);
+    }
+
+    #[test]
+    fn uncorrelated_responses_apply_but_do_not_complete_a_new_request() {
+        let mut core = requested_core(0);
+        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        core.on_state(sender, None, vec![contact(1)], Vec::new(), None);
+        core.on_state(sender, None, vec![contact(2)], Vec::new(), part(1, 0, 1));
+        assert!(core.devices.awaiting_state);
+        assert!(core.devices.state_replies.is_empty());
+        assert!(core.peers.contains_key(&PeerId([1; 32])));
+        assert!(core.peers.contains_key(&PeerId([2; 32])));
+
+        let request = current_request(&core);
+        core.on_state(
+            sender,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reply(request, 2, 0, 1),
+        );
+        assert!(!core.devices.awaiting_state);
+
+        let mut legacy = waiting_core(0);
+        legacy.on_state(sender, None, Vec::new(), Vec::new(), None);
+        assert!(!legacy.devices.awaiting_state);
+    }
+
+    #[test]
+    fn response_tracking_is_bounded_and_isolated_per_sender() {
+        let mut core = requested_core(0);
+        let first = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let second = Addr::new(core.peer_id, cypher_types::DeviceId(3));
+        let request = current_request(&core);
+        for (sender, id) in [(first, 1), (first, 2), (second, 4)] {
+            core.on_state(
+                sender,
+                None,
+                Vec::new(),
+                Vec::new(),
+                reply(request, id, 0, 2),
+            );
+        }
+        assert_eq!(core.devices.state_replies.len(), 2);
+
+        // A conflicting total for one response ID does not add a part. A
+        // third response ID cannot evict either of the first two.
+        core.on_state(first, None, Vec::new(), Vec::new(), reply(request, 1, 1, 3));
+        core.on_state(first, None, Vec::new(), Vec::new(), reply(request, 3, 1, 2));
+        assert_eq!(core.devices.state_replies[&first].len(), MAX_STATE_REPLIES);
+        assert_eq!(core.devices.state_replies[&first][0].parts.len(), 1);
+
+        core.on_state(
+            second,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reply(request, 4, 1, 2),
+        );
+        assert!(!core.devices.awaiting_state);
+        assert!(core.devices.state_replies.is_empty());
+    }
+
+    #[test]
     fn state_retries_follow_the_whole_schedule_and_restart_bounded() {
         let mut core = waiting_core(0);
         core.ask_siblings();
         assert_eq!(core.devices.state_asks, 1);
+        let mut requests = outbox_state_requests(&core);
+        assert_eq!(requests.len(), 1);
 
         for (expected, minute) in (2_u32..=MAX_STATE_ASKS).zip([1, 3, 7, 15, 31, 63]) {
             core.now = minute * STATE_ASK_MS - 1;
             core.ask_siblings_again();
             assert_eq!(core.devices.state_asks, expected - 1, "early at {minute}");
+            assert_eq!(outbox_state_requests(&core), requests, "early at {minute}");
+
             core.now = minute * STATE_ASK_MS;
             core.ask_siblings_again();
             assert_eq!(core.devices.state_asks, expected, "due at {minute}");
+            assert_due_state_request(&core, &mut requests, expected, minute);
         }
 
         let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
-        core.on_state(sender, None, Vec::new(), Vec::new(), part(1, 0, 2));
+        let request = current_request(&core);
+        core.on_state(
+            sender,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reply(request, 1, 0, 2),
+        );
         core.now = 127 * STATE_ASK_MS - 1;
         core.ask_siblings_again();
         assert_eq!(core.devices.state_replies.len(), 1);
         assert_eq!(core.devices.state_asks, MAX_STATE_ASKS);
+        assert_eq!(outbox_state_requests(&core), requests);
         core.now = 127 * STATE_ASK_MS;
         core.ask_siblings_again();
         assert!(core.devices.state_replies.is_empty());
         assert_eq!(core.devices.state_asks, MAX_STATE_ASKS);
         assert!(core.devices.awaiting_state);
+        assert_eq!(outbox_state_requests(&core), requests);
 
         let mut restarted = waiting_core(core.now);
         restarted.ask_siblings();
         assert_eq!(restarted.devices.state_asks, 1);
         assert_eq!(restarted.devices.next_state_ask, 128 * STATE_ASK_MS);
+        let after_restart = outbox_state_requests(&restarted);
+        assert_eq!(after_restart.len(), 1);
+        assert!(!requests.contains(&after_restart[0]));
     }
 
     #[test]
     fn state_replies_never_exceed_the_part_limit() {
-        let contacts: Vec<_> = (0..=MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS)
+        let max = MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS;
+        let contacts: Vec<_> = (0..max)
             .map(|n| contact(u8::try_from(n % 256).unwrap_or_default()))
             .collect();
-        let bodies = state_bodies(None, &[], &contacts, MsgId([9; 16]));
+        let bodies = state_bodies(None, &[], &contacts, MsgId([9; 16]), None);
         assert_eq!(bodies.len(), MAX_STATE_PARTS as usize);
         assert!(bodies.iter().all(|body| match body {
             SyncBody::State {

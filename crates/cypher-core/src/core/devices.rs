@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use cypher_crypto::DeviceList;
-use cypher_types::{Addr, DeviceId, MAX_DEVICES, PeerId};
+use cypher_types::{Addr, DeviceId, MAX_DEVICES, MsgId, PeerId};
 use cypher_wire::{ClientMsg, DeliveryStatus};
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
@@ -103,7 +103,11 @@ pub(super) struct Devices {
     /// the app started, the next time no sooner than `next_state_ask`.
     pub(super) state_asks: u32,
     pub(super) next_state_ask: u64,
-    /// Incomplete state replies by sibling; cleared when one is complete.
+    /// The only outgoing request whose marked response can complete state.
+    /// Not persisted: after a restart the next request supersedes it.
+    pub(super) state_request: Option<MsgId>,
+    /// Incomplete state replies by sibling; cleared for each new request and
+    /// when one is complete.
     pub(super) state_replies: HashMap<Addr, Vec<StateReply>>,
     names: Vec<(u32, String)>,
     last_check: Option<u64>,

@@ -112,6 +112,11 @@ impl Target {
 }
 
 impl OutboxItem {
+    #[cfg(test)]
+    pub(super) fn envelope(&self) -> &[u8] {
+        &self.envelope
+    }
+
     fn target(&mut self, device: DeviceId) -> Option<&mut Target> {
         self.targets.iter_mut().find(|t| t.device == device)
     }
