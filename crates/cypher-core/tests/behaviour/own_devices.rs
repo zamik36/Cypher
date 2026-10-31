@@ -209,32 +209,34 @@ fn messages_sent_as_the_new_device_connects_reach_it() {
     has_both(&w, sibling, laptop, sent);
 }
 
-/// The laptop has its keys published but has not asked its siblings yet
-/// (its first look at its own list was lost). An hour later everyone comes
-/// back at once and A sends as the laptop asks: each starts a session with
-/// the other at the same time.
+/// On a restart, a lost first look at its own device list does not delay
+/// asking the siblings already in the persisted list. A sends as they
+/// answer: each side starts a session with the other at the same time.
 #[test]
 fn messages_sent_as_the_new_device_asks_reach_it() {
     let (mut w, sibling, laptop) = linked_offline(2);
+    ask_while_siblings_away(&mut w, sibling, laptop);
+    let (a_addr, sibling_addr) = (addr(&w, A), addr(&w, sibling));
+    let asked_a = w.sends_to(laptop, a_addr).len();
+    let asked_sibling = w.sends_to(laptop, sibling_addr).len();
     let a = w.peer(A);
     w.server.faults.push(Rule::times(
         1,
         move |m| matches!(m, ClientMsg::FetchDevices { peer } if *peer == a),
         Fault::Ignore,
     ));
-    w.connect(laptop);
-    w.run();
-    assert!(!w.has_session(laptop, w.peer(B)), "it has not asked yet");
-    for i in [A, B, sibling, laptop] {
-        w.disconnect(i);
-    }
-    w.now += 60 * 60_000;
-    for i in [A, B, sibling, laptop] {
-        w.connect(i);
-    }
+    w.restart(laptop);
+    assert_eq!(w.sends_to(laptop, a_addr).len(), asked_a + 1);
+    assert_eq!(
+        w.sends_to(laptop, sibling_addr).len(),
+        asked_sibling + 1
+    );
+
+    w.connect(A);
+    w.connect(sibling);
     let sent = queue_text_and_file(&mut w);
     w.run();
-    w.advance(30 * 60_000);
+    w.advance(5_000);
     has_both(&w, sibling, laptop, sent);
 }
 

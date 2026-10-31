@@ -424,6 +424,9 @@ impl<R: CryptoRngCore> Core<R> {
         self.tell_access();
         self.last_inbox_fetch = 0;
         self.check_own_devices();
+        // A failed list lookup must not postpone state we can request from
+        // siblings already in our persisted list.
+        self.ask_siblings();
         self.flush_outbox();
         self.resume_transfers();
     }
