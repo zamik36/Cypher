@@ -47,6 +47,7 @@ function failText(tr: Words): Record<FailReason, string> {
     invalid_keys: tr.join_invalid_keys,
     timeout: tr.join_timeout,
     offline: tr.join_offline,
+    too_large: tr.error_too_large,
     update_required: tr.error_update_required,
     storage_failed: tr.error_storage_failed,
     corrupted: tr.error_corrupted,

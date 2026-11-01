@@ -5,12 +5,13 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use cypher_crypto::DeviceList;
-use cypher_types::{Addr, DeviceId, MAX_DEVICES, PeerId};
+use cypher_types::{Addr, DeviceId, MAX_DEVICES, MsgId, PeerId};
 use cypher_wire::{ClientMsg, DeliveryStatus};
 use rand_core::CryptoRngCore;
 use serde::{Deserialize, Serialize};
 
 use super::outbox::OutboxItem;
+use super::sync::StateReply;
 use super::{Conn, Core, Pending};
 use crate::api::{CommandId, Effect, Event, FailReason};
 use crate::envelope::{Body, Envelope, InboxAd};
@@ -54,23 +55,60 @@ pub(crate) struct OwnDevices {
     joined: bool,
     /// The list version contacts were last told of.
     announced: u64,
-    /// This device asked its siblings for what they know.
-    asked: bool,
+    /// This device joined a list that had other devices on it, and none of
+    /// them has told it what it knows yet.
+    awaiting_state: bool,
     /// Names of the identity's devices, as far as this one knows them.
     names: Vec<(u32, String)>,
 }
 
 impl crate::Record for OwnDevices {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
+
+    /// Version 1 kept only whether this device had asked, so the response
+    /// may have been lost. Reconcile once after migration; a complete reply
+    /// persists `awaiting_state = false` and prevents later requests.
+    fn upgrade(version: u8, body: &[u8]) -> Result<Self, crate::CoreError> {
+        #[derive(Deserialize)]
+        struct V1 {
+            list: Option<Vec<u8>>,
+            joined: bool,
+            announced: u64,
+            _asked: bool,
+            names: Vec<(u32, String)>,
+        }
+        if version != 1 {
+            return Err(crate::CoreError::Storage);
+        }
+        let v1: V1 = postcard::from_bytes(body).map_err(|_| crate::CoreError::Storage)?;
+        Ok(Self {
+            list: v1.list,
+            joined: v1.joined,
+            announced: v1.announced,
+            awaiting_state: true,
+            names: v1.names,
+        })
+    }
 }
 
 /// What a device knows of its identity's devices and its contacts' lookups.
 #[derive(Default)]
 pub(super) struct Devices {
-    own: Option<DeviceList>,
+    pub(super) own: Option<DeviceList>,
     joined: bool,
     announced: u64,
-    pub(super) asked: bool,
+    /// Persisted: see [`OwnDevices::awaiting_state`].
+    pub(super) awaiting_state: bool,
+    /// The siblings were asked for what they know this many times since
+    /// the app started, the next time no sooner than `next_state_ask`.
+    pub(super) state_asks: u32,
+    pub(super) next_state_ask: u64,
+    /// The only outgoing request whose marked response can complete state.
+    /// Not persisted: after a restart the next request supersedes it.
+    pub(super) state_request: Option<MsgId>,
+    /// Incomplete state replies by sibling; cleared for each new request and
+    /// when one is complete.
+    pub(super) state_replies: HashMap<Addr, Vec<StateReply>>,
     names: Vec<(u32, String)>,
     last_check: Option<u64>,
     conflicts: u8,
@@ -87,7 +125,7 @@ impl Devices {
             own: record.list.and_then(|l| DeviceList::decode(&l).ok()),
             joined: record.joined,
             announced: record.announced,
-            asked: record.asked,
+            awaiting_state: record.awaiting_state,
             names: record.names,
             ..Self::default()
         }
@@ -98,13 +136,22 @@ impl Devices {
             list: self.own.as_ref().map(DeviceList::encode),
             joined: self.joined,
             announced: self.announced,
-            asked: self.asked,
+            awaiting_state: self.awaiting_state,
             names: self.names.clone(),
         }
     }
 }
 
 impl<R: CryptoRngCore> Core<R> {
+    /// Whether our own list, as this device knows it, has `device`: only
+    /// those of our devices get anything from this one.
+    pub(super) fn lists_own(&self, device: DeviceId) -> bool {
+        self.devices
+            .own
+            .as_ref()
+            .is_some_and(|l| l.contains(device))
+    }
+
     /// The devices of `peer` a message goes to; for this identity, its
     /// other devices.
     pub(super) fn devices_of(&self, peer: PeerId) -> Vec<DeviceId> {
@@ -421,9 +468,16 @@ impl<R: CryptoRngCore> Core<R> {
             this: self.device.0,
             devices,
         });
+        // Joining a list others are on already: a new device, which they
+        // are to tell what they know (and may hand the history).
+        let new_here = !self.devices.joined && list.devices().iter().any(|d| *d != self.device);
         self.devices.own = Some(list);
         self.devices.full = None;
         self.devices.joined = true;
+        if new_here {
+            self.devices.awaiting_state = true;
+            self.open_history();
+        }
         self.persist_own_devices();
         self.forget_unlisted_own();
         self.announce_devices();
@@ -436,6 +490,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// before the farewell goes out on it: should the app stop in between,
     /// no message key is ever used for a second, different message.
     fn forget_unlisted_own(&mut self) {
+        self.drop_unlisted_own_targets();
         let Some(list) = &self.devices.own else {
             return;
         };
@@ -634,5 +689,42 @@ impl<R: CryptoRngCore> Core<R> {
         for device in unreached {
             self.drop_targets(Addr::new(peer, device));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Record as _;
+
+    /// Both old `asked` values need one reconciliation because neither
+    /// proves that a response arrived.
+    #[test]
+    fn own_devices_of_version_1_are_reconciled_after_migration() {
+        #[derive(Serialize)]
+        struct V1 {
+            list: Option<Vec<u8>>,
+            joined: bool,
+            announced: u64,
+            asked: bool,
+            names: Vec<(u32, String)>,
+        }
+        for asked in [false, true] {
+            let v1 = V1 {
+                list: Some(vec![1, 2, 3]),
+                joined: true,
+                announced: 7,
+                asked,
+                names: vec![(2, "Laptop".into())],
+            };
+            let body = postcard::to_allocvec(&v1).unwrap();
+            let read = OwnDevices::upgrade(1, &body).unwrap();
+            assert_eq!(read.list.as_deref(), Some(&[1, 2, 3][..]));
+            assert!(read.joined);
+            assert_eq!(read.announced, 7);
+            assert!(read.awaiting_state);
+            assert_eq!(read.names, [(2, "Laptop".to_owned())]);
+        }
+        assert!(OwnDevices::upgrade(0, &[]).is_err());
     }
 }

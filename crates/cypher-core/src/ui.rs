@@ -686,6 +686,7 @@ mod tests {
             FailReason::InvalidKeys => "invalid_keys",
             FailReason::Timeout => "timeout",
             FailReason::Offline => "offline",
+            FailReason::TooLarge => "too_large",
             FailReason::Rejected => "rejected",
             FailReason::Cancelled => "cancelled",
             FailReason::SourceUnavailable => "source_unavailable",

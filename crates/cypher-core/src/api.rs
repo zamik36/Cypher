@@ -387,6 +387,8 @@ named_enum! {
         InvalidKeys = "invalid_keys",
         Timeout = "timeout",
         Offline = "offline",
+        /// An operation cannot be represented within a protocol limit.
+        TooLarge = "too_large",
         Rejected = "rejected",
         Cancelled = "cancelled",
         SourceUnavailable = "source_unavailable",
