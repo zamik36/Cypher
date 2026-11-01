@@ -823,6 +823,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "builds 51,201 peers; over 20 minutes under Miri")]
     fn oversized_state_replies_send_no_parts_and_leave_requester_waiting() {
         let mut core = requested_core(0);
         core.outbox.clear();
