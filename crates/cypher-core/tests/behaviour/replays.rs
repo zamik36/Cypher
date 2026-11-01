@@ -75,7 +75,7 @@ fn sent_toward(w: &World, i: usize, to: usize) -> Vec<Bytes> {
 }
 
 /// A frame that hands `body` to client `to` from `from` over the session.
-fn over_session(from: Addr, body: Bytes) -> Bytes {
+pub(super) fn over_session(from: Addr, body: Bytes) -> Bytes {
     Frame::new(
         0,
         ServerMsg::Recv {
@@ -89,7 +89,7 @@ fn over_session(from: Addr, body: Bytes) -> Bytes {
 
 /// The body of the last end-to-end message client `i` was handed by the
 /// server.
-fn last_message_from(w: &World, i: usize) -> Bytes {
+pub(super) fn last_message_from(w: &World, i: usize) -> Bytes {
     let peer = w.peer(i);
     crate::delivered_bodies(w)
         .into_iter()
@@ -100,7 +100,7 @@ fn last_message_from(w: &World, i: usize) -> Bytes {
 }
 
 /// `body` with the last byte of its ciphertext (the AEAD tag) flipped.
-fn altered(body: &Bytes) -> Bytes {
+pub(super) fn altered(body: &Bytes) -> Bytes {
     let mut raw = body.to_vec();
     if let Some(last) = raw.last_mut() {
         *last ^= 1;
@@ -236,24 +236,42 @@ fn a_fresh_message_altered_on_the_way_warns_and_starts_afresh() {
     assert_eq!(kept.count(), 1, "sent again on the fresh session");
 }
 
-/// Which messages a session read is kept in memory only: once the app
-/// restarts, a copy of one read before fails like a message whose key is
-/// spent, and the session starts afresh.
+/// Which messages a session read is stored with it: once the app
+/// restarts, a copy of one read before is still no news. B's session
+/// stays as it is, and B neither answers nor tells nor starts afresh.
 #[test]
-fn after_a_restart_a_copy_warns_and_starts_afresh() {
+fn after_a_restart_a_copy_is_still_no_news() {
     let mut w = talked();
     let (a, last) = (addr(&w, A), last_message_from(&w, A));
     w.restart(B);
-    let (from, fetches) = (w.clients[B].events.len(), w.server.key_fetches);
+    let fetches = w.server.key_fetches;
 
-    w.inject(B, over_session(a, last));
+    refused_by(&mut w, B, a, over_session(a, last));
 
-    assert!(warned(&w, B, from));
-    assert!(w.server.key_fetches > fetches, "a session started afresh");
+    assert_eq!(w.server.key_fetches, fetches, "no session started afresh");
+}
+
+/// B's session with A was replaced by a fresh one, which took over which
+/// messages the old one read; after a restart, a copy of a message read on
+/// either is still no news.
+#[test]
+fn after_a_fresh_session_and_a_restart_copies_from_both_are_no_news() {
+    let mut w = talked();
+    let a = addr(&w, A);
+    let old = last_message_from(&w, A);
+    restart_from_b(&mut w);
+    w.send_text(A, B, "on the fresh session");
+    let fresh = last_message_from(&w, A);
+    assert_ne!(old, fresh);
+    w.restart(B);
+
+    for copy in [old, fresh] {
+        refused_by(&mut w, B, a, over_session(a, copy));
+    }
 }
 
 /// The init a frame delivered to client `to` carries, if any.
-fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
+pub(super) fn init_in(w: &World, to: usize, raw: &Bytes) -> Option<InitHeader> {
     let body = match Frame::<ServerMsg>::decode(raw.clone()).ok()?.msg {
         ServerMsg::Recv { body, .. } => body,
         ServerMsg::RecvSealed { item } => open_item(w, to, &item)?.1,

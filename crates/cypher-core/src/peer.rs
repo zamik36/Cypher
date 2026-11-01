@@ -1,7 +1,8 @@
+use cypher_crypto::double_ratchet::SkippedKey;
 use cypher_crypto::{DeviceList, InitHeader, Ratchet};
 use cypher_types::DeviceId;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::CoreError;
 use crate::envelope::InboxAd;
@@ -37,6 +38,11 @@ pub(crate) struct Peer {
 /// One Double Ratchet session with one device of a contact.
 pub(crate) struct Session {
     pub ratchet: Ratchet,
+    /// Which line of sessions with the device this one continues (a
+    /// session that replaces another keeps it): the rows kept beside the
+    /// session carry it, so that rows a session long deleted left behind
+    /// are never taken for this one's.
+    pub lineage: u64,
     /// Initiator side: attached to every message until the responder has
     /// provably received one (any reply decrypts).
     pub pending_init: Option<InitHeader>,
@@ -144,10 +150,11 @@ impl Peer {
 }
 
 impl Session {
-    /// A session just made with one device.
-    pub(crate) fn new(ratchet: Ratchet, pending_init: Option<InitHeader>) -> Self {
+    /// A session just made with one device, starting a new `lineage`.
+    pub(crate) fn new(ratchet: Ratchet, pending_init: Option<InitHeader>, lineage: u64) -> Self {
         Self {
             ratchet,
+            lineage,
             pending_init,
             accepted_ephemerals: Vec::new(),
             inbox: None,
@@ -157,10 +164,12 @@ impl Session {
     }
 
     /// Keeps what belongs to the device rather than the old session: its
-    /// inbox, the inits seen from it and which of its messages were read,
-    /// so that a copy of one is still known. Our `Hello` goes out again.
+    /// inbox, the inits seen from it, which of its messages were read, so
+    /// that a copy of one is still known, and the line of sessions with it.
+    /// The old session's skipped keys go. Our `Hello` goes out again.
     pub(crate) fn carry_over(&mut self, mut old: Self) {
-        self.ratchet.inherit_decrypted(&mut old.ratchet);
+        self.ratchet.inherit(&mut old.ratchet);
+        self.lineage = old.lineage;
         self.inbox = old.inbox;
         self.accepted_ephemerals = old.accepted_ephemerals;
     }
@@ -176,7 +185,9 @@ impl Session {
         self.accepted_ephemerals.push(ephemeral);
     }
 
-    pub(crate) fn to_record(&self) -> SessionRecord {
+    /// The session's row; the skipped keys numbered `spent` are deleted
+    /// right after it is stored.
+    pub(crate) fn to_record(&self, spent: Vec<u64>) -> SessionRecord {
         let mut init = Vec::new();
         if let Some(h) = &self.pending_init {
             h.encode(&mut init);
@@ -187,10 +198,16 @@ impl Session {
             accepted_ephemerals: self.accepted_ephemerals.clone(),
             inbox: self.inbox,
             hello_sent: self.hello_sent,
+            lineage: self.lineage,
+            spent,
+            migrated: false,
         }
     }
 
-    pub(crate) fn from_record(r: &SessionRecord) -> Result<Self, CoreError> {
+    /// The session a row holds, without the skipped keys kept beside it;
+    /// `now_ms` dates the keys a row from before they were kept apart
+    /// holds inside.
+    pub(crate) fn from_record(r: &SessionRecord, now_ms: u64) -> Result<Self, CoreError> {
         let pending_init = if r.pending_init.is_empty() {
             None
         } else {
@@ -202,7 +219,8 @@ impl Session {
             Some(h)
         };
         Ok(Self {
-            ratchet: Ratchet::from_bytes(&r.ratchet).map_err(|_| CoreError::Storage)?,
+            ratchet: Ratchet::from_bytes(&r.ratchet, now_ms).map_err(|_| CoreError::Storage)?,
+            lineage: r.lineage,
             pending_init,
             accepted_ephemerals: r.accepted_ephemerals.clone(),
             inbox: r.inbox,
@@ -282,6 +300,9 @@ impl crate::Record for PeerRecord {
                 accepted_ephemerals: v4.accepted_ephemerals,
                 inbox: None,
                 hello_sent: v4.hello_sent,
+                lineage: 0,
+                spent: Vec::new(),
+                migrated: true,
             }),
         })
     }
@@ -299,7 +320,8 @@ struct PeerRecordV6 {
     devices: Option<Vec<u8>>,
 }
 
-/// One session with one device of a contact, as stored.
+/// One session with one device of a contact, as stored. Its skipped
+/// message keys are stored beside it, one row each ([`SkippedKeyRecord`]).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SessionRecord {
     #[serde(with = "zeroizing_bytes")]
@@ -308,26 +330,115 @@ pub(crate) struct SessionRecord {
     accepted_ephemerals: Vec<[u8; 32]>,
     inbox: Option<InboxAd>,
     hello_sent: bool,
+    /// See [`Session::lineage`].
+    lineage: u64,
+    /// Skipped keys this row no longer counts, whose rows are deleted right
+    /// after it is stored: should the app stop in between, the next start
+    /// deletes them.
+    pub(crate) spent: Vec<u64>,
+    /// Read from a version that kept the skipped keys inside the ratchet:
+    /// they come out of it, and no row beside it is the session's.
+    #[serde(skip)]
+    pub(crate) migrated: bool,
 }
 
 impl crate::Record for SessionRecord {
-    const VERSION: u8 = 2;
+    const VERSION: u8 = 3;
 
-    /// Version 1 kept an inbox no one reads any more: the device announces
-    /// its inboxes again.
+    /// Version 2 kept the skipped keys inside the ratchet, and version 1
+    /// also an inbox no one reads any more: the device announces its
+    /// inboxes again.
     fn upgrade(version: u8, body: &[u8]) -> Result<Self, CoreError> {
-        if version != 1 {
-            return Err(CoreError::Storage);
-        }
-        let v1: SessionRecordV1 = parse(body)?;
+        let v2 = match version {
+            1 => {
+                let v1: SessionRecordV1 = parse(body)?;
+                SessionRecordV2 {
+                    ratchet: v1.ratchet,
+                    pending_init: v1.pending_init,
+                    accepted_ephemerals: v1.accepted_ephemerals,
+                    inbox: None,
+                    hello_sent: v1.hello_sent,
+                }
+            }
+            2 => parse(body)?,
+            _ => return Err(CoreError::Storage),
+        };
         Ok(Self {
-            ratchet: v1.ratchet,
-            pending_init: v1.pending_init,
-            accepted_ephemerals: v1.accepted_ephemerals,
-            inbox: None,
-            hello_sent: v1.hello_sent,
+            ratchet: v2.ratchet,
+            pending_init: v2.pending_init,
+            accepted_ephemerals: v2.accepted_ephemerals,
+            inbox: v2.inbox,
+            hello_sent: v2.hello_sent,
+            lineage: 0,
+            spent: Vec::new(),
+            migrated: true,
         })
     }
+}
+
+/// [`SessionRecord`] as version 2 stored it.
+#[derive(Deserialize)]
+struct SessionRecordV2 {
+    #[serde(with = "zeroizing_bytes")]
+    ratchet: Zeroizing<Vec<u8>>,
+    pending_init: Vec<u8>,
+    accepted_ephemerals: Vec<[u8; 32]>,
+    inbox: Option<InboxAd>,
+    hello_sent: bool,
+}
+
+/// A skipped message key of a session, as stored in its own row
+/// ([`crate::store::skipped_key_row`]), which tells its number.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SkippedKeyRecord {
+    /// The [`Session::lineage`] of the session that set it aside.
+    pub(crate) lineage: u64,
+    dh: [u8; 32],
+    n: u32,
+    mk: [u8; 32],
+    created_ms: u64,
+}
+
+impl SkippedKeyRecord {
+    pub(crate) fn new(lineage: u64, key: &SkippedKey) -> Self {
+        Self {
+            lineage,
+            dh: *key.dh(),
+            n: key.n(),
+            mk: *key.mk(),
+            created_ms: key.created_ms(),
+        }
+    }
+
+    /// The key, stored under `seq`.
+    pub(crate) fn key(&self, seq: u64) -> SkippedKey {
+        SkippedKey::new(seq, self.dh, self.n, self.mk, self.created_ms)
+    }
+}
+
+impl Drop for SkippedKeyRecord {
+    fn drop(&mut self) {
+        self.mk.zeroize();
+    }
+}
+
+impl crate::Record for SkippedKeyRecord {
+    const VERSION: u8 = 1;
+}
+
+/// The digest of a message a session decrypted, as stored in its slot
+/// ([`crate::store::decrypted_row`]).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DecryptedRecord {
+    /// The [`Session::lineage`] of the session that decrypted it.
+    pub(crate) lineage: u64,
+    /// Its number among the messages the session decrypted.
+    pub(crate) seq: u64,
+    pub(crate) digest: [u8; 32],
+}
+
+impl crate::Record for DecryptedRecord {
+    const VERSION: u8 = 1;
 }
 
 /// [`SessionRecord`] as version 1 stored it.
