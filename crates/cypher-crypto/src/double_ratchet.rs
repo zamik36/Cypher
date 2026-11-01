@@ -156,7 +156,6 @@ pub struct Ratchet {
     skipped: SkippedKeys,
     /// The last [`MAX_DECRYPTED`] messages decrypted. Kept apart from the
     /// snapshot, see [`Ratchet::take_changes`].
-    /// part of the snapshot.
     decrypted: Decrypted,
 }
 
