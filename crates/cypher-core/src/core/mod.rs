@@ -235,6 +235,10 @@ impl<R: CryptoRngCore> Core<R> {
     /// Builds the core for one device of the identity `seed` from previously
     /// persisted state. Returns persistence effects when fresh prekeys had to
     /// be generated.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "restore composes persisted subsystems"
+    )]
     pub fn restore(
         seed: &IdentitySeed,
         device: DeviceId,
