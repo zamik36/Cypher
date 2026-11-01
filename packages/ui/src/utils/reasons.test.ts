@@ -10,6 +10,7 @@ describe("reasonText", () => {
     expect(reasonText("key_mismatch")).toBe(t().join_key_mismatch);
     expect(reasonText(new Error("not_found"))).toBe(t().join_not_found);
     expect(reasonText("update_required")).toBe(t().error_update_required);
+    expect(reasonText("too_large")).toBe(t().error_too_large);
   });
 
   it("knows the core's reasons only by their snake_case names", () => {

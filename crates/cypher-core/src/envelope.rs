@@ -21,6 +21,9 @@ pub const MAX_POSTER_LEN: usize = 16 * 1024;
 pub const MAX_RECEIPT_IDS: usize = 512;
 /// Contacts in one `SyncBody::State`, so it fits an inbox item.
 pub const MAX_STATE_CONTACTS: usize = 50;
+/// Parts in one marked state reply: at most 51,200 contacts, while each
+/// received index still needs its own tracking entry.
+pub const MAX_STATE_PARTS: u32 = 1024;
 /// Invites in one `SyncBody::State`.
 pub const MAX_STATE_LINKS: usize = 32;
 /// A contact's name as this user gave it, in bytes.
@@ -128,17 +131,39 @@ pub enum SyncBody {
     Profile { name: Option<String> },
     /// An invite made on this device, and when.
     Link { code: String, at_ms: u64 },
-    /// A device new to the identity asks the others what they know.
-    StateRequest,
+    /// A device new to the identity asks the others what they know. The
+    /// optional request id is appended for older readers to ignore as padding.
+    StateRequest { request: Option<MsgId> },
     /// Part of what this device knows, for a new one.
     State {
         profile: Option<String>,
         contacts: Vec<ContactState>,
         links: Vec<(String, u64)>,
+        /// Which part of one complete reply this is. Appended last: an older
+        /// peer reads `None`, and an older reader ignores it as padding.
+        part: Option<StatePart>,
     },
     /// The message history, for a device just linked: an archive
     /// ([`crate::history`]) sent as a file.
     History { desc: FileDesc },
+}
+
+/// One part of a complete state reply. Parts may arrive in any order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatePart {
+    /// The same for every part of one reply, different for a retry's reply.
+    pub id: MsgId,
+    pub index: u32,
+    pub total: u32,
+    /// The request this reply answers. Appended last, for the same padding
+    /// compatibility as the optional fields on `State` and `StateRequest`.
+    pub request: Option<MsgId>,
+}
+
+impl StatePart {
+    pub(crate) fn valid(self) -> bool {
+        self.total > 0 && self.total <= MAX_STATE_PARTS && self.index < self.total
+    }
 }
 
 /// A contact as one device keeps it.
@@ -181,7 +206,7 @@ impl SyncBody {
             },
             Self::Read { ids, .. } => ids.len() <= MAX_RECEIPT_IDS,
             Self::Contact(contact) => contact.valid(),
-            Self::Removed { .. } | Self::StateRequest => true,
+            Self::Removed { .. } | Self::StateRequest { .. } => true,
             Self::Profile { name } => name
                 .as_ref()
                 .is_none_or(|n| n.len() <= MAX_PROFILE_NAME_LEN),
@@ -190,6 +215,7 @@ impl SyncBody {
                 profile,
                 contacts,
                 links,
+                part,
             } => {
                 profile
                     .as_ref()
@@ -198,6 +224,7 @@ impl SyncBody {
                     && contacts.iter().all(ContactState::valid)
                     && links.len() <= MAX_STATE_LINKS
                     && links.iter().all(|(code, _)| code.len() <= MAX_LINK_LEN)
+                    && part.is_none_or(StatePart::valid)
             }
             Self::History { desc } => desc.inline.is_none() && desc.validate().is_ok(),
         }
@@ -488,6 +515,305 @@ mod tests {
                 ads: None,
             }
         );
+    }
+
+    /// `State` before replies were split into marked parts. The variant
+    /// ordinals and the three original fields are unchanged.
+    #[derive(Serialize, Deserialize)]
+    enum OldSyncBody {
+        _Sent,
+        _Read,
+        _Contact,
+        _Removed,
+        _Profile,
+        _Link,
+        _StateRequest,
+        State {
+            profile: Option<String>,
+            contacts: Vec<ContactState>,
+            links: Vec<(String, u64)>,
+        },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum OldSyncEnvelopeBody {
+        _Hello,
+        _Text,
+        _File,
+        _FileCtl,
+        _Receipt,
+        _Devices,
+        Sync(OldSyncBody),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldSyncEnvelope {
+        msg_id: MsgId,
+        sent_at_ms: u64,
+        body: OldSyncEnvelopeBody,
+    }
+
+    fn contact() -> ContactState {
+        ContactState {
+            peer: PeerId([4; 32]),
+            identity_dh: [5; 32],
+            alias: Some("Bob".into()),
+            name: None,
+            request: false,
+            blocked: false,
+            via: None,
+            devices: None,
+        }
+    }
+
+    #[test]
+    fn state_parts_travel_both_ways_with_older_peers() {
+        let contact = contact();
+        let mut old = postcard::to_allocvec(&OldSyncEnvelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: OldSyncEnvelopeBody::Sync(OldSyncBody::State {
+                profile: Some("Alice".into()),
+                contacts: vec![contact.clone()],
+                links: vec![("invite".into(), 7)],
+            }),
+        })
+        .unwrap();
+        old.resize(padded_len(old.len()), 0);
+        assert_eq!(
+            Envelope::decode(&old).unwrap().body,
+            Body::Sync(SyncBody::State {
+                profile: Some("Alice".into()),
+                contacts: vec![contact.clone()],
+                links: vec![("invite".into(), 7)],
+                part: None,
+            })
+        );
+
+        let new = Envelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: Body::Sync(SyncBody::State {
+                profile: Some("Alice".into()),
+                contacts: vec![contact.clone()],
+                links: vec![("invite".into(), 7)],
+                part: Some(StatePart {
+                    id: MsgId([8; 16]),
+                    index: 1,
+                    total: 2,
+                    request: Some(MsgId([7; 16])),
+                }),
+            }),
+        }
+        .encode();
+        let (read, padding) = postcard::take_from_bytes::<OldSyncEnvelope>(&new).unwrap();
+        let OldSyncEnvelopeBody::Sync(OldSyncBody::State {
+            profile,
+            contacts,
+            links,
+        }) = read.body
+        else {
+            panic!("the old reader sees its State variant");
+        };
+        assert_eq!(profile.as_deref(), Some("Alice"));
+        assert_eq!(contacts, [contact]);
+        assert_eq!(links, [("invite".into(), 7)]);
+        assert!(!padding.is_empty(), "the new part is trailing padding");
+    }
+
+    /// The immediately previous wire shape: requests had no id, and marked
+    /// parts had no request id. Both new optional fields must be padding to
+    /// this reader and decode as `None` from this writer.
+    #[derive(Serialize, Deserialize)]
+    enum MarkedSyncBody {
+        _Sent,
+        _Read,
+        _Contact,
+        _Removed,
+        _Profile,
+        _Link,
+        StateRequest,
+        State {
+            profile: Option<String>,
+            contacts: Vec<ContactState>,
+            links: Vec<(String, u64)>,
+            part: Option<MarkedStatePart>,
+        },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct MarkedStatePart {
+        id: MsgId,
+        index: u32,
+        total: u32,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum MarkedEnvelopeBody {
+        _Hello,
+        _Text,
+        _File,
+        _FileCtl,
+        _Receipt,
+        _Devices,
+        Sync(MarkedSyncBody),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct MarkedEnvelope {
+        msg_id: MsgId,
+        sent_at_ms: u64,
+        body: MarkedEnvelopeBody,
+    }
+
+    fn padded<T: Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = postcard::to_allocvec(value).unwrap();
+        bytes.resize(padded_len(bytes.len()), 0);
+        bytes
+    }
+
+    #[test]
+    fn state_correlation_travels_both_ways_with_marked_peers() {
+        let old_request = padded(&MarkedEnvelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: MarkedEnvelopeBody::Sync(MarkedSyncBody::StateRequest),
+        });
+        assert_eq!(
+            Envelope::decode(&old_request).unwrap().body,
+            Body::Sync(SyncBody::StateRequest { request: None })
+        );
+
+        let request = MsgId([6; 16]);
+        let new_request = Envelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: Body::Sync(SyncBody::StateRequest {
+                request: Some(request),
+            }),
+        }
+        .encode();
+        let (read, padding) = postcard::take_from_bytes::<MarkedEnvelope>(&new_request).unwrap();
+        assert!(matches!(
+            read.body,
+            MarkedEnvelopeBody::Sync(MarkedSyncBody::StateRequest)
+        ));
+        assert!(!padding.is_empty(), "the request id is trailing padding");
+    }
+
+    #[test]
+    fn old_marked_state_parts_decode_without_correlation() {
+        let old_part = padded(&MarkedEnvelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: MarkedEnvelopeBody::Sync(MarkedSyncBody::State {
+                profile: None,
+                contacts: vec![contact()],
+                links: Vec::new(),
+                part: Some(MarkedStatePart {
+                    id: MsgId([8; 16]),
+                    index: 1,
+                    total: 2,
+                }),
+            }),
+        });
+        assert_eq!(
+            Envelope::decode(&old_part).unwrap().body,
+            Body::Sync(SyncBody::State {
+                profile: None,
+                contacts: vec![contact()],
+                links: Vec::new(),
+                part: Some(StatePart {
+                    id: MsgId([8; 16]),
+                    index: 1,
+                    total: 2,
+                    request: None,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn new_marked_state_parts_keep_correlation_as_padding_for_old_peers() {
+        let request = MsgId([6; 16]);
+        let new_part = Envelope {
+            msg_id: MsgId([1; 16]),
+            sent_at_ms: 5,
+            body: Body::Sync(SyncBody::State {
+                profile: None,
+                contacts: vec![contact()],
+                links: Vec::new(),
+                part: Some(StatePart {
+                    id: MsgId([8; 16]),
+                    index: 1,
+                    total: 2,
+                    request: Some(request),
+                }),
+            }),
+        }
+        .encode();
+        let (read, padding) = postcard::take_from_bytes::<MarkedEnvelope>(&new_part).unwrap();
+        let MarkedEnvelopeBody::Sync(MarkedSyncBody::State {
+            contacts,
+            part: Some(part),
+            ..
+        }) = read.body
+        else {
+            panic!("the old reader sees its marked State variant");
+        };
+        assert_eq!(contacts, [contact()]);
+        assert_eq!(part.id, MsgId([8; 16]));
+        assert_eq!((part.index, part.total), (1, 2));
+        assert!(
+            !padding.is_empty(),
+            "the correlation id is trailing padding"
+        );
+    }
+
+    #[test]
+    fn state_part_numbers_are_validated() {
+        assert!(
+            StatePart {
+                id: MsgId([8; 16]),
+                index: MAX_STATE_PARTS - 1,
+                total: MAX_STATE_PARTS,
+                request: None,
+            }
+            .valid()
+        );
+        for part in [
+            StatePart {
+                id: MsgId([8; 16]),
+                index: 0,
+                total: 0,
+                request: None,
+            },
+            StatePart {
+                id: MsgId([8; 16]),
+                index: 2,
+                total: 2,
+                request: None,
+            },
+            StatePart {
+                id: MsgId([8; 16]),
+                index: 0,
+                total: MAX_STATE_PARTS + 1,
+                request: None,
+            },
+        ] {
+            let encoded = Envelope {
+                msg_id: MsgId([1; 16]),
+                sent_at_ms: 5,
+                body: Body::Sync(SyncBody::State {
+                    profile: None,
+                    contacts: Vec::new(),
+                    links: Vec::new(),
+                    part: Some(part),
+                }),
+            }
+            .encode();
+            Envelope::decode(&encoded).unwrap_err();
+        }
     }
 
     #[test]

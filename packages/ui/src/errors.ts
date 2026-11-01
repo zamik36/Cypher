@@ -41,6 +41,7 @@ export type FailReason =
   | "invalid_keys"
   | "timeout"
   | "offline"
+  | "too_large"
   | "rejected"
   | "cancelled"
   | "source_unavailable"
