@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use p256::ecdsa::Signature;
@@ -10,10 +8,7 @@ use super::WebPush;
 impl WebPush {
     /// `vapid t=<JWT>, k=<public key>` for `audience`.
     pub(super) fn authorization(&self, audience: &str) -> String {
-        let exp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-            + 12 * 3600;
+        let exp = crate::now_secs() + 12 * 3600;
         self.authorization_until(audience, exp)
     }
 
