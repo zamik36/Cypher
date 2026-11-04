@@ -344,8 +344,8 @@ impl<R: CryptoRngCore> Core<R> {
             .collect();
         let id = self.random_id();
         let Ok(bodies) = state_bodies(
-            self.profile_name.as_deref(),
-            &self.own_links,
+            self.profile.name.as_deref(),
+            &self.profile.own_links,
             &contacts,
             id,
             request,
@@ -392,7 +392,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn adopt_link(&mut self, code: &str, at_ms: u64) {
-        if !self.own_links.iter().any(|(c, _)| c == code) {
+        if !self.profile.own_links.iter().any(|(c, _)| c == code) {
             self.remember_link(code, at_ms);
         }
     }

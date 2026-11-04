@@ -42,11 +42,11 @@ use files::Transfers;
 use held::HeldSent;
 use history::History;
 use inbox::InboxEpochs;
-use messaging::Joining;
+use messaging::{Joining, Profile};
 use outbox::{Outbox, OutboxItem};
 use push::{PushState, Subscription};
 use requests::{MAX_DEFERRED, Pending, REQUEST_TIMEOUT_MS, Requests};
-use servers::ServerKeys;
+use servers::{ServerKeys, Servers};
 
 const PING_INTERVAL_MS: u64 = 20_000;
 const DEAD_AFTER_MS: u64 = 50_000;
@@ -154,18 +154,10 @@ pub struct Core<R> {
     history: History,
     recent: RecentIds,
     anon: Anon,
-    /// The address of the server this device connects to.
-    server: String,
-    server_keys: ServerKeys,
+    servers: Servers,
     inbox_epochs: InboxEpochs,
-    /// A signing key a server showed that is not the one remembered for
-    /// it, and that server's address: the key is trusted for it alone.
-    offered_key: Option<(String, [u8; 32])>,
     push: PushState,
-    /// The name this user goes by, sent to contacts with `Hello`.
-    profile_name: Option<String>,
-    /// Invites this user made and when; each admits one contact.
-    own_links: Vec<(String, u64)>,
+    profile: Profile,
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -239,13 +231,17 @@ impl<R: CryptoRngCore> Core<R> {
             history: own.history,
             recent: RecentIds::default(),
             anon: Anon::default(),
-            server: String::new(),
-            server_keys: own.servers,
+            servers: Servers {
+                current: String::new(),
+                keys: own.servers,
+                offered: None,
+            },
             inbox_epochs: own.inbox.unwrap_or_default(),
-            offered_key: None,
             push: PushState::default(),
-            profile_name: own.profile_name,
-            own_links: own.links,
+            profile: Profile {
+                name: own.profile_name,
+                own_links: own.links,
+            },
         };
         core.tidy_session_rows(sessions.stale, sessions.migrated);
         core.adopt_legacy_sessions(legacy, &mut skipped);

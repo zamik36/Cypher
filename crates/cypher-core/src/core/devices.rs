@@ -374,7 +374,7 @@ impl<R: CryptoRngCore> Core<R> {
             Some(false) => Some(FailReason::Rejected),
             Some(true) => None,
         };
-        let nickname = self.profile_name.clone().unwrap_or_default();
+        let nickname = self.profile.name.clone().unwrap_or_default();
         let body = seal_handover(&offer, &self.me.seed, &nickname, &mut self.rng);
         let (None, Some(body)) = (reason, body) else {
             let reason = reason.unwrap_or(FailReason::ServerError);

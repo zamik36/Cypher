@@ -65,6 +65,13 @@ impl Opened {
     }
 }
 
+pub(super) struct Profile {
+    /// The name this user goes by, sent to contacts with `Hello`.
+    pub(super) name: Option<String>,
+    /// Invites this user made and when; each admits one contact.
+    pub(super) own_links: Vec<(String, u64)>,
+}
+
 /// An invite being joined by, from when the server named its host until
 /// the host's devices have answered one by one.
 pub(super) struct Joining {
@@ -148,7 +155,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.sync(SyncBody::Profile {
-            name: self.profile_name.clone(),
+            name: self.profile.name.clone(),
         });
         self.greet_again();
     }
@@ -179,15 +186,15 @@ impl<R: CryptoRngCore> Core<R> {
     /// of it from the device it was changed on.
     pub(super) fn adopt_profile_name(&mut self, name: Option<&str>) -> bool {
         let name = name.and_then(clean_name);
-        if name == self.profile_name {
+        if name == self.profile.name {
             return false;
         }
-        self.profile_name = name;
+        self.profile.name = name;
         let op = self.journal.vault.put(
             Table::Meta,
             META_PROFILE.to_vec(),
             &ProfileRecord {
-                name: self.profile_name.clone(),
+                name: self.profile.name.clone(),
             },
             &mut self.rng,
         );
@@ -199,7 +206,7 @@ impl<R: CryptoRngCore> Core<R> {
         let ad = self.own_ad(self.me.device);
         Body::Hello {
             inbox: ad.ids[0],
-            name: self.profile_name.clone(),
+            name: self.profile.name.clone(),
             via: self.peers.get(peer).and_then(|p| p.via.clone()),
             ad: Some(ad),
         }
@@ -209,14 +216,15 @@ impl<R: CryptoRngCore> Core<R> {
     /// as a contact.
     pub(super) fn remember_link(&mut self, code: &str, at_ms: u64) {
         let now = self.now;
-        self.own_links
+        self.profile
+            .own_links
             .retain(|(c, at)| now.saturating_sub(*at) < LINK_TTL_MS && c != code);
         if now.saturating_sub(at_ms) >= LINK_TTL_MS {
             return self.persist_links();
         }
-        self.own_links.push((code.to_owned(), at_ms));
-        if self.own_links.len() > MAX_OWN_LINKS {
-            self.own_links.remove(0);
+        self.profile.own_links.push((code.to_owned(), at_ms));
+        if self.profile.own_links.len() > MAX_OWN_LINKS {
+            self.profile.own_links.remove(0);
         }
         self.persist_links();
     }
@@ -225,20 +233,21 @@ impl<R: CryptoRngCore> Core<R> {
     fn take_own_link(&mut self, code: &str) -> bool {
         let now = self.now;
         let Some(i) = self
+            .profile
             .own_links
             .iter()
             .position(|(c, at)| c == code && now.saturating_sub(*at) < LINK_TTL_MS)
         else {
             return false;
         };
-        self.own_links.remove(i);
+        self.profile.own_links.remove(i);
         self.persist_links();
         true
     }
 
     pub(super) fn persist_links(&mut self) {
         let record = OwnLinks {
-            links: self.own_links.clone(),
+            links: self.profile.own_links.clone(),
         };
         let op = self
             .journal
