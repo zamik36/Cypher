@@ -43,7 +43,7 @@ use held::HeldSent;
 use history::History;
 use inbox::InboxEpochs;
 use messaging::Joining;
-use outbox::OutboxItem;
+use outbox::{Outbox, OutboxItem};
 use push::{PushState, Subscription};
 use requests::{MAX_DEFERRED, Pending, REQUEST_TIMEOUT_MS, Requests};
 use servers::ServerKeys;
@@ -132,7 +132,7 @@ pub struct Core<R> {
     peers: HashMap<PeerId, Peer>,
     /// One per device of a contact we talk to.
     sessions: HashMap<Addr, Session>,
-    outbox: BTreeMap<MsgId, OutboxItem>,
+    outbox: Outbox,
     // Maps the core walks to make effects are ordered: the same inputs make
     // the same effects in the same order.
     transfers: Transfers,
@@ -152,7 +152,6 @@ pub struct Core<R> {
     joining: HashMap<PeerId, Joining>,
     devices: Devices,
     history: History,
-    held: HeldSent,
     recent: RecentIds,
     anon: Anon,
     /// The address of the server this device connects to.
@@ -214,7 +213,10 @@ impl<R: CryptoRngCore> Core<R> {
             prekeys,
             peers,
             sessions: sessions.sessions,
-            outbox,
+            outbox: Outbox {
+                items: outbox,
+                sent: own.held,
+            },
             transfers: Transfers {
                 outgoing,
                 incoming,
@@ -235,7 +237,6 @@ impl<R: CryptoRngCore> Core<R> {
             joining: HashMap::new(),
             devices: own.devices,
             history: own.history,
-            held: own.held,
             recent: RecentIds::default(),
             anon: Anon::default(),
             server: String::new(),

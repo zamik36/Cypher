@@ -2,6 +2,8 @@
 //! message goes to is a target with its own path (online, inbox, retries)
 //! and its own receipt.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use cypher_crypto::sealed;
 use cypher_types::{Addr, DeviceId, MsgId, PeerId};
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::anon::Readiness;
+use super::held::HeldSent;
 use super::{Core, Pending};
 use crate::CoreError;
 use crate::api::MessageStatus;
@@ -41,6 +44,11 @@ const SEALED_PAUSE_MS: u64 = 60 * 60_000;
 /// How long they do after the server could not hand a sealed message to
 /// the device's gateway at all.
 const SEALED_BROKEN_MS: u64 = 5 * 60_000;
+
+pub(super) struct Outbox {
+    pub(super) items: BTreeMap<MsgId, OutboxItem>,
+    pub(super) sent: HeldSent,
+}
 
 /// An end-to-end message on its way. Stored as padded plaintext and
 /// encrypted at send time for each device, so a session reset never
@@ -282,7 +290,7 @@ impl<R: CryptoRngCore> Core<R> {
             .vault
             .put(Table::Outbox, msg_id.to_vec(), &item, &mut self.rng);
         self.persist(op);
-        self.outbox.insert(msg_id, item);
+        self.outbox.items.insert(msg_id, item);
         self.send_due(msg_id);
     }
 
@@ -292,6 +300,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let due: Vec<MsgId> = self
             .outbox
+            .items
             .values()
             .filter(|i| i.targets.iter().any(|t| t.due(self.now)))
             .map(|i| i.msg_id)
@@ -303,7 +312,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Sends one message to each of its devices that is due.
     fn send_due(&mut self, msg_id: MsgId) {
-        let Some(item) = self.outbox.get(&msg_id) else {
+        let Some(item) = self.outbox.items.get(&msg_id) else {
             return;
         };
         let due: Vec<DeviceId> = item
@@ -325,7 +334,7 @@ impl<R: CryptoRngCore> Core<R> {
         if !self.is_ready() {
             return;
         }
-        let Some(peer) = self.outbox.get(&msg_id).map(|item| item.peer) else {
+        let Some(peer) = self.outbox.items.get(&msg_id).map(|item| item.peer) else {
             return;
         };
         let addr = Addr::new(peer, device);
@@ -334,7 +343,7 @@ impl<R: CryptoRngCore> Core<R> {
         if matches!(route, Route::Later) {
             return;
         }
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
+        let Some(item) = self.outbox.items.get_mut(&msg_id) else {
             return;
         };
         let Some(session) = self.sessions.get_mut(&addr) else {
@@ -462,6 +471,7 @@ impl<R: CryptoRngCore> Core<R> {
         let now = self.now;
         if let Some(target) = self
             .outbox
+            .items
             .get_mut(&msg_id)
             .and_then(|item| item.target(addr.device))
         {
@@ -483,7 +493,7 @@ impl<R: CryptoRngCore> Core<R> {
                 // Only a message the contact always answers (with a receipt)
                 // tells that silence means trouble: a host does not answer
                 // the Hello of someone it has not accepted yet.
-                let answered = self.outbox.get(&msg_id).is_some_and(|i| i.tracked);
+                let answered = self.outbox.items.get(&msg_id).is_some_and(|i| i.tracked);
                 if answered
                     && self
                         .sessions
@@ -575,6 +585,7 @@ impl<R: CryptoRngCore> Core<R> {
         let now = self.now;
         if let Some(target) = self
             .outbox
+            .items
             .get_mut(&msg_id)
             .and_then(|item| item.target(device))
         {
@@ -587,7 +598,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// The server took the message for one device. Control traffic is done
     /// there; a message the user sees waits for that device's receipt.
     fn complete_target(&mut self, msg_id: MsgId, device: DeviceId, status: MessageStatus) {
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
+        let Some(item) = self.outbox.items.get_mut(&msg_id) else {
             return;
         };
         if !item.tracked {
@@ -618,7 +629,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// A device answered for a message (a receipt), or will never need to:
     /// the message is done there.
     pub(super) fn drop_target(&mut self, msg_id: MsgId, device: DeviceId) {
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
+        let Some(item) = self.outbox.items.get_mut(&msg_id) else {
             return;
         };
         item.targets.retain(|t| t.device != device);
@@ -632,7 +643,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// late receipt or repeated news of it comes. Anything else is done
     /// then.
     fn settle(&mut self, msg_id: MsgId) {
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
+        let Some(item) = self.outbox.items.get_mut(&msg_id) else {
             return;
         };
         let kept = item.tracked
@@ -660,6 +671,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn confirm(&mut self, sender: Addr, msg_id: MsgId, status: MessageStatus) {
         let Some(item) = self
             .outbox
+            .items
             .get_mut(&msg_id)
             .filter(|i| i.peer == sender.peer && i.tracked)
         else {
@@ -682,7 +694,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// A message another device of ours sent: this one takes the contact's
     /// receipts for it too.
     pub(super) fn await_receipts(&mut self, peer: PeerId, msg_id: MsgId) {
-        if self.outbox.contains_key(&msg_id) {
+        if self.outbox.items.contains_key(&msg_id) {
             return;
         }
         let item = OutboxItem {
@@ -698,7 +710,7 @@ impl<R: CryptoRngCore> Core<R> {
             .vault
             .put(Table::Outbox, msg_id.to_vec(), &item, &mut self.rng);
         self.persist(op);
-        self.outbox.insert(msg_id, item);
+        self.outbox.items.insert(msg_id, item);
         self.trim_awaiting(&peer);
     }
 
@@ -714,6 +726,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let mut waiting: Vec<(u64, MsgId)> = self
             .outbox
+            .items
             .values()
             .filter(|i| i.peer == addr.peer && i.targets.iter().any(|t| t.device == addr.device))
             .map(|i| {
@@ -737,6 +750,7 @@ impl<R: CryptoRngCore> Core<R> {
         let own = self.me.peer_id;
         let mut unlisted: Vec<DeviceId> = self
             .outbox
+            .items
             .values()
             .filter(|i| i.peer == own)
             .flat_map(OutboxItem::devices)
@@ -753,6 +767,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn drop_targets(&mut self, addr: Addr) {
         let ids: Vec<MsgId> = self
             .outbox
+            .items
             .values()
             .filter(|i| i.peer == addr.peer && i.targets.iter().any(|t| t.device == addr.device))
             .map(|i| i.msg_id)
@@ -764,7 +779,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Tells the UI a message got further, never back.
     fn report(&mut self, msg_id: MsgId, status: MessageStatus) {
-        let Some(item) = self.outbox.get_mut(&msg_id) else {
+        let Some(item) = self.outbox.items.get_mut(&msg_id) else {
             return;
         };
         if rank(status) <= rank(item.reported) {
@@ -780,12 +795,13 @@ impl<R: CryptoRngCore> Core<R> {
     /// says.
     fn trim_awaiting(&mut self, peer: &PeerId) {
         let waits = |i: &&OutboxItem| i.peer == *peer && (i.settled() || i.awaiting());
-        let count = self.outbox.values().filter(waits).count();
+        let count = self.outbox.items.values().filter(waits).count();
         let Some(excess) = count.checked_sub(MAX_AWAITING_PER_PEER).filter(|n| *n > 0) else {
             return;
         };
         let mut waiting: Vec<(u8, u64, MsgId)> = self
             .outbox
+            .items
             .values()
             .filter(waits)
             .map(OutboxItem::trim_order)
@@ -797,7 +813,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn persist_outbox(&mut self, msg_id: &MsgId) {
-        if let Some(item) = self.outbox.get(msg_id) {
+        if let Some(item) = self.outbox.items.get(msg_id) {
             let op = self
                 .journal
                 .vault
@@ -811,7 +827,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub(super) fn drop_outbox(&mut self, msg_id: &MsgId) {
-        if self.outbox.remove(msg_id).is_some() {
+        if self.outbox.items.remove(msg_id).is_some() {
             self.persist(StoreOp::Delete {
                 table: Table::Outbox,
                 key: msg_id.to_vec(),
@@ -823,6 +839,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn drop_outbox_for(&mut self, peer: &PeerId) {
         let stale: Vec<MsgId> = self
             .outbox
+            .items
             .values()
             .filter(|i| i.peer == *peer)
             .map(|i| i.msg_id)
@@ -842,7 +859,12 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         let mut confirmed_none = Vec::new();
-        for item in self.outbox.values_mut().filter(|i| i.peer == addr.peer) {
+        for item in self
+            .outbox
+            .items
+            .values_mut()
+            .filter(|i| i.peer == addr.peer)
+        {
             let msg_id = item.msg_id;
             if let Some(target) = item.target(addr.device) {
                 target.in_flight = false;
@@ -887,7 +909,7 @@ mod tests {
             id,
             MessageStatus::Delivered,
         );
-        let item = &core.outbox[&id];
+        let item = &core.outbox.items[&id];
         assert!(item.settled() && item.reported == MessageStatus::Read);
         let told: Vec<MessageStatus> = core
             .journal

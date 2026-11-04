@@ -491,6 +491,7 @@ mod tests {
 
     fn outbox_state_requests(core: &Core<rand::rngs::OsRng>) -> Vec<MsgId> {
         core.outbox
+            .items
             .values()
             .filter_map(|item| {
                 let envelope = Envelope::decode(item.envelope()).ok()?;
@@ -826,7 +827,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "builds 51,201 peers; over 20 minutes under Miri")]
     fn oversized_state_replies_send_no_parts_and_leave_requester_waiting() {
         let mut core = requested_core(0);
-        core.outbox.clear();
+        core.outbox.items.clear();
         core.journal.effects.clear();
         for n in 0..=MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS {
             let mut peer = [0_u8; 32];
@@ -841,7 +842,10 @@ mod tests {
             },
         );
 
-        assert!(core.outbox.is_empty(), "not even one State part goes out");
+        assert!(
+            core.outbox.items.is_empty(),
+            "not even one State part goes out"
+        );
         assert_eq!(core.journal.effects.len(), 1);
         assert!(matches!(
             core.journal.effects[0],

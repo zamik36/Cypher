@@ -674,6 +674,7 @@ impl<R: CryptoRngCore> Core<R> {
         gone.sort_unstable();
         let unreached: Vec<DeviceId> = self
             .outbox
+            .items
             .values()
             .filter(|i| i.peer == peer)
             .flat_map(OutboxItem::devices)
