@@ -103,7 +103,7 @@ impl<R: CryptoRngCore> Core<R> {
     fn start_outgoing(&mut self, peer: PeerId, desc: &FileDesc, kind: &MediaKind) {
         if kind.is_media() {
             self.persist_media_key(desc);
-            self.effects.push(Effect::OpenSink {
+            self.journal.effects.push(Effect::OpenSink {
                 file_id: desc.file_id,
                 len: stored_len(desc, true),
                 sink: Sink::Media,
@@ -123,17 +123,17 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let file_id = desc.file_id;
         self.persist_media_key(desc);
-        self.effects.push(Effect::OpenSink {
+        self.journal.effects.push(Effect::OpenSink {
             file_id,
             len: sealed.len() as u64,
             sink: Sink::Media,
         });
-        self.effects.push(Effect::WriteChunk {
+        self.journal.effects.push(Effect::WriteChunk {
             file_id,
             offset: 0,
             data: Bytes::from(sealed),
         });
-        self.effects.push(Effect::CloseSink {
+        self.journal.effects.push(Effect::CloseSink {
             file_id,
             complete: true,
         });
@@ -234,7 +234,7 @@ impl<R: CryptoRngCore> Core<R> {
         } else {
             Sink::Download
         };
-        self.effects.push(Effect::OpenSink {
+        self.journal.effects.push(Effect::OpenSink {
             file_id: *file_id,
             len,
             sink,
@@ -391,7 +391,7 @@ impl<R: CryptoRngCore> Core<R> {
                 (None, None) => return,
             };
         if had_sink {
-            self.effects.push(Effect::CloseSink {
+            self.journal.effects.push(Effect::CloseSink {
                 file_id: *file_id,
                 complete,
             });
@@ -446,7 +446,7 @@ impl<R: CryptoRngCore> Core<R> {
         if reading {
             return;
         }
-        self.effects.push(Effect::ReadChunk {
+        self.journal.effects.push(Effect::ReadChunk {
             file_id: *file_id,
             index,
             offset: u64::from(index) * u64::from(out.desc.chunk_size),
@@ -497,14 +497,15 @@ impl<R: CryptoRngCore> Core<R> {
             && let Some(frame) = frames.first()
         {
             let offset = chunk_offset(&out.desc, index, true);
-            self.effects.push(Effect::WriteChunk {
+            self.journal.effects.push(Effect::WriteChunk {
                 file_id,
                 offset,
                 data: frame.slice(CHUNK_HEADROOM..),
             });
         }
         if self.is_ready() {
-            self.effects
+            self.journal
+                .effects
                 .extend(frames.into_iter().map(Effect::Transmit));
         }
     }
@@ -526,7 +527,7 @@ impl<R: CryptoRngCore> Core<R> {
             } => {
                 let received = inc.received.count();
                 let (bytes, total) = (inc.received_bytes(), inc.desc.size);
-                self.effects.push(Effect::WriteChunk {
+                self.journal.effects.push(Effect::WriteChunk {
                     file_id,
                     offset,
                     data: Bytes::from(data),
@@ -556,7 +557,7 @@ impl<R: CryptoRngCore> Core<R> {
         let tag = inc.cipher.ack_tag(next, sack);
         let frame = relay::ack_frame(inc.from(), file_id, next, sack, &tag);
         if self.is_ready() {
-            self.effects.push(Effect::Transmit(frame));
+            self.journal.effects.push(Effect::Transmit(frame));
         }
     }
 
@@ -697,6 +698,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn persist_media(&mut self, key: &MediaKey) {
         let op = self
+            .journal
             .vault
             .put(Table::Media, key.file_id.to_vec(), key, &mut self.rng);
         self.persist(op);
@@ -708,6 +710,7 @@ impl<R: CryptoRngCore> Core<R> {
         record: &crate::transfer::TransferRecord,
     ) {
         let op = self
+            .journal
             .vault
             .put(Table::Transfers, file_id.to_vec(), record, &mut self.rng);
         self.persist(op);

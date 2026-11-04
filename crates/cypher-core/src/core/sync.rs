@@ -827,7 +827,7 @@ mod tests {
     fn oversized_state_replies_send_no_parts_and_leave_requester_waiting() {
         let mut core = requested_core(0);
         core.outbox.clear();
-        core.effects.clear();
+        core.journal.effects.clear();
         for n in 0..=MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS {
             let mut peer = [0_u8; 32];
             peer[..8].copy_from_slice(&(n as u64).to_be_bytes());
@@ -842,9 +842,9 @@ mod tests {
         );
 
         assert!(core.outbox.is_empty(), "not even one State part goes out");
-        assert_eq!(core.effects.len(), 1);
+        assert_eq!(core.journal.effects.len(), 1);
         assert!(matches!(
-            core.effects[0],
+            core.journal.effects[0],
             Effect::Emit(Event::Warning {
                 reason: FailReason::TooLarge
             })

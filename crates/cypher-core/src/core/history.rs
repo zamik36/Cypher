@@ -89,7 +89,9 @@ impl<R: CryptoRngCore> Core<R> {
         self.history.building = Some((device, file_id));
         self.persist_history();
         let partial = self.partial_media();
-        self.effects.push(Effect::BuildHistory { file_id, partial });
+        self.journal
+            .effects
+            .push(Effect::BuildHistory { file_id, partial });
     }
 
     /// Voice and video notes still on their way: their copies are not whole.
@@ -160,7 +162,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn import_history(&mut self, file_id: FileId) {
         self.history.inbound = Inbound::Importing(file_id);
         self.persist_history();
-        self.effects.push(Effect::ImportHistory { file_id });
+        self.journal.effects.push(Effect::ImportHistory { file_id });
     }
 
     pub(super) fn on_history_imported(&mut self, file_id: FileId, ok: bool) {
@@ -216,15 +218,17 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn resume_history(&mut self) {
         if let Some((_, file_id)) = self.history.building {
             let partial = self.partial_media();
-            self.effects.push(Effect::BuildHistory { file_id, partial });
+            self.journal
+                .effects
+                .push(Effect::BuildHistory { file_id, partial });
         }
         if let Inbound::Importing(file_id) = self.history.inbound {
-            self.effects.push(Effect::ImportHistory { file_id });
+            self.journal.effects.push(Effect::ImportHistory { file_id });
         }
     }
 
     fn persist_history(&mut self) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_HISTORY.to_vec(),
             &self.history,

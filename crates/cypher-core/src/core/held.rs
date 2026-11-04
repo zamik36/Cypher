@@ -196,6 +196,7 @@ impl<R: CryptoRngCore> Core<R> {
         let gone = self.held.hold(msg, self.now);
         if let Some((seq, held)) = self.held.held.back() {
             let op = self
+                .journal
                 .vault
                 .put(Table::Meta, held_key(*seq), held, &mut self.rng);
             self.persist(op);

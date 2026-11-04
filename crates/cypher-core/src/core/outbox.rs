@@ -278,6 +278,7 @@ impl<R: CryptoRngCore> Core<R> {
             reported: MessageStatus::Pending,
         };
         let op = self
+            .journal
             .vault
             .put(Table::Outbox, msg_id.to_vec(), &item, &mut self.rng);
         self.persist(op);
@@ -704,6 +705,7 @@ impl<R: CryptoRngCore> Core<R> {
             reported: MessageStatus::Sent,
         };
         let op = self
+            .journal
             .vault
             .put(Table::Outbox, msg_id.to_vec(), &item, &mut self.rng);
         self.persist(op);
@@ -808,6 +810,7 @@ impl<R: CryptoRngCore> Core<R> {
     fn persist_outbox(&mut self, msg_id: &MsgId) {
         if let Some(item) = self.outbox.get(msg_id) {
             let op = self
+                .journal
                 .vault
                 .put(Table::Outbox, msg_id.to_vec(), item, &mut self.rng);
             self.persist(op);
@@ -898,6 +901,7 @@ mod tests {
         let item = &core.outbox[&id];
         assert!(item.settled() && item.reported == MessageStatus::Read);
         let told: Vec<MessageStatus> = core
+            .journal
             .effects
             .iter()
             .filter_map(|e| match e {

@@ -167,6 +167,11 @@ pub struct Snapshot {
 /// `(key, value)` rows as read from one storage table.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
+struct Journal {
+    vault: Vault,
+    effects: Vec<Effect>,
+}
+
 /// The sans-IO client state machine. Drivers own sockets, disks and clocks;
 /// the core owns every protocol and cryptographic decision.
 pub struct Core<R> {
@@ -178,7 +183,7 @@ pub struct Core<R> {
     peer_id: PeerId,
     /// Which of the identity's devices this one is.
     device: DeviceId,
-    vault: Vault,
+    journal: Journal,
     prekeys: Prekeys,
     peers: HashMap<PeerId, Peer>,
     /// One per device of a contact we talk to.
@@ -228,7 +233,6 @@ pub struct Core<R> {
     profile_name: Option<String>,
     /// Invites this user made and when; each admits one contact.
     own_links: Vec<(String, u64)>,
-    effects: Vec<Effect>,
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -267,7 +271,10 @@ impl<R: CryptoRngCore> Core<R> {
             device,
             seed: IdentitySeed(*seed.as_bytes()),
             identity,
-            vault,
+            journal: Journal {
+                vault,
+                effects: Vec::new(),
+            },
             prekeys,
             peers,
             sessions: sessions.sessions,
@@ -300,7 +307,6 @@ impl<R: CryptoRngCore> Core<R> {
             push: PushState::default(),
             profile_name: own.profile_name,
             own_links: own.links,
-            effects: Vec::new(),
         };
         core.tidy_session_rows(sessions.stale, sessions.migrated);
         core.adopt_legacy_sessions(legacy, &mut skipped);
@@ -308,7 +314,7 @@ impl<R: CryptoRngCore> Core<R> {
             core.seed_accepted_inits();
         }
         core.pick_up(&skipped, fresh_prekeys, inboxes_new);
-        let effects = std::mem::take(&mut core.effects);
+        let effects = std::mem::take(&mut core.journal.effects);
         Ok((core, effects))
     }
 
@@ -392,7 +398,7 @@ impl<R: CryptoRngCore> Core<R> {
             Input::Tick => self.on_tick(),
         }
         self.place_held();
-        std::mem::take(&mut self.effects)
+        std::mem::take(&mut self.journal.effects)
     }
 
     fn on_connected(&mut self) {
@@ -446,7 +452,7 @@ impl<R: CryptoRngCore> Core<R> {
         let session = onion.is_none();
         let Ok(Frame { req_id, msg }) = Frame::<ServerMsg>::decode(bytes) else {
             if session {
-                self.effects.push(Effect::Disconnect { reconnect: true });
+                self.disconnect(true);
             }
             return;
         };
@@ -478,7 +484,7 @@ impl<R: CryptoRngCore> Core<R> {
             ServerMsg::Superseded => {
                 self.conn = Conn::Offline;
                 self.emit(Event::Superseded);
-                self.effects.push(Effect::Disconnect { reconnect: false });
+                self.disconnect(false);
             }
             ServerMsg::Recv { from, device, body } => {
                 self.on_relay(Addr::new(from, device), &body, false);
@@ -509,7 +515,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// An error outside any request concerns the session itself.
     fn on_unsolicited_error(&mut self, code: ErrorCode) {
         match code {
-            ErrorCode::Unauthorized => self.effects.push(Effect::Disconnect { reconnect: false }),
+            ErrorCode::Unauthorized => self.disconnect(false),
             // Reconnecting cannot help: only a newer app can talk to this
             // server.
             ErrorCode::UnsupportedVersion => {
@@ -517,7 +523,7 @@ impl<R: CryptoRngCore> Core<R> {
                 self.emit(Event::Warning {
                     reason: FailReason::UpdateRequired,
                 });
-                self.effects.push(Effect::Disconnect { reconnect: false });
+                self.disconnect(false);
             }
             ErrorCode::NotFound
             | ErrorCode::BadRequest
@@ -647,7 +653,7 @@ impl<R: CryptoRngCore> Core<R> {
     fn ask_key_set(&mut self) {
         let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         if let Some(frame) = self.anon.key_set_request(self.now, deadline) {
-            self.effects.push(Effect::Anonymous(frame));
+            self.journal.effects.push(Effect::Anonymous(frame));
         }
     }
 
@@ -799,7 +805,9 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         if self.now.saturating_sub(self.last_rx) >= DEAD_AFTER_MS {
-            self.effects.push(Effect::Disconnect { reconnect: true });
+            self.journal
+                .effects
+                .push(Effect::Disconnect { reconnect: true });
             self.on_disconnected();
             return;
         }
@@ -1013,7 +1021,7 @@ impl<R: CryptoRngCore> Core<R> {
             }
         };
         self.pending.insert(req_id, (pending, deadline));
-        self.effects.push(effect);
+        self.journal.effects.push(effect);
     }
 
     /// Sends what waited for the relay, once it is up or its wait is over:
@@ -1033,20 +1041,25 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn transmit(&mut self, req_id: u32, msg: ClientMsg) {
-        self.effects
+        self.journal
+            .effects
             .push(Effect::Transmit(Frame::new(req_id, msg).encode()));
     }
 
+    fn disconnect(&mut self, reconnect: bool) {
+        self.journal.effects.push(Effect::Disconnect { reconnect });
+    }
+
     fn emit(&mut self, event: Event) {
-        self.effects.push(Effect::Emit(event));
+        self.journal.effects.push(Effect::Emit(event));
     }
 
     fn persist(&mut self, op: StoreOp) {
-        self.effects.push(Effect::Persist(op));
+        self.journal.effects.push(Effect::Persist(op));
     }
 
     fn persist_prekeys(&mut self) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_PREKEYS.to_vec(),
             &self.prekeys.to_record(),
@@ -1057,10 +1070,11 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn persist_peer(&mut self, peer: &PeerId) {
         if let Some(p) = self.peers.get(peer) {
-            let op = self
-                .vault
-                .put(Table::Peers, peer.to_vec(), &p.to_record(), &mut self.rng);
-            self.effects.push(Effect::Persist(op));
+            let op =
+                self.journal
+                    .vault
+                    .put(Table::Peers, peer.to_vec(), &p.to_record(), &mut self.rng);
+            self.journal.effects.push(Effect::Persist(op));
         }
     }
 
@@ -1077,21 +1091,22 @@ impl<R: CryptoRngCore> Core<R> {
         };
         let changes = s.ratchet.take_changes();
         for key in &changes.stored {
-            let op = self.vault.put(
+            let op = self.journal.vault.put(
                 Table::Sessions,
                 skipped_key_row(addr, key.seq()),
                 &SkippedKeyRecord::new(s.lineage, key),
                 &mut self.rng,
             );
-            self.effects.push(Effect::Persist(op));
+            self.journal.effects.push(Effect::Persist(op));
         }
         let record = s.to_record(changes.spent);
         let op = self
+            .journal
             .vault
             .put(Table::Sessions, session_key(addr), &record, &mut self.rng);
-        self.effects.push(Effect::Persist(op));
+        self.journal.effects.push(Effect::Persist(op));
         for (seq, digest) in changes.decrypted {
-            let op = self.vault.put(
+            let op = self.journal.vault.put(
                 Table::Sessions,
                 decrypted_row(addr, seq),
                 &DecryptedRecord {
@@ -1101,9 +1116,9 @@ impl<R: CryptoRngCore> Core<R> {
                 },
                 &mut self.rng,
             );
-            self.effects.push(Effect::Persist(op));
+            self.journal.effects.push(Effect::Persist(op));
         }
-        self.effects.extend(record.spent.iter().map(|&seq| {
+        self.journal.effects.extend(record.spent.iter().map(|&seq| {
             Effect::Persist(StoreOp::Delete {
                 table: Table::Sessions,
                 key: skipped_key_row(addr, seq),

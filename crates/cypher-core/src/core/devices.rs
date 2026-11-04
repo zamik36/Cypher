@@ -565,7 +565,9 @@ impl<R: CryptoRngCore> Core<R> {
     fn on_removed(&mut self) {
         self.conn = Conn::Offline;
         self.emit(Event::DeviceUnlinked);
-        self.effects.push(Effect::Disconnect { reconnect: false });
+        self.journal
+            .effects
+            .push(Effect::Disconnect { reconnect: false });
     }
 
     /// Tells every contact of a list version they have not heard of, with the
@@ -605,6 +607,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn persist_own_devices(&mut self) {
         let record = self.devices.to_record();
         let op = self
+            .journal
             .vault
             .put(Table::Meta, META_DEVICES.to_vec(), &record, &mut self.rng);
         self.persist(op);

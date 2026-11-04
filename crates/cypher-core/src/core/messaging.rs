@@ -183,7 +183,7 @@ impl<R: CryptoRngCore> Core<R> {
             return false;
         }
         self.profile_name = name;
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_PROFILE.to_vec(),
             &ProfileRecord {
@@ -241,6 +241,7 @@ impl<R: CryptoRngCore> Core<R> {
             links: self.own_links.clone(),
         };
         let op = self
+            .journal
             .vault
             .put(Table::Meta, META_LINKS.to_vec(), &record, &mut self.rng);
         self.persist(op);
@@ -317,13 +318,16 @@ impl<R: CryptoRngCore> Core<R> {
             .sent_at_ms
             .min(self.now.saturating_add(MAX_CLOCK_SKEW_MS));
         let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
-        let op = self.vault.put(Table::Messages, key, &msg, &mut self.rng);
+        let op = self
+            .journal
+            .vault
+            .put(Table::Messages, key, &msg, &mut self.rng);
         self.persist(op);
         self.emit(Event::Message(msg));
     }
 
     pub(super) fn set_status(&mut self, msg_id: MsgId, status: MessageStatus) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::MessageStatus,
             msg_id.to_vec(),
             &status,

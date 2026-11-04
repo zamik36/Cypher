@@ -243,7 +243,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn persist_inbox_epochs(&mut self) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_INBOX.to_vec(),
             &self.inbox_epochs,

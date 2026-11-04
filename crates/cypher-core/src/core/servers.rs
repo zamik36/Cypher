@@ -89,7 +89,7 @@ impl<R: CryptoRngCore> Core<R> {
     fn remember_server_key(&mut self, key: [u8; 32]) {
         let server = self.server.clone();
         self.server_keys.pin(&server, key);
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_SERVERS.to_vec(),
             &self.server_keys,
