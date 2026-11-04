@@ -377,13 +377,12 @@ mod tests {
     use rand::rngs::OsRng;
 
     #[test]
-    fn base_bundle_decodes_with_opk_flag() {
+    fn base_bundle_decodes_without_opk() {
         let ik = IdentityKeyPair::generate();
         let pk = Prekeys::generate(0, &mut OsRng);
-        let mut full = pk.base_bundle(&ik, DeviceId(2));
-        assert_eq!(full.len(), BUNDLE_BASE_LEN);
-        full.push(0);
-        let bundle = PrekeyBundle::decode(&full).unwrap();
+        let base = pk.base_bundle(&ik, DeviceId(2));
+        assert_eq!(base.len(), BUNDLE_BASE_LEN);
+        let bundle = PrekeyBundle::decode_base(&base).unwrap();
         bundle.verify().unwrap();
         assert_eq!(
             (bundle.identity, bundle.device),

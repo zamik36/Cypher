@@ -529,7 +529,7 @@ impl World {
     /// prekey.
     pub(crate) fn bundle_of(&self, addr: Addr) -> PrekeyBundle {
         let base = &self.server.keys[&addr].base;
-        PrekeyBundle::decode(&[&base[..], &[0]].concat()).unwrap()
+        PrekeyBundle::decode_base(base).unwrap()
     }
 
     /// The server has none of client `i`'s one-time prekeys left: whoever
@@ -992,7 +992,7 @@ impl World {
                 replace_opks,
             } => {
                 let addr = authed.unwrap();
-                let bundle = PrekeyBundle::decode(&[&base[..], &[0]].concat()).unwrap();
+                let bundle = PrekeyBundle::decode_base(&base).unwrap();
                 assert_eq!(
                     Addr::new(bundle.identity, bundle.device),
                     addr,

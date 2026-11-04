@@ -15,10 +15,8 @@ impl Handler {
         opks: &[(u32, [u8; 32])],
         replace: bool,
     ) -> redis::RedisResult<ServerMsg> {
-        let mut full = base.to_vec();
-        full.push(0);
         // Any device of the identity may publish; the bundle names which.
-        let device = PrekeyBundle::decode(&full)
+        let device = PrekeyBundle::decode_base(base)
             .ok()
             .filter(|b| b.identity == *peer && b.verify().is_ok())
             .map(|b| b.device);
