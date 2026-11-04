@@ -45,7 +45,20 @@ impl<B: Bus> Session<B> {
                 true
             }
             ClientMsg::Hello { .. } | ClientMsg::Auth { .. } | ClientMsg::Send { .. } => false,
-            _ => {
+            ClientMsg::SendSealed { .. }
+            | ClientMsg::PublishKeys { .. }
+            | ClientMsg::FetchKeys { .. }
+            | ClientMsg::PublishDevices { .. }
+            | ClientMsg::FetchDevices { .. }
+            | ClientMsg::CreateLink
+            | ClientMsg::ResolveLink { .. }
+            | ClientMsg::InboxPut { .. }
+            | ClientMsg::InboxFetch { .. }
+            | ClientMsg::InboxAck { .. }
+            | ClientMsg::Bootstrap
+            | ClientMsg::PushKey
+            | ClientMsg::PushRegister { .. }
+            | ClientMsg::PushUnregister { .. } => {
                 self.forward_to_signaling(me, req_id, bytes);
                 true
             }
