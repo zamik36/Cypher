@@ -425,7 +425,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// once the relay is up; while the relay is still coming up, it waits
     /// rather than go with our name.
     fn sealed_route(&self, addr: Addr) -> Route {
-        if addr.peer == self.peer_id {
+        if addr.peer == self.me.peer_id {
             return Route::Named;
         }
         let Some(peer) = self.peers.get(&addr.peer) else {
@@ -520,8 +520,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// seal it to: the inbox its `Hello` or its identity's announcement told,
     /// or, for our own devices, the one this identity derives for it.
     fn inbox_of(&self, addr: Addr) -> Option<([u8; 32], [u8; 32])> {
-        if addr.peer == self.peer_id {
-            let own_dh = self.identity.dh_public_key().to_bytes();
+        if addr.peer == self.me.peer_id {
+            let own_dh = self.me.identity.dh_public_key().to_bytes();
             return Some((self.own_inbox_of(addr.device), own_dh));
         }
         let peer = self.peers.get(&addr.peer)?;
@@ -570,8 +570,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// as an inbox item or a sealed delivery carries it.
     fn seal_item(&mut self, identity_dh: &[u8; 32], body: &[u8]) -> Option<Bytes> {
         let mut plain = Zeroizing::new(Vec::with_capacity(36 + body.len()));
-        plain.extend_from_slice(self.peer_id.as_bytes());
-        plain.extend_from_slice(&self.device.0.to_le_bytes());
+        plain.extend_from_slice(self.me.peer_id.as_bytes());
+        plain.extend_from_slice(&self.me.device.0.to_le_bytes());
         plain.extend_from_slice(body);
         sealed::seal(identity_dh, &plain, &mut self.rng)
             .ok()
@@ -621,7 +621,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// check that the device is still listed.
     pub(super) fn on_inbox_gone(&mut self, msg_id: MsgId, addr: Addr) {
         self.retry_later(msg_id, addr.device, RETRY_OFFLINE_MS);
-        if addr.peer != self.peer_id {
+        if addr.peer != self.me.peer_id {
             self.refresh_devices(addr.peer);
         }
     }
@@ -719,7 +719,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// (looked up again as often as [`Core::open_session`] allows), or
     /// until it is heard from, and the rest goes.
     pub(super) fn on_keys_missing(&mut self, addr: Addr) {
-        if addr.peer != self.peer_id || !self.lists_own(addr.device) {
+        if addr.peer != self.me.peer_id || !self.lists_own(addr.device) {
             self.drop_targets(addr);
             return;
         }
@@ -745,7 +745,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Forgets as targets the devices of ours our list no longer has, with
     /// a session or (one just linked, never online) without.
     pub(super) fn drop_unlisted_own_targets(&mut self) {
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         let mut unlisted: Vec<DeviceId> = self
             .outbox
             .values()
@@ -849,7 +849,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn requeue_for(&mut self, addr: Addr) {
         // A device of ours off our list gets nothing more; one newer than
         // the list this device knows has nothing waiting for it yet.
-        if addr.peer == self.peer_id && !self.lists_own(addr.device) {
+        if addr.peer == self.me.peer_id && !self.lists_own(addr.device) {
             return;
         }
         let mut confirmed_none = Vec::new();

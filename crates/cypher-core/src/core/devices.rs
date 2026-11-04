@@ -155,13 +155,13 @@ impl<R: CryptoRngCore> Core<R> {
     /// The devices of `peer` a message goes to; for this identity, its
     /// other devices.
     pub(super) fn devices_of(&self, peer: PeerId) -> Vec<DeviceId> {
-        if peer == self.peer_id {
+        if peer == self.me.peer_id {
             let own = self.devices.own.as_ref();
             return own.map_or_else(Vec::new, |l| {
                 l.devices()
                     .iter()
                     .copied()
-                    .filter(|d| *d != self.device)
+                    .filter(|d| *d != self.me.device)
                     .collect()
             });
         }
@@ -181,7 +181,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.devices.last_check = Some(self.now);
-        let peer = self.peer_id;
+        let peer = self.me.peer_id;
         self.request(
             ClientMsg::FetchDevices { peer },
             Pending::FetchDevices {
@@ -263,17 +263,17 @@ impl<R: CryptoRngCore> Core<R> {
             // Older than one this device already saw: the server rolled it
             // back (or lost it) and could drop us from it that way.
             Some(list) if known.is_some_and(|k| list.version() < k) => self.republish_known(),
-            Some(list) if list.contains(self.device) => self.adopt_own(list),
+            Some(list) if list.contains(self.me.device) => self.adopt_own(list),
             Some(_) if self.devices.joined => self.on_removed(),
             Some(list) if list.devices().len() >= MAX_DEVICES => {
                 let devices = list.devices().iter().map(|d| d.0).collect();
                 self.devices.full = Some(list);
                 self.emit(Event::NoRoom {
-                    this: self.device.0,
+                    this: self.me.device.0,
                     devices,
                 });
             }
-            Some(list) => match list.with(&self.identity, self.device) {
+            Some(list) => match list.with(&self.me.identity, self.me.device) {
                 Ok(next) => self.publish_own(next),
                 Err(_) => self.emit(Event::Warning {
                     reason: FailReason::Rejected,
@@ -293,8 +293,8 @@ impl<R: CryptoRngCore> Core<R> {
             .map(|l| l.devices().to_vec())
             .unwrap_or_default()
             .into_iter()
-            .chain([self.device]);
-        if let Ok(list) = DeviceList::sign(&self.identity, version, ids) {
+            .chain([self.me.device]);
+        if let Ok(list) = DeviceList::sign(&self.me.identity, version, ids) {
             self.publish_own(list);
         }
     }
@@ -313,8 +313,8 @@ impl<R: CryptoRngCore> Core<R> {
                     .iter()
                     .copied()
                     .filter(|d| *d != device)
-                    .chain([self.device]);
-                DeviceList::sign(&self.identity, version, ids).ok()
+                    .chain([self.me.device]);
+                DeviceList::sign(&self.me.identity, version, ids).ok()
             });
         match next {
             Some(list) => self.publish_own(list),
@@ -375,7 +375,7 @@ impl<R: CryptoRngCore> Core<R> {
             Some(true) => None,
         };
         let nickname = self.profile_name.clone().unwrap_or_default();
-        let body = seal_handover(&offer, &self.seed, &nickname, &mut self.rng);
+        let body = seal_handover(&offer, &self.me.seed, &nickname, &mut self.rng);
         let (None, Some(body)) = (reason, body) else {
             let reason = reason.unwrap_or(FailReason::ServerError);
             return self.emit(Event::LinkFailed {
@@ -406,7 +406,7 @@ impl<R: CryptoRngCore> Core<R> {
                 .devices
                 .own
                 .as_ref()
-                .and_then(|l| l.with(&self.identity, offer.device).ok()),
+                .and_then(|l| l.with(&self.me.identity, offer.device).ok()),
             DeliveryStatus::Offline | DeliveryStatus::Busy | DeliveryStatus::Queued => None,
         };
         if let Some(list) = next {
@@ -432,8 +432,8 @@ impl<R: CryptoRngCore> Core<R> {
             .devices
             .own
             .as_ref()
-            .filter(|l| device != self.device && l.contains(device))
-            .and_then(|l| l.without(&self.identity, device).ok());
+            .filter(|l| device != self.me.device && l.contains(device))
+            .and_then(|l| l.without(&self.me.identity, device).ok());
         match next {
             Some(list) => {
                 self.devices.names.retain(|(d, _)| *d != device.0);
@@ -465,12 +465,12 @@ impl<R: CryptoRngCore> Core<R> {
             })
             .collect();
         self.emit(Event::OwnDevices {
-            this: self.device.0,
+            this: self.me.device.0,
             devices,
         });
         // Joining a list others are on already: a new device, which they
         // are to tell what they know (and may hand the history).
-        let new_here = !self.devices.joined && list.devices().iter().any(|d| *d != self.device);
+        let new_here = !self.devices.joined && list.devices().iter().any(|d| *d != self.me.device);
         self.devices.own = Some(list);
         self.devices.full = None;
         self.devices.joined = true;
@@ -497,7 +497,7 @@ impl<R: CryptoRngCore> Core<R> {
         let mut gone: Vec<Addr> = self
             .sessions
             .keys()
-            .filter(|a| a.peer == self.peer_id && !list.contains(a.device))
+            .filter(|a| a.peer == self.me.peer_id && !list.contains(a.device))
             .copied()
             .collect();
         gone.sort_unstable();
@@ -555,7 +555,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         };
         let known = self.devices.own.as_ref().map_or(0, DeviceList::version);
-        if self.devices.joined && list.identity() == self.peer_id && list.version() > known {
+        if self.devices.joined && list.identity() == self.me.peer_id && list.version() > known {
             self.on_own_devices(Some(list));
         }
     }

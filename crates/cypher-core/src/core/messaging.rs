@@ -196,7 +196,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn hello(&self, peer: &PeerId) -> Body {
-        let ad = self.own_ad(self.device);
+        let ad = self.own_ad(self.me.device);
         Body::Hello {
             inbox: ad.ids[0],
             name: self.profile_name.clone(),
@@ -485,7 +485,7 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        let known = if addr.peer == self.peer_id {
+        let known = if addr.peer == self.me.peer_id {
             self.lists_own(addr.device)
         } else {
             self.peers.contains_key(&addr.peer)
@@ -527,7 +527,7 @@ impl<R: CryptoRngCore> Core<R> {
             .ok()
             .filter(|b| b.identity == addr.peer && b.device == addr.device)?;
         let (ratchet, init) =
-            handshake::initiate(&self.identity, self.device, &bundle, &mut self.rng).ok()?;
+            handshake::initiate(&self.me.identity, self.me.device, &bundle, &mut self.rng).ok()?;
         let lineage = self.rng.next_u64();
         Some((
             Session::new(ratchet, Some(init), lineage),
@@ -616,7 +616,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.dispatch(sender, env);
         // A device their identity has not listed (to our knowledge): their
         // list may have grown.
-        if from == self.peer_id {
+        if from == self.me.peer_id {
             self.check_own_device(sender.device);
         } else if self
             .peers
@@ -664,7 +664,7 @@ impl<R: CryptoRngCore> Core<R> {
             return Ok(Opened::Copy);
         }
 
-        let own = from == self.peer_id;
+        let own = from == self.me.peer_id;
         if !own
             && !self.peers.contains_key(&from)
             && self.pending_requests() >= MAX_PENDING_REQUESTS
@@ -680,8 +680,8 @@ impl<R: CryptoRngCore> Core<R> {
             None => None,
         };
         let mut ratchet = handshake::respond(
-            &self.identity,
-            self.device,
+            &self.me.identity,
+            self.me.device,
             spk,
             opk,
             (&from, from_device),
@@ -697,7 +697,7 @@ impl<R: CryptoRngCore> Core<R> {
             .sessions
             .get(&sender)
             .is_some_and(Session::is_unconfirmed_initiator)
-            && (self.peer_id, self.device) < (from, from_device);
+            && (self.me.peer_id, self.me.device) < (from, from_device);
         self.spend_init(init, who);
         if keep_ours {
             return Err(CoreError::Conflict);
@@ -720,7 +720,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Who `from` is, as far as how many of their inits are taken goes:
     /// someone not (yet) taken as a contact is a request.
     fn init_sender(&self, from: PeerId) -> InitSender {
-        if from != self.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
+        if from != self.me.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
             InitSender::Request(from)
         } else {
             InitSender::Contact(from)
@@ -839,7 +839,7 @@ impl<R: CryptoRngCore> Core<R> {
             body,
         } = env;
         // Our own devices only keep each other in step; only they may.
-        if from == self.peer_id {
+        if from == self.me.peer_id {
             match body {
                 Body::Sync(sync) => self.on_sync(sender, sync),
                 Body::Devices { list, .. } => self.on_own_list_body(&list),

@@ -133,7 +133,7 @@ impl<R: CryptoRngCore> Core<R> {
             key: *FileKey::random(&mut self.rng).as_bytes(),
             inline: None,
         };
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         let out = Outgoing::new(own, desc.clone(), MediaKind::File);
         self.persist_transfer_record(file_id, &out.to_record());
         self.outgoing.insert(file_id, out);
@@ -195,7 +195,7 @@ impl<R: CryptoRngCore> Core<R> {
                 reason: FailReason::Cancelled,
             });
         }
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         let transfers: Vec<FileId> = self
             .outgoing
             .iter()

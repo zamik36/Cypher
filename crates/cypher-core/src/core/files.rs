@@ -225,7 +225,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         inc.state = InState::Receiving;
         let (from, len, sealed) = (inc.from(), inc.stored_len(), inc.sealed_at_rest());
-        let sink = if from.peer == self.peer_id {
+        let sink = if from.peer == self.me.peer_id {
             Sink::History
         } else if sealed {
             let key = MediaKey::from_desc(&inc.desc);
@@ -261,7 +261,7 @@ impl<R: CryptoRngCore> Core<R> {
                 else {
                     // Finished, or taken by another device: the contact's
                     // device would wait for it forever.
-                    if sender.peer == self.peer_id || self.peers.contains_key(&sender.peer) {
+                    if sender.peer == self.me.peer_id || self.peers.contains_key(&sender.peer) {
                         let cancel = Body::FileCtl(FileCtl::Cancel { file_id });
                         self.send_control_to(sender, cancel);
                     }
@@ -306,7 +306,7 @@ impl<R: CryptoRngCore> Core<R> {
         out.receivers.remove(&sender.device);
         let idle = out.receivers.is_empty();
         // The history goes to one device of ours, never to the others.
-        let others = sender.peer != self.peer_id
+        let others = sender.peer != self.me.peer_id
             && self
                 .devices_of(sender.peer)
                 .into_iter()
@@ -373,7 +373,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Forgets a transfer; `reason == None` means it completed.
     fn drop_transfer(&mut self, file_id: &FileId, reason: Option<FailReason>, complete: bool) {
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         // `history`: the transfer was the history, sent (`Some(true)`) or
         // received (`Some(false)`).
         let (had_sink, media, history) =
@@ -664,7 +664,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.progress_at.insert(file_id, self.now);
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         let history = match (self.outgoing.get(&file_id), self.incoming.get(&file_id)) {
             (Some(out), _) => (out.peer == own).then_some(true),
             (None, Some(inc)) => (inc.peer == own).then_some(false),

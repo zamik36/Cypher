@@ -167,6 +167,15 @@ pub struct Snapshot {
 /// `(key, value)` rows as read from one storage table.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
+struct Me {
+    /// Kept to derive the inboxes of this identity's other devices.
+    seed: IdentitySeed,
+    identity: IdentityKeyPair,
+    peer_id: PeerId,
+    /// Which of the identity's devices this one is.
+    device: DeviceId,
+}
+
 struct Journal {
     vault: Vault,
     effects: Vec<Effect>,
@@ -177,12 +186,7 @@ struct Journal {
 pub struct Core<R> {
     rng: R,
     now: u64,
-    /// Kept to derive the inboxes of this identity's other devices.
-    seed: IdentitySeed,
-    identity: IdentityKeyPair,
-    peer_id: PeerId,
-    /// Which of the identity's devices this one is.
-    device: DeviceId,
+    me: Me,
     journal: Journal,
     prekeys: Prekeys,
     peers: HashMap<PeerId, Peer>,
@@ -267,10 +271,12 @@ impl<R: CryptoRngCore> Core<R> {
         let mut core = Self {
             rng,
             now: now_ms,
-            peer_id: identity.peer_id(),
-            device,
-            seed: IdentitySeed(*seed.as_bytes()),
-            identity,
+            me: Me {
+                seed: IdentitySeed(*seed.as_bytes()),
+                peer_id: identity.peer_id(),
+                device,
+                identity,
+            },
             journal: Journal {
                 vault,
                 effects: Vec::new(),
@@ -352,7 +358,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub fn peer_id(&self) -> PeerId {
-        self.peer_id
+        self.me.peer_id
     }
 
     pub fn is_ready(&self) -> bool {
@@ -408,8 +414,8 @@ impl<R: CryptoRngCore> Core<R> {
             0,
             ClientMsg::Hello {
                 version: PROTOCOL_VERSION,
-                peer: self.peer_id,
-                device: self.device,
+                peer: self.me.peer_id,
+                device: self.me.device,
             },
         );
     }
@@ -542,8 +548,8 @@ impl<R: CryptoRngCore> Core<R> {
         let mut signed = Vec::with_capacity(SESSION_AUTH_CONTEXT.len() + 36);
         signed.extend_from_slice(SESSION_AUTH_CONTEXT);
         signed.extend_from_slice(nonce);
-        signed.extend_from_slice(&self.device.0.to_le_bytes());
-        let signature = self.identity.sign(&signed).to_bytes();
+        signed.extend_from_slice(&self.me.device.0.to_le_bytes());
+        let signature = self.me.identity.sign(&signed).to_bytes();
         self.transmit(0, ClientMsg::Auth { signature });
     }
 
@@ -630,7 +636,7 @@ impl<R: CryptoRngCore> Core<R> {
         });
         self.emit(Event::LinkCreated {
             id,
-            link: ShareLink::new(link, &self.peer_id).to_string(),
+            link: ShareLink::new(link, &self.me.peer_id).to_string(),
         });
     }
 
@@ -841,7 +847,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// contact.
     pub(super) fn repair_session(&mut self, addr: Addr) {
         let known =
-            addr.peer == self.peer_id || self.peers.get(&addr.peer).is_some_and(|p| !p.request);
+            addr.peer == self.me.peer_id || self.peers.get(&addr.peer).is_some_and(|p| !p.request);
         let settled = known
             && !self
                 .sessions
@@ -877,8 +883,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// Fetches the keys of one device of a contact for a fresh session with
     /// it; at most every ten minutes per device.
     pub(super) fn open_session(&mut self, addr: Addr) {
-        let blocked = if addr.peer == self.peer_id {
-            addr.device == self.device
+        let blocked = if addr.peer == self.me.peer_id {
+            addr.device == self.me.device
         } else {
             self.peers.get(&addr.peer).is_none_or(|p| p.blocked)
         };
@@ -923,7 +929,7 @@ impl<R: CryptoRngCore> Core<R> {
         } else {
             Vec::new()
         };
-        let base = Bytes::from(self.prekeys.base_bundle(&self.identity, self.device));
+        let base = Bytes::from(self.prekeys.base_bundle(&self.me.identity, self.me.device));
         self.request(
             ClientMsg::PublishKeys {
                 base,
@@ -959,7 +965,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// The server says who made the link; only its fingerprint, which the
     /// server never saw, says whether to believe it.
     fn on_link_resolved(&mut self, id: CommandId, share: &ShareLink, peer: PeerId) {
-        let reason = if peer == self.peer_id {
+        let reason = if peer == self.me.peer_id {
             Some(FailReason::SelfLink)
         } else if !share.is_host(&peer) {
             Some(FailReason::KeyMismatch)
