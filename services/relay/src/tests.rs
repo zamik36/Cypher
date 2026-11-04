@@ -5,6 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cypher_transport::server::Handler;
 use cypher_transport::{FrameSink, FrameStream};
+use cypher_wire::relay::{TAG_KEYS, TAG_ONION};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 

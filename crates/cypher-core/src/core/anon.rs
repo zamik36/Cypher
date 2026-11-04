@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::{BufMut, Bytes, BytesMut};
 use cypher_crypto::onion::{self, ReplyKey};
 use cypher_crypto::onion_keys::KeySet;
-use cypher_wire::relay::{CORR_LEN, HEADER_LEN, TAG_KEYS, TAG_ONION};
+use cypher_wire::relay::{self, HEADER_LEN, TAG_KEYS, TAG_ONION};
 use rand_core::CryptoRngCore;
 
 /// How long to wait for the driver's relay channel before falling back.
@@ -175,8 +175,8 @@ impl Anon {
     /// What the relay sent back: a reply to one request, or the key set,
     /// taken only if the server's key signed it.
     pub(super) fn open(&mut self, reply: &[u8]) -> Option<Opened> {
-        let (corr, body) = reply.split_first_chunk::<CORR_LEN>()?;
-        let waiting = self.waiting.remove(&u64::from_le_bytes(*corr))?;
+        let (corr, body) = relay::parse_reply(reply)?;
+        let waiting = self.waiting.remove(&corr)?;
         match waiting.awaited {
             Awaited::Reply { key, req_id } => {
                 let frame = onion::open_response(&key, body).ok()?;
@@ -199,6 +199,7 @@ impl Anon {
 mod tests {
     use cypher_crypto::IdentityKeyPair;
     use cypher_crypto::onion_keys::EpochKey;
+    use cypher_wire::relay::CORR_LEN;
     use rand_core::OsRng;
     use x25519_dalek::{PublicKey, StaticSecret};
 

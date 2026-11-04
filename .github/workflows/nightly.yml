@@ -47,6 +47,7 @@ jobs:
           - { crate: cypher-wire, name: fuzz_frames }
           - { crate: cypher-wire, name: fuzz_bodies }
           - { crate: cypher-wire, name: fuzz_history }
+          - { crate: cypher-wire, name: fuzz_relay }
           - { crate: cypher-crypto, name: fuzz_aead }
           - { crate: cypher-crypto, name: fuzz_ratchet }
           - { crate: cypher-crypto, name: fuzz_decoders }

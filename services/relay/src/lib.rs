@@ -15,7 +15,7 @@ use cypher_server_kit::ratelimit::ConnLimiter;
 use cypher_server_kit::{SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT};
 use cypher_transport::server::{self, Handler, Listener, Upgrade};
 use cypher_transport::{FrameSink, FrameStream, TrustedProxies};
-use cypher_wire::relay::{CORR_LEN, HEADER_LEN, TAG_KEYS, TAG_ONION};
+use cypher_wire::relay::{self, CORR_LEN, HEADER_LEN, Route};
 use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use prometheus::{IntCounter, IntGauge};
@@ -178,14 +178,17 @@ impl<U: OnionUpstream> Relay<U> {
     /// `frame` is `[corr u64][tag u8][payload]`; the reply keeps the same
     /// correlation prefix so the client can match pipelined answers.
     async fn forward(&self, frame: Bytes) -> Option<Bytes> {
-        let corr = frame.slice(..CORR_LEN);
-        let reply = match frame.get(CORR_LEN) {
-            Some(&TAG_ONION) => {
-                let request = frame.slice(HEADER_LEN..);
-                self.upstream.forward(SIG_ONION_SUBJECT, request).await
+        let Some(request) = relay::parse(&frame) else {
+            self.metrics.dropped.inc();
+            return None;
+        };
+        let reply = match request.route {
+            Route::Onion => {
+                self.upstream
+                    .forward(SIG_ONION_SUBJECT, frame.slice(HEADER_LEN..))
+                    .await
             }
-            Some(&TAG_KEYS) if frame.len() == HEADER_LEN => self.key_set().await,
-            _ => None,
+            Route::Keys => self.key_set().await,
         };
         let Some(reply) = reply else {
             self.metrics.dropped.inc();
@@ -193,7 +196,7 @@ impl<U: OnionUpstream> Relay<U> {
         };
         self.metrics.forwarded.inc();
         let mut out = BytesMut::with_capacity(CORR_LEN + reply.len());
-        out.put_slice(&corr);
+        out.put_u64_le(request.corr);
         out.put_slice(&reply);
         Some(out.freeze())
     }
