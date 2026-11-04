@@ -17,15 +17,27 @@ use super::*;
 #[derive(Default)]
 struct FakeSignaling {
     key_sets: AtomicU8,
+    fetches: AtomicU8,
+    failures: AtomicU8,
     key_set_delay_ms: AtomicU64,
 }
 
 impl OnionUpstream for FakeSignaling {
     async fn forward(&self, subject: &'static str, request: Bytes) -> Option<Bytes> {
         if subject == SIG_KEYS_SUBJECT {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
             let delay = self.key_set_delay_ms.load(Ordering::Relaxed);
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            if self
+                .failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return None;
             }
             let n = self.key_sets.fetch_add(1, Ordering::Relaxed);
             return Some(Bytes::from(vec![b'k', n]));
@@ -157,6 +169,35 @@ async fn concurrent_key_set_refreshes_are_shared() {
         ]
     );
     assert_eq!(relay.upstream.key_sets.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn failed_initial_key_set_fetch_is_not_cached() {
+    let relay = relay();
+    relay.upstream.failures.store(1, Ordering::Relaxed);
+
+    assert_eq!(relay.key_set().await, None);
+    assert!(relay.key_set.lock().unwrap().is_none());
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 1);
+
+    assert_eq!(relay.key_set().await, Some(Bytes::from_static(&[b'k', 0])));
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_key_set_refresh_preserves_stale_and_retries() {
+    let relay = relay();
+    assert_eq!(relay.key_set().await, Some(Bytes::from_static(&[b'k', 0])));
+    tokio::time::sleep(KEY_SET_TTL).await;
+    let stale = relay.key_set.lock().unwrap().clone();
+    relay.upstream.failures.store(1, Ordering::Relaxed);
+
+    assert_eq!(relay.key_set().await, None);
+    assert_eq!(*relay.key_set.lock().unwrap(), stale);
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 2);
+
+    assert_eq!(relay.key_set().await, Some(Bytes::from_static(&[b'k', 1])));
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test(start_paused = true)]
