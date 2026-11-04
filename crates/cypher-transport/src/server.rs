@@ -156,17 +156,60 @@ fn admit_late(early: Admission, forwarded: Option<IpAddr>, slots: &Arc<IpSlots>)
     }
 }
 
+const ACCEPT_RETRY: Duration = Duration::from_millis(50);
+const ACCEPT_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+fn accept_warning_due(last: &mut Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    if last
+        .as_ref()
+        .is_some_and(|at| now.saturating_duration_since(*at) < ACCEPT_LOG_INTERVAL)
+    {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
 /// Accepts the next TCP connection; accept errors (e.g. fd exhaustion) are
-/// transient, so this backs off instead of failing the listener.
+/// transient, so this backs off instead of failing the listener. A persistent
+/// error is logged immediately, then at most once per second.
 async fn accept(listener: &TcpListener) -> TcpStream {
+    let mut last_warning = None;
     loop {
         match listener.accept().await {
             Ok((tcp, _)) => return tcp,
             Err(e) => {
-                tracing::warn!("accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                if accept_warning_due(&mut last_warning, tokio::time::Instant::now()) {
+                    tracing::warn!("accept failed: {e}");
+                }
+                tokio::time::sleep(ACCEPT_RETRY).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use tokio::time::Instant;
+
+    use super::{ACCEPT_LOG_INTERVAL, ACCEPT_RETRY, accept_warning_due};
+
+    #[test]
+    fn persistent_emfile_warnings_are_rate_limited() {
+        let start = Instant::now();
+        let mut last = None;
+        assert!(accept_warning_due(&mut last, start));
+        for retry in 1..20u32 {
+            assert!(
+                !accept_warning_due(&mut last, start + ACCEPT_RETRY * retry),
+                "unexpected warning at retry {retry}"
+            );
+        }
+        assert!(accept_warning_due(&mut last, start + ACCEPT_LOG_INTERVAL));
+        assert!(!accept_warning_due(
+            &mut last,
+            start + ACCEPT_LOG_INTERVAL + ACCEPT_RETRY
+        ));
     }
 }
 
