@@ -97,11 +97,13 @@ impl<R: CryptoRngCore> Core<R> {
     /// Voice and video notes still on their way: their copies are not whole.
     fn partial_media(&self) -> Vec<FileId> {
         let outgoing = self
+            .transfers
             .outgoing
             .iter()
             .filter(|(_, o)| o.kind.is_media())
             .map(|(id, _)| *id);
         let incoming = self
+            .transfers
             .incoming
             .iter()
             .filter(|(_, i)| i.kind.is_media())
@@ -136,7 +138,7 @@ impl<R: CryptoRngCore> Core<R> {
         let own = self.me.peer_id;
         let out = Outgoing::new(own, desc.clone(), MediaKind::File);
         self.persist_transfer_record(file_id, &out.to_record());
-        self.outgoing.insert(file_id, out);
+        self.transfers.outgoing.insert(file_id, out);
         self.send_control_to(
             Addr::new(own, device),
             Body::Sync(SyncBody::History { desc }),
@@ -146,7 +148,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// A sibling offers its history: taken once, while this device is new.
     pub(super) fn on_history_offer(&mut self, sender: Addr, desc: FileDesc) {
         let file_id = desc.file_id;
-        let known = self.incoming.contains_key(&file_id) || self.outgoing.contains_key(&file_id);
+        let known = self.transfers.incoming.contains_key(&file_id)
+            || self.transfers.outgoing.contains_key(&file_id);
         if self.history.inbound != Inbound::Open || known {
             return;
         }
@@ -154,7 +157,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist_history();
         let inc = Incoming::new(sender, desc, MediaKind::File);
         self.persist_transfer_record(file_id, &inc.to_record());
-        self.incoming.insert(file_id, inc);
+        self.transfers.incoming.insert(file_id, inc);
         self.accept_file(&file_id);
     }
 
@@ -197,12 +200,14 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let own = self.me.peer_id;
         let transfers: Vec<FileId> = self
+            .transfers
             .outgoing
             .iter()
             .filter(|(_, o)| o.peer == own)
             .map(|(id, _)| *id)
             .chain(
-                self.incoming
+                self.transfers
+                    .incoming
                     .iter()
                     .filter(|(_, i)| i.peer == own)
                     .map(|(id, _)| *id),

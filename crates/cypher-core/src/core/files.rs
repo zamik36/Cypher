@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use bytes::Bytes;
 use cypher_crypto::FileKey;
 use cypher_crypto::chunk::CHUNK_TAG_LEN;
@@ -22,6 +24,14 @@ use crate::transfer::{
 
 const PROGRESS_INTERVAL_MS: u64 = 100;
 const PERSIST_EVERY_CHUNKS: u32 = 32;
+
+pub(super) struct Transfers {
+    pub(super) outgoing: BTreeMap<FileId, Outgoing>,
+    pub(super) incoming: BTreeMap<FileId, Incoming>,
+    pub(super) progress_at: HashMap<FileId, u64>,
+    /// Chunks read from disk for the devices waiting for them.
+    pub(super) reads: HashMap<(FileId, u32), Vec<DeviceId>>,
+}
 
 /// A file or media message the user is sending.
 pub(super) struct NewFile {
@@ -78,7 +88,7 @@ impl<R: CryptoRngCore> Core<R> {
             && file.size <= MAX_FILE_SIZE
             && file.mime.len() <= MAX_MIME_LEN
             && inline_ok
-            && !self.outgoing.contains_key(&file.file_id)
+            && !self.transfers.outgoing.contains_key(&file.file_id)
     }
 
     /// Descriptor of an accepted file with a fresh key and a sanitized name.
@@ -111,7 +121,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let out = Outgoing::new(peer, desc.clone(), kind.clone());
         self.persist_transfer_record(desc.file_id, &out.to_record());
-        self.outgoing.insert(desc.file_id, out);
+        self.transfers.outgoing.insert(desc.file_id, out);
     }
 
     /// Small media travels inside the message; both sides keep a sealed
@@ -149,7 +159,9 @@ impl<R: CryptoRngCore> Core<R> {
         kind: MediaKind,
     ) {
         let (from, file_id) = (sender.peer, desc.file_id);
-        if self.incoming.contains_key(&file_id) || self.outgoing.contains_key(&file_id) {
+        if self.transfers.incoming.contains_key(&file_id)
+            || self.transfers.outgoing.contains_key(&file_id)
+        {
             return;
         }
         let name = fs_name::sanitize(&desc.name);
@@ -179,7 +191,7 @@ impl<R: CryptoRngCore> Core<R> {
         let (size, mime) = (desc.size, desc.mime.clone());
         let inc = Incoming::new(sender, desc, kind);
         self.persist_transfer_record(file_id, &inc.to_record());
-        self.incoming.insert(file_id, inc);
+        self.transfers.incoming.insert(file_id, inc);
         if media {
             self.accept_file(&file_id);
         } else {
@@ -197,13 +209,14 @@ impl<R: CryptoRngCore> Core<R> {
     /// record survives, but whoever shows them to the user does not.
     pub(super) fn announce_pending_offers(&mut self) {
         let pending: Vec<FileId> = self
+            .transfers
             .incoming
             .iter()
             .filter(|(_, inc)| inc.state == InState::Offered && !inc.kind.is_media())
             .map(|(file_id, _)| *file_id)
             .collect();
         for file_id in pending {
-            if let Some(inc) = self.incoming.get(&file_id) {
+            if let Some(inc) = self.transfers.incoming.get(&file_id) {
                 let offer = Event::TransferOffered {
                     peer: inc.peer,
                     file_id,
@@ -217,7 +230,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub(super) fn accept_file(&mut self, file_id: &FileId) {
-        let Some(inc) = self.incoming.get_mut(file_id) else {
+        let Some(inc) = self.transfers.incoming.get_mut(file_id) else {
             return;
         };
         if inc.state != InState::Offered {
@@ -255,6 +268,7 @@ impl<R: CryptoRngCore> Core<R> {
         match ctl {
             FileCtl::Accept { file_id, have } => {
                 let Some(out) = self
+                    .transfers
                     .outgoing
                     .get_mut(&file_id)
                     .filter(|o| o.peer == sender.peer)
@@ -274,6 +288,7 @@ impl<R: CryptoRngCore> Core<R> {
             }
             FileCtl::Cancel { file_id } => {
                 if self
+                    .transfers
                     .incoming
                     .get(&file_id)
                     .is_some_and(|i| i.from() == sender)
@@ -297,6 +312,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// stops and no other could still take it.
     fn stop_sending(&mut self, file_id: FileId, sender: Addr) {
         let Some(out) = self
+            .transfers
             .outgoing
             .get_mut(&file_id)
             .filter(|o| o.peer == sender.peer)
@@ -320,10 +336,10 @@ impl<R: CryptoRngCore> Core<R> {
     /// comes from, or every device of theirs it was offered to.
     fn tell_cancelled(&mut self, file_id: &FileId) -> bool {
         let cancel = Body::FileCtl(FileCtl::Cancel { file_id: *file_id });
-        if let Some(peer) = self.outgoing.get(file_id).map(|o| o.peer) {
+        if let Some(peer) = self.transfers.outgoing.get(file_id).map(|o| o.peer) {
             self.send_control(peer, cancel);
             true
-        } else if let Some(from) = self.incoming.get(file_id).map(Incoming::from) {
+        } else if let Some(from) = self.transfers.incoming.get(file_id).map(Incoming::from) {
             self.send_control_to(from, cancel);
             true
         } else {
@@ -333,10 +349,16 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Ends the transfers with one device of a contact.
     pub(super) fn cancel_transfers_with_device(&mut self, addr: Addr) {
-        for out in self.outgoing.values_mut().filter(|o| o.peer == addr.peer) {
+        for out in self
+            .transfers
+            .outgoing
+            .values_mut()
+            .filter(|o| o.peer == addr.peer)
+        {
             out.receivers.remove(&addr.device);
         }
         let ids: Vec<FileId> = self
+            .transfers
             .incoming
             .iter()
             .filter(|(_, i)| i.from() == addr)
@@ -349,12 +371,14 @@ impl<R: CryptoRngCore> Core<R> {
 
     pub(super) fn cancel_transfers_with(&mut self, peer: &PeerId) {
         let ids: Vec<FileId> = self
+            .transfers
             .outgoing
             .iter()
             .filter(|(_, o)| o.peer == *peer)
             .map(|(id, _)| *id)
             .chain(
-                self.incoming
+                self.transfers
+                    .incoming
                     .iter()
                     .filter(|(_, i)| i.peer == *peer)
                     .map(|(id, _)| *id),
@@ -366,7 +390,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub(super) fn fail_outgoing(&mut self, file_id: &FileId, reason: FailReason) {
-        if self.outgoing.contains_key(file_id) && self.tell_cancelled(file_id) {
+        if self.transfers.outgoing.contains_key(file_id) && self.tell_cancelled(file_id) {
             self.drop_transfer(file_id, Some(reason), false);
         }
     }
@@ -376,20 +400,22 @@ impl<R: CryptoRngCore> Core<R> {
         let own = self.me.peer_id;
         // `history`: the transfer was the history, sent (`Some(true)`) or
         // received (`Some(false)`).
-        let (had_sink, media, history) =
-            match (self.outgoing.remove(file_id), self.incoming.remove(file_id)) {
-                (Some(out), _) => (
-                    out.kind.is_media(),
-                    out.kind.is_media(),
-                    (out.peer == own).then_some(true),
-                ),
-                (None, Some(inc)) => (
-                    inc.state == InState::Receiving,
-                    inc.sealed_at_rest(),
-                    (inc.peer == own).then_some(false),
-                ),
-                (None, None) => return,
-            };
+        let (had_sink, media, history) = match (
+            self.transfers.outgoing.remove(file_id),
+            self.transfers.incoming.remove(file_id),
+        ) {
+            (Some(out), _) => (
+                out.kind.is_media(),
+                out.kind.is_media(),
+                (out.peer == own).then_some(true),
+            ),
+            (None, Some(inc)) => (
+                inc.state == InState::Receiving,
+                inc.sealed_at_rest(),
+                (inc.peer == own).then_some(false),
+            ),
+            (None, None) => return,
+        };
         if had_sink {
             self.journal.effects.push(Effect::CloseSink {
                 file_id: *file_id,
@@ -402,7 +428,7 @@ impl<R: CryptoRngCore> Core<R> {
                 key: file_id.to_vec(),
             });
         }
-        self.progress_at.remove(file_id);
+        self.transfers.progress_at.remove(file_id);
         self.persist(StoreOp::Delete {
             table: Table::Transfers,
             key: file_id.to_vec(),
@@ -423,7 +449,7 @@ impl<R: CryptoRngCore> Core<R> {
         if !self.is_ready() {
             return;
         }
-        let Some(out) = self.outgoing.get_mut(file_id) else {
+        let Some(out) = self.transfers.outgoing.get_mut(file_id) else {
             return;
         };
         let wanted = out.schedule(self.now);
@@ -435,10 +461,10 @@ impl<R: CryptoRngCore> Core<R> {
     /// Asks the driver for a chunk `device` is due; devices waiting for the
     /// same chunk share one read.
     fn request_chunk(&mut self, file_id: &FileId, device: DeviceId, index: u32) {
-        let Some(out) = self.outgoing.get(file_id) else {
+        let Some(out) = self.transfers.outgoing.get(file_id) else {
             return;
         };
-        let waiting = self.reads.entry((*file_id, index)).or_default();
+        let waiting = self.transfers.reads.entry((*file_id, index)).or_default();
         let reading = !waiting.is_empty();
         if !waiting.contains(&device) {
             waiting.push(device);
@@ -459,8 +485,12 @@ impl<R: CryptoRngCore> Core<R> {
     /// as a complete frame to each device waiting for it: for one device the
     /// chunk data is never copied after the disk read.
     pub(super) fn on_chunk_read(&mut self, file_id: FileId, index: u32, mut buf: Vec<u8>) {
-        let waiting = self.reads.remove(&(file_id, index)).unwrap_or_default();
-        let Some(out) = self.outgoing.get_mut(&file_id) else {
+        let waiting = self
+            .transfers
+            .reads
+            .remove(&(file_id, index))
+            .unwrap_or_default();
+        let Some(out) = self.transfers.outgoing.get_mut(&file_id) else {
             return;
         };
         let devices: Vec<DeviceId> = waiting.into_iter().filter(|d| out.sending_to(*d)).collect();
@@ -512,6 +542,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     pub(super) fn on_chunk(&mut self, sender: Addr, file_id: FileId, index: u32, data: &[u8]) {
         let Some(inc) = self
+            .transfers
             .incoming
             .get_mut(&file_id)
             .filter(|i| i.from() == sender)
@@ -550,7 +581,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn send_file_ack(&mut self, file_id: &FileId) {
-        let Some(inc) = self.incoming.get(file_id) else {
+        let Some(inc) = self.transfers.incoming.get(file_id) else {
             return;
         };
         let (next, sack) = inc.ack_state();
@@ -570,6 +601,7 @@ impl<R: CryptoRngCore> Core<R> {
         tag: &[u8; 16],
     ) {
         let Some(out) = self
+            .transfers
             .outgoing
             .get_mut(&file_id)
             .filter(|o| o.peer == sender.peer)
@@ -604,7 +636,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn retransmit_expired(&mut self) {
         let now = self.now;
         let mut resend = Vec::new();
-        for (id, out) in &mut self.outgoing {
+        for (id, out) in &mut self.transfers.outgoing {
             resend.extend(out.expired(now).into_iter().map(|(d, i)| (*id, d, i)));
         }
         for (id, device, index) in resend {
@@ -613,15 +645,16 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub(super) fn pause_transfers(&mut self) {
-        for out in self.outgoing.values_mut() {
+        for out in self.transfers.outgoing.values_mut() {
             out.pause();
         }
         // Reads still on their way come back to nobody.
-        self.reads.clear();
+        self.transfers.reads.clear();
     }
 
     pub(super) fn resume_transfers(&mut self) {
         let resumable: Vec<FileId> = self
+            .transfers
             .outgoing
             .iter_mut()
             .filter_map(|(id, o)| o.resume().then_some(*id))
@@ -630,6 +663,7 @@ impl<R: CryptoRngCore> Core<R> {
             self.pump(&id);
         }
         let receiving: Vec<(FileId, Addr, Vec<u8>)> = self
+            .transfers
             .incoming
             .iter()
             .filter(|(_, i)| i.state == InState::Receiving)
@@ -659,13 +693,21 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn report_progress(&mut self, file_id: FileId, bytes: u64, total: u64) {
-        let last = self.progress_at.get(&file_id).copied().unwrap_or(0);
+        let last = self
+            .transfers
+            .progress_at
+            .get(&file_id)
+            .copied()
+            .unwrap_or(0);
         if self.now.saturating_sub(last) < PROGRESS_INTERVAL_MS {
             return;
         }
-        self.progress_at.insert(file_id, self.now);
+        self.transfers.progress_at.insert(file_id, self.now);
         let own = self.me.peer_id;
-        let history = match (self.outgoing.get(&file_id), self.incoming.get(&file_id)) {
+        let history = match (
+            self.transfers.outgoing.get(&file_id),
+            self.transfers.incoming.get(&file_id),
+        ) {
             (Some(out), _) => (out.peer == own).then_some(true),
             (None, Some(inc)) => (inc.peer == own).then_some(false),
             (None, None) => None,
@@ -686,7 +728,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn persist_incoming(&mut self, file_id: &FileId) {
-        if let Some(inc) = self.incoming.get(file_id) {
+        if let Some(inc) = self.transfers.incoming.get(file_id) {
             let record = inc.to_record();
             self.persist_transfer_record(*file_id, &record);
         }

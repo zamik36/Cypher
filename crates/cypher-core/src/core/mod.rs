@@ -38,6 +38,7 @@ use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Opened, Readiness};
 use devices::{Devices, DevicesFor, OwnDevices};
+use files::Transfers;
 use held::HeldSent;
 use history::History;
 use inbox::InboxEpochs;
@@ -134,8 +135,7 @@ pub struct Core<R> {
     outbox: BTreeMap<MsgId, OutboxItem>,
     // Maps the core walks to make effects are ordered: the same inputs make
     // the same effects in the same order.
-    outgoing: BTreeMap<FileId, Outgoing>,
-    incoming: BTreeMap<FileId, Incoming>,
+    transfers: Transfers,
     requests: Requests,
     connection: Connection,
     last_inbox_fetch: u64,
@@ -154,9 +154,6 @@ pub struct Core<R> {
     history: History,
     held: HeldSent,
     recent: RecentIds,
-    progress_at: HashMap<FileId, u64>,
-    /// Chunks read from disk for the devices waiting for them.
-    reads: HashMap<(FileId, u32), Vec<DeviceId>>,
     anon: Anon,
     /// The address of the server this device connects to.
     server: String,
@@ -218,8 +215,12 @@ impl<R: CryptoRngCore> Core<R> {
             peers,
             sessions: sessions.sessions,
             outbox,
-            outgoing,
-            incoming,
+            transfers: Transfers {
+                outgoing,
+                incoming,
+                progress_at: HashMap::new(),
+                reads: HashMap::new(),
+            },
             requests: Requests::default(),
             connection: Connection {
                 conn: Conn::Offline,
@@ -236,8 +237,6 @@ impl<R: CryptoRngCore> Core<R> {
             history: own.history,
             held: own.held,
             recent: RecentIds::default(),
-            progress_at: HashMap::new(),
-            reads: HashMap::new(),
             anon: Anon::default(),
             server: String::new(),
             server_keys: own.servers,
@@ -1388,7 +1387,7 @@ fn load_outbox(
     Ok(outbox)
 }
 
-type Transfers = (BTreeMap<FileId, Outgoing>, BTreeMap<FileId, Incoming>);
+type LoadedTransfers = (BTreeMap<FileId, Outgoing>, BTreeMap<FileId, Incoming>);
 
 /// Our saved prekeys, or a fresh set (`true`) when there are none.
 fn load_prekeys(
@@ -1462,7 +1461,7 @@ fn load_transfers(
     vault: &Vault,
     rows: &Rows,
     skipped: &mut Skipped,
-) -> Result<Transfers, CoreError> {
+) -> Result<LoadedTransfers, CoreError> {
     let (mut outgoing, mut incoming) = (BTreeMap::new(), BTreeMap::new());
     for (k, v) in rows {
         let Some(rec) = skipped.open::<TransferRecord>(vault, Table::Transfers, k, v)? else {
