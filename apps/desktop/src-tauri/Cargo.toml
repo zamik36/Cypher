@@ -41,6 +41,7 @@ base64 = "0.22"
 
 [dev-dependencies]
 cypher-media = { workspace = true, features = ["test-util"] }
+cypher-tls = { workspace = true, features = ["server"] }
 e2e = { path = "../../../tests/e2e" }
 serde_json.workspace = true
 tauri = { version = "2", features = ["test"] }
