@@ -133,20 +133,6 @@ where
     )
 }
 
-/// Accepts the next TCP connection; accept errors (e.g. fd exhaustion) are
-/// transient, so this backs off instead of failing the listener.
-pub async fn accept(listener: &tokio::net::TcpListener) -> TcpStream {
-    loop {
-        match listener.accept().await {
-            Ok((tcp, _)) => return tcp,
-            Err(e) => {
-                tracing::warn!("accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    }
-}
-
 pub mod server;
 #[cfg(feature = "ws")]
 pub mod ws;

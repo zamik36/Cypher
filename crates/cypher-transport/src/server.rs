@@ -9,6 +9,7 @@
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -16,7 +17,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 use crate::limits::{ConnectionLimits, IpSlot, IpSlots};
-use crate::{FrameSink, FrameStream, Result, accept, accept_tls, split};
+use crate::{FrameSink, FrameStream, Result, accept_tls, split};
 
 /// Serves upgraded frame connections.
 pub trait Handler: Send + Sync + 'static {
@@ -152,6 +153,20 @@ fn admit_late(early: Admission, forwarded: Option<IpAddr>, slots: &Arc<IpSlots>)
             .acquire(forwarded.unwrap_or(proxy))
             .map_or(Admission::Refused, |slot| Admission::Admitted(Some(slot))),
         decided @ (Admission::Admitted(_) | Admission::Refused) => decided,
+    }
+}
+
+/// Accepts the next TCP connection; accept errors (e.g. fd exhaustion) are
+/// transient, so this backs off instead of failing the listener.
+async fn accept(listener: &TcpListener) -> TcpStream {
+    loop {
+        match listener.accept().await {
+            Ok((tcp, _)) => return tcp,
+            Err(e) => {
+                tracing::warn!("accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
     }
 }
 
