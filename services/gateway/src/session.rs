@@ -10,7 +10,7 @@ use cypher_server_kit::ratelimit::ConnLimiter;
 use cypher_server_kit::{
     Origin, SEALED_REFUSED, SIG_REQUEST_SUBJECT, peer_subject, peer_subscription,
 };
-use cypher_types::{Addr, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, session_auth_message};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, PROTOCOL_VERSION, SendView, ServerMsg,
     access_hash, encode_recv, encode_recv_sealed, peek_send,
@@ -349,12 +349,7 @@ impl<B: Bus> Session<B> {
         let ClientMsg::Auth { signature } = auth.msg else {
             return None;
         };
-        let signed = [
-            SESSION_AUTH_CONTEXT,
-            nonce.as_slice(),
-            &device.0.to_le_bytes(),
-        ]
-        .concat();
+        let signed = session_auth_message(&nonce, device);
         // Strict: a small-order key would otherwise "sign" any challenge.
         let verified = VerifyingKey::from_bytes(peer.as_bytes())
             .and_then(|key| key.verify_strict(&signed, &Signature::from_bytes(&signature)));

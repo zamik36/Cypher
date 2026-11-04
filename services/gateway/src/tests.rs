@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cypher_crypto::IdentityKeyPair;
-use cypher_types::{Addr, DeviceId, MAX_FRAME_SIZE, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, DeviceId, MAX_FRAME_SIZE, PeerId, session_auth_message};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_BODY_LEN, PROTOCOL_VERSION, ServerMsg,
 };
@@ -105,9 +105,7 @@ impl Client {
         else {
             panic!("expected challenge");
         };
-        let mut signed = SESSION_AUTH_CONTEXT.to_vec();
-        signed.extend_from_slice(&nonce);
-        signed.extend_from_slice(&self.device.0.to_le_bytes());
+        let signed = session_auth_message(&nonce, self.device);
         let signature = self.id.sign(&signed).to_bytes();
         self.send(0, ClientMsg::Auth { signature }).await;
         assert!(matches!(self.recv().await.unwrap().msg, ServerMsg::Ready));

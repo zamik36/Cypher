@@ -14,7 +14,7 @@ use cypher_crypto::inbox::{InboxOp, push_extra, verify_op};
 use cypher_crypto::onion::{self, ReplyKey};
 use cypher_crypto::onion_keys::{EpochKey, KeySet};
 use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed, PrekeyBundle};
-use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, session_auth_message};
 use cypher_wire::{ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, ServerMsg, relay};
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -867,9 +867,7 @@ impl World {
             }
             ClientMsg::Auth { signature } => {
                 let (nonce, addr) = self.server.challenges.remove(&from).expect("hello first");
-                let mut signed = SESSION_AUTH_CONTEXT.to_vec();
-                signed.extend_from_slice(&nonce);
-                signed.extend_from_slice(&addr.device.0.to_le_bytes());
+                let signed = session_auth_message(&nonce, addr.device);
                 verify_signature(&addr.peer, &signed, &signature).expect("valid auth signature");
                 self.server.online.insert(addr, from);
                 self.server.access.remove(&addr);
