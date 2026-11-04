@@ -177,7 +177,7 @@ impl<R: CryptoRngCore> Core<R> {
             .devices
             .last_check
             .is_some_and(|at| self.now.saturating_sub(at) < OWN_CHECK_MS);
-        if recent || self.conn != Conn::Ready {
+        if recent || self.connection.conn != Conn::Ready {
             return;
         }
         self.devices.last_check = Some(self.now);
@@ -213,7 +213,7 @@ impl<R: CryptoRngCore> Core<R> {
             .last_refresh
             .get(&peer)
             .is_some_and(|at| self.now.saturating_sub(*at) < REFRESH_INTERVAL_MS);
-        if recent || self.conn != Conn::Ready {
+        if recent || self.connection.conn != Conn::Ready {
             return;
         }
         self.devices.last_refresh.insert(peer, self.now);
@@ -369,7 +369,7 @@ impl<R: CryptoRngCore> Core<R> {
             .filter(|_| self.devices.joined)
             .map(|l| !l.contains(offer.device) && l.devices().len() < MAX_DEVICES);
         let reason = match room {
-            _ if self.conn != Conn::Ready => Some(FailReason::Offline),
+            _ if self.connection.conn != Conn::Ready => Some(FailReason::Offline),
             None => Some(FailReason::Offline),
             Some(false) => Some(FailReason::Rejected),
             Some(true) => None,
@@ -559,7 +559,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// This device was taken off its identity's list: it stops, and the
     /// user decides what happens to what it holds.
     fn on_removed(&mut self) {
-        self.conn = Conn::Offline;
+        self.connection.conn = Conn::Offline;
         self.emit(Event::DeviceUnlinked);
         self.journal
             .effects

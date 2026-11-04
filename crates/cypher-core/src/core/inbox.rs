@@ -105,7 +105,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// epoch's and the last one's, and now and then the ones beyond. One
     /// request per epoch is in flight at most.
     pub(super) fn fetch_inbox(&mut self) {
-        if self.conn != Conn::Ready
+        if self.connection.conn != Conn::Ready
             || !matches!(
                 self.anon.readiness(self.now),
                 Readiness::Onion | Readiness::Session
@@ -194,7 +194,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Once per epoch: tells every contact of the inboxes read from now
     /// on, then closes those no longer read, oldest first.
     pub(super) fn turn_inbox_epoch(&mut self) {
-        if self.conn != Conn::Ready {
+        if self.connection.conn != Conn::Ready {
             return;
         }
         let current = self.inbox_epoch();
@@ -220,7 +220,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let epoch = self.inbox_epochs.open_from;
         if epoch.saturating_add(3) > current
-            || self.conn != Conn::Ready
+            || self.connection.conn != Conn::Ready
             || !matches!(
                 self.anon.readiness(self.now),
                 Readiness::Onion | Readiness::Session

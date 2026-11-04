@@ -88,7 +88,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// Takes the next step the onion channel allows now; the rest waits for
     /// it to come up.
     pub(super) fn push_step(&mut self) {
-        if self.conn != Conn::Ready || self.anon.readiness(self.now) != Readiness::Onion {
+        if self.connection.conn != Conn::Ready || self.anon.readiness(self.now) != Readiness::Onion
+        {
             return;
         }
         let epoch = self.inbox_epoch();

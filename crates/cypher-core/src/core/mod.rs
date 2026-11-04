@@ -108,6 +108,18 @@ struct Journal {
     effects: Vec<Effect>,
 }
 
+struct Connection {
+    conn: Conn,
+    last_rx: u64,
+    last_ping: u64,
+}
+
+impl Connection {
+    fn liveness(&self, now: u64) -> bool {
+        now.saturating_sub(self.last_rx) < DEAD_AFTER_MS
+    }
+}
+
 /// The sans-IO client state machine. Drivers own sockets, disks and clocks;
 /// the core owns every protocol and cryptographic decision.
 pub struct Core<R> {
@@ -125,9 +137,7 @@ pub struct Core<R> {
     outgoing: BTreeMap<FileId, Outgoing>,
     incoming: BTreeMap<FileId, Incoming>,
     requests: Requests,
-    conn: Conn,
-    last_rx: u64,
-    last_ping: u64,
+    connection: Connection,
     last_inbox_fetch: u64,
     /// When the inboxes beyond the last epoch were last read.
     last_inbox_sweep: Option<u64>,
@@ -211,9 +221,11 @@ impl<R: CryptoRngCore> Core<R> {
             outgoing,
             incoming,
             requests: Requests::default(),
-            conn: Conn::Offline,
-            last_rx: now_ms,
-            last_ping: now_ms,
+            connection: Connection {
+                conn: Conn::Offline,
+                last_rx: now_ms,
+                last_ping: now_ms,
+            },
             last_inbox_fetch: 0,
             last_inbox_sweep: None,
             last_resync: None,
@@ -283,7 +295,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.conn == Conn::Ready
+        self.connection.conn == Conn::Ready
     }
 
     pub fn peers(&self) -> impl Iterator<Item = &PeerId> {
@@ -329,8 +341,8 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_connected(&mut self) {
-        self.conn = Conn::Authenticating;
-        self.last_rx = self.now;
+        self.connection.conn = Conn::Authenticating;
+        self.connection.last_rx = self.now;
         self.transmit(
             0,
             ClientMsg::Hello {
@@ -342,10 +354,10 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_disconnected(&mut self) {
-        if self.conn == Conn::Offline {
+        if self.connection.conn == Conn::Offline {
             return;
         }
-        self.conn = Conn::Offline;
+        self.connection.conn = Conn::Offline;
         self.anon.on_disconnected();
         let pending = std::mem::take(&mut self.requests.pending)
             .into_values()
@@ -359,7 +371,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_ready(&mut self) {
-        self.conn = Conn::Ready;
+        self.connection.conn = Conn::Ready;
         self.emit(Event::Connected);
         self.publish_keys(false);
         self.request(ClientMsg::Bootstrap, Pending::Bootstrap, false);
@@ -402,14 +414,14 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         if session {
-            self.last_rx = self.now;
+            self.connection.last_rx = self.now;
         }
         match msg {
             ServerMsg::Challenge { nonce } => self.on_challenge(&nonce),
             ServerMsg::Ready => self.on_ready(),
             ServerMsg::Pong => {}
             ServerMsg::Superseded => {
-                self.conn = Conn::Offline;
+                self.connection.conn = Conn::Offline;
                 self.emit(Event::Superseded);
                 self.disconnect(false);
             }
@@ -446,7 +458,7 @@ impl<R: CryptoRngCore> Core<R> {
             // Reconnecting cannot help: only a newer app can talk to this
             // server.
             ErrorCode::UnsupportedVersion => {
-                self.conn = Conn::Offline;
+                self.connection.conn = Conn::Offline;
                 self.emit(Event::Warning {
                     reason: FailReason::UpdateRequired,
                 });
@@ -463,7 +475,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_challenge(&mut self, nonce: &[u8; 32]) {
-        if self.conn != Conn::Authenticating {
+        if self.connection.conn != Conn::Authenticating {
             return;
         }
         let mut signed = Vec::with_capacity(SESSION_AUTH_CONTEXT.len() + 36);
@@ -729,23 +741,23 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.expire_skipped_keys();
 
-        if self.conn == Conn::Offline {
+        if self.connection.conn == Conn::Offline {
             return;
         }
-        if self.now.saturating_sub(self.last_rx) >= DEAD_AFTER_MS {
+        if !self.connection.liveness(self.now) {
             self.journal
                 .effects
                 .push(Effect::Disconnect { reconnect: true });
             self.on_disconnected();
             return;
         }
-        if self.conn != Conn::Ready {
+        if self.connection.conn != Conn::Ready {
             return;
         }
         self.ask_key_set();
         self.send_deferred();
-        if self.now.saturating_sub(self.last_ping) >= PING_INTERVAL_MS {
-            self.last_ping = self.now;
+        if self.now.saturating_sub(self.connection.last_ping) >= PING_INTERVAL_MS {
+            self.connection.last_ping = self.now;
             self.transmit(0, ClientMsg::Ping);
         }
         if self.now.saturating_sub(self.last_inbox_fetch) >= INBOX_POLL_MS {
@@ -814,7 +826,7 @@ impl<R: CryptoRngCore> Core<R> {
             .last_repair
             .get(&addr)
             .is_some_and(|at| self.now.saturating_sub(*at) < REPAIR_INTERVAL_MS);
-        if blocked || recent || self.conn != Conn::Ready {
+        if blocked || recent || self.connection.conn != Conn::Ready {
             return;
         }
         self.last_repair.insert(addr, self.now);
@@ -836,7 +848,7 @@ impl<R: CryptoRngCore> Core<R> {
         let recent = self
             .last_resync
             .is_some_and(|at| self.now.saturating_sub(at) < RESYNC_INTERVAL_MS);
-        if recent || self.conn != Conn::Ready {
+        if recent || self.connection.conn != Conn::Ready {
             return;
         }
         self.last_resync = Some(self.now);
@@ -914,7 +926,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Sends a request and tracks it for correlation and timeout. Anonymous
     /// requests go through the anonymity layer instead of the session.
     fn request(&mut self, msg: ClientMsg, pending: Pending, anonymous: bool) {
-        if self.conn != Conn::Ready {
+        if self.connection.conn != Conn::Ready {
             self.fail_request(pending, FailReason::Offline);
             return;
         }
