@@ -373,26 +373,15 @@ impl<R: CryptoRngCore> Core<R> {
     /// Sends `body` to `addr` over the session: the gateway stamps it with
     /// our name.
     fn send_named(&mut self, msg_id: MsgId, addr: Addr, body: Bytes) {
-        let req_id = self.alloc_req();
-        self.pending.insert(
-            req_id,
-            (
-                Pending::Send {
-                    msg_id,
-                    addr,
-                    body: body.clone(),
-                },
-                self.now.saturating_add(super::REQUEST_TIMEOUT_MS),
-            ),
-        );
-        self.transmit(
-            req_id,
+        self.request(
             ClientMsg::Send {
                 to: addr.peer,
                 device: addr.device,
                 want_ack: true,
-                body,
+                body: body.clone(),
             },
+            Pending::Send { msg_id, addr, body },
+            false,
         );
     }
 

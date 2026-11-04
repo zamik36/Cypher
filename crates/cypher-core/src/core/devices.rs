@@ -383,8 +383,6 @@ impl<R: CryptoRngCore> Core<R> {
                 reason,
             });
         };
-        let req_id = self.alloc_req();
-        let deadline = self.now.saturating_add(super::REQUEST_TIMEOUT_MS);
         let send = ClientMsg::Send {
             to: offer.temp,
             device: DeviceId::FIRST,
@@ -394,9 +392,7 @@ impl<R: CryptoRngCore> Core<R> {
         if history {
             self.grant_history(offer.device);
         }
-        self.pending
-            .insert(req_id, (Pending::LinkSend { id, offer }, deadline));
-        self.transmit(req_id, send);
+        self.request(send, Pending::LinkSend { id, offer }, false);
     }
 
     /// The new device has the identity: list it.
@@ -536,7 +532,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         };
         let body = relay::message_body(session.pending_init.as_ref(), &header, &ct);
-        let req_id = self.alloc_req();
+        let req_id = self.requests.alloc_req();
         self.transmit(
             req_id,
             ClientMsg::Send {

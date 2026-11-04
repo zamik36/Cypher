@@ -7,6 +7,7 @@ mod inbox;
 mod messaging;
 mod outbox;
 mod push;
+mod requests;
 mod servers;
 mod sync;
 
@@ -14,7 +15,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
-use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed};
+use cypher_crypto::{IdentityKeyPair, IdentitySeed};
 use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
@@ -22,7 +23,6 @@ use rand_core::CryptoRngCore;
 use crate::CoreError;
 use crate::api::{Command, CommandId, Effect, Event, FailReason, Input};
 use crate::envelope::SyncBody;
-use crate::link::LinkOffer;
 use crate::peer::{
     DecryptedRecord, OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord,
     SkippedKeyRecord,
@@ -44,11 +44,9 @@ use inbox::InboxEpochs;
 use messaging::Joining;
 use outbox::OutboxItem;
 use push::{PushState, Subscription};
+use requests::{MAX_DEFERRED, Pending, REQUEST_TIMEOUT_MS, Requests};
 use servers::ServerKeys;
 
-/// Anonymous requests that wait for the relay at most; more fail at once.
-const MAX_DEFERRED: usize = 64;
-const REQUEST_TIMEOUT_MS: u64 = 15_000;
 const PING_INTERVAL_MS: u64 = 20_000;
 const DEAD_AFTER_MS: u64 = 50_000;
 const INBOX_POLL_MS: u64 = 5 * 60_000;
@@ -66,77 +64,6 @@ enum Conn {
     Offline,
     Authenticating,
     Ready,
-}
-
-#[derive(Debug)]
-enum Pending {
-    CreateLink {
-        id: CommandId,
-    },
-    Resolve {
-        id: CommandId,
-        link: ShareLink,
-    },
-    /// Keys of one device of the host of an invite we are joining by.
-    FetchKeys {
-        link: String,
-        addr: Addr,
-    },
-    /// Keys for a session with one device of a contact: one it has none
-    /// with yet, or one whose messages stopped decrypting.
-    SessionKeys {
-        addr: Addr,
-    },
-    FetchDevices {
-        peer: PeerId,
-        purpose: DevicesFor,
-    },
-    PublishDevices {
-        list: DeviceList,
-        /// A device this one just linked, listed by this publication.
-        linked: Option<devices::Linked>,
-    },
-    /// The hand-over to a new device, for `LinkDevice` `id`.
-    LinkSend {
-        id: CommandId,
-        offer: LinkOffer,
-    },
-    Publish {
-        batch: bool,
-    },
-    Send {
-        msg_id: MsgId,
-        addr: Addr,
-        body: Bytes,
-    },
-    /// The same message sent without our name, through the relay.
-    SendSealed {
-        msg_id: MsgId,
-        addr: Addr,
-        body: Bytes,
-    },
-    InboxPut {
-        msg_id: MsgId,
-        addr: Addr,
-    },
-    /// A read of the inbox of `epoch`; its last one, which closes it, if
-    /// `close`.
-    InboxFetch {
-        epoch: u32,
-        close: bool,
-    },
-    InboxAck {
-        epoch: u32,
-        close: bool,
-    },
-    Bootstrap,
-    PushKey,
-    /// The gateway took this device's access tokens.
-    Access,
-    PushRegister {
-        epoch: u32,
-    },
-    PushUnregister,
 }
 
 /// What a server error means for the request it answers.
@@ -197,11 +124,7 @@ pub struct Core<R> {
     // the same effects in the same order.
     outgoing: BTreeMap<FileId, Outgoing>,
     incoming: BTreeMap<FileId, Incoming>,
-    pending: BTreeMap<u32, (Pending, u64)>,
-    /// Anonymous requests made before it was known how they can go: sent
-    /// once the relay is up, or its wait is over.
-    deferred: VecDeque<(ClientMsg, Pending)>,
-    next_req: u32,
+    requests: Requests,
     conn: Conn,
     last_rx: u64,
     last_ping: u64,
@@ -287,9 +210,7 @@ impl<R: CryptoRngCore> Core<R> {
             outbox,
             outgoing,
             incoming,
-            pending: BTreeMap::new(),
-            deferred: VecDeque::new(),
-            next_req: 0,
+            requests: Requests::default(),
             conn: Conn::Offline,
             last_rx: now_ms,
             last_ping: now_ms,
@@ -426,10 +347,10 @@ impl<R: CryptoRngCore> Core<R> {
         }
         self.conn = Conn::Offline;
         self.anon.on_disconnected();
-        let pending = std::mem::take(&mut self.pending)
+        let pending = std::mem::take(&mut self.requests.pending)
             .into_values()
             .map(|(p, _)| p);
-        let deferred: Vec<_> = self.deferred.drain(..).map(|(_, p)| p).collect();
+        let deferred: Vec<_> = self.requests.deferred.drain(..).map(|(_, p)| p).collect();
         for p in pending.chain(deferred) {
             self.fail_request(p, FailReason::Offline);
         }
@@ -507,7 +428,7 @@ impl<R: CryptoRngCore> Core<R> {
             | ServerMsg::Done
             | ServerMsg::BootstrapInfo { .. }
             | ServerMsg::PushKey { .. }
-            | ServerMsg::Error { .. }) => match self.pending.remove(&req_id) {
+            | ServerMsg::Error { .. }) => match self.requests.pending.remove(&req_id) {
                 Some((pending, _)) => self.on_response(pending, msg),
                 None => {
                     if let ServerMsg::Error { code } = msg {
@@ -795,13 +716,14 @@ impl<R: CryptoRngCore> Core<R> {
     fn on_tick(&mut self) {
         self.anon.expire(self.now);
         let expired: Vec<u32> = self
+            .requests
             .pending
             .iter()
             .filter(|(_, (_, deadline))| *deadline <= self.now)
             .map(|(&id, _)| id)
             .collect();
         for id in expired {
-            if let Some((p, _)) = self.pending.remove(&id) {
+            if let Some((p, _)) = self.requests.pending.remove(&id) {
                 self.fail_request(p, FailReason::Timeout);
             }
         }
@@ -998,14 +920,14 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let readiness = self.anon.readiness(self.now);
         if anonymous && readiness == Readiness::Wait {
-            if self.deferred.len() < MAX_DEFERRED {
-                self.deferred.push_back((msg, pending));
+            if self.requests.deferred.len() < MAX_DEFERRED {
+                self.requests.deferred.push_back((msg, pending));
             } else {
                 self.fail_request(pending, FailReason::Offline);
             }
             return;
         }
-        let req_id = self.alloc_req();
+        let req_id = self.requests.alloc_req();
         let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         let frame = Frame::new(req_id, msg).encode();
         let effect = match (anonymous, readiness) {
@@ -1026,24 +948,19 @@ impl<R: CryptoRngCore> Core<R> {
                 return;
             }
         };
-        self.pending.insert(req_id, (pending, deadline));
+        self.requests.pending.insert(req_id, (pending, deadline));
         self.journal.effects.push(effect);
     }
 
     /// Sends what waited for the relay, once it is up or its wait is over:
     /// through the onion, over the session, or not at all.
     fn send_deferred(&mut self) {
-        if self.deferred.is_empty() || self.anon.readiness(self.now) == Readiness::Wait {
+        if self.requests.deferred.is_empty() || self.anon.readiness(self.now) == Readiness::Wait {
             return;
         }
-        for (msg, pending) in std::mem::take(&mut self.deferred) {
+        for (msg, pending) in std::mem::take(&mut self.requests.deferred) {
             self.request(msg, pending, true);
         }
-    }
-
-    fn alloc_req(&mut self) -> u32 {
-        self.next_req = self.next_req.wrapping_add(1).max(1);
-        self.next_req
     }
 
     fn transmit(&mut self, req_id: u32, msg: ClientMsg) {

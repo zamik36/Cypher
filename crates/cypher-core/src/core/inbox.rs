@@ -148,7 +148,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Whether a request on the inbox of `epoch` is on its way.
     fn inbox_busy(&self, epoch: u32) -> bool {
-        self.pending.values().any(|(p, _)| {
+        self.requests.pending.values().any(|(p, _)| {
             matches!(p, Pending::InboxFetch { epoch: e, .. } | Pending::InboxAck { epoch: e, .. }
                 if *e == epoch)
         })
