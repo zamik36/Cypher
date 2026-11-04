@@ -26,8 +26,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const MAX_REQUEST: usize = 128 * 1024;
-/// How long the key set is answered from memory: it changes weekly, and
-/// clients ask for it on every connection.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long writing one reply to a client may take. Replies are at most a
@@ -39,6 +37,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const PIPELINE: usize = 8;
 const FRAMES_PER_SEC: u64 = 20;
 const BYTES_PER_SEC: u64 = 1 << 20;
+/// How long the key set is answered from memory: it changes weekly, and
+/// clients ask for it on every connection.
 const KEY_SET_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
