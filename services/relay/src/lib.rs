@@ -210,8 +210,11 @@ impl<U: OnionUpstream> Relay<U> {
     /// is refreshed by one task; concurrent callers keep using the stale one.
     async fn key_set(&self) -> Option<Bytes> {
         let cached = self.key_set.lock().ok()?.clone();
-        if let Some((_, set)) = cached.as_ref().filter(|(at, _)| at.elapsed() < KEY_SET_TTL) {
-            return Some(set.clone());
+        if cached
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < KEY_SET_TTL)
+        {
+            return cached.map(|(_, set)| set);
         }
         let Ok(_refresh) = self.key_set_refresh.try_lock() else {
             if let Some((_, set)) = cached {
