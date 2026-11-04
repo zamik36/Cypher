@@ -126,6 +126,8 @@ pub struct Relay<U> {
     metrics: RelayMetrics,
     /// Signaling's key set and when it was fetched.
     key_set: Mutex<Option<(Instant, Bytes)>>,
+    /// At most one task refreshes the key set; the others use stale cache.
+    key_set_refresh: tokio::sync::Mutex<()>,
 }
 
 impl<U: OnionUpstream> Relay<U> {
@@ -134,6 +136,7 @@ impl<U: OnionUpstream> Relay<U> {
             upstream,
             metrics,
             key_set: Mutex::new(None),
+            key_set_refresh: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -203,8 +206,24 @@ impl<U: OnionUpstream> Relay<U> {
 }
 
 impl<U: OnionUpstream> Relay<U> {
-    /// Signaling's key set, from memory while it is fresh.
+    /// Signaling's key set, from memory while it is fresh. An expired entry
+    /// is refreshed by one task; concurrent callers keep using the stale one.
     async fn key_set(&self) -> Option<Bytes> {
+        let cached = self.key_set.lock().ok()?.clone();
+        if let Some((_, set)) = cached.as_ref().filter(|(at, _)| at.elapsed() < KEY_SET_TTL) {
+            return Some(set.clone());
+        }
+        let Ok(_refresh) = self.key_set_refresh.try_lock() else {
+            if let Some((_, set)) = cached {
+                return Some(set);
+            }
+            // With no stale answer, wait for the first fetch rather than
+            // starting another one. A failed fetch is shared by the waiters.
+            let _refresh = self.key_set_refresh.lock().await;
+            return self.key_set.lock().ok()?.clone().map(|(_, set)| set);
+        };
+        // Another refresh may have finished between reading the cache and
+        // acquiring the refresh lock.
         let cached = self.key_set.lock().ok()?.clone();
         if let Some((_, set)) = cached.filter(|(at, _)| at.elapsed() < KEY_SET_TTL) {
             return Some(set);

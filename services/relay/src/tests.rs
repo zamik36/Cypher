@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -15,15 +16,18 @@ use super::*;
 /// Key sets are numbered by how often they were asked for.
 #[derive(Default)]
 struct FakeSignaling {
-    key_sets: std::sync::atomic::AtomicU8,
+    key_sets: AtomicU8,
+    key_set_delay_ms: AtomicU64,
 }
 
 impl OnionUpstream for FakeSignaling {
     async fn forward(&self, subject: &'static str, request: Bytes) -> Option<Bytes> {
         if subject == SIG_KEYS_SUBJECT {
-            let n = self
-                .key_sets
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let delay = self.key_set_delay_ms.load(Ordering::Relaxed);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            let n = self.key_sets.fetch_add(1, Ordering::Relaxed);
             return Some(Bytes::from(vec![b'k', n]));
         }
         if request.starts_with(b"lost") {
@@ -124,6 +128,35 @@ async fn the_key_set_is_cached_and_unknown_tags_are_dropped() {
     conn.send(4, b"after").await;
     assert_eq!(conn.reply().await, (4, Bytes::from_static(b"ok:after")));
     assert_eq!(relay.metrics.dropped.get(), 2);
+}
+
+/// Concurrent misses share one upstream fetch. Once a cached value expires,
+/// one caller refreshes it while the other can still answer with stale data.
+#[tokio::test(start_paused = true)]
+async fn concurrent_key_set_refreshes_are_shared() {
+    let relay = relay();
+    relay
+        .upstream
+        .key_set_delay_ms
+        .store(30_000, Ordering::Relaxed);
+
+    let (first, second) = tokio::join!(relay.key_set(), relay.key_set());
+    assert_eq!(first, Some(Bytes::from_static(&[b'k', 0])));
+    assert_eq!(second, Some(Bytes::from_static(&[b'k', 0])));
+    assert_eq!(relay.upstream.key_sets.load(Ordering::Relaxed), 1);
+
+    tokio::time::sleep(KEY_SET_TTL).await;
+    let (first, second) = tokio::join!(relay.key_set(), relay.key_set());
+    let mut replies = [first, second];
+    replies.sort();
+    assert_eq!(
+        replies,
+        [
+            Some(Bytes::from_static(&[b'k', 0])),
+            Some(Bytes::from_static(&[b'k', 1]))
+        ]
+    );
+    assert_eq!(relay.upstream.key_sets.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test(start_paused = true)]
