@@ -100,3 +100,79 @@ impl Requests {
         self.next_req
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use cypher_crypto::IdentitySeed;
+    use cypher_types::{DeviceId, LinkId};
+    use cypher_wire::{Frame, ServerMsg};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    use super::super::{Conn, Core, Snapshot};
+    use super::*;
+    use crate::api::{Command, Effect, Event, Input};
+
+    fn ready_core() -> Core<ChaCha20Rng> {
+        let (mut core, _) = Core::restore(
+            &IdentitySeed([1; 32]),
+            DeviceId::FIRST,
+            &Snapshot::default(),
+            0,
+            ChaCha20Rng::seed_from_u64(7),
+        )
+        .unwrap();
+        core.connection.conn = Conn::Ready;
+        core
+    }
+
+    fn link(n: u64) -> LinkId {
+        LinkId::parse(&cypher_types::base32(&u128::from(n).to_be_bytes())).unwrap()
+    }
+
+    #[test]
+    fn request_ids_wrap_and_keep_response_correlation() {
+        let mut core = ready_core();
+        core.requests.next_req = u32::MAX - 1;
+        let mut sent = Vec::new();
+        for command in [10, 11, 12] {
+            let effects = core.handle(
+                Input::Command(Command::CreateLink {
+                    id: CommandId(command),
+                }),
+                0,
+            );
+            let [Effect::Transmit(raw)] = effects.as_slice() else {
+                panic!("one CreateLink transmission: {effects:?}");
+            };
+            let frame = Frame::<ClientMsg>::decode(raw.clone()).unwrap();
+            assert!(matches!(frame.msg, ClientMsg::CreateLink));
+            sent.push((frame.req_id, command));
+        }
+        assert_eq!(sent, [(u32::MAX, 10), (1, 11), (2, 12)]);
+
+        for (req_id, command) in [(1, 11), (2, 12), (u32::MAX, 10)] {
+            let effects = core.handle(
+                Input::Frame(
+                    Frame::new(
+                        req_id,
+                        ServerMsg::LinkCreated {
+                            link: link(command),
+                        },
+                    )
+                    .encode(),
+                ),
+                0,
+            );
+            let answered: Vec<_> = effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Emit(Event::LinkCreated { id, .. }) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(answered, [CommandId(command)]);
+        }
+        assert!(core.requests.pending.is_empty());
+    }
+}

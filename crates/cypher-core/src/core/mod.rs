@@ -1495,3 +1495,112 @@ impl RecentIds {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    use super::*;
+
+    fn ready_core() -> Core<ChaCha20Rng> {
+        let (mut core, _) = Core::restore(
+            &IdentitySeed([1; 32]),
+            DeviceId::FIRST,
+            &Snapshot::default(),
+            0,
+            ChaCha20Rng::seed_from_u64(7),
+        )
+        .unwrap();
+        core.connection.conn = Conn::Ready;
+        core
+    }
+
+    fn link(n: usize) -> LinkId {
+        LinkId::parse(&cypher_types::base32(
+            &u128::try_from(n).unwrap().to_be_bytes(),
+        ))
+        .unwrap()
+    }
+
+    fn defer(core: &mut Core<ChaCha20Rng>, n: usize) {
+        let link = link(n);
+        core.request(
+            ClientMsg::ResolveLink { link: link.clone() },
+            Pending::Resolve {
+                id: CommandId(u64::try_from(n).unwrap()),
+                link: ShareLink::new(link, &PeerId([7; 32])),
+            },
+            true,
+        );
+    }
+
+    #[test]
+    fn tick_emits_ping_and_disconnect_exactly_at_their_boundaries() {
+        let mut core = ready_core();
+        drop(core.handle(Input::Tick, 0));
+        let before_ping = core.handle(Input::Tick, 19_999);
+        assert!(before_ping.is_empty(), "{before_ping:?}");
+
+        let ping = core.handle(Input::Tick, 20_000);
+        let [Effect::Transmit(raw)] = ping.as_slice() else {
+            panic!("exactly one ping at 20_000: {ping:?}");
+        };
+        let frame = Frame::<ClientMsg>::decode(raw.clone()).unwrap();
+        assert_eq!(frame.req_id, 0);
+        assert!(matches!(frame.msg, ClientMsg::Ping));
+
+        let before_dead = core.handle(Input::Tick, 49_999);
+        assert!(
+            !before_dead
+                .iter()
+                .any(|effect| matches!(effect, Effect::Disconnect { .. }))
+        );
+        let dead = core.handle(Input::Tick, 50_000);
+        assert_eq!(
+            dead.iter()
+                .filter(|effect| matches!(effect, Effect::Disconnect { reconnect: true }))
+                .count(),
+            1,
+            "exactly one reconnect at 50_000: {dead:?}"
+        );
+    }
+
+    #[test]
+    fn the_sixty_fifth_deferred_request_fails_without_displacing_the_first_64() {
+        let mut core = ready_core();
+        for n in 0..MAX_DEFERRED {
+            defer(&mut core, n);
+        }
+        assert_eq!(core.requests.deferred.len(), MAX_DEFERRED);
+        assert!(core.journal.effects.is_empty());
+
+        defer(&mut core, MAX_DEFERRED);
+        assert_eq!(core.requests.deferred.len(), MAX_DEFERRED);
+        let expected: Vec<_> = (0..MAX_DEFERRED).map(link).collect();
+        for ((message, _), expected) in core.requests.deferred.iter().zip(&expected) {
+            assert!(matches!(message, ClientMsg::ResolveLink { link } if link == expected));
+        }
+        let overflow = std::mem::take(&mut core.journal.effects);
+        let [Effect::Emit(Event::JoinFailed { id, reason, .. })] = overflow.as_slice() else {
+            panic!("only the sixty-fifth request fails: {overflow:?}");
+        };
+        assert_eq!(*id, CommandId(MAX_DEFERRED as u64));
+        assert_eq!(*reason, FailReason::Offline);
+
+        core.anon.on_bootstrap(None, 0);
+        core.send_deferred();
+        assert!(core.requests.deferred.is_empty());
+        assert_eq!(core.requests.pending.len(), MAX_DEFERRED);
+        let sent = std::mem::take(&mut core.journal.effects);
+        assert_eq!(sent.len(), MAX_DEFERRED);
+        for (n, (effect, expected)) in sent.iter().zip(&expected).enumerate() {
+            let Effect::Transmit(raw) = effect else {
+                panic!("only transmissions after the wait: {effect:?}");
+            };
+            let frame = Frame::<ClientMsg>::decode(raw.clone()).unwrap();
+            assert_eq!(frame.req_id, u32::try_from(n + 1).unwrap());
+            assert!(matches!(frame.msg, ClientMsg::ResolveLink { link } if link == *expected));
+        }
+    }
+}
