@@ -68,10 +68,10 @@ pub struct Limits {
 }
 
 pub struct Gateway<B> {
-    pub bus: B,
-    pub registry: Registry,
-    pub limits: Limits,
-    pub metrics: Metrics,
+    bus: B,
+    registry: Registry,
+    limits: Limits,
+    metrics: Metrics,
     next_conn: AtomicU64,
     outbox_budget: Arc<Budget>,
 }
@@ -86,6 +86,15 @@ impl<B: Bus> Gateway<B> {
             next_conn: AtomicU64::new(1),
             outbox_budget: Budget::new(limits.outbox_bytes),
         }
+    }
+
+    pub(crate) fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// Drives one connection until it closes, whatever the transport.

@@ -96,7 +96,7 @@ impl<B: Bus> Handler for Gateway<B> {
     }
 
     fn rejected(&self) {
-        self.metrics.rejected.inc();
+        self.metrics().rejected.inc();
     }
 }
 

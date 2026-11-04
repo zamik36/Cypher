@@ -5,33 +5,33 @@ use tokio_util::sync::CancellationToken;
 use crate::outbox::Outbox;
 
 #[derive(Clone)]
-pub struct ConnHandle {
-    pub conn_id: u64,
-    pub outbox: Outbox,
-    pub kick: CancellationToken,
+pub(crate) struct ConnHandle {
+    pub(crate) conn_id: u64,
+    pub(crate) outbox: Outbox,
+    pub(crate) kick: CancellationToken,
 }
 
 /// Authenticated sessions on this node, one per device of a peer, for
 /// zero-hop local delivery.
 #[derive(Default)]
-pub struct Registry {
+pub(crate) struct Registry {
     devices: DashMap<Addr, ConnHandle>,
 }
 
 impl Registry {
     /// Registers `handle`, returning the session of the same device it
     /// replaced.
-    pub fn insert(&self, addr: Addr, handle: ConnHandle) -> Option<ConnHandle> {
+    pub(crate) fn insert(&self, addr: Addr, handle: ConnHandle) -> Option<ConnHandle> {
         self.devices.insert(addr, handle)
     }
 
     /// Clones the handle out so no map guard outlives this call.
-    pub fn get(&self, addr: &Addr) -> Option<ConnHandle> {
+    pub(crate) fn get(&self, addr: &Addr) -> Option<ConnHandle> {
         self.devices.get(addr).map(|h| h.value().clone())
     }
 
     /// Removes the entry only if it still belongs to `conn_id`.
-    pub fn remove(&self, addr: &Addr, conn_id: u64) {
+    pub(crate) fn remove(&self, addr: &Addr, conn_id: u64) {
         self.devices.remove_if(addr, |_, h| h.conn_id == conn_id);
     }
 }
