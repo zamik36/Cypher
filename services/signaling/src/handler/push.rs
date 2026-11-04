@@ -13,12 +13,7 @@ impl Handler {
         msg: ClientMsg,
     ) -> redis::RedisResult<ServerMsg> {
         match (msg, caller) {
-            (ClientMsg::PushKey, _) => Ok(self.push.as_ref().map_or_else(
-                || error(ErrorCode::Unavailable),
-                |push| ServerMsg::PushKey {
-                    key: push.public_key(),
-                },
-            )),
+            (ClientMsg::PushKey, _) => Ok(self.push_key()),
             (
                 ClientMsg::PushRegister {
                     proof,
@@ -50,8 +45,39 @@ impl Handler {
             }
             // Registering only anonymously: a session would tie the
             // device's push address to its identity.
-            _ => Ok(error(ErrorCode::BadRequest)),
+            (
+                ClientMsg::PushRegister { .. } | ClientMsg::PushUnregister { .. },
+                Caller::Session(_),
+            )
+            | (
+                ClientMsg::Hello { .. }
+                | ClientMsg::Auth { .. }
+                | ClientMsg::Ping
+                | ClientMsg::Send { .. }
+                | ClientMsg::SendSealed { .. }
+                | ClientMsg::SetAccess { .. }
+                | ClientMsg::PublishKeys { .. }
+                | ClientMsg::FetchKeys { .. }
+                | ClientMsg::PublishDevices { .. }
+                | ClientMsg::FetchDevices { .. }
+                | ClientMsg::CreateLink
+                | ClientMsg::ResolveLink { .. }
+                | ClientMsg::InboxPut { .. }
+                | ClientMsg::InboxFetch { .. }
+                | ClientMsg::InboxAck { .. }
+                | ClientMsg::Bootstrap,
+                _,
+            ) => Ok(error(ErrorCode::BadRequest)),
         }
+    }
+
+    fn push_key(&self) -> ServerMsg {
+        self.push.as_ref().map_or_else(
+            || error(ErrorCode::Unavailable),
+            |push| ServerMsg::PushKey {
+                key: push.public_key(),
+            },
+        )
     }
 
     async fn push_register(
