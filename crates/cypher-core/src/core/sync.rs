@@ -96,8 +96,8 @@ fn state_bodies(
 impl<R: CryptoRngCore> Core<R> {
     /// Tells this identity's other devices; nothing when there are none.
     pub(super) fn sync(&mut self, body: SyncBody) {
-        if !self.devices_of(self.peer_id).is_empty() {
-            self.send_control(self.peer_id, Body::Sync(body));
+        if !self.devices_of(self.me.peer_id).is_empty() {
+            self.send_control(self.me.peer_id, Body::Sync(body));
         }
     }
 
@@ -185,7 +185,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn send_state_request(&mut self) {
-        if self.devices_of(self.peer_id).is_empty() {
+        if self.devices_of(self.me.peer_id).is_empty() {
             return;
         }
         let request = self.random_id();
@@ -344,8 +344,8 @@ impl<R: CryptoRngCore> Core<R> {
             .collect();
         let id = self.random_id();
         let Ok(bodies) = state_bodies(
-            self.profile_name.as_deref(),
-            &self.own_links,
+            self.profile.name.as_deref(),
+            &self.profile.own_links,
             &contacts,
             id,
             request,
@@ -363,7 +363,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// A contact as another device keeps it: added here when new, made the
     /// same otherwise. Sessions with their devices come when first needed.
     fn adopt_contact(&mut self, state: ContactState) {
-        if state.peer == self.peer_id {
+        if state.peer == self.me.peer_id {
             return;
         }
         let devices = state
@@ -392,7 +392,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn adopt_link(&mut self, code: &str, at_ms: u64) {
-        if !self.own_links.iter().any(|(c, _)| c == code) {
+        if !self.profile.own_links.iter().any(|(c, _)| c == code) {
             self.remember_link(code, at_ms);
         }
     }
@@ -474,7 +474,7 @@ mod tests {
         )
         .unwrap();
         core.devices.own =
-            Some(DeviceList::sign(&core.identity, 1, [DeviceId::FIRST, DeviceId(2)]).unwrap());
+            Some(DeviceList::sign(&core.me.identity, 1, [DeviceId::FIRST, DeviceId(2)]).unwrap());
         core.devices.awaiting_state = true;
         core
     }
@@ -491,6 +491,7 @@ mod tests {
 
     fn outbox_state_requests(core: &Core<rand::rngs::OsRng>) -> Vec<MsgId> {
         core.outbox
+            .items
             .values()
             .filter_map(|item| {
                 let envelope = Envelope::decode(item.envelope()).ok()?;
@@ -555,7 +556,7 @@ mod tests {
     #[test]
     fn state_tracking_bounds_parts_and_response_ids() {
         let mut core = waiting_core(0);
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         core.on_state(
             sender,
             None,
@@ -584,8 +585,8 @@ mod tests {
     #[test]
     fn the_first_complete_reply_clears_every_siblings_parts() {
         let mut core = waiting_core(0);
-        let first = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
-        let second = Addr::new(core.peer_id, cypher_types::DeviceId(3));
+        let first = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
+        let second = Addr::new(core.me.peer_id, cypher_types::DeviceId(3));
         core.on_state(first, None, Vec::new(), Vec::new(), part(1, 0, 2));
         core.on_state(second, None, Vec::new(), Vec::new(), part(2, 0, 2));
         assert_eq!(core.devices.state_replies.len(), 2);
@@ -598,7 +599,7 @@ mod tests {
     #[test]
     fn only_the_current_response_completes_when_old_parts_arrive_late() {
         let mut core = requested_core(0);
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         let current = current_request(&core);
         let old = MsgId([250; 16]);
         assert_ne!(old, current);
@@ -646,7 +647,7 @@ mod tests {
     #[test]
     fn a_current_response_can_finish_last_part_first_with_duplicates() {
         let mut core = requested_core(0);
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         let request = current_request(&core);
         for index in [2, 0, 2] {
             core.on_state(
@@ -671,7 +672,7 @@ mod tests {
     #[test]
     fn a_retry_supersedes_the_old_request_without_ordering_random_ids() {
         let mut core = requested_core(0);
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         let first = current_request(&core);
         core.on_state(sender, None, Vec::new(), Vec::new(), reply(first, 1, 0, 2));
 
@@ -693,7 +694,7 @@ mod tests {
     #[test]
     fn uncorrelated_responses_apply_but_do_not_complete_a_new_request() {
         let mut core = requested_core(0);
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         core.on_state(sender, None, vec![contact(1)], Vec::new(), None);
         core.on_state(sender, None, vec![contact(2)], Vec::new(), part(1, 0, 1));
         assert!(core.devices.awaiting_state);
@@ -719,8 +720,8 @@ mod tests {
     #[test]
     fn response_tracking_is_bounded_and_isolated_per_sender() {
         let mut core = requested_core(0);
-        let first = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
-        let second = Addr::new(core.peer_id, cypher_types::DeviceId(3));
+        let first = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
+        let second = Addr::new(core.me.peer_id, cypher_types::DeviceId(3));
         let request = current_request(&core);
         for (sender, id) in [(first, 1), (first, 2), (second, 4)] {
             core.on_state(
@@ -771,7 +772,7 @@ mod tests {
             assert_due_state_request(&core, &mut requests, expected, minute);
         }
 
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         let request = current_request(&core);
         core.on_state(
             sender,
@@ -826,14 +827,14 @@ mod tests {
     #[cfg_attr(miri, ignore = "builds 51,201 peers; over 20 minutes under Miri")]
     fn oversized_state_replies_send_no_parts_and_leave_requester_waiting() {
         let mut core = requested_core(0);
-        core.outbox.clear();
-        core.effects.clear();
+        core.outbox.items.clear();
+        core.journal.effects.clear();
         for n in 0..=MAX_STATE_PARTS as usize * MAX_STATE_CONTACTS {
             let mut peer = [0_u8; 32];
             peer[..8].copy_from_slice(&(n as u64).to_be_bytes());
             core.peers.insert(PeerId(peer), Peer::new([0; 32]));
         }
-        let sender = Addr::new(core.peer_id, cypher_types::DeviceId::FIRST);
+        let sender = Addr::new(core.me.peer_id, cypher_types::DeviceId::FIRST);
         core.on_sync(
             sender,
             SyncBody::StateRequest {
@@ -841,10 +842,13 @@ mod tests {
             },
         );
 
-        assert!(core.outbox.is_empty(), "not even one State part goes out");
-        assert_eq!(core.effects.len(), 1);
+        assert!(
+            core.outbox.items.is_empty(),
+            "not even one State part goes out"
+        );
+        assert_eq!(core.journal.effects.len(), 1);
         assert!(matches!(
-            core.effects[0],
+            core.journal.effects[0],
             Effect::Emit(Event::Warning {
                 reason: FailReason::TooLarge
             })

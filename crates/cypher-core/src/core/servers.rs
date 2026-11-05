@@ -41,16 +41,25 @@ impl ServerKeys {
     }
 }
 
+pub(super) struct Servers {
+    /// The address of the server this device connects to.
+    pub(super) current: String,
+    pub(super) keys: ServerKeys,
+    /// A signing key a server showed that is not the one remembered for
+    /// it, and that server's address: the key is trusted for it alone.
+    pub(super) offered: Option<(String, [u8; 32])>,
+}
+
 impl<R: CryptoRngCore> Core<R> {
     /// The signing key the server showed, if it is the one remembered for
     /// it (or the first it ever showed). Another key is reported and not
     /// used until the user trusts it.
     pub(super) fn checked_server_key(&mut self, shown: [u8; 32]) -> Option<[u8; 32]> {
-        match self.server_keys.get(&self.server) {
+        match self.servers.keys.get(&self.servers.current) {
             Some(known) if *known == shown => Some(shown),
             Some(_) => {
-                let server = self.server.clone();
-                self.offered_key = Some((server.clone(), shown));
+                let server = self.servers.current.clone();
+                self.servers.offered = Some((server.clone(), shown));
                 self.emit(Event::ServerKeyChanged { server });
                 None
             }
@@ -64,10 +73,10 @@ impl<R: CryptoRngCore> Core<R> {
     /// The server this device connects to from now on. A key another
     /// server offered is not this one's to trust.
     pub(super) fn set_server(&mut self, addr: String) {
-        if addr != self.server {
-            self.offered_key = None;
+        if addr != self.servers.current {
+            self.servers.offered = None;
         }
-        self.server = addr;
+        self.servers.current = addr;
     }
 
     /// The user trusts the key the server showed instead of the one
@@ -75,10 +84,10 @@ impl<R: CryptoRngCore> Core<R> {
     /// for the server that showed it: an answer to a prompt about another
     /// server pins nothing.
     pub(super) fn trust_server_key(&mut self) {
-        let Some((server, key)) = self.offered_key.take() else {
+        let Some((server, key)) = self.servers.offered.take() else {
             return;
         };
-        if server != self.server {
+        if server != self.servers.current {
             return;
         }
         self.remember_server_key(key);
@@ -87,12 +96,12 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn remember_server_key(&mut self, key: [u8; 32]) {
-        let server = self.server.clone();
-        self.server_keys.pin(&server, key);
-        let op = self.vault.put(
+        let server = self.servers.current.clone();
+        self.servers.keys.pin(&server, key);
+        let op = self.journal.vault.put(
             Table::Meta,
             META_SERVERS.to_vec(),
-            &self.server_keys,
+            &self.servers.keys,
             &mut self.rng,
         );
         self.persist(op);

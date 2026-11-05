@@ -89,17 +89,21 @@ impl<R: CryptoRngCore> Core<R> {
         self.history.building = Some((device, file_id));
         self.persist_history();
         let partial = self.partial_media();
-        self.effects.push(Effect::BuildHistory { file_id, partial });
+        self.journal
+            .effects
+            .push(Effect::BuildHistory { file_id, partial });
     }
 
     /// Voice and video notes still on their way: their copies are not whole.
     fn partial_media(&self) -> Vec<FileId> {
         let outgoing = self
+            .transfers
             .outgoing
             .iter()
             .filter(|(_, o)| o.kind.is_media())
             .map(|(id, _)| *id);
         let incoming = self
+            .transfers
             .incoming
             .iter()
             .filter(|(_, i)| i.kind.is_media())
@@ -131,10 +135,10 @@ impl<R: CryptoRngCore> Core<R> {
             key: *FileKey::random(&mut self.rng).as_bytes(),
             inline: None,
         };
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         let out = Outgoing::new(own, desc.clone(), MediaKind::File);
         self.persist_transfer_record(file_id, &out.to_record());
-        self.outgoing.insert(file_id, out);
+        self.transfers.outgoing.insert(file_id, out);
         self.send_control_to(
             Addr::new(own, device),
             Body::Sync(SyncBody::History { desc }),
@@ -144,7 +148,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// A sibling offers its history: taken once, while this device is new.
     pub(super) fn on_history_offer(&mut self, sender: Addr, desc: FileDesc) {
         let file_id = desc.file_id;
-        let known = self.incoming.contains_key(&file_id) || self.outgoing.contains_key(&file_id);
+        let known = self.transfers.incoming.contains_key(&file_id)
+            || self.transfers.outgoing.contains_key(&file_id);
         if self.history.inbound != Inbound::Open || known {
             return;
         }
@@ -152,7 +157,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.persist_history();
         let inc = Incoming::new(sender, desc, MediaKind::File);
         self.persist_transfer_record(file_id, &inc.to_record());
-        self.incoming.insert(file_id, inc);
+        self.transfers.incoming.insert(file_id, inc);
         self.accept_file(&file_id);
     }
 
@@ -160,7 +165,7 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn import_history(&mut self, file_id: FileId) {
         self.history.inbound = Inbound::Importing(file_id);
         self.persist_history();
-        self.effects.push(Effect::ImportHistory { file_id });
+        self.journal.effects.push(Effect::ImportHistory { file_id });
     }
 
     pub(super) fn on_history_imported(&mut self, file_id: FileId, ok: bool) {
@@ -193,14 +198,16 @@ impl<R: CryptoRngCore> Core<R> {
                 reason: FailReason::Cancelled,
             });
         }
-        let own = self.peer_id;
+        let own = self.me.peer_id;
         let transfers: Vec<FileId> = self
+            .transfers
             .outgoing
             .iter()
             .filter(|(_, o)| o.peer == own)
             .map(|(id, _)| *id)
             .chain(
-                self.incoming
+                self.transfers
+                    .incoming
                     .iter()
                     .filter(|(_, i)| i.peer == own)
                     .map(|(id, _)| *id),
@@ -216,15 +223,17 @@ impl<R: CryptoRngCore> Core<R> {
     pub(super) fn resume_history(&mut self) {
         if let Some((_, file_id)) = self.history.building {
             let partial = self.partial_media();
-            self.effects.push(Effect::BuildHistory { file_id, partial });
+            self.journal
+                .effects
+                .push(Effect::BuildHistory { file_id, partial });
         }
         if let Inbound::Importing(file_id) = self.history.inbound {
-            self.effects.push(Effect::ImportHistory { file_id });
+            self.journal.effects.push(Effect::ImportHistory { file_id });
         }
     }
 
     fn persist_history(&mut self) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_HISTORY.to_vec(),
             &self.history,

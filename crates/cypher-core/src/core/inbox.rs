@@ -48,7 +48,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn inbox_key(&self, epoch: u32) -> InboxKey {
-        self.seed.derive_inbox_key(self.device, epoch)
+        self.me.seed.derive_inbox_key(self.me.device, epoch)
     }
 
     /// This device's inbox for the current epoch.
@@ -58,15 +58,18 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// The inbox of the identity's `device` for the current epoch.
     pub(super) fn own_inbox_of(&self, device: DeviceId) -> [u8; 32] {
-        self.seed.derive_inbox_key(device, self.inbox_epoch()).id()
+        self.me
+            .seed
+            .derive_inbox_key(device, self.inbox_epoch())
+            .id()
     }
 
     /// How the identity's `device` is reached now and next epoch, as
     /// contacts are told.
     pub(super) fn own_ad(&self, device: DeviceId) -> InboxAd {
         let (epoch, next) = (self.inbox_epoch(), self.inbox_epoch().saturating_add(1));
-        let id = |epoch| self.seed.derive_inbox_key(device, epoch).id();
-        let token = |epoch| self.seed.derive_access_token(device, epoch);
+        let id = |epoch| self.me.seed.derive_inbox_key(device, epoch).id();
+        let token = |epoch| self.me.seed.derive_access_token(device, epoch);
         InboxAd {
             epoch,
             ids: [id(epoch), id(next)],
@@ -82,7 +85,7 @@ impl<R: CryptoRngCore> Core<R> {
         let hashes = [epoch.checked_sub(1), Some(epoch), epoch.checked_add(1)]
             .into_iter()
             .flatten()
-            .map(|e| cypher_wire::access_hash(&self.seed.derive_access_token(self.device, e)))
+            .map(|e| cypher_wire::access_hash(&self.me.seed.derive_access_token(self.me.device, e)))
             .collect();
         self.request(ClientMsg::SetAccess { hashes }, Pending::Access, false);
     }
@@ -102,7 +105,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// epoch's and the last one's, and now and then the ones beyond. One
     /// request per epoch is in flight at most.
     pub(super) fn fetch_inbox(&mut self) {
-        if self.conn != Conn::Ready
+        if self.connection.conn != Conn::Ready
             || !matches!(
                 self.anon.readiness(self.now),
                 Readiness::Onion | Readiness::Session
@@ -145,7 +148,7 @@ impl<R: CryptoRngCore> Core<R> {
 
     /// Whether a request on the inbox of `epoch` is on its way.
     fn inbox_busy(&self, epoch: u32) -> bool {
-        self.pending.values().any(|(p, _)| {
+        self.requests.pending.values().any(|(p, _)| {
             matches!(p, Pending::InboxFetch { epoch: e, .. } | Pending::InboxAck { epoch: e, .. }
                 if *e == epoch)
         })
@@ -191,7 +194,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Once per epoch: tells every contact of the inboxes read from now
     /// on, then closes those no longer read, oldest first.
     pub(super) fn turn_inbox_epoch(&mut self) {
-        if self.conn != Conn::Ready {
+        if self.connection.conn != Conn::Ready {
             return;
         }
         let current = self.inbox_epoch();
@@ -217,7 +220,7 @@ impl<R: CryptoRngCore> Core<R> {
         }
         let epoch = self.inbox_epochs.open_from;
         if epoch.saturating_add(3) > current
-            || self.conn != Conn::Ready
+            || self.connection.conn != Conn::Ready
             || !matches!(
                 self.anon.readiness(self.now),
                 Readiness::Onion | Readiness::Session
@@ -243,7 +246,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn persist_inbox_epochs(&mut self) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_INBOX.to_vec(),
             &self.inbox_epochs,
@@ -255,7 +258,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// An item sealed to this identity, from an inbox or delivered sealed:
     /// the sender it names is proven by the session the body decrypts in.
     pub(super) fn on_inbox_item(&mut self, item: &[u8]) {
-        let Ok(plain) = cypher_crypto::sealed::open(&self.identity.dh_secret, item) else {
+        let Ok(plain) = cypher_crypto::sealed::open(&self.me.identity.dh_secret, item) else {
             return;
         };
         let Some((from, rest)) = plain.split_first_chunk::<32>() else {
