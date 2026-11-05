@@ -12,7 +12,7 @@
 use bytes::Bytes;
 use cypher_crypto::{IdentityKeyPair, IdentitySeed, sealed};
 use cypher_types::hex;
-use cypher_types::{DeviceId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{DeviceId, PeerId, session_auth_message};
 use cypher_wire::{ClientMsg, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
@@ -195,12 +195,7 @@ impl Provision {
         };
         match msg {
             ServerMsg::Challenge { nonce } => {
-                let signed = [
-                    SESSION_AUTH_CONTEXT,
-                    nonce.as_slice(),
-                    &DeviceId::FIRST.0.to_le_bytes(),
-                ]
-                .concat();
+                let signed = session_auth_message(&nonce, DeviceId::FIRST);
                 let signature = self.temp.sign(&signed).to_bytes();
                 let auth = ClientMsg::Auth { signature };
                 effects.push(Effect::Transmit(Frame::new(0, auth).encode()));

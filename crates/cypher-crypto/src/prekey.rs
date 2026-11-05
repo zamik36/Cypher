@@ -147,6 +147,14 @@ impl PrekeyBundle {
         }
     }
 
+    /// Decodes the base bundle stored by signaling, which omits the absent
+    /// one-time prekey marker.
+    pub fn decode_base(base: &[u8]) -> Result<Self, CryptoError> {
+        let mut full = base.to_vec();
+        full.push(0);
+        Self::decode(&full)
+    }
+
     /// Strict decoder: rejects trailing bytes so encodings are canonical.
     pub fn decode(b: &[u8]) -> Result<Self, CryptoError> {
         let mut r = crate::reader::Reader::new(b);

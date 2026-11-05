@@ -62,6 +62,10 @@ jobs:
       # Default members: everything but the desktop app, tested in its own job.
       - name: cargo nextest
         run: cargo nextest run --all-features --profile ci
+      - name: TLS feature tests
+        run: |
+          cargo nextest run -p cypher-tls --no-default-features --locked --profile ci
+          cargo nextest run -p cypher-tls --features server --locked --profile ci
       - name: Doctests
         run: cargo test --doc --all-features
       - name: Upload test report
@@ -146,7 +150,7 @@ jobs:
       - name: Every feature on its own
         run: >-
           cargo hack clippy --each-feature --all-targets
-          -p cypher-media -p cypher-client -p cypher-transport -- -D warnings
+          -p cypher-media -p cypher-client -p cypher-tls -p cypher-transport -- -D warnings
       # Same images as docker-compose.prod.yml.
       - name: Alert rules, Prometheus and Alertmanager config
         run: |
@@ -193,6 +197,7 @@ jobs:
           - { crate: cypher-wire, name: fuzz_frames }
           - { crate: cypher-wire, name: fuzz_bodies }
           - { crate: cypher-wire, name: fuzz_history }
+          - { crate: cypher-wire, name: fuzz_relay }
           - { crate: cypher-crypto, name: fuzz_aead }
           - { crate: cypher-crypto, name: fuzz_ratchet }
           - { crate: cypher-crypto, name: fuzz_decoders }

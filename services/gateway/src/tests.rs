@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cypher_crypto::IdentityKeyPair;
-use cypher_types::{Addr, DeviceId, MAX_FRAME_SIZE, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, DeviceId, MAX_FRAME_SIZE, PeerId, session_auth_message};
 use cypher_wire::{
     ClientMsg, DeliveryStatus, ErrorCode, Frame, MAX_BODY_LEN, PROTOCOL_VERSION, ServerMsg,
 };
@@ -105,9 +105,7 @@ impl Client {
         else {
             panic!("expected challenge");
         };
-        let mut signed = SESSION_AUTH_CONTEXT.to_vec();
-        signed.extend_from_slice(&nonce);
-        signed.extend_from_slice(&self.device.0.to_le_bytes());
+        let signed = session_auth_message(&nonce, self.device);
         let signature = self.id.sign(&signed).to_bytes();
         self.send(0, ClientMsg::Auth { signature }).await;
         assert!(matches!(self.recv().await.unwrap().msg, ServerMsg::Ready));
@@ -234,7 +232,7 @@ async fn sender_is_stamped_by_the_gateway() {
         }
         other => panic!("unexpected {other:?}"),
     }
-    assert_eq!(gw.metrics.delivered_local.get(), 1);
+    assert_eq!(gw.metrics().delivered_local.get(), 1);
 }
 
 #[tokio::test]
@@ -256,7 +254,7 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
     let gw = gateway(&MemBus::default());
     let mut a = Client::connect(&gw);
     let b = first(PeerId([8; 32]));
-    gw.registry.insert(
+    gw.registry().insert(
         b,
         crate::registry::ConnHandle {
             conn_id: u64::MAX,
@@ -273,8 +271,8 @@ async fn slow_consumer_gets_busy_instead_of_stalling_the_sender() {
         }
     ));
     // A refused delivery counts as busy, not as delivered.
-    assert_eq!(gw.metrics.delivered_local.get(), 0);
-    assert_eq!(gw.metrics.busy.get(), 1);
+    assert_eq!(gw.metrics().delivered_local.get(), 0);
+    assert_eq!(gw.metrics().busy.get(), 1);
 }
 
 fn send_body(to: Addr, want_ack: bool, body: Bytes) -> ClientMsg {
@@ -339,7 +337,7 @@ async fn stalled_readers_cannot_hold_more_than_the_outbox_budget() {
     }
     let queued: usize = stalled
         .iter()
-        .map(|c| gw.registry.get(&c.addr()).unwrap().outbox.queued())
+        .map(|c| gw.registry().get(&c.addr()).unwrap().outbox.queued())
         .sum();
     assert_eq!(queued, gw.outbox_used());
     assert!(
@@ -401,7 +399,7 @@ async fn frames_count_until_written() {
     }
     sender.sync().await;
     let each = cypher_wire::encode_recv(&sender.peer(), sender.device, b"x").len();
-    let outbox = gw.registry.get(&slow.addr()).unwrap().outbox;
+    let outbox = gw.registry().get(&slow.addr()).unwrap().outbox;
     assert_eq!(outbox.queued(), 4 * each, "none is written yet");
     assert_eq!(gw.outbox_used(), 4 * each);
 
@@ -433,11 +431,15 @@ async fn a_client_that_stops_reading_is_released_after_idling() {
         sender.send(req_id, send(stalled.addr(), false, b"x")).await;
     }
     sender.sync().await;
-    assert_eq!(gw.metrics.connections.get(), 2);
+    assert_eq!(gw.metrics().connections.get(), 2);
 
     tokio::time::sleep(IDLE_TIMEOUT + WRITER_GRACE + Duration::from_secs(1)).await;
-    assert!(gw.registry.get(&stalled.addr()).is_none());
-    assert_eq!(gw.metrics.connections.get(), 0, "both sessions are closed");
+    assert!(gw.registry().get(&stalled.addr()).is_none());
+    assert_eq!(
+        gw.metrics().connections.get(),
+        0,
+        "both sessions are closed"
+    );
 }
 
 /// A client that keeps sending but stops reading never idles out;
@@ -453,10 +455,10 @@ async fn a_stalled_write_closes_the_session() {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
     assert!(
-        gw.registry.get(&stalled.addr()).is_none(),
+        gw.registry().get(&stalled.addr()).is_none(),
         "unanswered for longer than the write timeout"
     );
-    assert_eq!(gw.metrics.connections.get(), 0);
+    assert_eq!(gw.metrics().connections.get(), 0);
 }
 
 #[tokio::test]
@@ -472,7 +474,7 @@ async fn second_login_supersedes_the_first() {
         ServerMsg::Superseded
     ));
     assert!(first.closed().await);
-    assert_eq!(gw.registry.get(&second.addr()).map(|_| ()), Some(()));
+    assert_eq!(gw.registry().get(&second.addr()).map(|_| ()), Some(()));
 }
 
 /// Devices of one identity are separate sessions: signing in on one keeps
@@ -690,10 +692,10 @@ async fn failed_publishes_are_counted() {
     let gw = Arc::new(Gateway::new(NoPublish::default(), LIMITS, metrics()));
     let mut a = Client::connect(&gw);
     a.authenticate().await;
-    assert_eq!(gw.metrics.publish_failed.get(), 1, "the eviction");
+    assert_eq!(gw.metrics().publish_failed.get(), 1, "the eviction");
     a.send(1, send(first(PeerId([3; 32])), false, b"x")).await;
     a.sync().await;
-    assert_eq!(gw.metrics.publish_failed.get(), 2, "the relay");
+    assert_eq!(gw.metrics().publish_failed.get(), 2, "the relay");
 }
 
 /// A gateway of the previous release announces a login by an empty message
@@ -823,7 +825,7 @@ async fn frames_over_the_rate_limit_are_answered_once_per_interval() {
     };
     assert_eq!(a.recv().await.unwrap(), limited(1));
     assert_eq!(a.recv().await, None, "2 and 3 are dropped silently");
-    assert_eq!(gw.metrics.rate_limited.get(), 3);
+    assert_eq!(gw.metrics().rate_limited.get(), 3);
 
     tokio::time::sleep(LIMIT_NOTICE_INTERVAL).await;
     a.send(6, ClientMsg::Ping).await;

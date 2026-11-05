@@ -1,23 +1,32 @@
 //! TLS `ServerConfig` and `ClientConfig` builders.
 
-use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+#[cfg(feature = "server")]
+use std::{path::Path, time::Duration};
 
 use cypher_types::{Error, Result};
+#[cfg(feature = "server")]
+use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::ring::default_provider;
+use rustls::pki_types::CertificateDer;
+#[cfg(feature = "server")]
+use rustls::pki_types::PrivateKeyDer;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ClientConfig, ConfigBuilder, RootCertStore, ServerConfig, WantsVerifier};
+use rustls::{ClientConfig, ConfigBuilder, RootCertStore, WantsVerifier};
 use tracing::debug;
 
+#[cfg(feature = "server")]
 use crate::cert::SelfSignedCert;
-use crate::reload::{PemCert, pem_reason};
+use crate::error::{pem_reason, transport};
+#[cfg(feature = "server")]
+use crate::reload::PemCert;
 
 /// How long a service waits for certificates another container writes
 /// (e.g. Caddy with auto-HTTPS) before giving up.
+#[cfg(feature = "server")]
 const PEM_ATTEMPTS: u32 = 30;
+#[cfg(feature = "server")]
 const PEM_RETRY: Duration = Duration::from_secs(2);
 
 /// The crypto every config here is built with. The process-wide default
@@ -27,6 +36,7 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(default_provider())
 }
 
+#[cfg(feature = "server")]
 fn server_builder() -> Result<ConfigBuilder<ServerConfig, WantsVerifier>> {
     ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
@@ -39,15 +49,13 @@ fn client_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>> {
         .map_err(|e| transport("TLS client config error", e))
 }
 
-fn transport(context: &str, e: impl std::fmt::Display) -> Error {
-    Error::Transport(format!("{context}: {e}"))
-}
-
 /// Build a TLS [`ServerConfig`] from a [`SelfSignedCert`].
+#[cfg(feature = "server")]
 pub fn make_server_config_from_cert(cert: SelfSignedCert) -> Result<Arc<ServerConfig>> {
     server_config(vec![cert.cert_der], cert.key_der)
 }
 
+#[cfg(feature = "server")]
 fn server_config(
     certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
@@ -62,6 +70,7 @@ fn server_config(
 
 /// Server config from CA-issued PEM files (e.g. Let's Encrypt). The
 /// certificate is served through [`PemCert`], which picks up renewals.
+#[cfg(feature = "server")]
 fn server_config_from_pem(
     cert_path: &str,
     key_path: &str,
@@ -76,6 +85,7 @@ fn server_config_from_pem(
 
 /// Loads PEM files, waiting while they do not exist yet; any other error
 /// (unreadable, malformed) fails at once or after the last attempt.
+#[cfg(feature = "server")]
 async fn load_pem_with_retry(
     cert_path: &str,
     key_path: &str,
@@ -159,6 +169,7 @@ pub fn make_client_config_with_pem(pem: &str) -> Result<Arc<ClientConfig>> {
 /// Server config for a service: CA-issued PEM files in production, or a
 /// fresh self-signed certificate in development whose PEM is written to
 /// `dev_cert_out` so local clients can pin it.
+#[cfg(feature = "server")]
 pub async fn load_server_config(
     cert_path: Option<&str>,
     key_path: Option<&str>,
@@ -186,232 +197,244 @@ pub async fn load_server_config(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::testdata;
+    #[cfg(feature = "server")]
+    mod server {
+        use crate::config::*;
+        use crate::testdata;
 
-    struct PemFiles {
-        dir: tempfile::TempDir,
-        cert_pem: String,
-        key_pem: String,
-    }
+        struct PemFiles {
+            dir: tempfile::TempDir,
+            cert_pem: String,
+            key_pem: String,
+        }
 
-    impl PemFiles {
-        fn new() -> Self {
-            let key = rcgen::KeyPair::generate().unwrap();
-            let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
-                .unwrap()
-                .self_signed(&key)
-                .unwrap();
-            Self {
-                dir: tempfile::tempdir().unwrap(),
-                cert_pem: cert.pem(),
-                key_pem: key.serialize_pem(),
+        impl PemFiles {
+            fn new() -> Self {
+                let key = rcgen::KeyPair::generate().unwrap();
+                let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+                    .unwrap()
+                    .self_signed(&key)
+                    .unwrap();
+                Self {
+                    dir: tempfile::tempdir().unwrap(),
+                    cert_pem: cert.pem(),
+                    key_pem: key.serialize_pem(),
+                }
+            }
+
+            fn path(&self, name: &str) -> String {
+                self.dir.path().join(name).to_string_lossy().into_owned()
+            }
+
+            fn write(&self, name: &str, contents: &str) -> String {
+                let path = self.path(name);
+                std::fs::write(&path, contents).unwrap();
+                path
             }
         }
 
-        fn path(&self, name: &str) -> String {
-            self.dir.path().join(name).to_string_lossy().into_owned()
+        async fn load(cert: &str, key: &str) -> Result<Arc<ServerConfig>> {
+            load_pem_with_retry(cert, key, 2, Duration::from_millis(1)).await
         }
 
-        fn write(&self, name: &str, contents: &str) -> String {
-            let path = self.path(name);
-            std::fs::write(&path, contents).unwrap();
-            path
+        #[tokio::test]
+        async fn dev_certificate_is_written_for_clients_to_pin() {
+            let files = PemFiles::new();
+            let out = files.dir.path().join("dev.pem");
+            load_server_config(None, Some(""), &["localhost"], Some(&out))
+                .await
+                .unwrap();
+            let pem = std::fs::read_to_string(&out).unwrap();
+            assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
+            make_client_config_with_pem(&pem).unwrap();
         }
-    }
 
-    async fn load(cert: &str, key: &str) -> Result<Arc<ServerConfig>> {
-        load_pem_with_retry(cert, key, 2, Duration::from_millis(1)).await
-    }
-
-    #[tokio::test]
-    async fn dev_certificate_is_written_for_clients_to_pin() {
-        let files = PemFiles::new();
-        let out = files.dir.path().join("dev.pem");
-        load_server_config(None, Some(""), &["localhost"], Some(&out))
-            .await
-            .unwrap();
-        let pem = std::fs::read_to_string(&out).unwrap();
-        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
-        make_client_config_with_pem(&pem).unwrap();
-    }
-
-    #[tokio::test]
-    async fn half_configured_pem_paths_are_rejected() {
-        let only_cert = load_server_config(Some("cert.pem"), None, &[], None).await;
-        assert!(matches!(only_cert, Err(Error::Config(_))));
-        let only_key = load_server_config(Some(""), Some("key.pem"), &[], None).await;
-        assert!(matches!(only_key, Err(Error::Config(_))));
-    }
-
-    /// Runs a TLS handshake in memory; returns the certificate chain the
-    /// client was shown.
-    fn handshake(
-        server: Arc<ServerConfig>,
-        client: Arc<ClientConfig>,
-    ) -> Vec<CertificateDer<'static>> {
-        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
-        let mut client = rustls::ClientConnection::new(client, name).unwrap();
-        let mut server = rustls::ServerConnection::new(server).unwrap();
-        while client.is_handshaking() || server.is_handshaking() {
-            let mut wire = Vec::new();
-            client.write_tls(&mut wire).unwrap();
-            server.read_tls(&mut wire.as_slice()).unwrap();
-            server.process_new_packets().unwrap();
-            wire.clear();
-            server.write_tls(&mut wire).unwrap();
-            client.read_tls(&mut wire.as_slice()).unwrap();
-            client.process_new_packets().unwrap();
+        #[tokio::test]
+        async fn half_configured_pem_paths_are_rejected() {
+            let only_cert = load_server_config(Some("cert.pem"), None, &[], None).await;
+            assert!(matches!(only_cert, Err(Error::Config(_))));
+            let only_key = load_server_config(Some(""), Some("key.pem"), &[], None).await;
+            assert!(matches!(only_key, Err(Error::Config(_))));
         }
-        client.peer_certificates().unwrap().to_vec()
-    }
 
-    #[tokio::test]
-    async fn ca_issued_pem_files_are_served() {
-        let files = PemFiles::new();
-        let cert = files.write("cert.pem", &files.cert_pem);
-        let key = files.write("key.pem", &files.key_pem);
-        let server = load_server_config(Some(&cert), Some(&key), &[], None)
-            .await
-            .unwrap();
-        let client = make_client_config_with_pem(&files.cert_pem).unwrap();
-        let shown = handshake(server, client);
-        let expected = CertificateDer::from_pem_slice(files.cert_pem.as_bytes()).unwrap();
-        assert_eq!(shown.first(), Some(&expected));
-    }
+        /// Runs a TLS handshake in memory; returns the certificate chain the
+        /// client was shown.
+        fn handshake(
+            server: Arc<ServerConfig>,
+            client: Arc<ClientConfig>,
+        ) -> Vec<CertificateDer<'static>> {
+            let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+            let mut client = rustls::ClientConnection::new(client, name).unwrap();
+            let mut server = rustls::ServerConnection::new(server).unwrap();
+            while client.is_handshaking() || server.is_handshaking() {
+                let mut wire = Vec::new();
+                client.write_tls(&mut wire).unwrap();
+                server.read_tls(&mut wire.as_slice()).unwrap();
+                server.process_new_packets().unwrap();
+                wire.clear();
+                server.write_tls(&mut wire).unwrap();
+                client.read_tls(&mut wire.as_slice()).unwrap();
+                client.process_new_packets().unwrap();
+            }
+            client.peer_certificates().unwrap().to_vec()
+        }
 
-    #[tokio::test]
-    async fn malformed_pem_files_fail_with_the_reason() {
-        let files = PemFiles::new();
-        let cert = files.write("cert.pem", &files.cert_pem);
-        let key = files.write("key.pem", &files.key_pem);
-        let empty = files.write("empty.pem", "");
-        let broken = files.write(
-            "broken.pem",
-            "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
-        );
-        let reason = |r: Result<Arc<ServerConfig>>| r.unwrap_err().to_string();
-        assert!(reason(load(&empty, &key).await).contains("no certificate"));
-        assert!(reason(load(&broken, &key).await).contains("invalid certificate"));
-        assert!(reason(load(&cert, &empty).await).contains("no private key"));
-        assert!(reason(load(&cert, &cert).await).contains("no private key"));
-        assert!(reason(load(&key, &cert).await).contains("no certificate"));
-        let bad_key = files.write(
-            "bad-key.pem",
-            "-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----\n",
-        );
-        assert!(reason(load(&cert, &bad_key).await).contains("invalid private key"));
-        let cut = files.write(
-            "cut.pem",
-            "-----BEGIN CERTIFICATE-----
+        #[tokio::test]
+        async fn ca_issued_pem_files_are_served() {
+            let files = PemFiles::new();
+            let cert = files.write("cert.pem", &files.cert_pem);
+            let key = files.write("key.pem", &files.key_pem);
+            let server = load_server_config(Some(&cert), Some(&key), &[], None)
+                .await
+                .unwrap();
+            let client = make_client_config_with_pem(&files.cert_pem).unwrap();
+            let shown = handshake(server, client);
+            let expected = CertificateDer::from_pem_slice(files.cert_pem.as_bytes()).unwrap();
+            assert_eq!(shown.first(), Some(&expected));
+        }
+
+        #[tokio::test]
+        async fn malformed_pem_files_fail_with_the_reason() {
+            let files = PemFiles::new();
+            let cert = files.write("cert.pem", &files.cert_pem);
+            let key = files.write("key.pem", &files.key_pem);
+            let empty = files.write("empty.pem", "");
+            let broken = files.write(
+                "broken.pem",
+                "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+            );
+            let reason = |r: Result<Arc<ServerConfig>>| r.unwrap_err().to_string();
+            assert!(reason(load(&empty, &key).await).contains("no certificate"));
+            assert!(reason(load(&broken, &key).await).contains("invalid certificate"));
+            assert!(reason(load(&cert, &empty).await).contains("no private key"));
+            assert!(reason(load(&cert, &cert).await).contains("no private key"));
+            assert!(reason(load(&key, &cert).await).contains("no certificate"));
+            let bad_key = files.write(
+                "bad-key.pem",
+                "-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----\n",
+            );
+            assert!(reason(load(&cert, &bad_key).await).contains("invalid private key"));
+            let cut = files.write(
+                "cut.pem",
+                "-----BEGIN CERTIFICATE-----
 MIIB
 ",
-        );
-        let cut = reason(load(&cut, &key).await);
-        assert!(cut.contains("missing -----END CERTIFICATE-----"), "{cut}");
-    }
-
-    /// Operators bring keys in every PEM form: PKCS#8 (the rcgen pairs
-    /// above), SEC1 (`EC PRIVATE KEY`) and PKCS#1 (`RSA PRIVATE KEY`).
-    #[tokio::test]
-    async fn sec1_and_pkcs1_keys_are_served() {
-        let files = PemFiles::new();
-        for (name, (cert_pem, key_pem)) in
-            [("sec1", testdata::sec1()), ("pkcs1", testdata::pkcs1())]
-        {
-            let cert = files.write(&format!("{name}-cert.pem"), &cert_pem);
-            let key = files.write(&format!("{name}-key.pem"), &key_pem);
-            let server = load(&cert, &key).await.unwrap();
-            let client = make_client_config_with_pem(&cert_pem).unwrap();
-            assert_eq!(handshake(server, client).len(), 1, "{name}");
+            );
+            let cut = reason(load(&cut, &key).await);
+            assert!(cut.contains("missing -----END CERTIFICATE-----"), "{cut}");
         }
-    }
 
-    #[tokio::test]
-    async fn the_whole_chain_in_the_certificate_file_is_served() {
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let ca = ca_params.self_signed(&ca_key).unwrap();
-        let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
-        let leaf_key = rcgen::KeyPair::generate().unwrap();
-        let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
-            .unwrap()
-            .signed_by(&leaf_key, &issuer)
-            .unwrap();
+        /// Operators bring keys in every PEM form: PKCS#8 (the rcgen pairs
+        /// above), SEC1 (`EC PRIVATE KEY`) and PKCS#1 (`RSA PRIVATE KEY`).
+        #[tokio::test]
+        async fn sec1_and_pkcs1_keys_are_served() {
+            let files = PemFiles::new();
+            for (name, (cert_pem, key_pem)) in
+                [("sec1", testdata::sec1()), ("pkcs1", testdata::pkcs1())]
+            {
+                let cert = files.write(&format!("{name}-cert.pem"), &cert_pem);
+                let key = files.write(&format!("{name}-key.pem"), &key_pem);
+                let server = load(&cert, &key).await.unwrap();
+                let client = make_client_config_with_pem(&cert_pem).unwrap();
+                assert_eq!(handshake(server, client).len(), 1, "{name}");
+            }
+        }
 
-        let files = PemFiles::new();
-        let cert = files.write("chain.pem", &[leaf.pem(), ca.pem()].concat());
-        let key = files.write("key.pem", &leaf_key.serialize_pem());
-        let server = load(&cert, &key).await.unwrap();
-        let client = make_client_config_with_pem(&ca.pem()).unwrap();
-        let shown = handshake(server, client);
-        assert_eq!(shown.len(), 2);
-        assert_eq!(shown.first().map(AsRef::as_ref), Some(leaf.der().as_ref()));
-        assert_eq!(shown.get(1).map(AsRef::as_ref), Some(ca.der().as_ref()));
-    }
+        #[tokio::test]
+        async fn the_whole_chain_in_the_certificate_file_is_served() {
+            let ca_key = rcgen::KeyPair::generate().unwrap();
+            let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca = ca_params.self_signed(&ca_key).unwrap();
+            let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+            let leaf_key = rcgen::KeyPair::generate().unwrap();
+            let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+                .unwrap()
+                .signed_by(&leaf_key, &issuer)
+                .unwrap();
 
-    #[tokio::test]
-    async fn one_file_may_hold_both_the_key_and_the_certificate() {
-        let files = PemFiles::new();
-        let pem = [files.key_pem.as_str(), files.cert_pem.as_str()].concat();
-        let both = files.write("both.pem", &pem);
-        let server = load(&both, &both).await.unwrap();
-        let client = make_client_config_with_pem(&pem).unwrap();
-        assert_eq!(handshake(server, client).len(), 1);
-    }
+            let files = PemFiles::new();
+            let cert = files.write("chain.pem", &[leaf.pem(), ca.pem()].concat());
+            let key = files.write("key.pem", &leaf_key.serialize_pem());
+            let server = load(&cert, &key).await.unwrap();
+            let client = make_client_config_with_pem(&ca.pem()).unwrap();
+            let shown = handshake(server, client);
+            assert_eq!(shown.len(), 2);
+            assert_eq!(shown.first().map(AsRef::as_ref), Some(leaf.der().as_ref()));
+            assert_eq!(shown.get(1).map(AsRef::as_ref), Some(ca.der().as_ref()));
+        }
 
-    #[tokio::test]
-    async fn missing_files_are_awaited_then_reported() {
-        let files = PemFiles::new();
-        let (cert, key) = (files.path("cert.pem"), files.path("key.pem"));
-        let err = load(&cert, &key).await.unwrap_err().to_string();
-        assert!(err.contains("after 2 attempts"), "{err}");
+        #[tokio::test]
+        async fn one_file_may_hold_both_the_key_and_the_certificate() {
+            let files = PemFiles::new();
+            let pem = [files.key_pem.as_str(), files.cert_pem.as_str()].concat();
+            let both = files.write("both.pem", &pem);
+            let server = load(&both, &both).await.unwrap();
+            let client = make_client_config_with_pem(&pem).unwrap();
+            assert_eq!(handshake(server, client).len(), 1);
+        }
 
-        let writer = {
-            let (cert, key) = (cert.clone(), key.clone());
+        #[tokio::test]
+        async fn missing_files_are_awaited_then_reported() {
+            let files = PemFiles::new();
+            let (cert, key) = (files.path("cert.pem"), files.path("key.pem"));
+            let err = load(&cert, &key).await.unwrap_err().to_string();
+            assert!(err.contains("after 2 attempts"), "{err}");
+
+            let (cert_out, key_out) = (cert.clone(), key.clone());
             let (cert_pem, key_pem) = (files.cert_pem.clone(), files.key_pem.clone());
-            tokio::spawn(async move {
+            let writer = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(30)).await;
-                std::fs::write(key, key_pem).unwrap();
-                std::fs::write(cert, cert_pem).unwrap();
-            })
-        };
-        load_pem_with_retry(&cert, &key, 100, Duration::from_millis(10))
-            .await
-            .unwrap();
-        writer.await.unwrap();
-    }
+                std::fs::write(key_out, key_pem).unwrap();
+                std::fs::write(cert_out, cert_pem).unwrap();
+            });
+            load_pem_with_retry(&cert, &key, 100, Duration::from_millis(10))
+                .await
+                .unwrap();
+            writer.await.unwrap();
+        }
 
-    #[test]
-    fn pinned_bundle_needs_valid_certificates() {
-        let files = PemFiles::new();
-        let bundle = [files.cert_pem.as_str(), PemFiles::new().cert_pem.as_str()].concat();
-        make_client_config_with_pem(&bundle).unwrap();
-        make_client_config_with_pem("").unwrap_err();
-        make_client_config_with_pem(&files.key_pem).unwrap_err();
-        make_client_config_with_pem(
-            "-----BEGIN CERTIFICATE-----
+        #[test]
+        fn pinned_bundle_needs_valid_certificates() {
+            let files = PemFiles::new();
+            let bundle = [files.cert_pem.as_str(), PemFiles::new().cert_pem.as_str()].concat();
+            make_client_config_with_pem(&bundle).unwrap();
+            make_client_config_with_pem("").unwrap_err();
+            make_client_config_with_pem(&files.key_pem).unwrap_err();
+            make_client_config_with_pem(
+                "-----BEGIN CERTIFICATE-----
 !!!
 -----END CERTIFICATE-----
 ",
-        )
-        .unwrap_err();
+            )
+            .unwrap_err();
+        }
+
+        #[test]
+        fn system_client_config_builds() {
+            make_client_config();
+        }
+
+        /// Configs carry their own provider: building them installs no
+        /// process-wide default, which is the binary's to choose.
+        #[test]
+        fn configs_leave_the_process_provider_alone() {
+            let pem = SelfSignedCert::generate(&["localhost"]).unwrap();
+            make_client_config_with_pem(&pem.cert_pem).unwrap();
+            make_client_config();
+            make_server_config_from_cert(pem).unwrap();
+            assert!(CryptoProvider::get_default().is_none());
+        }
     }
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
 
     #[test]
-    fn system_client_config_builds() {
+    fn client_config_builds_without_the_server_feature() {
         make_client_config();
-    }
-
-    /// Configs carry their own provider: building them installs no
-    /// process-wide default, which is the binary's to choose.
-    #[test]
-    fn configs_leave_the_process_provider_alone() {
-        let pem = SelfSignedCert::generate(&["localhost"]).unwrap();
-        make_client_config_with_pem(&pem.cert_pem).unwrap();
-        make_client_config();
-        make_server_config_from_cert(pem).unwrap();
-        assert!(CryptoProvider::get_default().is_none());
+        make_client_config_with_pem("").unwrap_err();
     }
 }

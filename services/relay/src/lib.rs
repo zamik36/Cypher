@@ -15,7 +15,7 @@ use cypher_server_kit::ratelimit::ConnLimiter;
 use cypher_server_kit::{SIG_KEYS_SUBJECT, SIG_ONION_SUBJECT};
 use cypher_transport::server::{self, Handler, Listener, Upgrade};
 use cypher_transport::{FrameSink, FrameStream, TrustedProxies};
-use cypher_wire::relay::{CORR_LEN, HEADER_LEN, TAG_KEYS, TAG_ONION};
+use cypher_wire::relay::{self, CORR_LEN, HEADER_LEN, Route};
 use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use prometheus::{IntCounter, IntGauge};
@@ -26,8 +26,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const MAX_REQUEST: usize = 128 * 1024;
-/// How long the key set is answered from memory: it changes weekly, and
-/// clients ask for it on every connection.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long writing one reply to a client may take. Replies are at most a
@@ -39,6 +37,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const PIPELINE: usize = 8;
 const FRAMES_PER_SEC: u64 = 20;
 const BYTES_PER_SEC: u64 = 1 << 20;
+/// How long the key set is answered from memory: it changes weekly, and
+/// clients ask for it on every connection.
 const KEY_SET_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +126,8 @@ pub struct Relay<U> {
     metrics: RelayMetrics,
     /// Signaling's key set and when it was fetched.
     key_set: Mutex<Option<(Instant, Bytes)>>,
+    /// At most one task refreshes the key set; the others use stale cache.
+    key_set_refresh: tokio::sync::Mutex<()>,
 }
 
 impl<U: OnionUpstream> Relay<U> {
@@ -134,6 +136,7 @@ impl<U: OnionUpstream> Relay<U> {
             upstream,
             metrics,
             key_set: Mutex::new(None),
+            key_set_refresh: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -178,14 +181,17 @@ impl<U: OnionUpstream> Relay<U> {
     /// `frame` is `[corr u64][tag u8][payload]`; the reply keeps the same
     /// correlation prefix so the client can match pipelined answers.
     async fn forward(&self, frame: Bytes) -> Option<Bytes> {
-        let corr = frame.slice(..CORR_LEN);
-        let reply = match frame.get(CORR_LEN) {
-            Some(&TAG_ONION) => {
-                let request = frame.slice(HEADER_LEN..);
-                self.upstream.forward(SIG_ONION_SUBJECT, request).await
+        let Some(request) = relay::parse(&frame) else {
+            self.metrics.dropped.inc();
+            return None;
+        };
+        let reply = match request.route {
+            Route::Onion => {
+                self.upstream
+                    .forward(SIG_ONION_SUBJECT, frame.slice(HEADER_LEN..))
+                    .await
             }
-            Some(&TAG_KEYS) if frame.len() == HEADER_LEN => self.key_set().await,
-            _ => None,
+            Route::Keys => self.key_set().await,
         };
         let Some(reply) = reply else {
             self.metrics.dropped.inc();
@@ -193,15 +199,34 @@ impl<U: OnionUpstream> Relay<U> {
         };
         self.metrics.forwarded.inc();
         let mut out = BytesMut::with_capacity(CORR_LEN + reply.len());
-        out.put_slice(&corr);
+        out.put_u64_le(request.corr);
         out.put_slice(&reply);
         Some(out.freeze())
     }
 }
 
 impl<U: OnionUpstream> Relay<U> {
-    /// Signaling's key set, from memory while it is fresh.
+    /// Signaling's key set, from memory while it is fresh. An expired entry
+    /// is refreshed by one task; concurrent callers keep using the stale one.
     async fn key_set(&self) -> Option<Bytes> {
+        let cached = self.key_set.lock().ok()?.clone();
+        if cached
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < KEY_SET_TTL)
+        {
+            return cached.map(|(_, set)| set);
+        }
+        let Ok(_refresh) = self.key_set_refresh.try_lock() else {
+            if let Some((_, set)) = cached {
+                return Some(set);
+            }
+            // With no stale answer, wait for the first fetch rather than
+            // starting another one. A failed fetch is shared by the waiters.
+            let _refresh = self.key_set_refresh.lock().await;
+            return self.key_set.lock().ok()?.clone().map(|(_, set)| set);
+        };
+        // Another refresh may have finished between reading the cache and
+        // acquiring the refresh lock.
         let cached = self.key_set.lock().ok()?.clone();
         if let Some((_, set)) = cached.filter(|(at, _)| at.elapsed() < KEY_SET_TTL) {
             return Some(set);

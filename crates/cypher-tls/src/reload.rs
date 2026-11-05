@@ -12,6 +12,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
+use crate::error::{pem_reason, transport};
+
 /// How often the files are checked for a newer modification time.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -94,28 +96,6 @@ impl ResolvesServerCert for PemCert {
 fn stamp(cert_path: &PathBuf, key_path: &PathBuf) -> Stamp {
     let modified = |p: &PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     (modified(cert_path), modified(key_path))
-}
-
-fn transport(context: &str, e: impl std::fmt::Display) -> Error {
-    Error::Transport(format!("{context}: {e}"))
-}
-
-/// A PEM parse error as text: the markers and lines it quotes are bytes,
-/// shown as a byte list by its own `Display`.
-pub(crate) fn pem_reason(e: &pem::Error) -> String {
-    match e {
-        pem::Error::MissingSectionEnd { end_marker } => {
-            // The marker is the section label, e.g. `CERTIFICATE`.
-            format!(
-                "missing -----END {}-----",
-                String::from_utf8_lossy(end_marker)
-            )
-        }
-        pem::Error::IllegalSectionStart { line } => {
-            format!("illegal section start {}", String::from_utf8_lossy(line))
-        }
-        other => other.to_string(),
-    }
 }
 
 fn read(cert_path: &PathBuf, key_path: &PathBuf) -> Result<CertifiedKey> {

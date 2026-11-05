@@ -120,7 +120,7 @@ fn take(counter: &AtomicUsize, len: usize, limit: usize) -> bool {
 
 /// Bounded outbound queue shared by everything that writes to one client.
 #[derive(Clone)]
-pub struct Outbox {
+pub(crate) struct Outbox {
     tx: mpsc::Sender<Queued>,
     counters: Arc<Counters>,
 }
@@ -142,7 +142,7 @@ pub(crate) fn outbox(budget: &Arc<Budget>) -> (Outbox, OutboxReceiver) {
 impl Outbox {
     /// Never waits: returns false when the reader is too slow or gone, or
     /// the gateway holds its whole budget of queued bytes.
-    pub fn try_push(&self, frame: Bytes) -> bool {
+    pub(crate) fn try_push(&self, frame: Bytes) -> bool {
         let Some(reservation) = self.counters.reserve(frame.len()) else {
             return false;
         };

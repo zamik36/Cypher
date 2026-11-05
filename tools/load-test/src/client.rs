@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use cypher_crypto::IdentityKeyPair;
 use cypher_transport::ClientConn;
-use cypher_types::{DeviceId, SESSION_AUTH_CONTEXT};
+use cypher_types::{DeviceId, session_auth_message};
 use cypher_wire::{ClientMsg, Frame, PROTOCOL_VERSION, ServerMsg};
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpSocket, TcpStream, lookup_host};
@@ -154,8 +154,7 @@ async fn connect(
         ServerMsg::Challenge { nonce } => nonce,
         other => bail!("expected challenge, got {other:?}"),
     };
-    let device = DeviceId::FIRST.0.to_le_bytes();
-    let signed = [SESSION_AUTH_CONTEXT, nonce.as_slice(), &device].concat();
+    let signed = session_auth_message(&nonce, DeviceId::FIRST);
     let signature = id.sign(&signed).to_bytes();
     conn.send(Frame::new(0, ClientMsg::Auth { signature }).encode())
         .await?;

@@ -9,6 +9,7 @@
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -16,7 +17,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 use crate::limits::{ConnectionLimits, IpSlot, IpSlots};
-use crate::{FrameSink, FrameStream, Result, accept, accept_tls, split};
+use crate::{FrameSink, FrameStream, Result, accept_tls, split};
 
 /// Serves upgraded frame connections.
 pub trait Handler: Send + Sync + 'static {
@@ -155,16 +156,64 @@ fn admit_late(early: Admission, forwarded: Option<IpAddr>, slots: &Arc<IpSlots>)
     }
 }
 
+const ACCEPT_RETRY: Duration = Duration::from_millis(50);
+const ACCEPT_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+fn accept_warning_due(last: &mut Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    if last
+        .as_ref()
+        .is_some_and(|at| now.saturating_duration_since(*at) < ACCEPT_LOG_INTERVAL)
+    {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Accepts the next TCP connection; accept errors (e.g. fd exhaustion) are
+/// transient, so this backs off instead of failing the listener. A persistent
+/// error is logged immediately, then at most once per second. The caller owns
+/// the warning state so a successful accept does not reset it.
+async fn accept(
+    listener: &TcpListener,
+    last_warning: &mut Option<tokio::time::Instant>,
+) -> TcpStream {
+    accept_with(
+        || async { listener.accept().await.map(|(tcp, _)| tcp) },
+        last_warning,
+    )
+    .await
+}
+
+async fn accept_with<F, Fut, T>(mut next: F, last_warning: &mut Option<tokio::time::Instant>) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    loop {
+        match next().await {
+            Ok(tcp) => return tcp,
+            Err(e) => {
+                if accept_warning_due(last_warning, tokio::time::Instant::now()) {
+                    tracing::warn!("accept failed: {e}");
+                }
+                tokio::time::sleep(ACCEPT_RETRY).await;
+            }
+        }
+    }
+}
+
 async fn accept_loop<H: Handler>(
     Listener { listener, upgrade }: Listener,
     handler: Arc<H>,
     Shared { permits, slots }: Shared,
     shutdown: CancellationToken,
 ) {
+    let mut last_warning = None;
     loop {
         let tcp = tokio::select! {
             () = shutdown.cancelled() => return,
-            tcp = accept(&listener) => tcp,
+            tcp = accept(&listener, &mut last_warning) => tcp,
         };
         let peer = tcp.peer_addr().ok().map(|a| a.ip());
         let early = admit_early(&upgrade, &slots, peer);
@@ -202,6 +251,55 @@ async fn accept_loop<H: Handler>(
                 () = connection => {}
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use std::collections::VecDeque;
+    use std::future::ready;
+    use std::io;
+
+    use tokio::time::Instant;
+
+    use super::{ACCEPT_LOG_INTERVAL, ACCEPT_RETRY, accept_warning_due, accept_with};
+
+    #[test]
+    fn persistent_emfile_warnings_are_rate_limited() {
+        let start = Instant::now();
+        let mut last = None;
+        assert!(accept_warning_due(&mut last, start));
+        for retry in 1..20u32 {
+            assert!(
+                !accept_warning_due(&mut last, start + ACCEPT_RETRY * retry),
+                "unexpected warning at retry {retry}"
+            );
+        }
+        assert!(accept_warning_due(&mut last, start + ACCEPT_LOG_INTERVAL));
+        assert!(!accept_warning_due(
+            &mut last,
+            start + ACCEPT_LOG_INTERVAL + ACCEPT_RETRY
+        ));
+    }
+
+    async fn accept_once(results: Vec<io::Result<()>>, last: &mut Option<Instant>) {
+        let mut results = VecDeque::from(results);
+        accept_with(|| ready(results.pop_front().unwrap()), last).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_accepts_do_not_reset_warning_throttle() {
+        let start = Instant::now();
+        let mut last = None;
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert_eq!(last, Some(start));
+
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert_eq!(last, Some(start), "success reset the warning series");
+
+        tokio::time::sleep(ACCEPT_LOG_INTERVAL).await;
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert!(last.is_some_and(|at| at >= start + ACCEPT_LOG_INTERVAL));
     }
 }
 

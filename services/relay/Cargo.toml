@@ -10,7 +10,7 @@ publish.workspace = true
 console = ["cypher-server-kit/console"]
 
 [dependencies]
-cypher-tls.workspace = true
+cypher-tls = { workspace = true, features = ["server"] }
 cypher-transport = { workspace = true, features = ["ws"] }
 cypher-server-kit.workspace = true
 cypher-wire.workspace = true

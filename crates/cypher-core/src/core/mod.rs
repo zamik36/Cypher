@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use cypher_crypto::{IdentityKeyPair, IdentitySeed};
-use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, SESSION_AUTH_CONTEXT};
+use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, session_auth_message};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
 
@@ -474,10 +474,7 @@ impl<R: CryptoRngCore> Core<R> {
         if self.connection.conn != Conn::Authenticating {
             return;
         }
-        let mut signed = Vec::with_capacity(SESSION_AUTH_CONTEXT.len() + 36);
-        signed.extend_from_slice(SESSION_AUTH_CONTEXT);
-        signed.extend_from_slice(nonce);
-        signed.extend_from_slice(&self.me.device.0.to_le_bytes());
+        let signed = session_auth_message(nonce, self.me.device);
         let signature = self.me.identity.sign(&signed).to_bytes();
         self.transmit(0, ClientMsg::Auth { signature });
     }

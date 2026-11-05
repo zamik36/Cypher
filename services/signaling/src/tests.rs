@@ -232,7 +232,7 @@ async fn every_device_has_its_own_keys() {
         let ServerMsg::Keys { base, opk } = ask(&h, Some(bob.peer_id()), fetch).await else {
             panic!("no keys for {device}");
         };
-        let bundle = PrekeyBundle::decode(&[&base[..], &[0]].concat()).unwrap();
+        let bundle = PrekeyBundle::decode_base(&base).unwrap();
         assert_eq!(
             (bundle.device, opk.map(|(id, _)| id)),
             (device, Some(device.0))
