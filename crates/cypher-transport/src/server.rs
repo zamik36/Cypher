@@ -203,55 +203,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod accept_tests {
-    use std::collections::VecDeque;
-    use std::future::ready;
-    use std::io;
-
-    use tokio::time::Instant;
-
-    use super::{ACCEPT_LOG_INTERVAL, ACCEPT_RETRY, accept_warning_due, accept_with};
-
-    #[test]
-    fn persistent_emfile_warnings_are_rate_limited() {
-        let start = Instant::now();
-        let mut last = None;
-        assert!(accept_warning_due(&mut last, start));
-        for retry in 1..20u32 {
-            assert!(
-                !accept_warning_due(&mut last, start + ACCEPT_RETRY * retry),
-                "unexpected warning at retry {retry}"
-            );
-        }
-        assert!(accept_warning_due(&mut last, start + ACCEPT_LOG_INTERVAL));
-        assert!(!accept_warning_due(
-            &mut last,
-            start + ACCEPT_LOG_INTERVAL + ACCEPT_RETRY
-        ));
-    }
-
-    async fn accept_once(results: Vec<io::Result<()>>, last: &mut Option<Instant>) {
-        let mut results = VecDeque::from(results);
-        accept_with(|| ready(results.pop_front().unwrap()), last).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn successful_accepts_do_not_reset_warning_throttle() {
-        let start = Instant::now();
-        let mut last = None;
-        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
-        assert_eq!(last, Some(start));
-
-        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
-        assert_eq!(last, Some(start), "success reset the warning series");
-
-        tokio::time::sleep(ACCEPT_LOG_INTERVAL).await;
-        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
-        assert!(last.is_some_and(|at| at >= start + ACCEPT_LOG_INTERVAL));
-    }
-}
-
 async fn accept_loop<H: Handler>(
     Listener { listener, upgrade }: Listener,
     handler: Arc<H>,
@@ -300,6 +251,55 @@ async fn accept_loop<H: Handler>(
                 () = connection => {}
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use std::collections::VecDeque;
+    use std::future::ready;
+    use std::io;
+
+    use tokio::time::Instant;
+
+    use super::{ACCEPT_LOG_INTERVAL, ACCEPT_RETRY, accept_warning_due, accept_with};
+
+    #[test]
+    fn persistent_emfile_warnings_are_rate_limited() {
+        let start = Instant::now();
+        let mut last = None;
+        assert!(accept_warning_due(&mut last, start));
+        for retry in 1..20u32 {
+            assert!(
+                !accept_warning_due(&mut last, start + ACCEPT_RETRY * retry),
+                "unexpected warning at retry {retry}"
+            );
+        }
+        assert!(accept_warning_due(&mut last, start + ACCEPT_LOG_INTERVAL));
+        assert!(!accept_warning_due(
+            &mut last,
+            start + ACCEPT_LOG_INTERVAL + ACCEPT_RETRY
+        ));
+    }
+
+    async fn accept_once(results: Vec<io::Result<()>>, last: &mut Option<Instant>) {
+        let mut results = VecDeque::from(results);
+        accept_with(|| ready(results.pop_front().unwrap()), last).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_accepts_do_not_reset_warning_throttle() {
+        let start = Instant::now();
+        let mut last = None;
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert_eq!(last, Some(start));
+
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert_eq!(last, Some(start), "success reset the warning series");
+
+        tokio::time::sleep(ACCEPT_LOG_INTERVAL).await;
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert!(last.is_some_and(|at| at >= start + ACCEPT_LOG_INTERVAL));
     }
 }
 
