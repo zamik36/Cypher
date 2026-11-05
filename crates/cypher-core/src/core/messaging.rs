@@ -65,6 +65,13 @@ impl Opened {
     }
 }
 
+pub(super) struct Profile {
+    /// The name this user goes by, sent to contacts with `Hello`.
+    pub(super) name: Option<String>,
+    /// Invites this user made and when; each admits one contact.
+    pub(super) own_links: Vec<(String, u64)>,
+}
+
 /// An invite being joined by, from when the server named its host until
 /// the host's devices have answered one by one.
 pub(super) struct Joining {
@@ -148,7 +155,7 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         self.sync(SyncBody::Profile {
-            name: self.profile_name.clone(),
+            name: self.profile.name.clone(),
         });
         self.greet_again();
     }
@@ -179,15 +186,15 @@ impl<R: CryptoRngCore> Core<R> {
     /// of it from the device it was changed on.
     pub(super) fn adopt_profile_name(&mut self, name: Option<&str>) -> bool {
         let name = name.and_then(clean_name);
-        if name == self.profile_name {
+        if name == self.profile.name {
             return false;
         }
-        self.profile_name = name;
-        let op = self.vault.put(
+        self.profile.name = name;
+        let op = self.journal.vault.put(
             Table::Meta,
             META_PROFILE.to_vec(),
             &ProfileRecord {
-                name: self.profile_name.clone(),
+                name: self.profile.name.clone(),
             },
             &mut self.rng,
         );
@@ -196,10 +203,10 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn hello(&self, peer: &PeerId) -> Body {
-        let ad = self.own_ad(self.device);
+        let ad = self.own_ad(self.me.device);
         Body::Hello {
             inbox: ad.ids[0],
-            name: self.profile_name.clone(),
+            name: self.profile.name.clone(),
             via: self.peers.get(peer).and_then(|p| p.via.clone()),
             ad: Some(ad),
         }
@@ -209,14 +216,15 @@ impl<R: CryptoRngCore> Core<R> {
     /// as a contact.
     pub(super) fn remember_link(&mut self, code: &str, at_ms: u64) {
         let now = self.now;
-        self.own_links
+        self.profile
+            .own_links
             .retain(|(c, at)| now.saturating_sub(*at) < LINK_TTL_MS && c != code);
         if now.saturating_sub(at_ms) >= LINK_TTL_MS {
             return self.persist_links();
         }
-        self.own_links.push((code.to_owned(), at_ms));
-        if self.own_links.len() > MAX_OWN_LINKS {
-            self.own_links.remove(0);
+        self.profile.own_links.push((code.to_owned(), at_ms));
+        if self.profile.own_links.len() > MAX_OWN_LINKS {
+            self.profile.own_links.remove(0);
         }
         self.persist_links();
     }
@@ -225,22 +233,24 @@ impl<R: CryptoRngCore> Core<R> {
     fn take_own_link(&mut self, code: &str) -> bool {
         let now = self.now;
         let Some(i) = self
+            .profile
             .own_links
             .iter()
             .position(|(c, at)| c == code && now.saturating_sub(*at) < LINK_TTL_MS)
         else {
             return false;
         };
-        self.own_links.remove(i);
+        self.profile.own_links.remove(i);
         self.persist_links();
         true
     }
 
     pub(super) fn persist_links(&mut self) {
         let record = OwnLinks {
-            links: self.own_links.clone(),
+            links: self.profile.own_links.clone(),
         };
         let op = self
+            .journal
             .vault
             .put(Table::Meta, META_LINKS.to_vec(), &record, &mut self.rng);
         self.persist(op);
@@ -317,13 +327,16 @@ impl<R: CryptoRngCore> Core<R> {
             .sent_at_ms
             .min(self.now.saturating_add(MAX_CLOCK_SKEW_MS));
         let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
-        let op = self.vault.put(Table::Messages, key, &msg, &mut self.rng);
+        let op = self
+            .journal
+            .vault
+            .put(Table::Messages, key, &msg, &mut self.rng);
         self.persist(op);
         self.emit(Event::Message(msg));
     }
 
     pub(super) fn set_status(&mut self, msg_id: MsgId, status: MessageStatus) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::MessageStatus,
             msg_id.to_vec(),
             &status,
@@ -481,7 +494,7 @@ impl<R: CryptoRngCore> Core<R> {
         base: &[u8],
         opk: Option<(u32, [u8; 32])>,
     ) {
-        let known = if addr.peer == self.peer_id {
+        let known = if addr.peer == self.me.peer_id {
             self.lists_own(addr.device)
         } else {
             self.peers.contains_key(&addr.peer)
@@ -523,7 +536,7 @@ impl<R: CryptoRngCore> Core<R> {
             .ok()
             .filter(|b| b.identity == addr.peer && b.device == addr.device)?;
         let (ratchet, init) =
-            handshake::initiate(&self.identity, self.device, &bundle, &mut self.rng).ok()?;
+            handshake::initiate(&self.me.identity, self.me.device, &bundle, &mut self.rng).ok()?;
         let lineage = self.rng.next_u64();
         Some((
             Session::new(ratchet, Some(init), lineage),
@@ -612,7 +625,7 @@ impl<R: CryptoRngCore> Core<R> {
         self.dispatch(sender, env);
         // A device their identity has not listed (to our knowledge): their
         // list may have grown.
-        if from == self.peer_id {
+        if from == self.me.peer_id {
             self.check_own_device(sender.device);
         } else if self
             .peers
@@ -660,7 +673,7 @@ impl<R: CryptoRngCore> Core<R> {
             return Ok(Opened::Copy);
         }
 
-        let own = from == self.peer_id;
+        let own = from == self.me.peer_id;
         if !own
             && !self.peers.contains_key(&from)
             && self.pending_requests() >= MAX_PENDING_REQUESTS
@@ -676,8 +689,8 @@ impl<R: CryptoRngCore> Core<R> {
             None => None,
         };
         let mut ratchet = handshake::respond(
-            &self.identity,
-            self.device,
+            &self.me.identity,
+            self.me.device,
             spk,
             opk,
             (&from, from_device),
@@ -693,7 +706,7 @@ impl<R: CryptoRngCore> Core<R> {
             .sessions
             .get(&sender)
             .is_some_and(Session::is_unconfirmed_initiator)
-            && (self.peer_id, self.device) < (from, from_device);
+            && (self.me.peer_id, self.me.device) < (from, from_device);
         self.spend_init(init, who);
         if keep_ours {
             return Err(CoreError::Conflict);
@@ -716,7 +729,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// Who `from` is, as far as how many of their inits are taken goes:
     /// someone not (yet) taken as a contact is a request.
     fn init_sender(&self, from: PeerId) -> InitSender {
-        if from != self.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
+        if from != self.me.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
             InitSender::Request(from)
         } else {
             InitSender::Contact(from)
@@ -835,7 +848,7 @@ impl<R: CryptoRngCore> Core<R> {
             body,
         } = env;
         // Our own devices only keep each other in step; only they may.
-        if from == self.peer_id {
+        if from == self.me.peer_id {
             match body {
                 Body::Sync(sync) => self.on_sync(sender, sync),
                 Body::Devices { list, .. } => self.on_own_list_body(&list),

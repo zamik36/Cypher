@@ -193,9 +193,10 @@ impl<R: CryptoRngCore> Core<R> {
         msg.sent_at_ms = msg
             .sent_at_ms
             .min(self.now.saturating_add(MAX_CLOCK_SKEW_MS));
-        let gone = self.held.hold(msg, self.now);
-        if let Some((seq, held)) = self.held.held.back() {
+        let gone = self.outbox.sent.hold(msg, self.now);
+        if let Some((seq, held)) = self.outbox.sent.held.back() {
             let op = self
+                .journal
                 .vault
                 .put(Table::Meta, held_key(*seq), held, &mut self.rng);
             self.persist(op);
@@ -208,13 +209,13 @@ impl<R: CryptoRngCore> Core<R> {
     /// too long. Each record is stored before its row is deleted: should
     /// the app stop in between, it is stored once more, the same.
     pub(super) fn place_held(&mut self) {
-        if self.held.is_empty() {
+        if self.outbox.sent.is_empty() {
             return;
         }
-        let expired = self.held.expire(self.now);
+        let expired = self.outbox.sent.expire(self.now);
         self.delete_held(expired.into_iter().map(|(seq, _)| seq));
         let peers = &self.peers;
-        let placed = self.held.take_known(|p| peers.contains_key(p));
+        let placed = self.outbox.sent.take_known(|p| peers.contains_key(p));
         let mut done = Vec::with_capacity(placed.len());
         for (seq, msg) in placed {
             let (peer, msg_id) = (msg.peer, msg.msg_id);
@@ -228,7 +229,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// `peer` was forgotten on another device: what it sent them is not
     /// shown here should they come back.
     pub(super) fn forget_held(&mut self, peer: &PeerId) {
-        let gone = self.held.forget(peer);
+        let gone = self.outbox.sent.forget(peer);
         self.delete_held(gone.into_iter().map(|(seq, _)| seq));
     }
 

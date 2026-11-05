@@ -7,6 +7,7 @@ mod inbox;
 mod messaging;
 mod outbox;
 mod push;
+mod requests;
 mod servers;
 mod sync;
 
@@ -14,7 +15,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
-use cypher_crypto::{DeviceList, IdentityKeyPair, IdentitySeed};
+use cypher_crypto::{IdentityKeyPair, IdentitySeed};
 use cypher_types::{Addr, DeviceId, FileId, LinkId, MsgId, PeerId, session_auth_message};
 use cypher_wire::{ClientMsg, ErrorCode, Frame, PROTOCOL_VERSION, ServerMsg};
 use rand_core::CryptoRngCore;
@@ -22,7 +23,6 @@ use rand_core::CryptoRngCore;
 use crate::CoreError;
 use crate::api::{Command, CommandId, Effect, Event, FailReason, Input};
 use crate::envelope::SyncBody;
-use crate::link::LinkOffer;
 use crate::peer::{
     DecryptedRecord, OwnLinks, Peer, PeerRecord, ProfileRecord, Session, SessionRecord,
     SkippedKeyRecord,
@@ -38,17 +38,16 @@ use crate::transfer::{Incoming, Outgoing, TransferRecord};
 
 use anon::{Anon, Opened, Readiness};
 use devices::{Devices, DevicesFor, OwnDevices};
+use files::Transfers;
 use held::HeldSent;
 use history::History;
 use inbox::InboxEpochs;
-use messaging::Joining;
-use outbox::OutboxItem;
+use messaging::{Joining, Profile};
+use outbox::{Outbox, OutboxItem};
 use push::{PushState, Subscription};
-use servers::ServerKeys;
+use requests::{MAX_DEFERRED, Pending, REQUEST_TIMEOUT_MS, Requests};
+use servers::{ServerKeys, Servers};
 
-/// Anonymous requests that wait for the relay at most; more fail at once.
-const MAX_DEFERRED: usize = 64;
-const REQUEST_TIMEOUT_MS: u64 = 15_000;
 const PING_INTERVAL_MS: u64 = 20_000;
 const DEAD_AFTER_MS: u64 = 50_000;
 const INBOX_POLL_MS: u64 = 5 * 60_000;
@@ -66,77 +65,6 @@ enum Conn {
     Offline,
     Authenticating,
     Ready,
-}
-
-#[derive(Debug)]
-enum Pending {
-    CreateLink {
-        id: CommandId,
-    },
-    Resolve {
-        id: CommandId,
-        link: ShareLink,
-    },
-    /// Keys of one device of the host of an invite we are joining by.
-    FetchKeys {
-        link: String,
-        addr: Addr,
-    },
-    /// Keys for a session with one device of a contact: one it has none
-    /// with yet, or one whose messages stopped decrypting.
-    SessionKeys {
-        addr: Addr,
-    },
-    FetchDevices {
-        peer: PeerId,
-        purpose: DevicesFor,
-    },
-    PublishDevices {
-        list: DeviceList,
-        /// A device this one just linked, listed by this publication.
-        linked: Option<devices::Linked>,
-    },
-    /// The hand-over to a new device, for `LinkDevice` `id`.
-    LinkSend {
-        id: CommandId,
-        offer: LinkOffer,
-    },
-    Publish {
-        batch: bool,
-    },
-    Send {
-        msg_id: MsgId,
-        addr: Addr,
-        body: Bytes,
-    },
-    /// The same message sent without our name, through the relay.
-    SendSealed {
-        msg_id: MsgId,
-        addr: Addr,
-        body: Bytes,
-    },
-    InboxPut {
-        msg_id: MsgId,
-        addr: Addr,
-    },
-    /// A read of the inbox of `epoch`; its last one, which closes it, if
-    /// `close`.
-    InboxFetch {
-        epoch: u32,
-        close: bool,
-    },
-    InboxAck {
-        epoch: u32,
-        close: bool,
-    },
-    Bootstrap,
-    PushKey,
-    /// The gateway took this device's access tokens.
-    Access,
-    PushRegister {
-        epoch: u32,
-    },
-    PushUnregister,
 }
 
 /// What a server error means for the request it answers.
@@ -167,35 +95,49 @@ pub struct Snapshot {
 /// `(key, value)` rows as read from one storage table.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
-/// The sans-IO client state machine. Drivers own sockets, disks and clocks;
-/// the core owns every protocol and cryptographic decision.
-pub struct Core<R> {
-    rng: R,
-    now: u64,
+struct Me {
     /// Kept to derive the inboxes of this identity's other devices.
     seed: IdentitySeed,
     identity: IdentityKeyPair,
     peer_id: PeerId,
     /// Which of the identity's devices this one is.
     device: DeviceId,
+}
+
+struct Journal {
     vault: Vault,
+    effects: Vec<Effect>,
+}
+
+struct Connection {
+    conn: Conn,
+    last_rx: u64,
+    last_ping: u64,
+}
+
+impl Connection {
+    fn liveness(&self, now: u64) -> bool {
+        now.saturating_sub(self.last_rx) < DEAD_AFTER_MS
+    }
+}
+
+/// The sans-IO client state machine. Drivers own sockets, disks and clocks;
+/// the core owns every protocol and cryptographic decision.
+pub struct Core<R> {
+    rng: R,
+    now: u64,
+    me: Me,
+    journal: Journal,
     prekeys: Prekeys,
     peers: HashMap<PeerId, Peer>,
     /// One per device of a contact we talk to.
     sessions: HashMap<Addr, Session>,
-    outbox: BTreeMap<MsgId, OutboxItem>,
+    outbox: Outbox,
     // Maps the core walks to make effects are ordered: the same inputs make
     // the same effects in the same order.
-    outgoing: BTreeMap<FileId, Outgoing>,
-    incoming: BTreeMap<FileId, Incoming>,
-    pending: BTreeMap<u32, (Pending, u64)>,
-    /// Anonymous requests made before it was known how they can go: sent
-    /// once the relay is up, or its wait is over.
-    deferred: VecDeque<(ClientMsg, Pending)>,
-    next_req: u32,
-    conn: Conn,
-    last_rx: u64,
-    last_ping: u64,
+    transfers: Transfers,
+    requests: Requests,
+    connection: Connection,
     last_inbox_fetch: u64,
     /// When the inboxes beyond the last epoch were last read.
     last_inbox_sweep: Option<u64>,
@@ -210,25 +152,12 @@ pub struct Core<R> {
     joining: HashMap<PeerId, Joining>,
     devices: Devices,
     history: History,
-    held: HeldSent,
     recent: RecentIds,
-    progress_at: HashMap<FileId, u64>,
-    /// Chunks read from disk for the devices waiting for them.
-    reads: HashMap<(FileId, u32), Vec<DeviceId>>,
     anon: Anon,
-    /// The address of the server this device connects to.
-    server: String,
-    server_keys: ServerKeys,
+    servers: Servers,
     inbox_epochs: InboxEpochs,
-    /// A signing key a server showed that is not the one remembered for
-    /// it, and that server's address: the key is trusted for it alone.
-    offered_key: Option<(String, [u8; 32])>,
     push: PushState,
-    /// The name this user goes by, sent to contacts with `Hello`.
-    profile_name: Option<String>,
-    /// Invites this user made and when; each admits one contact.
-    own_links: Vec<(String, u64)>,
-    effects: Vec<Effect>,
+    profile: Profile,
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -263,23 +192,35 @@ impl<R: CryptoRngCore> Core<R> {
         let mut core = Self {
             rng,
             now: now_ms,
-            peer_id: identity.peer_id(),
-            device,
-            seed: IdentitySeed(*seed.as_bytes()),
-            identity,
-            vault,
+            me: Me {
+                seed: IdentitySeed(*seed.as_bytes()),
+                peer_id: identity.peer_id(),
+                device,
+                identity,
+            },
+            journal: Journal {
+                vault,
+                effects: Vec::new(),
+            },
             prekeys,
             peers,
             sessions: sessions.sessions,
-            outbox,
-            outgoing,
-            incoming,
-            pending: BTreeMap::new(),
-            deferred: VecDeque::new(),
-            next_req: 0,
-            conn: Conn::Offline,
-            last_rx: now_ms,
-            last_ping: now_ms,
+            outbox: Outbox {
+                items: outbox,
+                sent: own.held,
+            },
+            transfers: Transfers {
+                outgoing,
+                incoming,
+                progress_at: HashMap::new(),
+                reads: HashMap::new(),
+            },
+            requests: Requests::default(),
+            connection: Connection {
+                conn: Conn::Offline,
+                last_rx: now_ms,
+                last_ping: now_ms,
+            },
             last_inbox_fetch: 0,
             last_inbox_sweep: None,
             last_resync: None,
@@ -288,19 +229,19 @@ impl<R: CryptoRngCore> Core<R> {
             joining: HashMap::new(),
             devices: own.devices,
             history: own.history,
-            held: own.held,
             recent: RecentIds::default(),
-            progress_at: HashMap::new(),
-            reads: HashMap::new(),
             anon: Anon::default(),
-            server: String::new(),
-            server_keys: own.servers,
+            servers: Servers {
+                current: String::new(),
+                keys: own.servers,
+                offered: None,
+            },
             inbox_epochs: own.inbox.unwrap_or_default(),
-            offered_key: None,
             push: PushState::default(),
-            profile_name: own.profile_name,
-            own_links: own.links,
-            effects: Vec::new(),
+            profile: Profile {
+                name: own.profile_name,
+                own_links: own.links,
+            },
         };
         core.tidy_session_rows(sessions.stale, sessions.migrated);
         core.adopt_legacy_sessions(legacy, &mut skipped);
@@ -308,7 +249,7 @@ impl<R: CryptoRngCore> Core<R> {
             core.seed_accepted_inits();
         }
         core.pick_up(&skipped, fresh_prekeys, inboxes_new);
-        let effects = std::mem::take(&mut core.effects);
+        let effects = std::mem::take(&mut core.journal.effects);
         Ok((core, effects))
     }
 
@@ -346,11 +287,11 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     pub fn peer_id(&self) -> PeerId {
-        self.peer_id
+        self.me.peer_id
     }
 
     pub fn is_ready(&self) -> bool {
-        self.conn == Conn::Ready
+        self.connection.conn == Conn::Ready
     }
 
     pub fn peers(&self) -> impl Iterator<Item = &PeerId> {
@@ -392,32 +333,32 @@ impl<R: CryptoRngCore> Core<R> {
             Input::Tick => self.on_tick(),
         }
         self.place_held();
-        std::mem::take(&mut self.effects)
+        std::mem::take(&mut self.journal.effects)
     }
 
     fn on_connected(&mut self) {
-        self.conn = Conn::Authenticating;
-        self.last_rx = self.now;
+        self.connection.conn = Conn::Authenticating;
+        self.connection.last_rx = self.now;
         self.transmit(
             0,
             ClientMsg::Hello {
                 version: PROTOCOL_VERSION,
-                peer: self.peer_id,
-                device: self.device,
+                peer: self.me.peer_id,
+                device: self.me.device,
             },
         );
     }
 
     fn on_disconnected(&mut self) {
-        if self.conn == Conn::Offline {
+        if self.connection.conn == Conn::Offline {
             return;
         }
-        self.conn = Conn::Offline;
+        self.connection.conn = Conn::Offline;
         self.anon.on_disconnected();
-        let pending = std::mem::take(&mut self.pending)
+        let pending = std::mem::take(&mut self.requests.pending)
             .into_values()
             .map(|(p, _)| p);
-        let deferred: Vec<_> = self.deferred.drain(..).map(|(_, p)| p).collect();
+        let deferred: Vec<_> = self.requests.deferred.drain(..).map(|(_, p)| p).collect();
         for p in pending.chain(deferred) {
             self.fail_request(p, FailReason::Offline);
         }
@@ -426,7 +367,7 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_ready(&mut self) {
-        self.conn = Conn::Ready;
+        self.connection.conn = Conn::Ready;
         self.emit(Event::Connected);
         self.publish_keys(false);
         self.request(ClientMsg::Bootstrap, Pending::Bootstrap, false);
@@ -446,7 +387,7 @@ impl<R: CryptoRngCore> Core<R> {
         let session = onion.is_none();
         let Ok(Frame { req_id, msg }) = Frame::<ServerMsg>::decode(bytes) else {
             if session {
-                self.effects.push(Effect::Disconnect { reconnect: true });
+                self.disconnect(true);
             }
             return;
         };
@@ -469,16 +410,16 @@ impl<R: CryptoRngCore> Core<R> {
             return;
         }
         if session {
-            self.last_rx = self.now;
+            self.connection.last_rx = self.now;
         }
         match msg {
             ServerMsg::Challenge { nonce } => self.on_challenge(&nonce),
             ServerMsg::Ready => self.on_ready(),
             ServerMsg::Pong => {}
             ServerMsg::Superseded => {
-                self.conn = Conn::Offline;
+                self.connection.conn = Conn::Offline;
                 self.emit(Event::Superseded);
-                self.effects.push(Effect::Disconnect { reconnect: false });
+                self.disconnect(false);
             }
             ServerMsg::Recv { from, device, body } => {
                 self.on_relay(Addr::new(from, device), &body, false);
@@ -495,7 +436,7 @@ impl<R: CryptoRngCore> Core<R> {
             | ServerMsg::Done
             | ServerMsg::BootstrapInfo { .. }
             | ServerMsg::PushKey { .. }
-            | ServerMsg::Error { .. }) => match self.pending.remove(&req_id) {
+            | ServerMsg::Error { .. }) => match self.requests.pending.remove(&req_id) {
                 Some((pending, _)) => self.on_response(pending, msg),
                 None => {
                     if let ServerMsg::Error { code } = msg {
@@ -509,15 +450,15 @@ impl<R: CryptoRngCore> Core<R> {
     /// An error outside any request concerns the session itself.
     fn on_unsolicited_error(&mut self, code: ErrorCode) {
         match code {
-            ErrorCode::Unauthorized => self.effects.push(Effect::Disconnect { reconnect: false }),
+            ErrorCode::Unauthorized => self.disconnect(false),
             // Reconnecting cannot help: only a newer app can talk to this
             // server.
             ErrorCode::UnsupportedVersion => {
-                self.conn = Conn::Offline;
+                self.connection.conn = Conn::Offline;
                 self.emit(Event::Warning {
                     reason: FailReason::UpdateRequired,
                 });
-                self.effects.push(Effect::Disconnect { reconnect: false });
+                self.disconnect(false);
             }
             ErrorCode::NotFound
             | ErrorCode::BadRequest
@@ -530,11 +471,11 @@ impl<R: CryptoRngCore> Core<R> {
     }
 
     fn on_challenge(&mut self, nonce: &[u8; 32]) {
-        if self.conn != Conn::Authenticating {
+        if self.connection.conn != Conn::Authenticating {
             return;
         }
-        let signed = session_auth_message(nonce, self.device);
-        let signature = self.identity.sign(&signed).to_bytes();
+        let signed = session_auth_message(nonce, self.me.device);
+        let signature = self.me.identity.sign(&signed).to_bytes();
         self.transmit(0, ClientMsg::Auth { signature });
     }
 
@@ -621,7 +562,7 @@ impl<R: CryptoRngCore> Core<R> {
         });
         self.emit(Event::LinkCreated {
             id,
-            link: ShareLink::new(link, &self.peer_id).to_string(),
+            link: ShareLink::new(link, &self.me.peer_id).to_string(),
         });
     }
 
@@ -644,7 +585,7 @@ impl<R: CryptoRngCore> Core<R> {
     fn ask_key_set(&mut self) {
         let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         if let Some(frame) = self.anon.key_set_request(self.now, deadline) {
-            self.effects.push(Effect::Anonymous(frame));
+            self.journal.effects.push(Effect::Anonymous(frame));
         }
     }
 
@@ -780,33 +721,36 @@ impl<R: CryptoRngCore> Core<R> {
     fn on_tick(&mut self) {
         self.anon.expire(self.now);
         let expired: Vec<u32> = self
+            .requests
             .pending
             .iter()
             .filter(|(_, (_, deadline))| *deadline <= self.now)
             .map(|(&id, _)| id)
             .collect();
         for id in expired {
-            if let Some((p, _)) = self.pending.remove(&id) {
+            if let Some((p, _)) = self.requests.pending.remove(&id) {
                 self.fail_request(p, FailReason::Timeout);
             }
         }
         self.expire_skipped_keys();
 
-        if self.conn == Conn::Offline {
+        if self.connection.conn == Conn::Offline {
             return;
         }
-        if self.now.saturating_sub(self.last_rx) >= DEAD_AFTER_MS {
-            self.effects.push(Effect::Disconnect { reconnect: true });
+        if !self.connection.liveness(self.now) {
+            self.journal
+                .effects
+                .push(Effect::Disconnect { reconnect: true });
             self.on_disconnected();
             return;
         }
-        if self.conn != Conn::Ready {
+        if self.connection.conn != Conn::Ready {
             return;
         }
         self.ask_key_set();
         self.send_deferred();
-        if self.now.saturating_sub(self.last_ping) >= PING_INTERVAL_MS {
-            self.last_ping = self.now;
+        if self.now.saturating_sub(self.connection.last_ping) >= PING_INTERVAL_MS {
+            self.connection.last_ping = self.now;
             self.transmit(0, ClientMsg::Ping);
         }
         if self.now.saturating_sub(self.last_inbox_fetch) >= INBOX_POLL_MS {
@@ -830,7 +774,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// contact.
     pub(super) fn repair_session(&mut self, addr: Addr) {
         let known =
-            addr.peer == self.peer_id || self.peers.get(&addr.peer).is_some_and(|p| !p.request);
+            addr.peer == self.me.peer_id || self.peers.get(&addr.peer).is_some_and(|p| !p.request);
         let settled = known
             && !self
                 .sessions
@@ -866,8 +810,8 @@ impl<R: CryptoRngCore> Core<R> {
     /// Fetches the keys of one device of a contact for a fresh session with
     /// it; at most every ten minutes per device.
     pub(super) fn open_session(&mut self, addr: Addr) {
-        let blocked = if addr.peer == self.peer_id {
-            addr.device == self.device
+        let blocked = if addr.peer == self.me.peer_id {
+            addr.device == self.me.device
         } else {
             self.peers.get(&addr.peer).is_none_or(|p| p.blocked)
         };
@@ -875,7 +819,7 @@ impl<R: CryptoRngCore> Core<R> {
             .last_repair
             .get(&addr)
             .is_some_and(|at| self.now.saturating_sub(*at) < REPAIR_INTERVAL_MS);
-        if blocked || recent || self.conn != Conn::Ready {
+        if blocked || recent || self.connection.conn != Conn::Ready {
             return;
         }
         self.last_repair.insert(addr, self.now);
@@ -897,7 +841,7 @@ impl<R: CryptoRngCore> Core<R> {
         let recent = self
             .last_resync
             .is_some_and(|at| self.now.saturating_sub(at) < RESYNC_INTERVAL_MS);
-        if recent || self.conn != Conn::Ready {
+        if recent || self.connection.conn != Conn::Ready {
             return;
         }
         self.last_resync = Some(self.now);
@@ -912,7 +856,7 @@ impl<R: CryptoRngCore> Core<R> {
         } else {
             Vec::new()
         };
-        let base = Bytes::from(self.prekeys.base_bundle(&self.identity, self.device));
+        let base = Bytes::from(self.prekeys.base_bundle(&self.me.identity, self.me.device));
         self.request(
             ClientMsg::PublishKeys {
                 base,
@@ -948,7 +892,7 @@ impl<R: CryptoRngCore> Core<R> {
     /// The server says who made the link; only its fingerprint, which the
     /// server never saw, says whether to believe it.
     fn on_link_resolved(&mut self, id: CommandId, share: &ShareLink, peer: PeerId) {
-        let reason = if peer == self.peer_id {
+        let reason = if peer == self.me.peer_id {
             Some(FailReason::SelfLink)
         } else if !share.is_host(&peer) {
             Some(FailReason::KeyMismatch)
@@ -975,20 +919,20 @@ impl<R: CryptoRngCore> Core<R> {
     /// Sends a request and tracks it for correlation and timeout. Anonymous
     /// requests go through the anonymity layer instead of the session.
     fn request(&mut self, msg: ClientMsg, pending: Pending, anonymous: bool) {
-        if self.conn != Conn::Ready {
+        if self.connection.conn != Conn::Ready {
             self.fail_request(pending, FailReason::Offline);
             return;
         }
         let readiness = self.anon.readiness(self.now);
         if anonymous && readiness == Readiness::Wait {
-            if self.deferred.len() < MAX_DEFERRED {
-                self.deferred.push_back((msg, pending));
+            if self.requests.deferred.len() < MAX_DEFERRED {
+                self.requests.deferred.push_back((msg, pending));
             } else {
                 self.fail_request(pending, FailReason::Offline);
             }
             return;
         }
-        let req_id = self.alloc_req();
+        let req_id = self.requests.alloc_req();
         let deadline = self.now.saturating_add(REQUEST_TIMEOUT_MS);
         let frame = Frame::new(req_id, msg).encode();
         let effect = match (anonymous, readiness) {
@@ -1009,41 +953,41 @@ impl<R: CryptoRngCore> Core<R> {
                 return;
             }
         };
-        self.pending.insert(req_id, (pending, deadline));
-        self.effects.push(effect);
+        self.requests.pending.insert(req_id, (pending, deadline));
+        self.journal.effects.push(effect);
     }
 
     /// Sends what waited for the relay, once it is up or its wait is over:
     /// through the onion, over the session, or not at all.
     fn send_deferred(&mut self) {
-        if self.deferred.is_empty() || self.anon.readiness(self.now) == Readiness::Wait {
+        if self.requests.deferred.is_empty() || self.anon.readiness(self.now) == Readiness::Wait {
             return;
         }
-        for (msg, pending) in std::mem::take(&mut self.deferred) {
+        for (msg, pending) in std::mem::take(&mut self.requests.deferred) {
             self.request(msg, pending, true);
         }
     }
 
-    fn alloc_req(&mut self) -> u32 {
-        self.next_req = self.next_req.wrapping_add(1).max(1);
-        self.next_req
-    }
-
     fn transmit(&mut self, req_id: u32, msg: ClientMsg) {
-        self.effects
+        self.journal
+            .effects
             .push(Effect::Transmit(Frame::new(req_id, msg).encode()));
     }
 
+    fn disconnect(&mut self, reconnect: bool) {
+        self.journal.effects.push(Effect::Disconnect { reconnect });
+    }
+
     fn emit(&mut self, event: Event) {
-        self.effects.push(Effect::Emit(event));
+        self.journal.effects.push(Effect::Emit(event));
     }
 
     fn persist(&mut self, op: StoreOp) {
-        self.effects.push(Effect::Persist(op));
+        self.journal.effects.push(Effect::Persist(op));
     }
 
     fn persist_prekeys(&mut self) {
-        let op = self.vault.put(
+        let op = self.journal.vault.put(
             Table::Meta,
             META_PREKEYS.to_vec(),
             &self.prekeys.to_record(),
@@ -1054,10 +998,11 @@ impl<R: CryptoRngCore> Core<R> {
 
     fn persist_peer(&mut self, peer: &PeerId) {
         if let Some(p) = self.peers.get(peer) {
-            let op = self
-                .vault
-                .put(Table::Peers, peer.to_vec(), &p.to_record(), &mut self.rng);
-            self.effects.push(Effect::Persist(op));
+            let op =
+                self.journal
+                    .vault
+                    .put(Table::Peers, peer.to_vec(), &p.to_record(), &mut self.rng);
+            self.journal.effects.push(Effect::Persist(op));
         }
     }
 
@@ -1074,21 +1019,22 @@ impl<R: CryptoRngCore> Core<R> {
         };
         let changes = s.ratchet.take_changes();
         for key in &changes.stored {
-            let op = self.vault.put(
+            let op = self.journal.vault.put(
                 Table::Sessions,
                 skipped_key_row(addr, key.seq()),
                 &SkippedKeyRecord::new(s.lineage, key),
                 &mut self.rng,
             );
-            self.effects.push(Effect::Persist(op));
+            self.journal.effects.push(Effect::Persist(op));
         }
         let record = s.to_record(changes.spent);
         let op = self
+            .journal
             .vault
             .put(Table::Sessions, session_key(addr), &record, &mut self.rng);
-        self.effects.push(Effect::Persist(op));
+        self.journal.effects.push(Effect::Persist(op));
         for (seq, digest) in changes.decrypted {
-            let op = self.vault.put(
+            let op = self.journal.vault.put(
                 Table::Sessions,
                 decrypted_row(addr, seq),
                 &DecryptedRecord {
@@ -1098,9 +1044,9 @@ impl<R: CryptoRngCore> Core<R> {
                 },
                 &mut self.rng,
             );
-            self.effects.push(Effect::Persist(op));
+            self.journal.effects.push(Effect::Persist(op));
         }
-        self.effects.extend(record.spent.iter().map(|&seq| {
+        self.journal.effects.extend(record.spent.iter().map(|&seq| {
             Effect::Persist(StoreOp::Delete {
                 table: Table::Sessions,
                 key: skipped_key_row(addr, seq),
@@ -1435,7 +1381,7 @@ fn load_outbox(
     Ok(outbox)
 }
 
-type Transfers = (BTreeMap<FileId, Outgoing>, BTreeMap<FileId, Incoming>);
+type LoadedTransfers = (BTreeMap<FileId, Outgoing>, BTreeMap<FileId, Incoming>);
 
 /// Our saved prekeys, or a fresh set (`true`) when there are none.
 fn load_prekeys(
@@ -1509,7 +1455,7 @@ fn load_transfers(
     vault: &Vault,
     rows: &Rows,
     skipped: &mut Skipped,
-) -> Result<Transfers, CoreError> {
+) -> Result<LoadedTransfers, CoreError> {
     let (mut outgoing, mut incoming) = (BTreeMap::new(), BTreeMap::new());
     for (k, v) in rows {
         let Some(rec) = skipped.open::<TransferRecord>(vault, Table::Transfers, k, v)? else {
@@ -1544,5 +1490,114 @@ impl RecentIds {
             self.set.remove(&old);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    use super::*;
+
+    fn ready_core() -> Core<ChaCha20Rng> {
+        let (mut core, _) = Core::restore(
+            &IdentitySeed([1; 32]),
+            DeviceId::FIRST,
+            &Snapshot::default(),
+            0,
+            ChaCha20Rng::seed_from_u64(7),
+        )
+        .unwrap();
+        core.connection.conn = Conn::Ready;
+        core
+    }
+
+    fn link(n: usize) -> LinkId {
+        LinkId::parse(&cypher_types::base32(
+            &u128::try_from(n).unwrap().to_be_bytes(),
+        ))
+        .unwrap()
+    }
+
+    fn defer(core: &mut Core<ChaCha20Rng>, n: usize) {
+        let link = link(n);
+        core.request(
+            ClientMsg::ResolveLink { link: link.clone() },
+            Pending::Resolve {
+                id: CommandId(u64::try_from(n).unwrap()),
+                link: ShareLink::new(link, &PeerId([7; 32])),
+            },
+            true,
+        );
+    }
+
+    #[test]
+    fn tick_emits_ping_and_disconnect_exactly_at_their_boundaries() {
+        let mut core = ready_core();
+        drop(core.handle(Input::Tick, 0));
+        let before_ping = core.handle(Input::Tick, 19_999);
+        assert!(before_ping.is_empty(), "{before_ping:?}");
+
+        let ping = core.handle(Input::Tick, 20_000);
+        let [Effect::Transmit(raw)] = ping.as_slice() else {
+            panic!("exactly one ping at 20_000: {ping:?}");
+        };
+        let frame = Frame::<ClientMsg>::decode(raw.clone()).unwrap();
+        assert_eq!(frame.req_id, 0);
+        assert!(matches!(frame.msg, ClientMsg::Ping));
+
+        let before_dead = core.handle(Input::Tick, 49_999);
+        assert!(
+            !before_dead
+                .iter()
+                .any(|effect| matches!(effect, Effect::Disconnect { .. }))
+        );
+        let dead = core.handle(Input::Tick, 50_000);
+        assert_eq!(
+            dead.iter()
+                .filter(|effect| matches!(effect, Effect::Disconnect { reconnect: true }))
+                .count(),
+            1,
+            "exactly one reconnect at 50_000: {dead:?}"
+        );
+    }
+
+    #[test]
+    fn the_sixty_fifth_deferred_request_fails_without_displacing_the_first_64() {
+        let mut core = ready_core();
+        for n in 0..MAX_DEFERRED {
+            defer(&mut core, n);
+        }
+        assert_eq!(core.requests.deferred.len(), MAX_DEFERRED);
+        assert!(core.journal.effects.is_empty());
+
+        defer(&mut core, MAX_DEFERRED);
+        assert_eq!(core.requests.deferred.len(), MAX_DEFERRED);
+        let expected: Vec<_> = (0..MAX_DEFERRED).map(link).collect();
+        for ((message, _), expected) in core.requests.deferred.iter().zip(&expected) {
+            assert!(matches!(message, ClientMsg::ResolveLink { link } if link == expected));
+        }
+        let overflow = std::mem::take(&mut core.journal.effects);
+        let [Effect::Emit(Event::JoinFailed { id, reason, .. })] = overflow.as_slice() else {
+            panic!("only the sixty-fifth request fails: {overflow:?}");
+        };
+        assert_eq!(*id, CommandId(MAX_DEFERRED as u64));
+        assert_eq!(*reason, FailReason::Offline);
+
+        core.anon.on_bootstrap(None, 0);
+        core.send_deferred();
+        assert!(core.requests.deferred.is_empty());
+        assert_eq!(core.requests.pending.len(), MAX_DEFERRED);
+        let sent = std::mem::take(&mut core.journal.effects);
+        assert_eq!(sent.len(), MAX_DEFERRED);
+        for (n, (effect, expected)) in sent.iter().zip(&expected).enumerate() {
+            let Effect::Transmit(raw) = effect else {
+                panic!("only transmissions after the wait: {effect:?}");
+            };
+            let frame = Frame::<ClientMsg>::decode(raw.clone()).unwrap();
+            assert_eq!(frame.req_id, u32::try_from(n + 1).unwrap());
+            assert!(matches!(frame.msg, ClientMsg::ResolveLink { link } if link == *expected));
+        }
     }
 }
