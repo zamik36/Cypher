@@ -166,6 +166,12 @@ pub struct Core<R> {
     profile: Profile,
 }
 
+impl<R> std::fmt::Debug for Core<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Core(..)")
+    }
+}
+
 impl<R: CryptoRngCore> Core<R> {
     /// Builds the core for one device of the identity `seed` from previously
     /// persisted state. Returns persistence effects when fresh prekeys had to
@@ -1611,5 +1617,19 @@ mod tests {
             assert_eq!(frame.req_id, u32::try_from(n + 1).unwrap());
             assert!(matches!(frame.msg, ClientMsg::ResolveLink { link } if link == *expected));
         }
+    }
+
+    #[test]
+    fn core_debug_hides_identity_state() {
+        let seed = IdentitySeed([0xA5; 32]);
+        let (core, _) = Core::restore(
+            &seed,
+            DeviceId::FIRST,
+            &Snapshot::default(),
+            0,
+            ChaCha20Rng::seed_from_u64(7),
+        )
+        .unwrap();
+        crate::assert_redacted_debug(&core, "Core(..)", &[seed.as_bytes()]);
     }
 }

@@ -294,6 +294,12 @@ pub struct Vault {
     key: Zeroizing<[u8; 32]>,
 }
 
+impl std::fmt::Debug for Vault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Vault(..)")
+    }
+}
+
 const VAULT_NONCE_LEN: usize = aead::NONCE_LEN;
 
 impl Vault {
@@ -738,5 +744,11 @@ mod tests {
         let b = message_key(&p, 300, &MsgId([0; 16]));
         assert!(a < b);
         assert!(a.starts_with(p.as_bytes()));
+    }
+
+    #[test]
+    fn vault_debug_hides_the_storage_key() {
+        let vault = Vault::new([0xA5; 32]);
+        crate::assert_redacted_debug(&vault, "Vault(..)", &[&vault.key[..]]);
     }
 }
