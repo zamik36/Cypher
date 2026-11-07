@@ -111,6 +111,12 @@ pub struct Config {
     pub tor: Option<TorConfig>,
 }
 
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Config(..)")
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TorConfig {
     /// Bridge lines for networks that block Tor (vanilla, obfs4, webtunnel).
@@ -301,6 +307,12 @@ pub struct Client {
     vault: Arc<Vault>,
     peer_id: PeerId,
     config: Config,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Client(..)")
+    }
 }
 
 // Unbounded by design: synchronous driver output is paced by bounded
@@ -1589,6 +1601,46 @@ mod tests {
         let kept_name = format!("{}.bin", kept.to_hex());
         assert_eq!(outgoing_files(dir.path()), [kept_name, "folder".to_owned()]);
         assert!(elsewhere.exists());
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_debug_hides_identity_and_private_paths() {
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().join("private-profile"),
+            tor: Some(TorConfig {
+                bridges: vec!["private bridge".into()],
+                transport_binary: None,
+            }),
+            ..config(dir.path())
+        };
+        assert_eq!(format!("{config:?}"), "Config(..)");
+        let config_shown = format!("{config:?}");
+        assert!(!config_shown.contains("private-profile"));
+        assert!(!config_shown.contains("private bridge"));
+
+        let seed = IdentitySeed([0xA5; 32]);
+        let (client, _events) = Client::start(
+            &seed,
+            DeviceId::FIRST,
+            Config {
+                tor: None,
+                ..config
+            },
+        )
+        .await
+        .unwrap();
+        let shown = format!("{client:?}");
+        assert_eq!(shown, "Client(..)");
+        assert!(!shown.contains(&format!("{:?}", seed.as_bytes())));
+        let hex = seed.as_bytes().iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+        assert!(!shown.contains(&hex));
         client.shutdown().await;
     }
 }

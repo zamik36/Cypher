@@ -20,6 +20,12 @@ pub struct IdentityStore {
     path: PathBuf,
 }
 
+impl std::fmt::Debug for IdentityStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IdentityStore(..)")
+    }
+}
+
 impl From<IdentityFileError> for ClientError {
     fn from(e: IdentityFileError) -> Self {
         Self::Identity(e.into())
@@ -254,5 +260,12 @@ mod tests {
         assert!(restored.device.is_valid());
         assert_ne!(restored.device, original.device);
         assert_eq!(store.unlock(PASS).unwrap().device, restored.device);
+    }
+
+    #[test]
+    fn identity_store_debug_hides_the_profile_path() {
+        let store = IdentityStore::new(Path::new("private-profile"));
+        assert_eq!(format!("{store:?}"), "IdentityStore(..)");
+        assert!(!format!("{store:?}").contains("private-profile"));
     }
 }
