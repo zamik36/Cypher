@@ -18,6 +18,12 @@ pub enum Error {
 /// The Kotlin side (`FilesPlugin`), managed as app state.
 pub struct Files<R: Runtime>(pub(crate) PluginHandle<R>);
 
+impl<R: Runtime> std::fmt::Debug for Files<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Files(..)")
+    }
+}
+
 /// A picked file copied into the app for sending.
 #[derive(Debug, Deserialize)]
 pub struct Staged {
