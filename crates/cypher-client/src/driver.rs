@@ -194,6 +194,10 @@ impl Driver {
         let (net_tx, net_rx) = net::inbound();
         // Unbounded by design: it holds at most one result per job the
         // driver itself handed to the IO thread or a history task.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "only driver-issued jobs produce results; their number bounds the queue"
+        )]
         let (io_tx, io_rx) = mpsc::unbounded_channel();
         let driver = Self {
             core: parts.core,
@@ -771,6 +775,10 @@ mod tests {
 
     use super::*;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test driver uses the production UI and IO channel types"
+    )]
     fn driver(store: Store) -> (Driver, mpsc::UnboundedReceiver<Event>) {
         let dir = tempfile::tempdir().unwrap();
         let seed = IdentitySeed::generate();
@@ -914,7 +922,7 @@ mod tests {
     async fn a_received_file_is_announced_once_on_disk_and_remembered() {
         let dir = tempfile::tempdir().unwrap();
         let (mut d, mut events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
-        let (io_tx, mut io_rx) = mpsc::unbounded_channel();
+        let (io_tx, mut io_rx) = crate::event_channel();
         d.io = FileIo::spawn(io_tx).unwrap();
         let (received, recorded) = (FileId([1; 16]), FileId([2; 16]));
         let path = dir.path().join("in.bin");

@@ -40,6 +40,10 @@ impl Recorder {
         on_level: impl FnMut(f32) + Send + 'static,
     ) -> Result<Self, MediaError> {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the owned recorder sends at most one stop signal"
+        )]
         let (stop, stop_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("cypher-voice".into())

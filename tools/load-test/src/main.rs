@@ -42,6 +42,10 @@ struct Gateway {
 async fn main() -> ExitCode {
     // The process-wide TLS provider is the binary's choice; the configs
     // cypher-tls builds carry their own. Nothing can have installed one yet.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this binary entry point owns the process-wide provider choice"
+    )]
     let _ = rustls::crypto::ring::default_provider().install_default();
     match run(Args::parse()).await {
         Ok(true) => ExitCode::SUCCESS,

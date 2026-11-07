@@ -18,4 +18,8 @@ disallowed-methods = [
     { path = "std::process::exit", reason = "return an ExitCode from main instead" },
     { path = "rand::thread_rng", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
     { path = "rand::random", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
+    { path = "tokio::sync::mpsc::unbounded_channel", reason = "use a bounded channel unless queue growth is externally bounded" },
+    { path = "std::sync::mpsc::channel", reason = "use sync_channel unless queue growth is externally bounded" },
+    { path = "tokio::sync::notify::Notify::notify_waiters", reason = "use CancellationToken so cancellation is not lost" },
+    { path = "rustls::crypto::CryptoProvider::install_default", reason = "install the provider only in main" },
 ]

@@ -213,6 +213,10 @@ impl Store {
         }
         // Unbounded by design: every caller waits for its reply, so it holds
         // at most one job per waiting task.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "each caller awaits its reply, bounding jobs by concurrent client calls"
+        )]
         let (tx, rx) = std_mpsc::channel();
         thread::Builder::new()
             .name("cypher-store".into())
@@ -224,6 +228,10 @@ impl Store {
     /// every call fails with [`ClientError::Closed`].
     #[cfg(test)]
     pub(crate) fn detached() -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the detached test store deliberately has no worker or queued jobs"
+        )]
         let (tx, _) = std_mpsc::channel();
         Self { tx }
     }

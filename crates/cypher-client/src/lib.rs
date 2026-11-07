@@ -303,6 +303,16 @@ pub struct Client {
     config: Config,
 }
 
+// Unbounded by design: synchronous driver output is paced by bounded
+// network input, issued jobs and application requests.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "bounded input, issued jobs and requests pace driver output"
+)]
+fn event_channel<T>() -> (mpsc::UnboundedSender<T>, mpsc::UnboundedReceiver<T>) {
+    mpsc::unbounded_channel()
+}
+
 impl Client {
     /// Restores persisted state for `seed` and starts connecting. Refuses a
     /// Tor config the build cannot honour rather than reach the relay
@@ -328,9 +338,7 @@ impl Client {
         } = blocking(move || restore(&restoring, device, &dir, &db)).await?;
         let vault = Vault::new(seed.derive_storage_key());
 
-        // Unbounded by design: the driver emits from synchronous code, at the
-        // pace of the bounded network queue and the app's own requests.
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = event_channel();
         let (req_tx, req_rx) = mpsc::channel(256);
         let stopped = Driver::spawn(
             Parts {
@@ -1234,6 +1242,10 @@ mod tests {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             assert!(matches!(start().await, Err(ClientError::NoCryptoProvider)));
             nothing_opened();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "this test installs the provider only after checking the no-provider path"
+            )]
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
         let (client, _events) = start().await.unwrap();

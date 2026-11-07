@@ -269,6 +269,10 @@ pub(crate) mod mem {
             &self,
             subject: String,
         ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "test-only in-memory bus mirrors the NATS stream without backpressure"
+            )]
             let (tx, rx) = mpsc::unbounded_channel();
             self.inner
                 .lock()

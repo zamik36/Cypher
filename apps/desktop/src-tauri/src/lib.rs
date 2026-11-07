@@ -34,6 +34,10 @@ pub fn run() -> tauri::Result<()> {
     // Arti reaches the relay with TLS configs built from the process-wide
     // provider; the app's own configs carry theirs. Installed once, here,
     // before anything can use TLS.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the application entry point installs TLS before any client starts"
+    )]
     let _ = rustls::crypto::ring::default_provider().install_default();
     wire(with_plugins())
         .setup(setup)
