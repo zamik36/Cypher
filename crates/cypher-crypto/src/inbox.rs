@@ -23,7 +23,7 @@ const INBOX_OP_CONTEXT: &[u8] = b"cypher/v4/inbox-op";
 
 /// The inbox epoch at `now_secs`.
 pub fn inbox_epoch(now_secs: u64) -> u32 {
-    u32::try_from(now_secs / INBOX_EPOCH_SECS).unwrap_or(u32::MAX)
+    u32::try_from(now_secs.div_euclid(INBOX_EPOCH_SECS)).unwrap_or(u32::MAX)
 }
 
 /// What a signed inbox request does; signed so one cannot stand for another.
