@@ -39,6 +39,14 @@ pub struct Target {
     pub tls: Arc<rustls::ClientConfig>,
 }
 
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Target")
+            .field("gateway_addr", &self.gateway_addr)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Target {
     fn client_config(&self, dir: &Path) -> Config {
         Config {

@@ -56,6 +56,7 @@ publish = false
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(tokio_unstable)'] }
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
 unused_qualifications = "deny"
 unreachable_pub = "deny"
@@ -111,6 +112,7 @@ lossy_float_literal = "deny"
 float_cmp_const = "deny"
 unused_result_ok = "deny"
 infinite_loop = "deny"
+read_zero_byte_vec = "deny"
 assertions_on_result_states = "deny"
 empty_drop = "deny"
 empty_structs_with_brackets = "deny"

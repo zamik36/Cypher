@@ -216,6 +216,46 @@ pub struct Client {
     startup: Vec<Effect>,
 }
 
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Identity(..)")
+    }
+}
+
+impl std::fmt::Debug for SealedIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SealedIdentity(..)")
+    }
+}
+
+impl std::fmt::Debug for Provision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provision(..)")
+    }
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Client(..)")
+    }
+}
+
+#[cfg(test)]
+fn assert_redacted_debug<T: std::fmt::Debug>(value: &T, expected: &str, secrets: &[&[u8]]) {
+    use std::fmt::Write as _;
+
+    let shown = format!("{value:?}");
+    assert_eq!(shown, expected);
+    for secret in secrets {
+        assert!(!shown.contains(&format!("{secret:?}")));
+        let hex = secret.iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+        assert!(!shown.contains(&hex));
+    }
+}
+
 #[wasm_bindgen]
 impl Client {
     /// Restores the core from `IndexedDB` rows: `[key, value]` byte pairs
@@ -747,5 +787,51 @@ mod tests {
         };
         assert_eq!(unread(None), 1);
         assert_eq!(unread(Some(status.1)), 0);
+    }
+
+    #[test]
+    fn identity_debug_hides_seed_blob_and_nickname() {
+        let identity = Identity {
+            seed: IdentitySeed([0xA5; 32]),
+            device: DeviceId::FIRST,
+            nickname: "private nickname".into(),
+        };
+        assert_redacted_debug(&identity, "Identity(..)", &[identity.seed.as_bytes()]);
+        assert!(!format!("{identity:?}").contains("private nickname"));
+
+        let sealed = SealedIdentity {
+            identity,
+            blob: b"private sealed identity".to_vec(),
+        };
+        assert_redacted_debug(
+            &sealed,
+            "SealedIdentity(..)",
+            &[sealed.identity.seed.as_bytes(), &sealed.blob],
+        );
+        assert!(!format!("{sealed:?}").contains("private nickname"));
+    }
+
+    #[test]
+    fn client_and_provision_debug_hide_private_state() {
+        let seed = IdentitySeed([0xA5; 32]);
+        let (core, startup) = Core::restore(
+            &seed,
+            DeviceId::FIRST,
+            &cypher_core::Snapshot::default(),
+            0,
+            OsRng,
+        )
+        .unwrap();
+        let client = Client {
+            core,
+            vault: Vault::new(seed.derive_storage_key()),
+            startup,
+        };
+        let storage_key = seed.derive_storage_key();
+        assert_redacted_debug(&client, "Client(..)", &[seed.as_bytes(), &storage_key]);
+
+        let provision = Provision::new("private device", 0.0);
+        assert_eq!(format!("{provision:?}"), "Provision(..)");
+        assert!(!format!("{provision:?}").contains("private device"));
     }
 }
