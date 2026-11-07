@@ -116,9 +116,12 @@ impl IdentityStore {
     }
 
     pub fn unlock(&self, passphrase: &str) -> Result<Unlocked, ClientError> {
-        let sealed = fs::read(&self.path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => ClientError::Identity(IdentityKind::Missing),
-            _ => e.into(),
+        let sealed = fs::read(&self.path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ClientError::Identity(IdentityKind::Missing)
+            } else {
+                e.into()
+            }
         })?;
         Ok(identity_file::open(&sealed, passphrase)?)
     }

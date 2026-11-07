@@ -168,7 +168,34 @@ fn reply(event: &Event) -> Option<JsEffect<'static>> {
             id: Some(id),
             reason,
         } => ("link_failed", id, ReplyValue::Reason(*reason)),
-        _ => return None,
+        Event::Connected
+        | Event::Disconnected
+        | Event::Superseded
+        | Event::DeviceUnlinked
+        | Event::NoRoom { .. }
+        | Event::OwnDevices { .. }
+        | Event::LinkFailed { .. }
+        | Event::LinkedHere
+        | Event::ContactsChanged
+        | Event::Onion { .. }
+        | Event::Bootstrap { .. }
+        | Event::ServerKeyChanged { .. }
+        | Event::PeerAdded { .. }
+        | Event::ContactRequest { .. }
+        | Event::PeerProfile { .. }
+        | Event::Message(_)
+        | Event::MessageStatus { .. }
+        | Event::TransferOffered { .. }
+        | Event::TransferProgress { .. }
+        | Event::TransferComplete { .. }
+        | Event::TransferFailed { .. }
+        | Event::Warning { .. }
+        | Event::PushKey { .. }
+        | Event::PushRegistered
+        | Event::PushUnavailable
+        | Event::HistoryProgress { .. }
+        | Event::HistoryDone { .. }
+        | Event::HistoryFailed { .. } => return None,
     };
     Some(JsEffect::Reply { op, id: *id, value })
 }

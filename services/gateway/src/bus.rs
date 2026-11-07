@@ -83,7 +83,8 @@ impl Bus for async_nats::Client {
             Err(e) => Err(match e.kind() {
                 async_nats::RequestErrorKind::NoResponders => BusError::NoResponders,
                 async_nats::RequestErrorKind::TimedOut => BusError::Timeout,
-                _ => BusError::Unavailable,
+                async_nats::RequestErrorKind::InvalidSubject
+                | async_nats::RequestErrorKind::Other => BusError::Unavailable,
             }),
         }
     }

@@ -1,6 +1,8 @@
 //! Framed TLS transport: `[u32 BE length][wire frame]`. The payload of each
 //! frame is one `cypher-wire` message; decoding hands out zero-copy slices.
 
+#![deny(clippy::future_not_send)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

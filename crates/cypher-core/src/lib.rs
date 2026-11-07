@@ -5,6 +5,7 @@
 // Adding a protocol variant must be handled at every match, never swallowed
 // by a catch-all arm.
 #![cfg_attr(not(test), deny(clippy::wildcard_enum_match_arm))]
+#![deny(clippy::iter_over_hash_type)]
 
 /// Declares a fieldless enum whose variants the frontends know by name:
 /// each variant's name (also its serde name), `name()` and `ALL`, every

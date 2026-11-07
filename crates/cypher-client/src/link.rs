@@ -96,7 +96,16 @@ async fn run(
                     let _ = done.send(Err(ClientError::Expired));
                     return;
                 }
-                _ => {}
+                Effect::Anonymous(_)
+                | Effect::Persist(_)
+                | Effect::Emit(_)
+                | Effect::ReadChunk { .. }
+                | Effect::OpenSink { .. }
+                | Effect::WriteChunk { .. }
+                | Effect::CloseSink { .. }
+                | Effect::BuildHistory { .. }
+                | Effect::ImportHistory { .. }
+                | Effect::Disconnect { .. } => {}
             }
         }
     }

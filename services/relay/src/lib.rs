@@ -3,6 +3,8 @@
 //! neither read nor forge requests or replies, and keeps no state beyond
 //! open connections and that key set for a minute.
 
+#![deny(clippy::future_not_send)]
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

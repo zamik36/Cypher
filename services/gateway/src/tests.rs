@@ -230,7 +230,22 @@ async fn sender_is_stamped_by_the_gateway() {
             assert_eq!(Addr::new(from, device), a.addr());
             assert_eq!(&body[..], b"hello");
         }
-        other => panic!("unexpected {other:?}"),
+        other @ (ServerMsg::Challenge { .. }
+        | ServerMsg::Ready
+        | ServerMsg::Pong
+        | ServerMsg::SendAck { .. }
+        | ServerMsg::RecvSealed { .. }
+        | ServerMsg::Keys { .. }
+        | ServerMsg::KeysAck { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::LinkCreated { .. }
+        | ServerMsg::LinkResolved { .. }
+        | ServerMsg::InboxBatch { .. }
+        | ServerMsg::Done
+        | ServerMsg::BootstrapInfo { .. }
+        | ServerMsg::PushKey { .. }
+        | ServerMsg::Error { .. }
+        | ServerMsg::Superseded) => panic!("unexpected {other:?}"),
     }
     assert_eq!(gw.metrics().delivered_local.get(), 1);
 }
@@ -535,7 +550,22 @@ async fn a_device_can_message_its_sibling() {
                 (one.addr(), &b"sync"[..])
             );
         }
-        other => panic!("unexpected {other:?}"),
+        other @ (ServerMsg::Challenge { .. }
+        | ServerMsg::Ready
+        | ServerMsg::Pong
+        | ServerMsg::SendAck { .. }
+        | ServerMsg::RecvSealed { .. }
+        | ServerMsg::Keys { .. }
+        | ServerMsg::KeysAck { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::LinkCreated { .. }
+        | ServerMsg::LinkResolved { .. }
+        | ServerMsg::InboxBatch { .. }
+        | ServerMsg::Done
+        | ServerMsg::BootstrapInfo { .. }
+        | ServerMsg::PushKey { .. }
+        | ServerMsg::Error { .. }
+        | ServerMsg::Superseded) => panic!("unexpected {other:?}"),
     }
     assert!(one.recv().await.is_none(), "nothing came back to itself");
 }
@@ -766,7 +796,22 @@ async fn delivery_across_gateway_nodes() {
         ServerMsg::Recv { from, body, .. } => {
             assert_eq!((from, &body[..]), (a.peer(), &b"cross-node"[..]));
         }
-        other => panic!("unexpected {other:?}"),
+        other @ (ServerMsg::Challenge { .. }
+        | ServerMsg::Ready
+        | ServerMsg::Pong
+        | ServerMsg::SendAck { .. }
+        | ServerMsg::RecvSealed { .. }
+        | ServerMsg::Keys { .. }
+        | ServerMsg::KeysAck { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::LinkCreated { .. }
+        | ServerMsg::LinkResolved { .. }
+        | ServerMsg::InboxBatch { .. }
+        | ServerMsg::Done
+        | ServerMsg::BootstrapInfo { .. }
+        | ServerMsg::PushKey { .. }
+        | ServerMsg::Error { .. }
+        | ServerMsg::Superseded) => panic!("unexpected {other:?}"),
     }
 }
 

@@ -1,6 +1,6 @@
 // Matches on our own and Tauri's enums name every variant, so a new one
 // is looked at where it matters.
-#![warn(clippy::wildcard_enum_match_arm)]
+#![deny(clippy::wildcard_enum_match_arm)]
 
 mod commands;
 mod dto;

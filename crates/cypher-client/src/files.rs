@@ -387,7 +387,12 @@ mod tests {
         }));
         match done.recv().await.unwrap() {
             IoDone::ChunkRead { buf, .. } => assert_eq!(&buf[3..], b"cdWX"),
-            _ => panic!("expected read"),
+            IoDone::ReadFailed { .. }
+            | IoDone::WriteFailed { .. }
+            | IoDone::Notify(_)
+            | IoDone::HistoryArrived { .. }
+            | IoDone::HistoryBuilt { .. }
+            | IoDone::HistoryImported { .. } => panic!("expected read"),
         }
     }
 

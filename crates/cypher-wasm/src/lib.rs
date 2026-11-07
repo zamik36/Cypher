@@ -2,6 +2,8 @@
 //! leaves WebAssembly memory; JS only moves bytes between the core, the
 //! WebSocket, `IndexedDB` and OPFS.
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 mod command;
 mod convert;
 mod history;
@@ -715,7 +717,17 @@ mod tests {
                     key,
                     value,
                 }) => Some((key, value)),
-                _ => None,
+                Effect::Persist(_)
+                | Effect::Transmit(_)
+                | Effect::Anonymous(_)
+                | Effect::Emit(_)
+                | Effect::ReadChunk { .. }
+                | Effect::OpenSink { .. }
+                | Effect::WriteChunk { .. }
+                | Effect::CloseSink { .. }
+                | Effect::BuildHistory { .. }
+                | Effect::ImportHistory { .. }
+                | Effect::Disconnect { .. } => None,
             })
             .unwrap();
         assert_eq!(

@@ -1,6 +1,8 @@
 //! Native Cypher client: a tokio driver around the sans-IO `cypher-core`,
 //! with SQLite persistence, positional file IO and automatic reconnects.
 
+#![deny(clippy::future_not_send, clippy::wildcard_enum_match_arm)]
+
 mod driver;
 mod files;
 mod history;
