@@ -53,6 +53,12 @@ macro_rules! prekey_common {
                 &self.secret
             }
         }
+
+        impl std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($t), "(..)"))
+            }
+        }
     };
 }
 
@@ -244,5 +250,15 @@ mod tests {
         assert_eq!(PrekeyBundle::decode(&buf), Err(CryptoError::Malformed));
         buf.truncate(buf.len() - 2);
         assert_eq!(PrekeyBundle::decode(&buf), Err(CryptoError::Malformed));
+    }
+
+    #[test]
+    fn prekey_debug_hides_private_keys() {
+        let signed = SignedPreKey::from_secret_bytes(7, [0xD2; 32]);
+        let one_time = OneTimePreKey::from_secret_bytes(9, [0xE3; 32]);
+        let signed_secret = signed.secret_bytes();
+        let one_time_secret = one_time.secret_bytes();
+        crate::assert_redacted_debug(&signed, "SignedPreKey(..)", &[&signed_secret[..]]);
+        crate::assert_redacted_debug(&one_time, "OneTimePreKey(..)", &[&one_time_secret[..]]);
     }
 }

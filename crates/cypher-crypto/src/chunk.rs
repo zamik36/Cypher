@@ -54,6 +54,12 @@ pub struct ChunkCipher {
     chunk_count: u32,
 }
 
+impl std::fmt::Debug for ChunkCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChunkCipher(..)")
+    }
+}
+
 pub const ACK_TAG_LEN: usize = 16;
 
 impl ChunkCipher {
@@ -200,5 +206,12 @@ mod tests {
         let mut buf = b"data".to_vec();
         a.seal(0, &mut buf).unwrap();
         assert_eq!(b.open(0, &mut buf), Err(CryptoError::Aead));
+    }
+
+    #[test]
+    fn chunk_cipher_debug_hides_the_file_key() {
+        let key = FileKey::from_bytes([0x5A; 32]);
+        let cipher = ChunkCipher::new(&key, FileId([3; 16]), 2);
+        crate::assert_redacted_debug(&cipher, "ChunkCipher(..)", &[key.as_bytes()]);
     }
 }

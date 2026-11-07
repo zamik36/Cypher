@@ -30,3 +30,23 @@ pub use error::CryptoError;
 pub use handshake::InitHeader;
 pub use identity::{IdentityKeyPair, IdentitySeed};
 pub use prekey::{OneTimePreKey, PrekeyBundle, SignedPreKey};
+
+#[cfg(test)]
+pub(crate) fn assert_redacted_debug<T: std::fmt::Debug>(
+    value: &T,
+    expected: &str,
+    secrets: &[&[u8]],
+) {
+    use std::fmt::Write as _;
+
+    let shown = format!("{value:?}");
+    assert_eq!(shown, expected);
+    for secret in secrets {
+        assert!(!shown.contains(&format!("{secret:?}")));
+        let hex = secret.iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+        assert!(!shown.contains(&hex));
+    }
+}

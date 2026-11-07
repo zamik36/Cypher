@@ -57,6 +57,12 @@ pub struct Unsealed {
     pub nickname: String,
 }
 
+impl std::fmt::Debug for Unsealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Unsealed(..)")
+    }
+}
+
 pub fn seal(
     seed: &IdentitySeed,
     device: DeviceId,
@@ -225,7 +231,7 @@ mod tests {
         );
         let mut blob = seal(&seed, DeviceId::FIRST, "a", PASS, &mut OsRng).unwrap();
         blob[1] ^= 1;
-        assert!(open(&blob, PASS).is_err());
+        open(&blob, PASS).unwrap_err();
         assert_eq!(
             open(&blob[..10], PASS).err(),
             Some(IdentityFileError::Corrupt)
@@ -266,5 +272,16 @@ mod tests {
                 && T_COST_RANGE.contains(&T_COST)
                 && P_COST_RANGE.contains(&P_COST)
         );
+    }
+
+    #[test]
+    fn unsealed_debug_hides_seed_and_nickname() {
+        let unsealed = Unsealed {
+            seed: IdentitySeed([0xA5; 32]),
+            device: DeviceId(7),
+            nickname: "private nickname".into(),
+        };
+        crate::assert_redacted_debug(&unsealed, "Unsealed(..)", &[unsealed.seed.as_bytes()]);
+        assert!(!format!("{unsealed:?}").contains("private nickname"));
     }
 }

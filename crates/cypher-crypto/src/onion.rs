@@ -33,6 +33,18 @@ pub struct OpenedRequest {
     pub replay_id: [u8; 32],
 }
 
+impl std::fmt::Debug for ReplyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReplyKey(..)")
+    }
+}
+
+impl std::fmt::Debug for OpenedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenedRequest(..)")
+    }
+}
+
 /// `epoch u32 ‖ sealed(onion_key, reply key ‖ time ‖ frame ‖ padding)`:
 /// the epoch tells signaling which of its keys `onion_key` is.
 pub fn seal_request(
@@ -193,9 +205,9 @@ mod tests {
         let (sk, pk) = keys();
         let (other_sk, _) = keys();
         let (mut blob, reply) = seal_request(0, &pk, b"x", 0, &mut OsRng).unwrap();
-        assert!(open_request(&other_sk, sealed(&blob)).is_err());
+        open_request(&other_sk, sealed(&blob)).unwrap_err();
         blob[40] ^= 1;
-        assert!(open_request(&sk, sealed(&blob)).is_err());
+        open_request(&sk, sealed(&blob)).unwrap_err();
 
         let resp = seal_response(&reply, b"y", &mut OsRng);
         let (_, other_reply) = seal_request(0, &pk, b"z", 0, &mut OsRng).unwrap();
@@ -206,7 +218,23 @@ mod tests {
     #[cfg_attr(miri, ignore = "seals a maximum-size frame; minutes under Miri")]
     fn oversized_frames_are_rejected() {
         let (_, pk) = keys();
-        assert!(seal_request(0, &pk, &vec![0u8; MAX_ONION_FRAME + 1], 0, &mut OsRng).is_err());
+        seal_request(0, &pk, &vec![0u8; MAX_ONION_FRAME + 1], 0, &mut OsRng).unwrap_err();
         seal_request(0, &pk, &vec![0u8; MAX_ONION_FRAME], 0, &mut OsRng).unwrap();
+    }
+
+    #[test]
+    fn onion_debug_hides_reply_key_and_plaintext() {
+        let opened = OpenedRequest {
+            frame: b"private plaintext".to_vec(),
+            timestamp_secs: 10,
+            reply: ReplyKey([0xC3; 32]),
+            replay_id: [0xD4; 32],
+        };
+        crate::assert_redacted_debug(&opened.reply, "ReplyKey(..)", &[&opened.reply.0]);
+        crate::assert_redacted_debug(
+            &opened,
+            "OpenedRequest(..)",
+            &[&opened.reply.0, &opened.frame],
+        );
     }
 }

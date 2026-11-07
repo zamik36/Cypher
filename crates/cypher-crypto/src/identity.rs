@@ -92,6 +92,18 @@ impl IdentityKeyPair {
     }
 }
 
+impl std::fmt::Debug for IdentitySeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IdentitySeed(..)")
+    }
+}
+
+impl std::fmt::Debug for IdentityKeyPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IdentityKeyPair(..)")
+    }
+}
+
 /// Checks that `peer`, an Ed25519 public key, signed `message`.
 ///
 /// Strict: rejects small-order keys and non-canonical signatures. Plain
@@ -167,7 +179,7 @@ mod tests {
         assert_eq!(phrase.split_whitespace().count(), 24);
         let restored = IdentitySeed::from_mnemonic(&phrase).unwrap();
         assert_eq!(seed.0, restored.0);
-        assert!(IdentitySeed::from_mnemonic("not a valid mnemonic").is_err());
+        IdentitySeed::from_mnemonic("not a valid mnemonic").unwrap_err();
     }
 
     #[test]
@@ -181,5 +193,19 @@ mod tests {
             out
         };
         assert_eq!(kp.signing_key.to_bytes(), legacy_ed);
+    }
+
+    #[test]
+    fn identity_debug_hides_seed_and_private_keys() {
+        let seed = IdentitySeed([0xA5; 32]);
+        crate::assert_redacted_debug(&seed, "IdentitySeed(..)", &[seed.as_bytes()]);
+        let pair = seed.derive_identity();
+        let signing = pair.signing_key.to_bytes();
+        let dh = pair.dh_secret.to_bytes();
+        crate::assert_redacted_debug(
+            &pair,
+            "IdentityKeyPair(..)",
+            &[&signing, &dh, seed.as_bytes()],
+        );
     }
 }
