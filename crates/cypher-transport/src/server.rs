@@ -84,6 +84,22 @@ pub struct Listener {
     upgrade: Upgrade,
 }
 
+impl std::fmt::Debug for Upgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tls(_) => f.write_str("Upgrade::Tls(..)"),
+            #[cfg(feature = "ws")]
+            Self::WebSocket(_) => f.write_str("Upgrade::WebSocket(..)"),
+        }
+    }
+}
+
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Listener(..)")
+    }
+}
+
 impl Listener {
     pub fn new(listener: TcpListener, upgrade: Upgrade) -> Self {
         Self { listener, upgrade }

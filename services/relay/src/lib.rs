@@ -132,6 +132,18 @@ pub struct Relay<U> {
     key_set_refresh: tokio::sync::Mutex<()>,
 }
 
+impl std::fmt::Debug for RelayMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelayMetrics(..)")
+    }
+}
+
+impl<U> std::fmt::Debug for Relay<U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Relay(..)")
+    }
+}
+
 impl<U: OnionUpstream> Relay<U> {
     pub fn new(upstream: U, metrics: RelayMetrics) -> Self {
         Self {

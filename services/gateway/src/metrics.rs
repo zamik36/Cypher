@@ -16,6 +16,12 @@ pub struct Metrics {
     pub publish_failed: IntCounter,
 }
 
+impl std::fmt::Debug for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Metrics(..)")
+    }
+}
+
 impl Metrics {
     pub fn register(r: &Registry) -> anyhow::Result<Self> {
         Ok(Self {

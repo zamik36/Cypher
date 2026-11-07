@@ -65,6 +65,14 @@ pub struct OpusWebm {
     cluster_start_ms: u64,
 }
 
+impl std::fmt::Debug for OpusWebm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpusWebm")
+            .field("frames", &self.frames)
+            .finish_non_exhaustive()
+    }
+}
+
 impl OpusWebm {
     /// `pre_skip` is the encoder lookahead in 48 kHz samples.
     pub fn new(pre_skip: u16) -> Self {
@@ -330,5 +338,14 @@ mod tests {
     fn single_frame_file_is_valid() {
         let mkv = MatroskaFile::open(Cursor::new(mux(1))).expect("valid webm");
         assert_eq!(mkv.info().duration(), Some(20.0));
+    }
+
+    #[test]
+    fn webm_debug_shows_frame_count_not_packets() {
+        let mut webm = OpusWebm::new(312);
+        webm.push(&[252, 170, 171]);
+        let shown = format!("{webm:?}");
+        assert_eq!(shown, "OpusWebm { frames: 1, .. }");
+        assert!(!shown.contains("252") && !shown.contains("170"));
     }
 }

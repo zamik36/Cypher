@@ -30,6 +30,12 @@ pub struct Metrics {
     ready: Arc<OnceLock<async_nats::Client>>,
 }
 
+impl std::fmt::Debug for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Metrics(..)")
+    }
+}
+
 impl Metrics {
     /// A fresh registry with the tokio runtime's own metrics (`tokio_*`); on
     /// Linux it also exports process resident memory, CPU time and open file

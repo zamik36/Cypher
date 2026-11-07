@@ -15,6 +15,12 @@ pub struct SelfSignedCert {
     pub key_der: PrivateKeyDer<'static>,
 }
 
+impl std::fmt::Debug for SelfSignedCert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SelfSignedCert(..)")
+    }
+}
+
 impl SelfSignedCert {
     /// Generate a new self-signed certificate for the given DNS names.
     ///
@@ -56,5 +62,19 @@ impl SelfSignedCert {
             cert_pem,
             key_der,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_hides_private_key_der_and_pem() {
+        let cert = SelfSignedCert::generate(&["localhost"]).unwrap();
+        let shown = format!("{cert:?}");
+        assert_eq!(shown, "SelfSignedCert(..)");
+        assert!(!shown.contains(&format!("{:?}", cert.key_der.secret_der())));
+        assert!(!shown.contains("PRIVATE KEY"));
     }
 }

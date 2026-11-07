@@ -27,6 +27,12 @@ pub struct Recorder {
     worker: JoinHandle<Result<Option<Recording>, MediaError>>,
 }
 
+impl std::fmt::Debug for Recorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Recorder(..)")
+    }
+}
+
 impl Recorder {
     /// Opens the default microphone and starts encoding. Returns once the
     /// device is running, or with the reason it could not be opened.

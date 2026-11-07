@@ -23,6 +23,22 @@ pub struct VoiceEncoder<L> {
     sink: FrameSink<L>,
 }
 
+impl std::fmt::Debug for Recording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recording")
+            .field("duration_ms", &self.duration_ms)
+            .field("webm_bytes", &self.webm.len())
+            .field("waveform_bytes", &self.waveform.len())
+            .finish()
+    }
+}
+
+impl<L> std::fmt::Debug for VoiceEncoder<L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VoiceEncoder(..)")
+    }
+}
+
 /// Everything that consumes complete 20 ms frames.
 struct FrameSink<L> {
     pcm: [i16; FRAME_SAMPLES],
@@ -239,5 +255,23 @@ mod tests {
             enc.push(&second).unwrap();
         }
         assert_eq!(enc.duration_ms(), MAX_VOICE_MS);
+    }
+
+    #[test]
+    fn voice_debug_shows_sizes_not_audio() {
+        let encoder = VoiceEncoder::new(48_000, |_| {}).unwrap();
+        assert_eq!(format!("{encoder:?}"), "VoiceEncoder(..)");
+        let recording = Recording {
+            webm: vec![201, 202, 203],
+            duration_ms: 20,
+            waveform: vec![204, 205],
+        };
+        let shown = format!("{recording:?}");
+        assert_eq!(
+            shown,
+            "Recording { duration_ms: 20, webm_bytes: 3, waveform_bytes: 2 }"
+        );
+        assert!(!shown.contains(&format!("{:?}", recording.webm)));
+        assert!(!shown.contains(&format!("{:?}", recording.waveform)));
     }
 }
