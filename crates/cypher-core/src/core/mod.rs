@@ -109,6 +109,12 @@ struct Journal {
     effects: Vec<Effect>,
 }
 
+#[derive(Clone, Copy)]
+struct FreshState {
+    prekeys: bool,
+    inboxes: bool,
+}
+
 struct Connection {
     conn: Conn,
     last_rx: u64,
@@ -158,6 +164,12 @@ pub struct Core<R> {
     inbox_epochs: InboxEpochs,
     push: PushState,
     profile: Profile,
+}
+
+impl<R> std::fmt::Debug for Core<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Core(..)")
+    }
 }
 
 impl<R: CryptoRngCore> Core<R> {
@@ -248,7 +260,13 @@ impl<R: CryptoRngCore> Core<R> {
         if core.prekeys.take_unseeded() {
             core.seed_accepted_inits();
         }
-        core.pick_up(&skipped, fresh_prekeys, inboxes_new);
+        core.pick_up(
+            &skipped,
+            FreshState {
+                prekeys: fresh_prekeys,
+                inboxes: inboxes_new,
+            },
+        );
         let effects = std::mem::take(&mut core.journal.effects);
         Ok((core, effects))
     }
@@ -270,11 +288,11 @@ impl<R: CryptoRngCore> Core<R> {
     /// What a restored core stores, tells and asks for again: state it
     /// just made up, offers still waiting, history work the driver did not
     /// finish, records it could not read.
-    fn pick_up(&mut self, skipped: &Skipped, fresh_prekeys: bool, fresh_inboxes: bool) {
-        if fresh_prekeys {
+    fn pick_up(&mut self, skipped: &Skipped, fresh: FreshState) {
+        if fresh.prekeys {
             self.persist_prekeys();
         }
-        if fresh_inboxes {
+        if fresh.inboxes {
             self.start_inbox_epochs();
         }
         self.announce_pending_offers();
@@ -1599,5 +1617,19 @@ mod tests {
             assert_eq!(frame.req_id, u32::try_from(n + 1).unwrap());
             assert!(matches!(frame.msg, ClientMsg::ResolveLink { link } if link == *expected));
         }
+    }
+
+    #[test]
+    fn core_debug_hides_identity_state() {
+        let seed = IdentitySeed([0xA5; 32]);
+        let (core, _) = Core::restore(
+            &seed,
+            DeviceId::FIRST,
+            &Snapshot::default(),
+            0,
+            ChaCha20Rng::seed_from_u64(7),
+        )
+        .unwrap();
+        crate::assert_redacted_debug(&core, "Core(..)", &[seed.as_bytes()]);
     }
 }

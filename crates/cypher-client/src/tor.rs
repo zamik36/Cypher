@@ -136,6 +136,10 @@ mod tests {
             return;
         }
         // As the binary does at startup.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this standalone smoke test has no binary entry point to install the provider"
+        )]
         let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let tor = Tor::new(TorConfig::default(), dir.path().to_owned());

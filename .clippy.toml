@@ -2,6 +2,7 @@ too-many-lines-threshold = 60
 cognitive-complexity-threshold = 20
 excessive-nesting-threshold = 5
 too-many-arguments-threshold = 6
+max-fn-params-bools = 1
 type-complexity-threshold = 250
 avoid-breaking-exported-api = false
 allow-unwrap-in-tests = true
@@ -17,4 +18,8 @@ disallowed-methods = [
     { path = "std::process::exit", reason = "return an ExitCode from main instead" },
     { path = "rand::thread_rng", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
     { path = "rand::random", reason = "use OsRng or an injected CryptoRngCore", allow-invalid = true },
+    { path = "tokio::sync::mpsc::unbounded_channel", reason = "use a bounded channel unless queue growth is externally bounded" },
+    { path = "std::sync::mpsc::channel", reason = "use sync_channel unless queue growth is externally bounded" },
+    { path = "tokio::sync::notify::Notify::notify_waiters", reason = "use CancellationToken so cancellation is not lost" },
+    { path = "rustls::crypto::CryptoProvider::install_default", reason = "install the provider only in main" },
 ]

@@ -76,6 +76,12 @@ pub struct Gateway<B> {
     outbox_budget: Arc<Budget>,
 }
 
+impl<B> std::fmt::Debug for Gateway<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Gateway(..)")
+    }
+}
+
 impl<B: Bus> Gateway<B> {
     pub fn new(bus: B, limits: Limits, metrics: Metrics) -> Self {
         Self {

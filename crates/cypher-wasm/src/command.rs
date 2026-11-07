@@ -144,6 +144,10 @@ pub(crate) struct Prepared {
 }
 
 impl JsCommand {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exhaustive command conversion keeps the protocol mapping in one place"
+    )]
     pub(crate) fn prepare(self, rng: &mut impl CryptoRngCore) -> Result<Prepared, CommandError> {
         let plain = |command| Prepared {
             command,
@@ -204,7 +208,13 @@ impl JsCommand {
             Self::BlockPeer { peer: p } => plain(Command::BlockPeer { peer: peer(&p)? }),
             Self::UnblockPeer { peer: p } => plain(Command::UnblockPeer { peer: peer(&p)? }),
             // Push wake-ups and this identity's other devices.
-            other => plain(other.device_command()?),
+            other @ (Self::EnablePush
+            | Self::RegisterPush { .. }
+            | Self::DisablePush
+            | Self::LinkDevice { .. }
+            | Self::CancelHistory
+            | Self::UnlinkDevice { .. }
+            | Self::ReplaceDevice { .. }) => plain(other.device_command()?),
         })
     }
 }
@@ -228,7 +238,24 @@ impl JsCommand {
             Self::CancelHistory => Command::CancelHistory,
             Self::UnlinkDevice { device } => Command::UnlinkDevice { device },
             Self::ReplaceDevice { device } => Command::ReplaceDevice { device },
-            _ => return Err(CommandError::Push),
+            Self::CreateLink { .. }
+            | Self::JoinLink { .. }
+            | Self::SendText { .. }
+            | Self::DiscardOutgoing { .. }
+            | Self::SendFile(_)
+            | Self::AcceptFile { .. }
+            | Self::CancelTransfer { .. }
+            | Self::MarkRead { .. }
+            | Self::FetchInbox
+            | Self::SetAnonymity { .. }
+            | Self::SetServer { .. }
+            | Self::TrustServerKey
+            | Self::RemovePeer { .. }
+            | Self::RenamePeer { .. }
+            | Self::SetProfileName { .. }
+            | Self::AcceptContact { .. }
+            | Self::BlockPeer { .. }
+            | Self::UnblockPeer { .. } => return Err(CommandError::Push),
         })
     }
 }

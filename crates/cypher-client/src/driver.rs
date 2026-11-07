@@ -55,6 +55,11 @@ impl cypher_core::Record for SavedFile {
     const VERSION: u8 = 1;
 }
 
+struct LostLinks {
+    gateway: bool,
+    relay: bool,
+}
+
 pub(crate) struct Driver {
     core: Core<OsRng>,
     store: Store,
@@ -189,6 +194,10 @@ impl Driver {
         let (net_tx, net_rx) = net::inbound();
         // Unbounded by design: it holds at most one result per job the
         // driver itself handed to the IO thread or a history task.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "only driver-issued jobs produce results; their number bounds the queue"
+        )]
         let (io_tx, io_rx) = mpsc::unbounded_channel();
         let driver = Self {
             core: parts.core,
@@ -514,7 +523,11 @@ impl Driver {
             }
         }
         if self.flush().await {
-            self.report_lost(gateway_lost, relay_lost).await;
+            self.report_lost(LostLinks {
+                gateway: gateway_lost,
+                relay: relay_lost,
+            })
+            .await;
         }
     }
 
@@ -544,11 +557,11 @@ impl Driver {
 
     /// Tells the core what the connections the driver dropped would have
     /// reported; their own `Down` is stale by now and ignored.
-    async fn report_lost(&mut self, gateway: bool, relay: bool) {
-        if gateway {
+    async fn report_lost(&mut self, lost: LostLinks) {
+        if lost.gateway {
             Box::pin(self.feed(Input::Disconnected)).await;
         }
-        if relay {
+        if lost.relay {
             Box::pin(self.feed(Input::AnonymousChannel { up: false })).await;
         }
     }
@@ -579,7 +592,14 @@ impl Driver {
                 file_id,
                 keep: complete,
             },
-            _ => return None,
+            Effect::Transmit(_)
+            | Effect::Anonymous(_)
+            | Effect::Persist(_)
+            | Effect::Emit(_)
+            | Effect::ReadChunk { .. }
+            | Effect::BuildHistory { .. }
+            | Effect::ImportHistory { .. }
+            | Effect::Disconnect { .. } => return None,
         })
     }
 
@@ -755,6 +775,10 @@ mod tests {
 
     use super::*;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test driver uses the production UI and IO channel types"
+    )]
     fn driver(store: Store) -> (Driver, mpsc::UnboundedReceiver<Event>) {
         let dir = tempfile::tempdir().unwrap();
         let seed = IdentitySeed::generate();
@@ -898,7 +922,7 @@ mod tests {
     async fn a_received_file_is_announced_once_on_disk_and_remembered() {
         let dir = tempfile::tempdir().unwrap();
         let (mut d, mut events) = driver(Store::open(&dir.path().join("state.db")).unwrap());
-        let (io_tx, mut io_rx) = mpsc::unbounded_channel();
+        let (io_tx, mut io_rx) = crate::event_channel();
         d.io = FileIo::spawn(io_tx).unwrap();
         let (received, recorded) = (FileId([1; 16]), FileId([2; 16]));
         let path = dir.path().join("in.bin");

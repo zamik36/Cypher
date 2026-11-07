@@ -8,6 +8,8 @@
 //! created on first start: the long-term signing key that signs the onion
 //! keys (clients pin it) and, when push is configured, the VAPID key.
 
+#![deny(clippy::future_not_send)]
+
 mod handler;
 mod keys;
 mod onion;

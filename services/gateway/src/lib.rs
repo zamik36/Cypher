@@ -1,6 +1,8 @@
 //! Gateway: terminates client connections (TLS and WebSocket), authenticates
 //! identities and relays opaque end-to-end frames between peers.
 
+#![deny(clippy::future_not_send, clippy::wildcard_enum_match_arm)]
+
 mod bus;
 mod metrics;
 mod outbox;

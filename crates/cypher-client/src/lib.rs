@@ -1,6 +1,8 @@
 //! Native Cypher client: a tokio driver around the sans-IO `cypher-core`,
 //! with SQLite persistence, positional file IO and automatic reconnects.
 
+#![deny(clippy::future_not_send, clippy::wildcard_enum_match_arm)]
+
 mod driver;
 mod files;
 mod history;
@@ -107,6 +109,12 @@ pub struct Config {
     /// installs in `main`; without one, [`Client::start`] fails with
     /// [`ClientError::NoCryptoProvider`].
     pub tor: Option<TorConfig>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Config(..)")
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -301,6 +309,22 @@ pub struct Client {
     config: Config,
 }
 
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Client(..)")
+    }
+}
+
+// Unbounded by design: synchronous driver output is paced by bounded
+// network input, issued jobs and application requests.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "bounded input, issued jobs and requests pace driver output"
+)]
+fn event_channel<T>() -> (mpsc::UnboundedSender<T>, mpsc::UnboundedReceiver<T>) {
+    mpsc::unbounded_channel()
+}
+
 impl Client {
     /// Restores persisted state for `seed` and starts connecting. Refuses a
     /// Tor config the build cannot honour rather than reach the relay
@@ -326,9 +350,7 @@ impl Client {
         } = blocking(move || restore(&restoring, device, &dir, &db)).await?;
         let vault = Vault::new(seed.derive_storage_key());
 
-        // Unbounded by design: the driver emits from synchronous code, at the
-        // pace of the bounded network queue and the app's own requests.
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = event_channel();
         let (req_tx, req_rx) = mpsc::channel(256);
         let stopped = Driver::spawn(
             Parts {
@@ -1232,6 +1254,10 @@ mod tests {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             assert!(matches!(start().await, Err(ClientError::NoCryptoProvider)));
             nothing_opened();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "this test installs the provider only after checking the no-provider path"
+            )]
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
         let (client, _events) = start().await.unwrap();
@@ -1575,6 +1601,46 @@ mod tests {
         let kept_name = format!("{}.bin", kept.to_hex());
         assert_eq!(outgoing_files(dir.path()), [kept_name, "folder".to_owned()]);
         assert!(elsewhere.exists());
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_debug_hides_identity_and_private_paths() {
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().join("private-profile"),
+            tor: Some(TorConfig {
+                bridges: vec!["private bridge".into()],
+                transport_binary: None,
+            }),
+            ..config(dir.path())
+        };
+        assert_eq!(format!("{config:?}"), "Config(..)");
+        let config_shown = format!("{config:?}");
+        assert!(!config_shown.contains("private-profile"));
+        assert!(!config_shown.contains("private bridge"));
+
+        let seed = IdentitySeed([0xA5; 32]);
+        let (client, _events) = Client::start(
+            &seed,
+            DeviceId::FIRST,
+            Config {
+                tor: None,
+                ..config
+            },
+        )
+        .await
+        .unwrap();
+        let shown = format!("{client:?}");
+        assert_eq!(shown, "Client(..)");
+        assert!(!shown.contains(&format!("{:?}", seed.as_bytes())));
+        let hex = seed.as_bytes().iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+        assert!(!shown.contains(&hex));
         client.shutdown().await;
     }
 }

@@ -1,6 +1,6 @@
 // Matches on our own and Tauri's enums name every variant, so a new one
 // is looked at where it matters.
-#![warn(clippy::wildcard_enum_match_arm)]
+#![deny(clippy::wildcard_enum_match_arm)]
 
 mod commands;
 mod dto;
@@ -34,6 +34,10 @@ pub fn run() -> tauri::Result<()> {
     // Arti reaches the relay with TLS configs built from the process-wide
     // provider; the app's own configs carry theirs. Installed once, here,
     // before anything can use TLS.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the application entry point installs TLS before any client starts"
+    )]
     let _ = rustls::crypto::ring::default_provider().install_default();
     wire(with_plugins())
         .setup(setup)

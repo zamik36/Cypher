@@ -5,6 +5,7 @@
 // Adding a protocol variant must be handled at every match, never swallowed
 // by a catch-all arm.
 #![cfg_attr(not(test), deny(clippy::wildcard_enum_match_arm))]
+#![deny(clippy::iter_over_hash_type)]
 
 /// Declares a fieldless enum whose variants the frontends know by name:
 /// each variant's name (also its serde name), `name()` and `ALL`, every
@@ -81,5 +82,25 @@ pub enum CoreError {
 impl From<cypher_crypto::CryptoError> for CoreError {
     fn from(_: cypher_crypto::CryptoError) -> Self {
         Self::Crypto
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_redacted_debug<T: std::fmt::Debug>(
+    value: &T,
+    expected: &str,
+    secrets: &[&[u8]],
+) {
+    use std::fmt::Write as _;
+
+    let shown = format!("{value:?}");
+    assert_eq!(shown, expected);
+    for secret in secrets {
+        assert!(!shown.contains(&format!("{secret:?}")));
+        let hex = secret.iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+        assert!(!shown.contains(&hex));
     }
 }

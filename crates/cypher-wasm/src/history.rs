@@ -89,6 +89,18 @@ pub struct HistoryReader {
     import: Import,
 }
 
+impl std::fmt::Debug for HistoryWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoryWriter(..)")
+    }
+}
+
+impl std::fmt::Debug for HistoryReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoryReader(..)")
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JsStep<'a> {
@@ -164,5 +176,18 @@ impl HistoryReader {
     /// The archive is over: it must have been whole.
     pub fn finish(&self) -> Result<(), JsError> {
         self.reader.finish().map_err(js_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_debug_hides_rows_and_storage_key() {
+        assert_eq!(format!("{:?}", HistoryWriter::new()), "HistoryWriter(..)");
+        let key = [0xA5; 32];
+        let reader = HistoryReader::new(Vault::new(key));
+        crate::assert_redacted_debug(&reader, "HistoryReader(..)", &[&key]);
     }
 }

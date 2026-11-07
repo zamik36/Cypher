@@ -16,7 +16,7 @@
     "@tauri-apps/plugin-deep-link": "^2.6.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-process": "^2.4.0",
-    "@tauri-apps/plugin-updater": "^2.14.0",
+    "@tauri-apps/plugin-updater": "2.13.1",
     "solid-js": "^1.9"
   },
   "devDependencies": {

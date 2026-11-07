@@ -21,6 +21,14 @@ pub struct BusMsg {
     pub announcer: Option<u128>,
 }
 
+impl std::fmt::Debug for BusMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BusMsg")
+            .field("payload_bytes", &self.payload.len())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusError {
     NoResponders,
@@ -83,7 +91,8 @@ impl Bus for async_nats::Client {
             Err(e) => Err(match e.kind() {
                 async_nats::RequestErrorKind::NoResponders => BusError::NoResponders,
                 async_nats::RequestErrorKind::TimedOut => BusError::Timeout,
-                _ => BusError::Unavailable,
+                async_nats::RequestErrorKind::InvalidSubject
+                | async_nats::RequestErrorKind::Other => BusError::Unavailable,
             }),
         }
     }
@@ -125,6 +134,24 @@ impl Bus for async_nats::Client {
                 s.map(convert)
             })
             .map_err(|_| BusError::Unavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bus_message_debug_hides_payload_and_reply() {
+        let msg = BusMsg {
+            payload: Bytes::from_static(b"private payload"),
+            reply: Some("private reply".into()),
+            origin: None,
+            announcer: None,
+        };
+        let shown = format!("{msg:?}");
+        assert_eq!(shown, "BusMsg { payload_bytes: 15, .. }");
+        assert!(!shown.contains("private payload") && !shown.contains("private reply"));
     }
 }
 
@@ -268,6 +295,10 @@ pub(crate) mod mem {
             &self,
             subject: String,
         ) -> impl Future<Output = Result<Self::Sub, BusError>> + Send {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "test-only in-memory bus mirrors the NATS stream without backpressure"
+            )]
             let (tx, rx) = mpsc::unbounded_channel();
             self.inner
                 .lock()

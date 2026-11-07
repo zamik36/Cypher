@@ -115,7 +115,7 @@ impl Stored {
         }
         for (seq, digest) in changes.decrypted {
             self.decrypted
-                .insert(seq % MAX_DECRYPTED as u64, (seq, digest));
+                .insert(seq.rem_euclid(MAX_DECRYPTED as u64), (seq, digest));
         }
     }
 
@@ -421,7 +421,7 @@ fn a_restored_session_knows_its_copies() {
         for (seq, digest) in changes.decrypted {
             stored
                 .decrypted
-                .insert(seq % MAX_DECRYPTED as u64, (seq, digest));
+                .insert(seq.rem_euclid(MAX_DECRYPTED as u64), (seq, digest));
         }
         stored.snapshot = b.to_bytes().to_vec();
     }
@@ -779,7 +779,7 @@ proptest! {
                     if queue.is_empty() {
                         continue;
                     }
-                    let (msg, body) = queue.remove(pick % queue.len());
+                    let (msg, body) = queue.remove(pick.rem_euclid(queue.len()));
                     prop_assert_eq!(recv(receiver, &msg).unwrap(), body);
                     if dup {
                         prop_assert_eq!(recv(receiver, &msg), Err(CryptoError::Duplicate));

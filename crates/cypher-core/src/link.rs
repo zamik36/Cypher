@@ -112,6 +112,18 @@ pub struct Provision {
     linked: Option<Linked>,
 }
 
+impl std::fmt::Debug for Linked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Linked(..)")
+    }
+}
+
+impl std::fmt::Debug for Provision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provision(..)")
+    }
+}
+
 impl Provision {
     /// A new device called `name`, waiting from `now_ms`.
     pub fn new(name: &str, now_ms: u64, rng: &mut impl CryptoRngCore) -> Self {
@@ -292,5 +304,22 @@ mod tests {
             })
         )));
         assert!(p.take_linked().is_none());
+    }
+
+    #[test]
+    fn link_debug_hides_identity_and_device_names() {
+        let linked = Linked {
+            seed: IdentitySeed([0xA5; 32]),
+            device: DeviceId(7),
+            nickname: "private nickname".into(),
+        };
+        crate::assert_redacted_debug(&linked, "Linked(..)", &[linked.seed.as_bytes()]);
+        assert!(!format!("{linked:?}").contains("private nickname"));
+
+        let provision = Provision::new("private device", 0, &mut OsRng);
+        let signing = provision.temp.signing_key.to_bytes();
+        let dh = provision.temp.dh_secret.to_bytes();
+        crate::assert_redacted_debug(&provision, "Provision(..)", &[&signing, &dh]);
+        assert!(!format!("{provision:?}").contains("private device"));
     }
 }

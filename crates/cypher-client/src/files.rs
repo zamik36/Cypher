@@ -113,6 +113,10 @@ impl FileIo {
         // Unbounded by design: only the driver submits, one job per core
         // effect, and received chunks are paced by the transfer window and
         // the bounded network queue.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "only the driver submits jobs; transfer windows and bounded input pace them"
+        )]
         let (tx, rx) = std_mpsc::channel();
         thread::Builder::new()
             .name("cypher-files".into())
@@ -347,6 +351,10 @@ mod tests {
     #[tokio::test]
     async fn writes_land_at_their_offsets_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test worker uses the production IO completion channel type"
+        )]
         let (done_tx, mut done) = mpsc::unbounded_channel();
         let io = FileIo::spawn(done_tx).unwrap();
         let id = FileId([1; 16]);
@@ -387,13 +395,22 @@ mod tests {
         }));
         match done.recv().await.unwrap() {
             IoDone::ChunkRead { buf, .. } => assert_eq!(&buf[3..], b"cdWX"),
-            _ => panic!("expected read"),
+            IoDone::ReadFailed { .. }
+            | IoDone::WriteFailed { .. }
+            | IoDone::Notify(_)
+            | IoDone::HistoryArrived { .. }
+            | IoDone::HistoryBuilt { .. }
+            | IoDone::HistoryImported { .. } => panic!("expected read"),
         }
     }
 
     #[tokio::test]
     async fn a_discarded_sink_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test worker uses the production IO completion channel type"
+        )]
         let (done_tx, mut done) = mpsc::unbounded_channel();
         let io = FileIo::spawn(done_tx).unwrap();
         let id = FileId([2; 16]);
@@ -423,6 +440,10 @@ mod tests {
     #[tokio::test]
     async fn a_reserved_file_is_filled() {
         let dir = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test worker uses the production IO completion channel type"
+        )]
         let (done_tx, mut done) = mpsc::unbounded_channel();
         let io = FileIo::spawn(done_tx).unwrap();
         let id = FileId([4; 16]);
@@ -459,6 +480,10 @@ mod tests {
     #[tokio::test]
     async fn a_link_in_place_of_a_sink_is_not_followed() {
         let dir = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test worker uses the production IO completion channel type"
+        )]
         let (done_tx, mut done) = mpsc::unbounded_channel();
         let io = FileIo::spawn(done_tx).unwrap();
         let outside = dir.path().join("outside");
@@ -498,6 +523,10 @@ mod tests {
     #[tokio::test]
     async fn a_hard_link_in_place_of_a_sink_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test worker uses the production IO completion channel type"
+        )]
         let (done_tx, mut done) = mpsc::unbounded_channel();
         let io = FileIo::spawn(done_tx).unwrap();
         let elsewhere = dir.path().join("bashrc");
@@ -530,6 +559,10 @@ mod tests {
     #[tokio::test]
     async fn a_source_changed_since_its_offer_is_not_read() {
         let dir = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test worker uses the production IO completion channel type"
+        )]
         let (done_tx, mut done) = mpsc::unbounded_channel();
         let io = FileIo::spawn(done_tx).unwrap();
         let id = FileId([3; 16]);

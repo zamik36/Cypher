@@ -12,6 +12,12 @@ pub struct Error(#[from] PluginInvokeError);
 /// The Kotlin side (`PushPlugin`), managed as app state.
 pub struct Push<R: Runtime>(pub(crate) PluginHandle<R>);
 
+impl<R: Runtime> std::fmt::Debug for Push<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Push(..)")
+    }
+}
+
 /// What the distributor answered: an endpoint and its Web Push keys
 /// (base64url, unpadded), or why there is none.
 #[derive(Debug, Deserialize)]

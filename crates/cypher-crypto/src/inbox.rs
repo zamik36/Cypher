@@ -23,7 +23,7 @@ const INBOX_OP_CONTEXT: &[u8] = b"cypher/v4/inbox-op";
 
 /// The inbox epoch at `now_secs`.
 pub fn inbox_epoch(now_secs: u64) -> u32 {
-    u32::try_from(now_secs / INBOX_EPOCH_SECS).unwrap_or(u32::MAX)
+    u32::try_from(now_secs.div_euclid(INBOX_EPOCH_SECS)).unwrap_or(u32::MAX)
 }
 
 /// What a signed inbox request does; signed so one cannot stand for another.
@@ -40,6 +40,12 @@ pub enum InboxOp {
 
 /// One device's inbox key for one epoch.
 pub struct InboxKey(SigningKey);
+
+impl std::fmt::Debug for InboxKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InboxKey(..)")
+    }
+}
 
 impl InboxKey {
     /// The inbox's address: the public key.
@@ -148,5 +154,12 @@ mod tests {
         verify_op(&inbox, InboxOp::Ack, 100, b"other", &sig).unwrap_err();
         let other = IdentitySeed([7; 32]).derive_inbox_key(DeviceId(1), 11).id();
         verify_op(&other, InboxOp::Ack, 100, b"claim", &sig).unwrap_err();
+    }
+
+    #[test]
+    fn inbox_key_debug_hides_the_signing_key() {
+        let key = IdentitySeed([0xA5; 32]).derive_inbox_key(DeviceId(1), 10);
+        let secret = key.0.to_bytes();
+        crate::assert_redacted_debug(&key, "InboxKey(..)", &[&secret]);
     }
 }

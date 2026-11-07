@@ -45,6 +45,12 @@ pub struct Stack {
     _dir: TempDir,
 }
 
+impl std::fmt::Debug for Stack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Stack(..)")
+    }
+}
+
 impl Stack {
     /// Starts the stack when `CYPHER_TEST_REDIS` and `CYPHER_TEST_NATS` name
     /// the backing stores; without them `None`, so the test skips, unless

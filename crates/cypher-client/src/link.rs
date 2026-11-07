@@ -23,6 +23,12 @@ pub struct Provisioning {
     done: oneshot::Receiver<Result<Linked, ClientError>>,
 }
 
+impl std::fmt::Debug for Provisioning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provisioning(..)")
+    }
+}
+
 impl Provisioning {
     /// What to show for a device of the identity to scan.
     pub fn offer(&self) -> &str {
@@ -96,8 +102,33 @@ async fn run(
                     let _ = done.send(Err(ClientError::Expired));
                     return;
                 }
-                _ => {}
+                Effect::Anonymous(_)
+                | Effect::Persist(_)
+                | Effect::Emit(_)
+                | Effect::ReadChunk { .. }
+                | Effect::OpenSink { .. }
+                | Effect::WriteChunk { .. }
+                | Effect::CloseSink { .. }
+                | Effect::BuildHistory { .. }
+                | Effect::ImportHistory { .. }
+                | Effect::Disconnect { .. } => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisioning_debug_hides_the_offer_and_result() {
+        let (_done_tx, done) = oneshot::channel();
+        let provisioning = Provisioning {
+            offer: "cypher-device:private".into(),
+            done,
+        };
+        assert_eq!(format!("{provisioning:?}"), "Provisioning(..)");
+        assert!(!format!("{provisioning:?}").contains("cypher-device:private"));
     }
 }
