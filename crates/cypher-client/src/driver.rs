@@ -55,6 +55,11 @@ impl cypher_core::Record for SavedFile {
     const VERSION: u8 = 1;
 }
 
+struct LostLinks {
+    gateway: bool,
+    relay: bool,
+}
+
 pub(crate) struct Driver {
     core: Core<OsRng>,
     store: Store,
@@ -514,7 +519,11 @@ impl Driver {
             }
         }
         if self.flush().await {
-            self.report_lost(gateway_lost, relay_lost).await;
+            self.report_lost(LostLinks {
+                gateway: gateway_lost,
+                relay: relay_lost,
+            })
+            .await;
         }
     }
 
@@ -544,11 +553,11 @@ impl Driver {
 
     /// Tells the core what the connections the driver dropped would have
     /// reported; their own `Down` is stale by now and ignored.
-    async fn report_lost(&mut self, gateway: bool, relay: bool) {
-        if gateway {
+    async fn report_lost(&mut self, lost: LostLinks) {
+        if lost.gateway {
             Box::pin(self.feed(Input::Disconnected)).await;
         }
-        if relay {
+        if lost.relay {
             Box::pin(self.feed(Input::AnonymousChannel { up: false })).await;
         }
     }
@@ -579,7 +588,14 @@ impl Driver {
                 file_id,
                 keep: complete,
             },
-            _ => return None,
+            Effect::Transmit(_)
+            | Effect::Anonymous(_)
+            | Effect::Persist(_)
+            | Effect::Emit(_)
+            | Effect::ReadChunk { .. }
+            | Effect::BuildHistory { .. }
+            | Effect::ImportHistory { .. }
+            | Effect::Disconnect { .. } => return None,
         })
     }
 
