@@ -109,6 +109,12 @@ struct Journal {
     effects: Vec<Effect>,
 }
 
+#[derive(Clone, Copy)]
+struct FreshState {
+    prekeys: bool,
+    inboxes: bool,
+}
+
 struct Connection {
     conn: Conn,
     last_rx: u64,
@@ -248,7 +254,13 @@ impl<R: CryptoRngCore> Core<R> {
         if core.prekeys.take_unseeded() {
             core.seed_accepted_inits();
         }
-        core.pick_up(&skipped, fresh_prekeys, inboxes_new);
+        core.pick_up(
+            &skipped,
+            FreshState {
+                prekeys: fresh_prekeys,
+                inboxes: inboxes_new,
+            },
+        );
         let effects = std::mem::take(&mut core.journal.effects);
         Ok((core, effects))
     }
@@ -270,11 +282,11 @@ impl<R: CryptoRngCore> Core<R> {
     /// What a restored core stores, tells and asks for again: state it
     /// just made up, offers still waiting, history work the driver did not
     /// finish, records it could not read.
-    fn pick_up(&mut self, skipped: &Skipped, fresh_prekeys: bool, fresh_inboxes: bool) {
-        if fresh_prekeys {
+    fn pick_up(&mut self, skipped: &Skipped, fresh: FreshState) {
+        if fresh.prekeys {
             self.persist_prekeys();
         }
-        if fresh_inboxes {
+        if fresh.inboxes {
             self.start_inbox_epochs();
         }
         self.announce_pending_offers();
