@@ -4,12 +4,12 @@
 
 ## Что установить
 
-| Инструмент | Как |
-|------|---------|
-| Rust | [rustup](https://rustup.rs); версию закрепляет `rust-toolchain.toml` |
-| Just | `cargo install just` |
-| Docker | [docker.com](https://docs.docker.com/get-docker/) — Redis и NATS |
-| Node.js 22 | Фронтенды десктопа и PWA (npm workspaces) |
+| Инструмент   | Как                                                                   |
+| ------------ | --------------------------------------------------------------------- |
+| Rust         | [rustup](https://rustup.rs); версию закрепляет `rust-toolchain.toml`  |
+| Just         | `cargo install just`                                                  |
+| Docker       | [docker.com](https://docs.docker.com/get-docker/) — Redis и NATS      |
+| Node.js 22   | Фронтенды десктопа и PWA (npm workspaces)                             |
 | wasm-bindgen | `cargo install wasm-bindgen-cli --version 0.2.129 --locked` — для PWA |
 
 Инструменты проверок (`cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`, `cargo-machete`, `cargo-hack`, `taplo`, `typos`) ставятся так же. Их версии закреплены в `.github/workflows/ci.yml`.
@@ -49,7 +49,7 @@ just e2e                # нативный сценарий против `just s
 just web-e2e            # Playwright на продакшен-сборке PWA (нужен `just wasm`)
 ```
 
-Тест стека в процессе входит в `just test` и `just cov`, если `CYPHER_TEST_REDIS` и `CYPHER_TEST_NATS` указывают на Redis и NATS, которыми не пользуются другие сервисы. Без них такие тесты пропускаются; с `CYPHER_REQUIRE_LIVE=1` часть из них падает, а не пропускается (см. [CONTRIBUTING.md](../CONTRIBUTING.md)).
+Тест стека в процессе входит в `just test` и `just cov`, если `CYPHER_TEST_REDIS` и `CYPHER_TEST_NATS` указывают на Redis и NATS, которыми не пользуются другие сервисы. Без них такие тесты пропускаются; с `CYPHER_REQUIRE_LIVE=1` часть из них падает, а не пропускается (см. [CONTRIBUTING.md](../.github/CONTRIBUTING.md)).
 
 ## Производительность
 
@@ -81,12 +81,12 @@ just test-local         # инфраструктура + сервисы + dev-с
 
 ## Адреса сервисов
 
-| Сервис | Адрес | Метрики |
-|---------|---------|---------|
-| Gateway (TLS) | `:9100` | `:9090/metrics` |
-| Gateway (WebSocket) | `:9101` | — |
-| Signaling | через NATS | `:9091/metrics` |
-| Relay (TLS / WebSocket) | `:9300` / `:9301` | `:9092/metrics` |
-| Redis | `localhost:6379` | — |
-| NATS | `localhost:4222` | `:8222` |
-| Dev-сервер PWA | `http://localhost:5174` | — |
+| Сервис                  | Адрес                   | Метрики         |
+| ----------------------- | ----------------------- | --------------- |
+| Gateway (TLS)           | `:9100`                 | `:9090/metrics` |
+| Gateway (WebSocket)     | `:9101`                 | —               |
+| Signaling               | через NATS              | `:9091/metrics` |
+| Relay (TLS / WebSocket) | `:9300` / `:9301`       | `:9092/metrics` |
+| Redis                   | `localhost:6379`        | —               |
+| NATS                    | `localhost:4222`        | `:8222`         |
+| Dev-сервер PWA          | `http://localhost:5174` | —               |

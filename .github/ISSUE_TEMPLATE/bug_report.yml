@@ -1,0 +1,54 @@
+name: Ошибка
+description: Сообщить о воспроизводимой ошибке в Шифре.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Уязвимости сообщайте приватно по [SECURITY.md](https://github.com/zamik36/Cypher/blob/dev/.github/SECURITY.md).
+        Не прикладывайте фразу восстановления, ключи, пароли, личную переписку или чужие адреса. Проверьте логи и снимки экрана перед отправкой.
+  - type: input
+    id: version
+    attributes:
+      label: Версия или коммит
+      description: Укажите версию приложения и сервера, если она известна.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Платформа
+      options:
+        - Windows
+        - Android
+        - PWA
+        - Сервер
+        - Другая
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Окружение
+      description: Версия ОС; для PWA также браузер и его версия.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Опишите действия с момента запуска приложения.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемый результат
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактический результат
+      description: При необходимости приложите обезличенные логи или снимки экрана.
+    validations:
+      required: true

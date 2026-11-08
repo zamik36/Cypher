@@ -174,25 +174,25 @@ web-e2e:
 
 # Run desktop app in dev mode (hot-reload)
 desktop-dev:
-    cd apps/desktop && cargo tauri dev
+    cd apps/desktop && npm exec -- tauri dev
 
 # Build desktop app (release)
 desktop-build:
-    cd apps/desktop && cargo tauri build
+    cd apps/desktop && npm exec -- tauri build
 
 # ─── Android ─────────────────────────────────────────────────────────────────
 
 # Run Android app in dev mode (needs connected device/emulator)
 android-dev:
-    cd apps/desktop && cargo tauri android dev
+    cd apps/desktop && npm exec -- tauri android dev
 
 # Build Android debug APK
 android-debug:
-    cd apps/desktop && cargo tauri android build --apk
+    cd apps/desktop && npm exec -- tauri android build --apk --debug
 
 # Build Android release APK (unsigned)
 android-release:
-    cd apps/desktop && cargo tauri android build --apk --release
+    cd apps/desktop && npm exec -- tauri android build --apk
 
 # Sign the release APK with a local development keystore
 android-sign: android-release

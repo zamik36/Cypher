@@ -1,92 +1,127 @@
+<p align="center">
+  <img src="assets/brand/icon.svg" alt="" width="112" height="112">
+</p>
+
 # Шифр (Cypher)
 
-Мессенджер со сквозным шифрованием: сообщения, файлы любого размера, голосовые и видео-«кружочки». Без регистрации, телефона и почты — личность создаётся на устройстве и восстанавливается по фразе из 24 слов. Сервер пересылает и временно хранит только зашифрованные байты.
+[![Релиз](https://img.shields.io/github/v/release/zamik36/Cypher)](https://github.com/zamik36/Cypher/releases)
+[![CI · dev](https://github.com/zamik36/Cypher/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/zamik36/Cypher/actions/workflows/ci.yml?query=branch%3Adev)
+[![Лицензия](https://img.shields.io/github/license/zamik36/Cypher)](LICENSE)
 
-## Статус
+Мессенджер со сквозным шифрованием для Windows, Android и браузера. Отправляйте сообщения, файлы, голосовые и видео-кружочки. Создайте личность на устройстве и пригласите собеседника по ссылке или QR-коду. Телефон и почта не нужны.
 
-**Бета.** Криптография, протокол, общее ядро клиента и серверные сервисы готовы и проверены: строгие линтеры, Miri, fuzz, покрытие 81–98 %, нагрузка с порогами в CI. Для закрытой беты проект пригоден.
+[Скачать](https://github.com/zamik36/Cypher/releases) · [Развернуть сервер](docs/deploy.md) · [Участвовать](.github/CONTRIBUTING.md) · [Сообщить об уязвимости](.github/SECURITY.md)
 
-Сверка ключа при знакомстве, версии хранимых данных и защита сервера от засорения уже сделаны (этап 1). Перед публичным запуском осталось закрыть:
-- деплой с откатом;
-- подписанные и самообновляемые клиенты;
-- алерты.
+## Посмотреть в работе
 
-Честная оценка — в [docs/assessment.md](docs/assessment.md), план — в [docs/roadmap.md](docs/roadmap.md).
+[![Переписка и передача изображения в Шифре](.github/media/cypher-demo-poster.png)](.github/media/cypher-demo.mp4)
 
-## Как это работает
+[Открыть видео · 34 секунды](.github/media/cypher-demo.mp4). Два тестовых пользователя обмениваются сообщениями и изображением в PWA с работающим сервером.
 
-```text
- клиент ──TLS / WebSocket──► gateway ──NATS──► gateway ──► клиент
-                               │
-                               └──NATS──► signaling ── Redis
- клиент ──(Tor)──► relay ──NATS──┘        (ключи, ссылки, офлайн-inbox)
-```
+## Возможности
 
-1. Первый собеседник создаёт ссылку-приглашение или QR и передаёт её второму.
-2. Второй открывает ссылку, получает ключи первого и устанавливает сессию: X3DH, затем Double Ratchet. У каждого сообщения свой ключ.
-3. Пока оба в сети, сообщения идут через gateway. Он знает, кто кому пишет, но видит только зашифрованное тело.
-4. Если получатель не в сети, сообщение запечатывается без указания отправителя (sealed sender) и кладётся в его inbox через relay. Relay не видит запрос, signaling не видит адрес клиента. Десктоп ходит к relay через Tor.
-5. Файлы шифруются по чанкам ключом конкретного файла; передача возобновляется после обрыва.
+- Личные чаты с квитанциями доставки и прочтения, ответами с цитатой и удалением сообщений у себя.
+- Шифрование файлов по чанкам и возобновление передачи после обрыва.
+- Голосовые сообщения и видео-кружочки.
+- Восстановление личности по фразе из 24 слов, привязка нескольких устройств и синхронизация истории.
+- Ручная и автоматическая блокировка приложения, сверка кодов безопасности собеседников.
+- Push-уведомления и анонимный режим с Tor в нативном клиенте.
 
-От чего система защищает и от чего пока нет — в [модели угроз](docs/threat-model.md).
+**Бета.** Целевые платформы: Windows (Tauri 2), Android (Tauri mobile) и PWA (браузер, WebAssembly). Linux и macOS есть в матрице сборки, но не входят в текущий список поддерживаемых платформ; нативный iOS запланирован на потом.
 
-## Клиенты
+README описывает ветку `dev` (0.3.0). Версии доступных установщиков и их изменения указаны в [релизах](https://github.com/zamik36/Cypher/releases).
 
-| Платформа | Технология |
-|---|---|
-| Windows, Linux, macOS | Tauri 2 + SolidJS, нативное ядро на Rust |
-| Android | Tauri 2 mobile |
-| Браузер, iOS | PWA: то же ядро в WebAssembly внутри Web Worker |
+Для собственного сервера есть [инструкция развёртывания](docs/deploy.md) с настройкой секретов, мониторинга и обновлений. Оставшиеся задачи выпуска перечислены в [roadmap](docs/roadmap.md), изменения версий в [CHANGELOG](CHANGELOG.md).
 
-Интерфейс общий (`packages/ui`), ядро общее (`crates/cypher-core`): протокол и криптография одинаковы на всех платформах.
+## Как защищается переписка
 
-## Быстрый старт
+Клиенты устанавливают сессию через X3DH и шифруют сообщения Double Ratchet. Серверы пересылают зашифрованное содержимое; для доставки офлайн временно хранят его в inbox получателя.
 
-**Сервер в Docker:**
+Для сообщений знакомым контактам клиент использует sealed sender через relay, когда у него есть токен доступа и этот путь доступен. Первое сообщение, передача файлов, синхронизация своих устройств и резервная доставка идут через аутентифицированную сессию gateway: на этом пути gateway видит отправителя и получателя.
 
-```bash
-cp .env.example .env          # задать пароли
-docker compose up -d
-curl -s localhost:9090/metrics | head -3   # gateway жив
-```
+Gateway знает IP подключённого клиента. Для анонимного режима нативный клиент использует Tor; PWA его не использует. Один relay-хоп сам по себе не скрывает адрес от оператора, который контролирует и relay, и signaling. Условия резервной доставки и остальные ограничения описаны в [модели угроз](docs/threat-model.md).
 
-Production с Caddy (TLS от Let's Encrypt), мониторингом и CI/CD описан в [docs/deploy.md](docs/deploy.md).
+## Запуск локально
 
-**Разработка** (нужны Rust, [just](https://github.com/casey/just), Docker, Node.js 22):
+### Сервер в Docker
+
+Нужны Docker с Compose и Bash (на Windows: Git Bash).
 
 ```bash
-just infra                    # Redis + NATS
-just services                 # gateway, signaling, relay
-just deps && just pwa-dev     # PWA на http://localhost:5174
-just desktop-dev              # или десктоп
+cp .env.example .env
+# Задайте свои пароли Redis и трёх пользователей NATS в .env.
+docker compose up -d --build --wait
+docker compose ps
+docker compose exec gateway gateway health
+docker compose exec signaling signaling health
+docker compose exec relay relay health
 ```
 
-## Качество
+Команды `health` проверяют `/ready` внутри контейнеров. Базовый Compose не публикует порты метрик на хост. Для Prometheus и Grafana используйте [инструкцию мониторинга](docs/deploy.md#мониторинг); не открывайте метрики в интернет. Настройку HTTPS и адреса сервера для клиентов см. в [руководстве развёртывания](docs/deploy.md).
 
-- **Rust.**
-  - clippy `pedantic` и отобранные restriction-линты в режиме deny, `unsafe` запрещён;
-  - Miri для крипто-, протокольного и медиа-кода;
-  - fuzz-цели, cargo-deny;
-  - храповик покрытия по крейтам: 81–98 % строк.
-- **Фронтенд.** Строгий TypeScript, ESLint strict-type-checked, vitest, Playwright на продакшен-сборке.
-- **Сквозные проверки.** В CI на каждый PR живой стек проходит сценарии нативного клиента и браузера, затем нагрузку: 5000 TLS-клиентов и 1000 пар WebSocket с порогами p99.
+### Разработка клиента
 
-## Документация
+Нужны Rust из [rust-toolchain.toml](rust-toolchain.toml), Node.js 22, Docker, [just](https://github.com/casey/just) и Bash. Для PWA установите target `wasm32-unknown-unknown` и CLI `wasm-bindgen` версии из Cargo.lock. Для Windows и Android подготовьте [зависимости Tauri](https://v2.tauri.app/start/prerequisites/).
 
-| Документ | О чём |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | Устройство системы: сервисы, крейты, потоки данных, хранение |
-| [docs/protocol-v4.md](docs/protocol-v4.md) | Протокол клиент ↔ сервер и end-to-end уровень |
-| [docs/threat-model.md](docs/threat-model.md) | Что защищается, от кого, где границы |
-| [docs/assessment.md](docs/assessment.md) | Оценка готовности: сильные стороны и проблемы по серьёзности |
-| [docs/roadmap.md](docs/roadmap.md) | План по этапам до версии 1.0 |
-| [docs/report-2026-09.md](docs/report-2026-09.md) | История работ: аудит, переписывание, доводка |
-| [docs/performance.md](docs/performance.md) | Бенчмарки, нагрузка, профилирование |
-| [docs/deploy.md](docs/deploy.md) | Развёртывание и секреты |
-| [docs/commands.md](docs/commands.md) | Все команды `just` |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Проверки, правила кода, тесты, храповик покрытия |
-| [SECURITY.md](SECURITY.md) | Как сообщить об уязвимости |
+Сначала создайте `.env` и задайте пароли, как выше. Установите зависимости и запустите инфраструктуру:
+
+```bash
+just deps
+just infra
+```
+
+В отдельном терминале оставьте сервисы работающими:
+
+```bash
+just services
+```
+
+В другом терминале выберите клиент:
+
+```bash
+just pwa-dev       # http://localhost:5174, включая сборку WASM
+# или
+just desktop-dev  # использует Tauri CLI из npm-зависимостей проекта
+# или
+just android-dev  # нужны Android SDK/NDK и устройство либо эмулятор
+```
+
+Особенности Bash и короткого каталога сборки на Windows: [CONTRIBUTING](.github/CONTRIBUTING.md#windows). Все рецепты: [Justfile](Justfile), пояснения: [команды](docs/commands.md).
+
+## Проверки
+
+В [CI](.github/workflows/ci.yml) настроены Rust-линтеры, Miri, fuzzing, проверки зависимостей и покрытия. Для интерфейса: TypeScript, ESLint, Vitest и Playwright. Сквозные сценарии используют Redis, NATS, нативный клиент и браузер.
+
+Нагрузочный job задаёт 5000 TLS-соединений на двух gateway и 300 пар WebSocket (600 клиентов). Он проверяет пороги задержек, ошибок и ресурсов. Это параметры CI, а не обещание ёмкости production-сервера. Методика и датированные замеры: [performance.md](docs/performance.md).
+
+## Структура проекта
+
+| Каталог                  | Содержимое                                                  |
+| ------------------------ | ----------------------------------------------------------- |
+| [`apps/`](apps/)         | Клиенты Windows, Android и PWA                              |
+| [`crates/`](crates/)     | Ядро на Rust, криптография, протокол и транспорт            |
+| [`packages/`](packages/) | Общий интерфейс на SolidJS                                  |
+| [`services/`](services/) | Gateway, signaling и relay                                  |
+| [`deploy/`](deploy/)     | Конфигурации серверов, мониторинга и резервного копирования |
+| [`docs/`](docs/)         | Архитектура, протокол, развёртывание и планы                |
+| [`tests/`](tests/)       | Сквозные и нагрузочные тесты                                |
+| [`.github/`](.github/)   | CI, правила участия и шаблоны issues и PR                   |
+
+Команды сборки и проверок собраны в [Justfile](Justfile). Исходник знака и генератор иконок находятся в [assets/brand](assets/brand/GENERATING.md).
+
+## Документация и участие
+
+| Документ                                  | Содержание                              |
+| ----------------------------------------- | --------------------------------------- |
+| [Архитектура](docs/architecture.md)       | Сервисы, ядро клиента и хранение        |
+| [Протокол v4](docs/protocol-v4.md)        | Форматы и обмен сообщениями             |
+| [Модель угроз](docs/threat-model.md)      | Защита и её границы                     |
+| [Развёртывание](docs/deploy.md)           | Сервер, секреты, мониторинг и выпуск    |
+| [План](docs/roadmap.md)                   | Реализованные этапы и оставшиеся задачи |
+| [Историческая оценка](docs/assessment.md) | Снимок состояния на 4 октября 2026      |
+
+Для ошибок и предложений используйте [issues](https://github.com/zamik36/Cypher/issues). Перед PR прочитайте [правила участия](.github/CONTRIBUTING.md) и [кодекс поведения](.github/CODE_OF_CONDUCT.md). Об уязвимостях сообщайте по [SECURITY.md](.github/SECURITY.md).
 
 ## Лицензия
 
-MIT — [LICENSE](LICENSE).
+[MIT](LICENSE).

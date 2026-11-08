@@ -312,7 +312,12 @@ export default function IdentityView(props: IdentityViewProps) {
       <Show when={hasId() !== null} fallback={<span class="spinner" />}>
         <div class="onboard__card">
           <div class="onboard__logo">
-            <Icon name="shield" size={32} />
+            <img
+              src={new URL("../../../../assets/brand/icon.svg", import.meta.url).href}
+              width="64"
+              height="64"
+              alt=""
+            />
           </div>
           <h1 class="onboard__title">{title()}</h1>
           <p class="onboard__subtitle">{subtitle()}</p>
