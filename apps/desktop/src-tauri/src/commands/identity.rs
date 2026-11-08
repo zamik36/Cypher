@@ -3,6 +3,7 @@
 use cypher_client::{IdentityStore, Unlocked};
 use cypher_core::CmdError;
 use tauri::State;
+use zeroize::Zeroizing;
 
 use crate::session::{AppState, CmdResult};
 
@@ -34,6 +35,7 @@ pub(crate) async fn create_identity(
     nickname: String,
     passphrase: String,
 ) -> CmdResult<String> {
+    let passphrase = Zeroizing::new(passphrase);
     let unlocked = with_store(&state, move |s| s.create(&nickname, &passphrase)).await?;
     Ok(activate(&state, unlocked).await)
 }
@@ -43,6 +45,7 @@ pub(crate) async fn unlock_identity(
     state: State<'_, AppState>,
     passphrase: String,
 ) -> CmdResult<(String, String)> {
+    let passphrase = Zeroizing::new(passphrase);
     let unlocked = with_store(&state, move |s| s.unlock(&passphrase)).await?;
     let nickname = unlocked.nickname.clone();
     Ok((activate(&state, unlocked).await, nickname))
@@ -55,6 +58,8 @@ pub(crate) async fn import_mnemonic(
     nickname: String,
     passphrase: String,
 ) -> CmdResult<String> {
+    let mnemonic = Zeroizing::new(mnemonic);
+    let passphrase = Zeroizing::new(passphrase);
     let unlocked = with_store(&state, move |s| s.import(&mnemonic, &nickname, &passphrase)).await?;
     Ok(activate(&state, unlocked).await)
 }
@@ -82,6 +87,7 @@ pub(crate) async fn export_mnemonic(
     state: State<'_, AppState>,
     passphrase: String,
 ) -> CmdResult<String> {
+    let passphrase = Zeroizing::new(passphrase);
     with_store(&state, move |s| {
         s.unlock(&passphrase).map(|u| u.seed.to_mnemonic())
     })
