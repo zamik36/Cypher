@@ -23,6 +23,7 @@ COPY apps/pwa/package.json apps/pwa/
 COPY tests/load/package.json tests/load/
 RUN npm ci --ignore-scripts
 COPY packages/ui/ packages/ui/
+COPY assets/brand/ assets/brand/
 COPY apps/pwa/ apps/pwa/
 COPY --from=wasm /wasm apps/pwa/src/wasm
 RUN npm run build -w apps/pwa
