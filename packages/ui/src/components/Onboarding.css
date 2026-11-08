@@ -22,9 +22,6 @@
   place-items: center;
   width: 64px;
   height: 64px;
-  border-radius: var(--r-lg);
-  background: var(--c-accent-soft);
-  color: var(--c-accent);
 }
 
 .onboard__title {
