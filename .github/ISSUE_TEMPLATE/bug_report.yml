@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Уязвимости сообщайте приватно по [SECURITY.md](https://github.com/zamik36/Cypher/blob/dev/SECURITY.md).
+        Уязвимости сообщайте приватно по [SECURITY.md](https://github.com/zamik36/Cypher/blob/dev/.github/SECURITY.md).
         Не прикладывайте фразу восстановления, ключи, пароли, личную переписку или чужие адреса. Проверьте логи и снимки экрана перед отправкой.
   - type: input
     id: version
