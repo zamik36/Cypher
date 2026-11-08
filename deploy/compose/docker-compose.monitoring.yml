@@ -1,5 +1,5 @@
 # Monitoring overlay — use with:
-# docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
+# docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml -f deploy/compose/docker-compose.monitoring.yml up -d
 services:
   loki:
     image: grafana/loki:3.0.0

@@ -13,14 +13,14 @@ on:
     branches: [main, dev]
     paths:
       - Cargo.lock
-      - .deny.toml
+      - .config/deny.toml
       - crates/*/fuzz/Cargo.toml
       - .github/workflows/advisories.yml
   pull_request:
     branches: [main, dev]
     paths:
       - Cargo.lock
-      - .deny.toml
+      - .config/deny.toml
       - crates/*/fuzz/Cargo.toml
       - .github/workflows/advisories.yml
 
@@ -63,16 +63,16 @@ jobs:
       - name: Resolve the lockfile
         if: matrix.lockfile.dir != '.'
         run: cargo generate-lockfile --manifest-path ${{ matrix.lockfile.dir }}/Cargo.toml
-      # The policy of .deny.toml (unsound = "all"). Most ignored crates are
+      # The policy of .config/deny.toml (unsound = "all"). Most ignored crates are
       # not in the fuzz graphs, so an unmatched ignore is no error there.
       - name: cargo deny
         run: >-
           cargo deny --manifest-path ${{ matrix.lockfile.dir }}/Cargo.toml --all-features
-          check --config .deny.toml
+          check --config .config/deny.toml
           ${{ matrix.lockfile.dir != '.' && '--allow advisory-not-detected' || '' }}
           advisories
       # A second reader over the whole lockfile (every target and feature),
-      # with the ignores of .deny.toml: only the quoted entries of its ignore
+      # with the ignores of .config/deny.toml: only the quoted entries of its ignore
       # array, not ids that comments mention.
       #
       # RUSTSEC-2026-0387 (crypto-bigint before 0.7.6) is ignored here only.
@@ -89,7 +89,7 @@ jobs:
             echo "::error::a build now compiles crypto-bigint before 0.7.6 (RUSTSEC-2026-0387)"
             exit 1
           fi
-          ignores=$(grep -oE '^\s*"RUSTSEC-[0-9]+-[0-9]+"' .deny.toml | tr -d ' "' | sed 's/^/--ignore=/')
+          ignores=$(grep -oE '^\s*"RUSTSEC-[0-9]+-[0-9]+"' .config/deny.toml | tr -d ' "' | sed 's/^/--ignore=/')
           # shellcheck disable=SC2086
           cargo audit --file ${{ matrix.lockfile.dir }}/Cargo.lock --deny unsound $ignores \
             --ignore=RUSTSEC-2026-0387
@@ -120,5 +120,5 @@ jobs:
             gh issue create --title "$title" --body "$body
 
           Update the dependency or add an ignore with its reason and a review
-          date to .deny.toml. Close this issue once the check passes again."
+          date to .config/deny.toml. Close this issue once the check passes again."
           fi

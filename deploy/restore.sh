@@ -1,8 +1,8 @@
 #!/bin/sh
 # Restores Redis and the signaling volume from a snapshot made by backup.sh.
-# Run from the deploy directory on the server:
+# Run from the repository root on the server:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup ls /backups
+#   docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml exec backup ls /backups
 #   deploy/restore.sh 20261004T030000Z
 #
 # Clients keep their sessions: Redis holds only prekeys, links and offline
@@ -11,7 +11,7 @@
 set -eu
 
 stamp="${1:?usage: deploy/restore.sh <stamp>, e.g. 20261004T030000Z}"
-compose() { docker compose -f docker-compose.yml -f docker-compose.prod.yml "$@"; }
+compose() { docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml "$@"; }
 # Volumes are named <project>_<volume>; compose names the project after
 # this directory unless COMPOSE_PROJECT_NAME says otherwise.
 project="${COMPOSE_PROJECT_NAME:-$(basename "$PWD")}"

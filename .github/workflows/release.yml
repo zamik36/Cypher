@@ -30,13 +30,13 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Versions agree with the tag
         run: cargo run -p xtask -- versions --tag "$GITHUB_REF_NAME"
-      - name: Release notes from CHANGELOG.md
+      - name: Release notes from docs/CHANGELOG.md
         id: notes
         run: |
           version="${GITHUB_REF_NAME#v}"
           {
             echo "notes<<CHANGELOG_EOF"
-            awk -v head="## [$version]" 'index($0, head) == 1 { on = 1; next } on && /^## \[/ { exit } on' CHANGELOG.md
+            awk -v head="## [$version]" 'index($0, head) == 1 { on = 1; next } on && /^## \[/ { exit } on' docs/CHANGELOG.md
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 

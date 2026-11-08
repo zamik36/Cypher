@@ -2,6 +2,8 @@
 
 Всё запускается через [`just`](https://github.com/casey/just); `just` без аргументов показывает список рецептов. Локальные сервисы берут секреты из `.env` (скопируйте `.env.example`).
 
+Конфигурации проверок находятся в `.config/`; команды `just` и npm передают нужные пути. Prettier находит настройки через `package.json`. `.prettierignore` и `.dockerignore` остаются в корне для стандартного поиска исключений, `.rustfmt.toml` и `.clippy.toml` для обычных `cargo fmt` и `cargo clippy`. Локальный `.cargo/config.toml` не отслеживается.
+
 ## Что установить
 
 | Инструмент   | Как                                                                   |

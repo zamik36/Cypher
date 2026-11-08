@@ -1,4 +1,4 @@
-# Production overlay — use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Production overlay — use with: docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml up -d
 #
 # Runs images CI built from one commit: GHCR_REPO (e.g. ghcr.io/zamik36/cypher)
 # and IMAGE_TAG (the first 8 hex digits of its sha) come from .env, which the

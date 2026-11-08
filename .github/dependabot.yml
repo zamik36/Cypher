@@ -24,7 +24,7 @@ updates:
         update-types: [minor, patch]
 
   - package-ecosystem: docker
-    directories: [/, /apps/pwa]
+    directories: [/deploy/docker, /apps/pwa]
     schedule:
       interval: weekly
       day: monday
@@ -32,7 +32,7 @@ updates:
 
   # Images pinned in docker-compose*.yml (Redis, NATS, Caddy, monitoring).
   - package-ecosystem: docker-compose
-    directory: /
+    directory: /deploy/compose
     schedule:
       interval: weekly
       day: monday

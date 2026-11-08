@@ -1,4 +1,5 @@
 // @ts-check
+import path from "node:path";
 import js from "@eslint/js";
 import prettier from "eslint-config-prettier/flat";
 import { defineConfig } from "eslint/config";
@@ -16,7 +17,7 @@ export default defineConfig(
     languageOptions: {
       parserOptions: {
         projectService: true,
-        tsconfigRootDir: import.meta.dirname,
+        tsconfigRootDir: path.resolve(import.meta.dirname, ".."),
       },
     },
     rules: {
@@ -36,8 +37,8 @@ export default defineConfig(
   },
   {
     // Build configs live outside the apps' browser tsconfigs.
-    files: ["apps/*/vite.config.ts", "apps/pwa/playwright.config.ts", "vitest.config.ts"],
-    languageOptions: { parserOptions: { projectService: false, project: "./tsconfig.node.json" } },
+    files: ["apps/*/vite.config.ts", "apps/pwa/playwright.config.ts", ".config/vitest.config.ts"],
+    languageOptions: { parserOptions: { projectService: false, project: "./.config/tsconfig.node.json" } },
   },
   {
     files: ["**/*.{js,mjs}"],

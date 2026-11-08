@@ -20,11 +20,11 @@ default:
 
 # Start Redis + NATS in Docker
 infra:
-    docker compose up -d redis nats
+    docker compose --project-directory . -f deploy/compose/docker-compose.yml up -d redis nats
 
 # Stop the Docker stack
 infra-down:
-    docker compose down
+    docker compose --project-directory . -f deploy/compose/docker-compose.yml down
 
 # ─── Backend services ────────────────────────────────────────────────────────
 
@@ -92,11 +92,11 @@ lint:
 
 # TOML formatting, typos, unused dependencies, every feature on its own
 hygiene:
-    taplo fmt --check
-    typos
+    taplo fmt --config .config/taplo.toml --check
+    typos --config .config/typos.toml . .config
     cargo machete
     cargo hack clippy --each-feature --all-targets -p cypher-media -p cypher-client -p cypher-transport -- -D warnings
-    cargo deny --all-features check
+    cargo deny --all-features check --config .config/deny.toml
 
 # Undefined-behaviour check; `just miri miri-full --run-ignored all` runs everything
 miri profile="miri" *args:
@@ -121,11 +121,11 @@ check: lint hygiene test
 # `just check` remains the full run before a commit.
 prepush:
     cargo fmt --all -- --check
-    taplo fmt --check
-    typos
+    taplo fmt --config .config/taplo.toml --check
+    typos --config .config/typos.toml . .config
     cargo machete
-    cargo deny --all-features check bans licenses sources
-    cargo deny --all-features check --warn unmaintained --warn unsound --warn yanked advisories
+    cargo deny --all-features check --config .config/deny.toml bans licenses sources
+    cargo deny --all-features check --config .config/deny.toml --warn unmaintained --warn unsound --warn yanked advisories
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Needs locally running services (`just infra services`).

@@ -9,14 +9,15 @@
     "tests/load"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && npm run typecheck --workspaces --if-present",
-    "lint": "eslint . --max-warnings 0",
-    "format": "prettier --write apps packages tests/load *.json *.mjs *.ts",
-    "format:check": "prettier --check apps packages tests/load *.json *.mjs *.ts",
+    "typecheck": "tsc --noEmit -p .config/tsconfig.node.json && npm run typecheck --workspaces --if-present",
+    "lint": "eslint --config .config/eslint.config.mjs . --max-warnings 0",
+    "format": "prettier --write apps packages tests/load *.json .config/*.json .config/*.mjs .config/*.ts",
+    "format:check": "prettier --check apps packages tests/load *.json .config/*.json .config/*.mjs .config/*.ts",
     "build": "npm run build --workspaces --if-present",
-    "test": "vitest run && npm run test --workspaces --if-present",
-    "coverage": "vitest run --coverage"
+    "test": "vitest run --config .config/vitest.config.ts && npm run test --workspaces --if-present",
+    "coverage": "vitest run --config .config/vitest.config.ts --coverage"
   },
+  "prettier": "./.config/prettier.json",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.63.0",

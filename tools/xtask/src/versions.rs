@@ -17,7 +17,7 @@ const NPM_PACKAGES: &[&str] = &[
     "packages/ui/package.json",
 ];
 const TAURI_CONFIG: &str = "apps/desktop/src-tauri/tauri.conf.json";
-const CHANGELOG: &str = "CHANGELOG.md";
+const CHANGELOG: &str = "docs/CHANGELOG.md";
 
 /// Checks the repository at `root`; with `tag` (e.g. `v0.3.0`), also that
 /// the tag names the workspace version.
