@@ -1789,6 +1789,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webkit2gtk",
+ "zeroize",
 ]
 
 [[package]]

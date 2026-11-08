@@ -3,6 +3,7 @@
 
 use cypher_core::{CmdError, Command, CommandId, ErrorKind, Event};
 use tauri::State;
+use zeroize::Zeroizing;
 
 use super::identity::{activate, with_store};
 use crate::session::{AppState, CmdResult, await_event};
@@ -45,6 +46,7 @@ pub(crate) async fn link_finish(
     state: State<'_, AppState>,
     passphrase: String,
 ) -> CmdResult<(String, String)> {
+    let passphrase = Zeroizing::new(passphrase);
     let (waiting, cancel) = state.linking.take().await.ok_or(ErrorKind::NotLinking)?;
     let linked = tokio::select! {
         linked = waiting.linked() => linked?,
