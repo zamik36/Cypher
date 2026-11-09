@@ -31,7 +31,7 @@
 
 README описывает ветку `dev` (0.3.0). Версии доступных установщиков и их изменения указаны в [релизах](https://github.com/zamik36/Cypher/releases).
 
-Для собственного сервера есть [инструкция развёртывания](docs/deploy.md) с настройкой секретов, мониторинга и обновлений. Оставшиеся задачи выпуска перечислены в [roadmap](docs/roadmap.md), изменения версий в [CHANGELOG](CHANGELOG.md).
+Для собственного сервера есть [инструкция развёртывания](docs/deploy.md) с настройкой секретов, мониторинга и обновлений. Оставшиеся задачи выпуска перечислены в [roadmap](docs/roadmap.md), изменения версий в [CHANGELOG](docs/CHANGELOG.md).
 
 ## Как защищается переписка
 
@@ -50,11 +50,11 @@ Gateway знает IP подключённого клиента. Для анон
 ```bash
 cp .env.example .env
 # Задайте свои пароли Redis и трёх пользователей NATS в .env.
-docker compose up -d --build --wait
-docker compose ps
-docker compose exec gateway gateway health
-docker compose exec signaling signaling health
-docker compose exec relay relay health
+docker compose --project-directory . -f deploy/compose/docker-compose.yml up -d --build --wait
+docker compose --project-directory . -f deploy/compose/docker-compose.yml ps
+docker compose --project-directory . -f deploy/compose/docker-compose.yml exec gateway gateway health
+docker compose --project-directory . -f deploy/compose/docker-compose.yml exec signaling signaling health
+docker compose --project-directory . -f deploy/compose/docker-compose.yml exec relay relay health
 ```
 
 Команды `health` проверяют `/ready` внутри контейнеров. Базовый Compose не публикует порты метрик на хост. Для Prometheus и Grafana используйте [инструкцию мониторинга](docs/deploy.md#мониторинг); не открывайте метрики в интернет. Настройку HTTPS и адреса сервера для клиентов см. в [руководстве развёртывания](docs/deploy.md).

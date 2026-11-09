@@ -13,7 +13,7 @@ pub(crate) const QUEUE_BYTES: usize = 8 << 20;
 const QUEUE_FRAMES: usize = 1024;
 
 /// Bytes the queues of all connections of one gateway may hold together.
-/// Sized against the 768 MiB container limit (`docker-compose.prod.yml`):
+/// Sized against the 768 MiB container limit (`deploy/compose/docker-compose.prod.yml`):
 /// 20 000 idle connections take about 470 MiB (24 KB RSS each,
 /// `docs/performance.md`), which leaves this much for queued frames plus
 /// room for frames in flight and allocator slack. Without a global bound,

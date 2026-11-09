@@ -3,9 +3,14 @@
 unused-ignored-advisory = "deny"
 # Unsound advisories count for dependencies too, not only workspace crates.
 unsound = "all"
-# Every ignore names why it does not apply and the date to look at it again
+# Every ignore records its rationale and the date to look at it again
 # (or earlier, when the named upstream release lands).
 ignore = [
+    # Temporary SQLite exception: Arti requires rusqlite <0.40; the patched
+    # SQLite needs rusqlite 0.41. Local database/WAL memory-exposure risk is
+    # accepted pending a compatible upstream release.
+    # review: 2026-11-23 or an Arti release accepting patched SQLite
+    "RUSTSEC-2026-0459",
     # paste: unmaintained, build-time macro via the optional arti-client Tor
     # stack; no replacement upstream yet. review: 2027-01-15 or arti 0.47
     "RUSTSEC-2024-0436",

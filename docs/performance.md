@@ -204,7 +204,7 @@ just flamegraph gateway 30         # SVG в target/flamegraphs/ (Linux, perf, in
 
 **wrk против статики PWA:**
 ```sh
-docker compose up -d pwa
+docker compose --project-directory . -f deploy/compose/docker-compose.yml up -d pwa
 wrk -t4 -c100 -d20s --latency -H 'Accept-Encoding: br' http://127.0.0.1:8080/
 ```
 

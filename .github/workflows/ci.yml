@@ -140,9 +140,9 @@ jobs:
         with:
           tool: taplo-cli@0.10.0,typos-cli@1.50.3,cargo-machete@0.9.2,cargo-hack@0.6.45
       - name: TOML formatting
-        run: taplo fmt --check
+        run: taplo fmt --config .config/taplo.toml --check
       - name: Typos
-        run: typos
+        run: typos --config .config/typos.toml . .config
       - name: Unused dependencies
         run: cargo machete
       - name: One version everywhere
@@ -151,7 +151,7 @@ jobs:
         run: >-
           cargo hack clippy --each-feature --all-targets
           -p cypher-media -p cypher-client -p cypher-tls -p cypher-transport -- -D warnings
-      # Same images as docker-compose.prod.yml.
+      # Same images as deploy/compose/docker-compose.prod.yml.
       - name: Alert rules, Prometheus and Alertmanager config
         run: |
           prometheus=prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
@@ -217,7 +217,7 @@ jobs:
       - name: Run fuzzer
         run: cd crates/${{ matrix.target.crate }} && cargo +${{ env.NIGHTLY }} fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target.name }} -- -max_total_time=30
 
-  # cargo-deny is pinned to the version .deny.toml is written for.
+  # cargo-deny is pinned to the version .config/deny.toml is written for.
   deny:
     name: Deny (licenses, bans, sources, vulnerabilities)
     runs-on: ubuntu-latest
@@ -233,14 +233,14 @@ jobs:
         with:
           tool: cargo-deny@0.19.0
       - name: Licenses, bans, sources
-        run: cargo deny --all-features check bans licenses sources
+        run: cargo deny --all-features check --config .config/deny.toml bans licenses sources
       # A push fails only on a vulnerability. Unmaintained, unsound and
       # yanked crates are warnings here: they appear without a code change,
       # and the daily advisories.yml run reports them in an issue. With
       # --warn, cargo-deny also lists the accepted ignores of those kinds
-      # (6 today, see .deny.toml) as warnings; that output is expected.
+      # (6 today, see .config/deny.toml) as warnings; that output is expected.
       - name: Vulnerabilities
-        run: cargo deny --all-features check --warn unmaintained --warn unsound --warn yanked advisories
+        run: cargo deny --all-features check --config .config/deny.toml --warn unmaintained --warn unsound --warn yanked advisories
 
   e2e:
     name: End-to-end (live stack)
@@ -400,9 +400,9 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - { name: gateway, target: gateway, file: Dockerfile }
-          - { name: signaling, target: signaling, file: Dockerfile }
-          - { name: relay, target: relay, file: Dockerfile }
+          - { name: gateway, target: gateway, file: deploy/docker/Dockerfile }
+          - { name: signaling, target: signaling, file: deploy/docker/Dockerfile }
+          - { name: relay, target: relay, file: deploy/docker/Dockerfile }
           - { name: pwa, target: "", file: apps/pwa/Dockerfile }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

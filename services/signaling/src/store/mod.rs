@@ -25,7 +25,7 @@ pub(crate) const MAX_INBOX_ITEMS: usize = 1000;
 /// Keeps every inbox batch below the NATS and frame payload limits.
 pub(crate) const MAX_BATCH_BYTES: usize = 768 * 1024;
 /// Bytes all inboxes together may hold: half of Redis' `maxmemory` in the
-/// standard deploy (`REDIS_MAXMEMORY`, 512 MiB, in `docker-compose.yml`).
+/// standard deploy (`REDIS_MAXMEMORY`, 512 MiB, in `deploy/compose/docker-compose.yml`).
 /// Redis refuses every write once full (`noeviction`), and prekeys, device
 /// lists, onion replay ids and rate limits live there too, so anonymous
 /// inbox items must never fill it. Raise it along with `maxmemory`.

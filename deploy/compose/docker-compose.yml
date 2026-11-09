@@ -50,7 +50,7 @@ services:
   gateway:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/docker/Dockerfile
       target: gateway
     read_only: true
     security_opt:
@@ -86,7 +86,7 @@ services:
   signaling:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/docker/Dockerfile
       target: signaling
     read_only: true
     security_opt:
@@ -123,7 +123,7 @@ services:
   relay:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/docker/Dockerfile
       target: relay
     read_only: true
     security_opt:

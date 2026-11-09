@@ -13,7 +13,7 @@ groups:
           description: "Prometheus has not reached {{ $labels.job }} for a minute."
 
       - alert: ServiceMemoryHigh
-        # 85% of each container's memory limit (docker-compose.prod.yml).
+        # 85% of each container's memory limit (deploy/compose/docker-compose.prod.yml).
         expr: >-
           process_resident_memory_bytes{job="gateway"} > 0.85 * 768 * 2^20
           or process_resident_memory_bytes{job="relay"} > 0.85 * 512 * 2^20
@@ -97,7 +97,7 @@ groups:
           severity: warning
         annotations:
           summary: "Certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
-          description: "Caddy renews 30 days ahead; check `docker compose logs caddy certs`."
+          description: "Caddy renews 30 days ahead; check `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs caddy certs`."
 
       - alert: CertificateExpiresSoon
         expr: probe_ssl_earliest_cert_expiry{job="tls"} - time() < 3 * 86400
@@ -106,7 +106,7 @@ groups:
           severity: critical
         annotations:
           summary: "Certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
-          description: "Caddy renews 30 days ahead; check `docker compose logs caddy certs`."
+          description: "Caddy renews 30 days ahead; check `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs caddy certs`."
 
   - name: storage
     rules:
@@ -144,7 +144,7 @@ groups:
           severity: warning
         annotations:
           summary: "The last backup is {{ $value | humanizeDuration }} old"
-          description: "Backups run daily; check `docker compose logs backup`."
+          description: "Backups run daily; check `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs backup`."
 
       - alert: BackupMissing
         expr: absent(cypher_backup_last_success_timestamp_seconds)
@@ -153,7 +153,7 @@ groups:
           severity: warning
         annotations:
           summary: "No backup has succeeded yet"
-          description: "Check `docker compose logs backup`."
+          description: "Check `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs backup`."
 
       - alert: NatsDown
         expr: absent(gnatsd_varz_connections)

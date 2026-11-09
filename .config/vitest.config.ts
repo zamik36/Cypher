@@ -1,7 +1,9 @@
+import { fileURLToPath } from "node:url";
 import solid from "vite-plugin-solid";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  root: fileURLToPath(new URL("..", import.meta.url)),
   plugins: [solid({ hot: false })],
   define: { __APP_VERSION__: JSON.stringify("0.0.0-test") },
   test: {

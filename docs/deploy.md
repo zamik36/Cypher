@@ -26,8 +26,10 @@
 ```
 
 Состав:
-- `docker-compose.yml` — сервисы и инфраструктура;
-- `docker-compose.prod.yml` — production-слой: образы из GHCR, Caddy с Let's Encrypt, сертификаты Caddy для портов 9100/9300, лимиты ресурсов, мониторинг, раздельные сети.
+- `deploy/compose/docker-compose.yml` — сервисы и инфраструктура;
+- `deploy/compose/docker-compose.prod.yml` — production-слой: образы из GHCR, Caddy с Let's Encrypt, сертификаты Caddy для портов 9100/9300, лимиты ресурсов, мониторинг, раздельные сети.
+
+Команды Compose выполняются из корня репозитория. `--project-directory .` сохраняет имя проекта, загрузку корневого `.env` и пути монтирования. Dockerfile сервисов находится в `deploy/docker/`, контекст сборки остаётся корнем репозитория; PWA использует `apps/pwa/Dockerfile`.
 
 ## Ручная установка
 
@@ -128,9 +130,9 @@ Redis работает с пределом `maxmemory` (`REDIS_MAXMEMORY`, по 
 Production-слой ничего не собирает на сервере: если образа с `IMAGE_TAG` нет в GHCR, `pull` завершится ошибкой.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
-docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml pull
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml up -d --wait
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml ps
 ```
 
 `--wait` ждёт, пока healthcheck каждого сервиса станет зелёным. Healthcheck gateway, signaling и relay — команда `<сервис> health` внутри образа: она спрашивает `/ready` на порту метрик. Сервис готов, когда открыл свои порты и подключился к NATS (signaling — ещё и подписался на запросы), и остаётся готовым, пока NATS на связи.
@@ -141,7 +143,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
 curl -s localhost:9090/ready   # gateway: ready
 curl -s localhost:9091/ready   # signaling
 curl -s localhost:9092/ready   # relay
-docker compose exec redis redis-cli ping   # PONG; пароль берётся из REDISCLI_AUTH
+docker compose --project-directory . -f deploy/compose/docker-compose.yml exec redis redis-cli ping   # PONG; пароль берётся из REDISCLI_AUTH
 ```
 
 ## Автоматический деплой из GitHub
@@ -152,7 +154,7 @@ docker compose exec redis redis-cli ping   # PONG; пароль берётся �
 | `setup.yml` | вручную | Первая установка: клонирует репозиторий на VPS. Стек поднимает деплой. |
 | `deploy.yml` | после успешного CI на push в `main` этого репозитория; вручную с sha | Пишет `.env` из секретов с `IMAGE_TAG=<sha8>`, скачивает образы этого коммита и обновляет только изменившиеся сервисы (`up -d --wait`, без `down`). Если сервисы не стали здоровыми за 3 минуты, возвращает последний здоровый деплой — и код, и образы. Деплои идут по одному. |
 | `release.yml` | тег `v*` | Ставит тег версии на образы, которые CI уже собрал и проверил для этого коммита. Публикует в GitHub Release сборки десктопа с подписанными обновлениями и `latest.json`, откуда установленные приложения узнают о новой версии, а также Android AAB (для Google Play) и APK (для установки напрямую), подписанные ключом выпуска. |
-| `advisories.yml` | каждый день; вручную; push в `main` и `dev` и PR в них, если меняются `Cargo.lock`, `.deny.toml`, `crates/*/fuzz/Cargo.toml` или сам `advisories.yml` | Проверяет зависимости workspace и обоих fuzz-крейтов на уязвимости и unsound-предупреждения (`cargo deny` и `cargo audit`): по расписанию и вручную — ветки `main` и `dev`, на push и PR — их коммит. Если проверка падает не на PR, открывает issue или дописывает в уже открытый. В `ci.yml` advisories блокируют push только на уязвимостях; unmaintained, unsound и yanked там лишь предупреждения. |
+| `advisories.yml` | каждый день; вручную; push в `main` и `dev` и PR в них, если меняются `Cargo.lock`, `.config/deny.toml`, `crates/*/fuzz/Cargo.toml` или сам `advisories.yml` | Проверяет зависимости workspace и обоих fuzz-крейтов на уязвимости и unsound-предупреждения (`cargo deny` и `cargo audit`): по расписанию и вручную — ветки `main` и `dev`, на push и PR — их коммит. Если проверка падает не на PR, открывает issue или дописывает в уже открытый. В `ci.yml` advisories блокируют push только на уязвимостях; unmaintained, unsound и yanked там лишь предупреждения. |
 | `nightly.yml` | каждую ночь | Miri, fuzzing, бенчмарки, нагрузка, мутационное тестирование и сборка Android-проекта, чтобы поломка сборки обнаруживалась до релиза. |
 
 Секреты репозитория:
@@ -188,8 +190,8 @@ docker compose exec redis redis-cli ping   # PONG; пароль берётся �
 cd ~/cypher
 git fetch origin && git checkout --detach <sha>
 sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$(printf %.8s <sha>)/" .env
-docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml pull
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml up -d --wait
 ```
 
 Последний здоровый деплой записан в `.deployed-sha`.
@@ -217,7 +219,7 @@ Gateway и relay состояния не хранят.
 **Бэкапы.** Сервис `backup` (`deploy/backup.sh`) раз в сутки снимает снапшот Redis (`redis-cli --rdb`) и архив тома `signaling-data` в том `backups` и хранит 14 дней. Время последнего успеха уходит в Prometheus; если бэкапа нет больше 26 часов, приходит алерт `BackupStale`. Список бэкапов:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup ls -l /backups
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml exec backup ls -l /backups
 ```
 
 Том `backups` лежит на том же диске: от ошибок и порчи данных он спасает, от потери сервера — нет. Копируйте его за пределы хоста, например по cron через `restic` с шифрованием: в бэкапах onion-ключ.
@@ -248,15 +250,15 @@ deploy/restore.sh 20261004T030000Z
 Для мониторинга при локальной разработке:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d   # Prometheus :9093, Grafana :3000
+docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.monitoring.yml up -d   # Prometheus :9093, Grafana :3000
 ```
 
 ## Диагностика
 
-- **Caddy не получает сертификат.** Проверьте DNS и порты 80/443: `docker compose logs caddy`.
-- **Gateway не принимает соединения:** `docker compose logs gateway nats`.
-- **Signaling:** `docker compose logs signaling` и проверка Redis командой выше.
-- **Все логи:** `docker compose logs -f --tail=50`.
+- **Caddy не получает сертификат.** Проверьте DNS и порты 80/443: `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs caddy`.
+- **Gateway не принимает соединения:** `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs gateway nats`.
+- **Signaling:** `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs signaling` и проверка Redis командой выше.
+- **Все логи:** `docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml logs -f --tail=50`.
 
 ## Известные ограничения текущего деплоя
 

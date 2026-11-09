@@ -25,6 +25,9 @@ async function violations(page: Page, where: string): Promise<string[]> {
 test("the main screens have no serious accessibility problems", async ({ browser, baseURL }) => {
   const found: string[] = [];
   const alice = await newUser(browser, baseURL ?? "");
+  const logo = alice.locator(".onboard__logo img");
+  await expect(logo).toBeVisible();
+  await expect.poll(() => logo.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
   found.push(...(await violations(alice, "welcome")));
   const bob = await newUser(browser, baseURL ?? "");
   await createIdentity(alice, "alice");
