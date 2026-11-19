@@ -25,7 +25,7 @@ services:
       - internal
 
   nats:
-    image: nats:2-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652
+    image: nats:2-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
     security_opt:
       - no-new-privileges:true
     cap_drop:
