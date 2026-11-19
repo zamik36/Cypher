@@ -1,0 +1,78 @@
+[advisories]
+# An ignore that no longer matches anything is stale and must be removed.
+unused-ignored-advisory = "deny"
+# Unsound advisories count for dependencies too, not only workspace crates.
+unsound = "all"
+# Every ignore records its rationale and the date to look at it again
+# (or earlier, when the named upstream release lands).
+ignore = [
+    # Temporary SQLite exception: Arti requires rusqlite <0.40; the patched
+    # SQLite needs rusqlite 0.41. Local database/WAL memory-exposure risk is
+    # accepted pending a compatible upstream release.
+    # review: 2026-11-23 or an Arti release accepting patched SQLite
+    "RUSTSEC-2026-0459",
+    # paste: unmaintained, build-time macro via the optional arti-client Tor
+    # stack; no replacement upstream yet. review: 2027-01-15 or arti 0.47
+    "RUSTSEC-2024-0436",
+    # rsa: Marvin timing attack on decryption via the optional arti-client Tor
+    # stack, which only verifies RSA signatures. review: 2027-01-15 or arti 0.47
+    "RUSTSEC-2023-0071",
+    # proc-macro-error: unmaintained build-time macro via tauri's Linux GTK
+    # stack (glib-macros), not shipped code. review: 2027-01-15
+    "RUSTSEC-2024-0370",
+    # glib 0.18: unsound VariantStrIter, via tauri's Linux GTK stack (gtk-rs
+    # 0.18 is what wry/tao build on); no crate in the graph but glib itself
+    # uses VariantStrIter.
+    # review: 2027-01-15 or tauri on gtk-rs >= 0.20
+    "RUSTSEC-2024-0429",
+    # zbus_names, zvariant, zvariant_derive: merged into zbus 6, so marked
+    # unmaintained; zbus 5 comes with notify-rust and the tauri opener and
+    # single-instance plugins (Linux D-Bus) until they move to zbus 6.
+    # review: 2027-01-15
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Unlicense",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+# Duplicates nobody here can fix: the Windows bindings come in several
+# generations through tokio, mio, tauri and others, and arti-client (optional
+# Tor stack) is on newer RustCrypto and rand releases than the core crypto.
+skip-tree = [
+    { crate = "windows-sys", reason = "several generations across the ecosystem" },
+    { crate = "arti-client", reason = "optional Tor stack; own dependency generation" },
+]
+# Version wildcards are banned for crates.io deps; workspace path deps are fine.
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+# TLS is rustls only: native TLS stacks must never sneak in transitively.
+deny = [
+    { name = "openssl", reason = "TLS is rustls only" },
+    { name = "openssl-sys", reason = "TLS is rustls only" },
+    { name = "native-tls", reason = "TLS is rustls only" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

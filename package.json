@@ -1,0 +1,39 @@
+{
+  "name": "cypher",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/desktop",
+    "apps/pwa",
+    "tests/load"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .config/tsconfig.node.json && npm run typecheck --workspaces --if-present",
+    "lint": "eslint --config .config/eslint.config.mjs . --max-warnings 0",
+    "format": "prettier --write apps packages tests/load *.json .config/*.json .config/*.mjs .config/*.ts",
+    "format:check": "prettier --check apps packages tests/load *.json .config/*.json .config/*.mjs .config/*.ts",
+    "build": "npm run build --workspaces --if-present",
+    "test": "vitest run --config .config/vitest.config.ts && npm run test --workspaces --if-present",
+    "coverage": "vitest run --config .config/vitest.config.ts --coverage"
+  },
+  "prettier": "./.config/prettier.json",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "@solidjs/testing-library": "^0.8.10",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^5.0.3",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-solid": "^0.18.0",
+    "fake-indexeddb": "^6.2.5",
+    "globals": "^17.12.0",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.0",
+    "vitest": "^5.0.3"
+  }
+}

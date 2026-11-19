@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Received files on Android 8 and 9, which keep them in app storage. -->
+        <provider
+            android:name="app.cypher.files.CypherFileProvider"
+            android:authorities="${applicationId}.cypher.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/cypher_file_paths" />
+        </provider>
+    </application>
+</manifest>

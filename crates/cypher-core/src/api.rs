@@ -1,0 +1,453 @@
+use bytes::Bytes;
+use cypher_types::{FileId, MsgId, PeerId};
+use serde::{Deserialize, Serialize};
+
+use crate::store::StoreOp;
+
+/// Everything the driver feeds into [`crate::Core::handle`].
+#[derive(Debug)]
+pub enum Input {
+    /// Transport to the gateway is up; the core starts authentication.
+    Connected,
+    Disconnected,
+    /// A frame from the gateway session.
+    Frame(Bytes),
+    /// A reply from the anonymous channel, as produced by the relay.
+    AnonymousFrame(Bytes),
+    /// The driver's relay (direct TLS or via Tor) went up or down.
+    AnonymousChannel {
+        up: bool,
+    },
+    Command(Command),
+    /// Answer to [`Effect::ReadChunk`]: `buf[..headroom]` is reserved for the
+    /// core to write frame headers in place, the rest holds the chunk.
+    ChunkRead {
+        file_id: FileId,
+        index: u32,
+        buf: Vec<u8>,
+    },
+    /// Answer to [`Effect::ReadChunk`] when the source is gone.
+    ChunkUnavailable {
+        file_id: FileId,
+    },
+    /// Answer to [`Effect::BuildHistory`]: the archive's size, or `None`
+    /// when it could not be built.
+    HistoryBuilt {
+        file_id: FileId,
+        size: Option<u64>,
+    },
+    /// Answer to [`Effect::ImportHistory`].
+    HistoryImported {
+        file_id: FileId,
+        ok: bool,
+    },
+    /// Periodic timer, at least once per second while running.
+    Tick,
+}
+
+/// Ties the events that answer a command to it: the driver picks the id
+/// (unique among its commands in flight), the answer echoes it. Never
+/// stored; it lives as long as the command's requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CommandId(pub u64);
+
+#[derive(Debug, Clone)]
+pub enum Command {
+    /// Answered with [`Event::LinkCreated`] or [`Event::CreateLinkFailed`].
+    CreateLink {
+        id: CommandId,
+    },
+    /// Answered with [`Event::PeerAdded`] (`joined`) or [`Event::JoinFailed`].
+    JoinLink {
+        id: CommandId,
+        link: String,
+    },
+    SendText {
+        peer: PeerId,
+        msg_id: MsgId,
+        text: String,
+        reply_to: Option<MsgId>,
+    },
+    /// Offers a file or media message. `inline` carries the full content for
+    /// small media, which then travels inside the encrypted message itself.
+    SendFile {
+        peer: PeerId,
+        msg_id: MsgId,
+        file_id: FileId,
+        name: String,
+        mime: String,
+        size: u64,
+        kind: MediaKind,
+        inline: Option<Vec<u8>>,
+    },
+    AcceptFile {
+        file_id: FileId,
+    },
+    CancelTransfer {
+        file_id: FileId,
+    },
+    MarkRead {
+        peer: PeerId,
+        ids: Vec<MsgId>,
+    },
+    FetchInbox,
+    /// Takes someone who wrote without an invite as a contact.
+    AcceptContact {
+        peer: PeerId,
+    },
+    /// Drops everything from `peer` until unblocked; nothing goes to them.
+    BlockPeer {
+        peer: PeerId,
+    },
+    UnblockPeer {
+        peer: PeerId,
+    },
+    /// Stops sending a message the user deleted before it went out.
+    DiscardOutgoing {
+        msg_id: MsgId,
+    },
+    RemovePeer {
+        peer: PeerId,
+    },
+    /// The name this user goes by, sent (encrypted) to every contact;
+    /// `None` or blank sends none.
+    SetProfileName {
+        name: Option<String>,
+    },
+    /// Names a contact on this device; `None` or blank removes the name.
+    RenamePeer {
+        peer: PeerId,
+        alias: Option<String>,
+    },
+    /// With `require_onion`, inbox traffic never falls back to the
+    /// identity-bearing gateway session.
+    SetAnonymity {
+        require_onion: bool,
+    },
+    /// The server this device connects to (its gateway address): the
+    /// signing key it shows is remembered for it.
+    SetServer {
+        addr: String,
+    },
+    /// Trusts the signing key the server showed in place of the one
+    /// remembered for it ([`Event::ServerKeyChanged`]).
+    TrustServerKey,
+    /// Wants a wake-up when the inbox gets something while away: asks the
+    /// server for its key ([`Event::PushKey`]) to subscribe with.
+    EnablePush,
+    /// The device's Web Push subscription, registered through the relay.
+    RegisterPush {
+        endpoint: String,
+        p256dh: [u8; 65],
+        auth: [u8; 16],
+    },
+    /// The server forgets the subscription.
+    DisablePush,
+    /// Hands this identity to the new device that shows `offer`, then
+    /// lists it among the identity's devices; with `history`, the new
+    /// device also gets the message history once it asks. Answered with
+    /// [`Event::DeviceLinked`] or [`Event::LinkFailed`].
+    LinkDevice {
+        id: CommandId,
+        offer: String,
+        history: bool,
+    },
+    /// Stops handing over, or receiving, the message history.
+    CancelHistory,
+    /// Takes one of this identity's other devices off its list.
+    UnlinkDevice {
+        device: u32,
+    },
+    /// The list had no room for this device ([`Event::NoRoom`]): it takes
+    /// the place of `device`, which the user no longer has.
+    ReplaceDevice {
+        device: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKind {
+    File,
+    Voice { duration_ms: u32, waveform: Vec<u8> },
+    VideoNote { duration_ms: u32, poster: Vec<u8> },
+}
+
+impl MediaKind {
+    pub fn is_media(&self) -> bool {
+        !matches!(self, Self::File)
+    }
+}
+
+/// Side effects the driver must perform, strictly in order: a `Persist` must
+/// be durable before any later `Transmit` leaves the process.
+#[derive(Debug)]
+pub enum Effect {
+    Transmit(Bytes),
+    /// Onion-sealed request for the relay channel (`[corr u64][blob]`).
+    Anonymous(Bytes),
+    Persist(StoreOp),
+    Emit(Event),
+    ReadChunk {
+        file_id: FileId,
+        index: u32,
+        offset: u64,
+        len: u32,
+        headroom: usize,
+    },
+    /// Allocate `len` bytes for a transfer, kept where `sink` says.
+    OpenSink {
+        file_id: FileId,
+        len: u64,
+        sink: Sink,
+    },
+    WriteChunk {
+        file_id: FileId,
+        offset: u64,
+        data: Bytes,
+    },
+    CloseSink {
+        file_id: FileId,
+        complete: bool,
+    },
+    /// Write the message history archive ([`crate::history`]) for another
+    /// device of this identity, to be served as `file_id`; answered with
+    /// [`Input::HistoryBuilt`]. Media still being transferred (`partial`)
+    /// is left out.
+    BuildHistory {
+        file_id: FileId,
+        partial: Vec<FileId>,
+    },
+    /// Take the rows of the received archive `file_id` the local store does
+    /// not have yet, and its media; answered with [`Input::HistoryImported`].
+    ImportHistory {
+        file_id: FileId,
+    },
+    /// Drop the gateway connection (protocol violation, liveness timeout).
+    Disconnect {
+        reconnect: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Event {
+    Connected,
+    Disconnected,
+    Superseded,
+    /// This device was removed from its identity's list: it stopped, and
+    /// stays stopped.
+    DeviceUnlinked,
+    /// This device (`this`) is not on its identity's list, which is full:
+    /// it waits for the user to pick one of `devices` to replace.
+    NoRoom {
+        this: u32,
+        devices: Vec<u32>,
+    },
+    /// The identity's devices as this one knows them: `(id, name)`, the
+    /// name empty when unknown.
+    OwnDevices {
+        this: u32,
+        devices: Vec<(u32, String)>,
+    },
+    /// A new device was linked to this identity, as `LinkDevice` `id` asked.
+    DeviceLinked {
+        id: CommandId,
+        device: u32,
+        name: String,
+    },
+    /// Linking a device did not work: on the device linking another (for
+    /// `LinkDevice` `id`, or a device list change without one), or on a new
+    /// device whose offer expired.
+    LinkFailed {
+        id: Option<CommandId>,
+        reason: FailReason,
+    },
+    /// The new device received its identity; the driver takes it from the
+    /// [`crate::link::Provision`].
+    LinkedHere,
+    /// Another device of this identity changed the contacts: the list is to
+    /// be read again.
+    ContactsChanged,
+    /// The anonymous relay channel went up or down.
+    Onion {
+        up: bool,
+    },
+    /// Where the server's onion relay is (empty: it has none).
+    Bootstrap {
+        relay_addr: String,
+    },
+    /// The server showed another signing key than the one remembered for
+    /// it: its onion relay is not used until the user trusts the new key.
+    ServerKeyChanged {
+        server: String,
+    },
+    LinkCreated {
+        id: CommandId,
+        link: String,
+    },
+    /// The server did not make the invite `CreateLink` `id` asked for.
+    CreateLinkFailed {
+        id: CommandId,
+        reason: FailReason,
+    },
+    JoinFailed {
+        id: CommandId,
+        link: String,
+        reason: FailReason,
+    },
+    /// A new contact: one we joined by `JoinLink` `joined`, or (`None`)
+    /// one who joined by our invite.
+    PeerAdded {
+        peer: PeerId,
+        joined: Option<CommandId>,
+    },
+    /// Someone started a session without one of our invites; they stay a
+    /// request until `AcceptContact`.
+    ContactRequest {
+        peer: PeerId,
+    },
+    /// A contact told us the name they go by, or that they have none.
+    PeerProfile {
+        peer: PeerId,
+        name: Option<String>,
+    },
+    Message(StoredMessage),
+    MessageStatus {
+        msg_id: MsgId,
+        status: MessageStatus,
+    },
+    TransferOffered {
+        peer: PeerId,
+        file_id: FileId,
+        name: String,
+        size: u64,
+        mime: String,
+    },
+    TransferProgress {
+        file_id: FileId,
+        bytes: u64,
+        total: u64,
+    },
+    TransferComplete {
+        file_id: FileId,
+    },
+    TransferFailed {
+        file_id: FileId,
+        reason: FailReason,
+    },
+    Warning {
+        reason: FailReason,
+    },
+    /// The server's VAPID public key, for subscribing to Web Push.
+    PushKey {
+        key: Vec<u8>,
+    },
+    /// The server will wake this device when its inbox gets something.
+    PushRegistered,
+    /// The server does not offer push, or refused the subscription.
+    PushUnavailable,
+    /// The message history is on its way to (`outgoing`) or from another
+    /// device of this identity.
+    HistoryProgress {
+        file_id: FileId,
+        outgoing: bool,
+        bytes: u64,
+        total: u64,
+    },
+    /// The message history was handed over, or taken in here.
+    HistoryDone {
+        file_id: FileId,
+        outgoing: bool,
+    },
+    HistoryFailed {
+        file_id: FileId,
+        outgoing: bool,
+        reason: FailReason,
+    },
+}
+
+/// Where a transfer's bytes are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sink {
+    /// A file the user takes: plaintext, where the user keeps files.
+    Download,
+    /// A voice or video note: the received ciphertext chunks (each
+    /// `chunk_size + 16` bytes), decrypted only on playback.
+    Media,
+    /// A message history archive from another device of this identity.
+    History,
+}
+
+named_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum FailReason {
+        NotFound = "not_found",
+        InvalidLink = "invalid_link",
+        SelfLink = "self_link",
+        InvalidKeys = "invalid_keys",
+        Timeout = "timeout",
+        Offline = "offline",
+        /// An operation cannot be represented within a protocol limit.
+        TooLarge = "too_large",
+        Rejected = "rejected",
+        Cancelled = "cancelled",
+        SourceUnavailable = "source_unavailable",
+        Corrupted = "corrupted",
+        Unauthorized = "unauthorized",
+        ServerError = "server_error",
+        DecryptFailed = "decrypt_failed",
+        /// The server answered a share link with an identity other than the
+        /// one the link was made for: possibly a key substitution.
+        KeyMismatch = "key_mismatch",
+        /// The driver could not make state durable and stopped the client.
+        StorageFailed = "storage_failed",
+        /// The server speaks another protocol version: the app must be
+        /// updated.
+        UpdateRequired = "update_required",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageStatus {
+    Pending,
+    Sent,
+    Queued,
+    Delivered,
+    Read,
+    Failed,
+}
+
+impl crate::Record for MessageStatus {
+    const VERSION: u8 = 1;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMessage {
+    pub msg_id: MsgId,
+    pub peer: PeerId,
+    pub outgoing: bool,
+    pub sent_at_ms: u64,
+    pub status: MessageStatus,
+    pub content: Content,
+}
+
+impl crate::Record for StoredMessage {
+    const VERSION: u8 = 1;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Content {
+    Text {
+        text: String,
+        reply_to: Option<MsgId>,
+    },
+    File {
+        file_id: FileId,
+        name: String,
+        mime: String,
+        size: u64,
+        kind: MediaKind,
+    },
+}

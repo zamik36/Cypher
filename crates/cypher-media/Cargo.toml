@@ -1,0 +1,36 @@
+[package]
+name = "cypher-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+opus = ["dep:opus"]
+capture = ["opus", "dep:cpal", "dep:rtrb"]
+# `Recorder::from_samples`: a recorder without a microphone, for tests of
+# code that drives one.
+test-util = ["capture"]
+
+# Benchmarks are criterion targets; the library has none for libtest.
+[lib]
+bench = false
+
+[dependencies]
+thiserror.workspace = true
+opus = { version = "0.4", optional = true }
+cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.4", optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+matroska-demuxer = "0.8"
+
+[[bench]]
+name = "media"
+harness = false
+required-features = ["opus"]
+
+[lints]
+workspace = true

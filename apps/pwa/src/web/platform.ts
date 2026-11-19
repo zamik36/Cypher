@@ -1,0 +1,251 @@
+import { CommandError } from "@cypher/ui/errors";
+import { browserName } from "./device";
+import type { ConversationEntry, LinkInfo, Platform, TransferInfo, UiMessage } from "@cypher/ui/platform";
+import type { Method, Methods, WorkerMessage } from "./protocol";
+import { WebVoiceRecorder } from "./voice";
+
+const DOWNLOAD_RELEASE_MS = 60_000;
+/** Presses shorter than this are accidental taps, as on desktop. */
+const MIN_VOICE_MS = 500;
+
+const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+const listeners = new Map<string, Set<(payload: unknown) => void>>();
+let nextId = 1;
+let voice: WebVoiceRecorder | null = null;
+/** Decrypted notes stay as object URLs until history is cleared. */
+const mediaUrls = new Map<string, Promise<string>>();
+
+worker.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
+  if ("id" in data) {
+    const call = pending.get(data.id);
+    pending.delete(data.id);
+    if (data.ok) call?.resolve(data.result);
+    else call?.reject(new CommandError(data.error));
+  } else if ("event" in data) {
+    listeners.get(data.event)?.forEach((cb) => cb(data.payload));
+  } else {
+    save(data.download.name, data.download.blob);
+  }
+};
+
+function call<M extends Method>(method: M, ...args: Parameters<Methods[M]>): Promise<ReturnType<Methods[M]>> {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    worker.postMessage({ id, method, args });
+  });
+}
+
+function save(name: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_RELEASE_MS);
+}
+
+async function sendFiles(peerId: string, files: File[]): Promise<TransferInfo[]> {
+  const sent = await call("sendFiles", peerId, files);
+  return sent.map((f) => ({ ...f, progress: 0, direction: "send", status: "active" }));
+}
+
+function pickFiles(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = Object.assign(document.createElement("input"), { type: "file", multiple: true });
+    input.onchange = () => resolve(Array.from(input.files ?? []));
+    input.oncancel = () => resolve([]);
+    input.click();
+  });
+}
+
+function hexBytes(hex: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array((hex.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+}
+
+function sameBytes(a: ArrayBuffer | null | undefined, b: Uint8Array): boolean {
+  const view = new Uint8Array(a ?? new ArrayBuffer(0));
+  return view.length === b.length && view.every((v, i) => v === b[i]);
+}
+
+/** Web Push: the subscription lives with the service worker. */
+const webPush: Platform["push"] =
+  "serviceWorker" in navigator && "PushManager" in self
+    ? {
+        enable: async () => {
+          await call("command", { type: "enable_push" });
+        },
+        subscribe: async (keyHex) => {
+          const key = hexBytes(keyHex);
+          const reg = await navigator.serviceWorker.ready;
+          let sub = await reg.pushManager.getSubscription();
+          // A subscription made with an older server key no longer works.
+          if (sub && !sameBytes(sub.options.applicationServerKey, key)) {
+            await sub.unsubscribe();
+            sub = null;
+          }
+          sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+          const p256dh = sub.getKey("p256dh");
+          const auth = sub.getKey("auth");
+          if (!p256dh || !auth) return false;
+          await call("command", {
+            type: "register_push",
+            endpoint: sub.endpoint,
+            p256dh: new Uint8Array(p256dh),
+            auth: new Uint8Array(auth),
+          });
+          return true;
+        },
+        disable: async () => {
+          const reg = await navigator.serviceWorker.getRegistration();
+          await (await reg?.pushManager.getSubscription())?.unsubscribe();
+          await call("command", { type: "disable_push" });
+        },
+      }
+    : undefined;
+
+/** The web client always talks to the origin that served it (CSP `connect-src 'self'`). */
+function endpoints(): [string, string] {
+  const origin = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
+  return [`${origin}/ws`, `${origin}/relay`];
+}
+
+export const webPlatform: Platform = {
+  kind: "web",
+  capabilities: { tor: false, gatewayConfig: false, revealFile: false, streamMedia: false },
+  hasIdentity: () => call("hasIdentity"),
+  createIdentity: (nickname, passphrase) => call("createIdentity", nickname, passphrase),
+  unlockIdentity: (passphrase) => call("unlockIdentity", passphrase),
+  importMnemonic: (mnemonic, nickname, passphrase) => call("importMnemonic", mnemonic, nickname, passphrase),
+  eraseDevice: () => call("eraseDevice"),
+  lock: () => call("lock"),
+  exportMnemonic: (passphrase) => call("exportMnemonic", passphrase),
+  devices: {
+    defaultName: () => Promise.resolve(browserName()),
+    startLink: (_addr, name) => call("startLink", endpoints()[0], name),
+    finishLink: (passphrase) => call("finishLink", passphrase),
+    cancelLink: () => call("cancelLink"),
+    link: (offer, history) => call("linkDevice", offer, history),
+    cancelHistory: async () => {
+      await call("command", { type: "cancel_history" });
+    },
+    unlink: async (deviceId) => {
+      await call("command", { type: "unlink_device", device: deviceId });
+    },
+    replace: async (deviceId) => {
+      await call("command", { type: "replace_device", device: deviceId });
+    },
+  },
+  connectToGateway: (_addr, anonymous) => call("connect", ...endpoints(), anonymous),
+  applyAnonymousSettings: (anonymous) => call("setAnonymity", anonymous),
+  createLink: async (): Promise<LinkInfo> => ({ link_id: await call("createLink") }),
+  joinLink: (linkId) => call("joinLink", linkId),
+  deleteMessage: (peerId, msgId, timestamp) => call("deleteMessage", peerId, msgId, timestamp),
+  sendMessage: async (peerId, text, replyTo) => {
+    const { msgId } = await call("command", { type: "send_text", peer: peerId, text, reply_to: replyTo ?? null });
+    return msgId ?? "";
+  },
+  markRead: async (peerId, msgIds) => {
+    await call("command", { type: "mark_read", peer: peerId, ids: msgIds });
+  },
+  pickAndSend: async (peerId): Promise<TransferInfo[]> => {
+    const files = await pickFiles();
+    return files.length === 0 ? [] : sendFiles(peerId, files);
+  },
+  sendFiles: (peerId, files) => sendFiles(peerId, files),
+  acceptFile: async (fileId) => {
+    await call("command", { type: "accept_file", file_id: fileId });
+  },
+  cancelTransfer: async (fileId) => {
+    await call("command", { type: "cancel_transfer", file_id: fileId });
+  },
+  fileSaved: (fileId) => call("fileSaved", fileId),
+  openFile: async (file) => save(file.name, await call("savedBlob", file.file_id)),
+  revealFile: () => Promise.reject(new CommandError({ kind: "unsupported", message: "unsupported" })),
+  generateQr: (linkId) => call("qr", linkId),
+  safetyNumber: (peerId) => call("safetyNumber", peerId),
+  reconnect: () => call("reconnect"),
+  trustServerKey: async () => {
+    await call("command", { type: "trust_server_key" });
+  },
+  startVoice: async (onLevel) => {
+    if (voice) throw new CommandError({ kind: "already_recording", message: "already recording" });
+    voice = await WebVoiceRecorder.start(onLevel);
+  },
+  stopVoice: async (peerId) => {
+    const recorder = voice;
+    voice = null;
+    if (!recorder) throw new CommandError({ kind: "not_recording", message: "not recording" });
+    const clip = await recorder.stop();
+    if (clip.durationMs < MIN_VOICE_MS) return null;
+    return call("sendMedia", peerId, clip.blob, clip.mime, "voice", clip.durationMs, { frames: clip.frames });
+  },
+  cancelVoice: () => {
+    voice?.cancel();
+    voice = null;
+    return Promise.resolve();
+  },
+  sendVideoNote: (peerId, note) =>
+    call("sendMedia", peerId, note.blob, note.mime, "video_note", note.durationMs, { poster: note.poster }),
+  mediaUrl: (fileId) => {
+    let url = mediaUrls.get(fileId);
+    if (!url) {
+      url = call("mediaBlob", fileId).then((blob) => URL.createObjectURL(blob));
+      url.catch(() => mediaUrls.delete(fileId));
+      mediaUrls.set(fileId, url);
+    }
+    return url;
+  },
+  imageUrl: (fileId) => {
+    const key = `image:${fileId}`;
+    let url = mediaUrls.get(key);
+    if (!url) {
+      url = call("savedBlob", fileId).then((blob) => URL.createObjectURL(blob));
+      url.catch(() => mediaUrls.delete(key));
+      mediaUrls.set(key, url);
+    }
+    return url;
+  },
+  getConversations: () => call("conversations") as Promise<ConversationEntry[]>,
+  renamePeer: async (peerId, alias) => {
+    await call("command", { type: "rename_peer", peer: peerId, alias });
+  },
+  acceptContact: async (peerId) => {
+    await call("command", { type: "accept_contact", peer: peerId });
+  },
+  setBlocked: async (peerId, blocked) => {
+    await call("command", { type: blocked ? "block_peer" : "unblock_peer", peer: peerId });
+  },
+  deleteConversation: (peerId) => call("forgetPeer", peerId),
+  getHistory: (peerId, limit, before) => call("history", peerId, limit, before) as Promise<UiMessage[]>,
+  clearChatHistory: async () => {
+    await call("clearHistory");
+    for (const url of mediaUrls.values())
+      void url.then(
+        (u) => URL.revokeObjectURL(u),
+        () => undefined,
+      );
+    mediaUrls.clear();
+  },
+  on: (channel, cb) => {
+    const set = listeners.get(channel) ?? new Set();
+    // The worker forwards core events verbatim; `Events` is their contract.
+    const handler = cb as (payload: unknown) => void;
+    set.add(handler);
+    listeners.set(channel, set);
+    return Promise.resolve(() => {
+      set.delete(handler);
+    });
+  },
+  ...(webPush && { push: webPush }),
+  notifications: {
+    supported: () => "Notification" in self,
+    permission: () => Promise.resolve(Notification.permission),
+    request: () => Notification.requestPermission(),
+    send: async (title, body) => {
+      // `serviceWorker` is missing outside secure contexts, despite the DOM typings.
+      const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
+      if (reg) await reg.showNotification(title, { body, tag: "messages" });
+      else new Notification(title, { body, tag: "messages" });
+    },
+  },
+};

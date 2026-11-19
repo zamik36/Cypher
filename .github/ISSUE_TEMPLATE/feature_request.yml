@@ -1,0 +1,22 @@
+name: Предложение
+description: Предложить изменение в Шифре.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Задача пользователя
+      description: Опишите ситуацию, в которой текущих возможностей не хватает. Используйте вымышленные примеры вместо личной переписки.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое поведение
+      description: Что пользователь сможет сделать и на какой платформе?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы и ограничения
+      description: Укажите обходной путь, если он есть, и возможное влияние на приватность.

@@ -1,0 +1,40 @@
+[package]
+name = "cypher-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+tor = ["dep:arti-client", "dep:tor-rtcompat"]
+
+[dependencies]
+cypher-types.workspace = true
+cypher-core.workspace = true
+cypher-crypto.workspace = true
+cypher-transport.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+futures.workspace = true
+rustls.workspace = true
+rusqlite.workspace = true
+rand.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+arti-client = { workspace = true, optional = true }
+tor-rtcompat = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW and O_NONBLOCK for opening received files.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+cypher-tls.workspace = true
+webpki-roots.workspace = true
+
+[lints]
+workspace = true

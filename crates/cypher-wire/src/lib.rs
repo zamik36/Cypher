@@ -1,0 +1,79 @@
+//! Cypher wire protocol v4 ([`PROTOCOL_VERSION`]): the only messages the
+//! server infrastructure understands. Everything end-to-end lives inside
+//! opaque `body` fields.
+//!
+//! Layout: `[kind u8][req_id u32 LE][fields...]`, little-endian integers,
+//! `u32`-prefixed byte strings and `u8`-prefixed short strings. Decoding is
+//! zero-copy for payload fields. Frames on the onion relay channel are in
+//! [`relay`].
+
+// Parses untrusted input: arithmetic must say how it handles overflow, and
+// every match must name each message kind so new ones cannot slip through.
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::wildcard_enum_match_arm)
+)]
+
+mod codec;
+mod message;
+pub mod relay;
+
+pub use message::{
+    ClientMsg, DeliveryStatus, ErrorCode, Frame, InboxProof, SEND_HEADER_LEN, SendView, ServerMsg,
+    encode_recv, encode_recv_sealed, peek_send, relay_addr_is_valid,
+};
+
+/// Bumped on any incompatible change; the gateway rejects other versions.
+pub const PROTOCOL_VERSION: u16 = 4;
+
+/// Size of the fixed frame prefix (`kind` + `req_id`).
+pub const FRAME_HEADER_LEN: usize = 5;
+
+/// Encoded prekey bundle without the one-time prekey part: identity(32) ‖
+/// device(4) ‖ `identity_dh(32)` ‖ `spk_id(4)` ‖ spk(32) ‖ signature(64).
+pub const BUNDLE_BASE_LEN: usize = 168;
+
+pub const MAX_BODY_LEN: usize = cypher_types::MAX_FRAME_SIZE - FRAME_HEADER_LEN - 64;
+pub const MAX_INBOX_ITEM_LEN: usize = 72 * 1024;
+pub const MAX_INBOX_BATCH: usize = 64;
+pub const MAX_OPKS_PER_PUBLISH: usize = 200;
+pub const MAX_RELAY_ADDR_LEN: usize = 255;
+/// Longest signed device list: identity, version, count, ids, signature.
+pub const MAX_DEVICE_LIST_LEN: usize = 32 + 8 + 1 + 4 * cypher_types::MAX_DEVICES + 64;
+/// Longest Web Push endpoint URL a client may register.
+pub const MAX_PUSH_ENDPOINT_LEN: usize = 1024;
+/// Access tokens a device takes sealed deliveries with at once: the last
+/// epoch's, this one's and the next.
+pub const MAX_ACCESS_HASHES: usize = 3;
+
+/// What a device tells its gateway of an access token: the gateway checks
+/// a sealed delivery's token against it, and never learns the token itself
+/// until one is used.
+pub fn access_hash(token: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::new()
+        .chain_update(b"cypher/v4/access-hash")
+        .chain_update(token)
+        .finalize()
+        .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WireError {
+    #[error("truncated frame")]
+    Truncated,
+    #[error("unknown message kind {0:#04x}")]
+    UnknownKind(u8),
+    #[error("field too large")]
+    TooLarge,
+    #[error("trailing bytes")]
+    TrailingBytes,
+    #[error("malformed field")]
+    Malformed,
+}
+
+impl From<WireError> for cypher_types::Error {
+    fn from(e: WireError) -> Self {
+        Self::Protocol(e.to_string())
+    }
+}

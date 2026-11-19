@@ -1,0 +1,911 @@
+use bytes::Bytes;
+use cypher_crypto::{
+    CryptoError, DeviceList, Header, InitHeader, PrekeyBundle, Ratchet, handshake,
+};
+use cypher_types::{Addr, DeviceId, MsgId, PeerId};
+use cypher_wire::ClientMsg;
+use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
+
+use super::{Core, Pending};
+use crate::CoreError;
+use crate::api::{CommandId, Content, Event, FailReason, MessageStatus, StoredMessage};
+use crate::envelope::{
+    Body, Envelope, InboxAd, MAX_RECEIPT_IDS, MAX_TEXT_LEN, ReceiptKind, SyncBody,
+};
+use crate::peer::{OwnLinks, Peer, ProfileRecord, Session, clean_name};
+use crate::prekeys::InitSender;
+use crate::relay::RelayBody;
+use crate::share::ShareLink;
+use crate::store::{META_LINKS, META_PROFILE, StoreOp, Table, message_key};
+
+/// How long an invite admits a contact; the server keeps links as long.
+const LINK_TTL_MS: u64 = 24 * 3600 * 1000;
+/// Invites remembered at once; the oldest go first.
+const MAX_OWN_LINKS: usize = 32;
+/// Strangers waiting for an answer at once; more are not let in.
+const MAX_PENDING_REQUESTS: usize = 20;
+/// How far ahead of ours the clock a message is dated by may run. A message
+/// dated later is dated this far ahead instead: its date is in its storage
+/// key, which drivers range over to show and to delete a conversation, so
+/// a date anywhere up to `u64::MAX` would hide the row from both.
+pub(super) const MAX_CLOCK_SKEW_MS: u64 = 10 * 60_000;
+
+// A session knows a copy among the messages it decrypted last. Greetings,
+// receipts and syncs take room there as texts do, so it holds several
+// inbox batches: one handed out again after its ack was lost still finds
+// its items there.
+const _: () =
+    assert!(cypher_crypto::double_ratchet::MAX_DECRYPTED >= 4 * cypher_wire::MAX_INBOX_BATCH);
+
+/// What came of decrypting a message that arrived.
+enum Opened {
+    /// Its plaintext, read for the first time.
+    New(Vec<u8>),
+    /// A byte-for-byte copy of one the session already read: an inbox item
+    /// handed out again after its ack was lost, or a frame replayed.
+    Copy,
+}
+
+impl Opened {
+    /// Decrypts a message in `ratchet`, telling a copy of one already read
+    /// from a failure.
+    fn decrypt(
+        ratchet: &mut Ratchet,
+        header: &Header,
+        ct: &[u8],
+        now_ms: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, CoreError> {
+        match ratchet.decrypt(header, ct, b"", now_ms, rng) {
+            Ok(pt) => Ok(Self::New(pt)),
+            Err(CryptoError::Duplicate) => Ok(Self::Copy),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+pub(super) struct Profile {
+    /// The name this user goes by, sent to contacts with `Hello`.
+    pub(super) name: Option<String>,
+    /// Invites this user made and when; each admits one contact.
+    pub(super) own_links: Vec<(String, u64)>,
+}
+
+/// An invite being joined by, from when the server named its host until
+/// the host's devices have answered one by one.
+pub(super) struct Joining {
+    /// The `JoinLink` commands this answers: the host's invite may be joined
+    /// again (a double submit) while the first join is under way.
+    ids: Vec<CommandId>,
+    link: String,
+    /// Key lookups not answered yet.
+    outstanding: usize,
+    /// The host's devices, to remember once the host is a contact.
+    devices: Option<DeviceList>,
+    /// The UI was told the contact is there.
+    added: bool,
+}
+
+impl<R: CryptoRngCore> Core<R> {
+    pub(super) fn send_text(
+        &mut self,
+        peer: PeerId,
+        msg_id: MsgId,
+        text: String,
+        reply_to: Option<MsgId>,
+    ) {
+        if text.is_empty() || text.len() > MAX_TEXT_LEN || !self.peers.contains_key(&peer) {
+            self.emit(Event::MessageStatus {
+                msg_id,
+                status: MessageStatus::Failed,
+            });
+            return;
+        }
+        let stored = StoredMessage {
+            msg_id,
+            peer,
+            outgoing: true,
+            sent_at_ms: self.now,
+            status: MessageStatus::Pending,
+            content: Content::Text {
+                text: text.clone(),
+                reply_to,
+            },
+        };
+        let content = stored.content.clone();
+        self.store_message(stored);
+        self.sync_sent(peer, msg_id, content);
+        self.enqueue(peer, msg_id, Body::Text { text, reply_to }, true);
+    }
+
+    /// Tells `peer` its messages were read and remembers that locally, so
+    /// the UI sees them as read and does not report them again.
+    pub(super) fn mark_read(&mut self, peer: PeerId, ids: &[MsgId]) {
+        for chunk in ids.chunks(MAX_RECEIPT_IDS) {
+            self.send_control(
+                peer,
+                Body::Receipt {
+                    kind: ReceiptKind::Read,
+                    ids: chunk.to_vec(),
+                },
+            );
+            self.sync(SyncBody::Read {
+                peer,
+                ids: chunk.to_vec(),
+            });
+        }
+        for &msg_id in ids {
+            self.set_status(msg_id, MessageStatus::Read);
+        }
+    }
+
+    pub(super) fn rename_peer(&mut self, peer: &PeerId, alias: Option<&str>) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        p.alias = alias.and_then(clean_name);
+        self.persist_peer(peer);
+    }
+
+    /// Sets the name this user goes by and tells every contact already
+    /// greeted; the others hear it in their first `Hello`.
+    pub(super) fn set_profile_name(&mut self, name: Option<&str>) {
+        if !self.adopt_profile_name(name) {
+            return;
+        }
+        self.sync(SyncBody::Profile {
+            name: self.profile.name.clone(),
+        });
+        self.greet_again();
+    }
+
+    /// Sends a fresh `Hello` (name, inboxes) to every contact's device
+    /// already greeted; the others get theirs when their session starts.
+    pub(super) fn greet_again(&mut self) {
+        let mut greeted: Vec<Addr> = self
+            .sessions
+            .iter()
+            .filter(|(addr, s)| {
+                s.hello_sent
+                    && self
+                        .peers
+                        .get(&addr.peer)
+                        .is_some_and(|p| !p.request && !p.blocked)
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+        greeted.sort_unstable();
+        for addr in greeted {
+            let hello = self.hello(&addr.peer);
+            self.send_control_to(addr, hello);
+        }
+    }
+
+    /// Keeps the name this user goes by; whether it changed. Contacts hear
+    /// of it from the device it was changed on.
+    pub(super) fn adopt_profile_name(&mut self, name: Option<&str>) -> bool {
+        let name = name.and_then(clean_name);
+        if name == self.profile.name {
+            return false;
+        }
+        self.profile.name = name;
+        let op = self.journal.vault.put(
+            Table::Meta,
+            META_PROFILE.to_vec(),
+            &ProfileRecord {
+                name: self.profile.name.clone(),
+            },
+            &mut self.rng,
+        );
+        self.persist(op);
+        true
+    }
+
+    fn hello(&self, peer: &PeerId) -> Body {
+        let ad = self.own_ad(self.me.device);
+        Body::Hello {
+            inbox: ad.ids[0],
+            name: self.profile.name.clone(),
+            via: self.peers.get(peer).and_then(|p| p.via.clone()),
+            ad: Some(ad),
+        }
+    }
+
+    /// Remembers an invite this user made, so whoever joins by it is taken
+    /// as a contact.
+    pub(super) fn remember_link(&mut self, code: &str, at_ms: u64) {
+        let now = self.now;
+        self.profile
+            .own_links
+            .retain(|(c, at)| now.saturating_sub(*at) < LINK_TTL_MS && c != code);
+        if now.saturating_sub(at_ms) >= LINK_TTL_MS {
+            return self.persist_links();
+        }
+        self.profile.own_links.push((code.to_owned(), at_ms));
+        if self.profile.own_links.len() > MAX_OWN_LINKS {
+            self.profile.own_links.remove(0);
+        }
+        self.persist_links();
+    }
+
+    /// Whether `code` is a live invite of ours; it admits one contact only.
+    fn take_own_link(&mut self, code: &str) -> bool {
+        let now = self.now;
+        let Some(i) = self
+            .profile
+            .own_links
+            .iter()
+            .position(|(c, at)| c == code && now.saturating_sub(*at) < LINK_TTL_MS)
+        else {
+            return false;
+        };
+        self.profile.own_links.remove(i);
+        self.persist_links();
+        true
+    }
+
+    pub(super) fn persist_links(&mut self) {
+        let record = OwnLinks {
+            links: self.profile.own_links.clone(),
+        };
+        let op = self
+            .journal
+            .vault
+            .put(Table::Meta, META_LINKS.to_vec(), &record, &mut self.rng);
+        self.persist(op);
+    }
+
+    fn pending_requests(&self) -> usize {
+        self.peers.values().filter(|p| p.request).count()
+    }
+
+    /// Takes a stranger as a contact: from now on they hear our `Hello`.
+    pub(super) fn accept_contact(&mut self, peer: &PeerId) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        if !p.request {
+            return;
+        }
+        p.request = false;
+        self.persist_peer(peer);
+        let mut devices: Vec<Addr> = self
+            .sessions
+            .keys()
+            .filter(|a| a.peer == *peer)
+            .copied()
+            .collect();
+        devices.sort_unstable();
+        for addr in devices {
+            self.send_hello(addr);
+        }
+    }
+
+    /// Blocking drops whatever they send, unread, and stops what goes to
+    /// them; unblocking lets them through again.
+    pub(super) fn set_blocked(&mut self, peer: &PeerId, blocked: bool) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        p.blocked = blocked;
+        self.persist_peer(peer);
+        if blocked {
+            self.drop_outbox_for(peer);
+            self.cancel_transfers_with(peer);
+        }
+    }
+
+    pub(super) fn remove_peer(&mut self, peer: &PeerId) {
+        if self.peers.remove(peer).is_none() {
+            return;
+        }
+        self.persist(StoreOp::Delete {
+            table: Table::Peers,
+            key: peer.to_vec(),
+        });
+        let mut devices: Vec<Addr> = self
+            .sessions
+            .keys()
+            .filter(|a| a.peer == *peer)
+            .copied()
+            .collect();
+        devices.sort_unstable();
+        for addr in devices {
+            if let Some(session) = self.sessions.remove(&addr) {
+                self.delete_session(addr, &session);
+            }
+        }
+        self.drop_outbox_for(peer);
+        self.cancel_transfers_with(peer);
+    }
+
+    /// Stores a message and shows it. Its date, told by whoever sent it, is
+    /// held to at most [`MAX_CLOCK_SKEW_MS`] ahead of now.
+    pub(super) fn store_message(&mut self, mut msg: StoredMessage) {
+        msg.sent_at_ms = msg
+            .sent_at_ms
+            .min(self.now.saturating_add(MAX_CLOCK_SKEW_MS));
+        let key = message_key(&msg.peer, msg.sent_at_ms, &msg.msg_id);
+        let op = self
+            .journal
+            .vault
+            .put(Table::Messages, key, &msg, &mut self.rng);
+        self.persist(op);
+        self.emit(Event::Message(msg));
+    }
+
+    pub(super) fn set_status(&mut self, msg_id: MsgId, status: MessageStatus) {
+        let op = self.journal.vault.put(
+            Table::MessageStatus,
+            msg_id.to_vec(),
+            &status,
+            &mut self.rng,
+        );
+        self.persist(op);
+        self.emit(Event::MessageStatus { msg_id, status });
+    }
+
+    /// Joins `peer`'s invite `link` for `JoinLink` `id`: `true` when this
+    /// starts a join, whose caller then asks for the host's devices; `false`
+    /// when one is under way already, which now answers `id` too.
+    pub(super) fn start_join(&mut self, id: CommandId, link: String, peer: PeerId) -> bool {
+        if let Some(joining) = self.joining.get_mut(&peer) {
+            joining.ids.push(id);
+            if joining.added {
+                self.emit(Event::PeerAdded {
+                    peer,
+                    joined: Some(id),
+                });
+            }
+            return false;
+        }
+        let joining = Joining {
+            ids: vec![id],
+            link,
+            outstanding: 0,
+            devices: None,
+            added: false,
+        };
+        self.joining.insert(peer, joining);
+        true
+    }
+
+    /// Joining `peer`'s invite failed before any of its devices was asked:
+    /// every join of it hears why.
+    pub(super) fn join_failed(&mut self, peer: PeerId, reason: FailReason) {
+        let Some(Joining { ids, link, .. }) = self.joining.remove(&peer) else {
+            return;
+        };
+        for id in ids {
+            let link = link.clone();
+            self.emit(Event::JoinFailed { id, link, reason });
+        }
+    }
+
+    /// The host of an invite we are joining by has these devices (its first
+    /// only, as far as anyone knows, without a list): ask for each one's keys.
+    pub(super) fn join_devices(&mut self, peer: PeerId, list: Option<DeviceList>) {
+        let devices = list
+            .as_ref()
+            .map_or_else(|| vec![DeviceId::FIRST], |l| l.devices().to_vec());
+        let Some(joining) = self.joining.get_mut(&peer) else {
+            return;
+        };
+        joining.outstanding = devices.len();
+        joining.devices = list;
+        let link = joining.link.clone();
+        for device in devices {
+            let addr = Addr::new(peer, device);
+            let link = link.clone();
+            self.request(
+                ClientMsg::FetchKeys { peer, device },
+                Pending::FetchKeys { link, addr },
+                true,
+            );
+        }
+    }
+
+    /// Keys of one of the host's devices: a session with it.
+    pub(super) fn on_keys(
+        &mut self,
+        link: &str,
+        addr: Addr,
+        base: &[u8],
+        opk: Option<(u32, [u8; 32])>,
+    ) {
+        let Some((mut fresh, identity_dh)) = self.initiate(addr, base, opk) else {
+            return self.join_answered(addr.peer, Some(FailReason::InvalidKeys));
+        };
+        let peer = addr.peer;
+        let settled = self.peers.contains_key(&peer)
+            && self
+                .sessions
+                .get(&addr)
+                .is_some_and(|s| !s.is_unconfirmed_initiator());
+        if !settled {
+            if let Some(old) = self.sessions.remove(&addr) {
+                fresh.carry_over(old);
+            }
+            self.sessions.insert(addr, fresh);
+            let devices = self.joining.get_mut(&peer).and_then(|j| j.devices.take());
+            // We asked for this contact, by this invite.
+            let p = self
+                .peers
+                .entry(peer)
+                .or_insert_with(|| Peer::new(identity_dh));
+            p.request = false;
+            p.via = ShareLink::parse(link).map(|share| share.link().as_str().to_owned());
+            if p.devices.is_none() {
+                p.devices = devices;
+            }
+            self.persist_peer(&peer);
+            self.persist_session(addr);
+            self.requeue_for(addr);
+            self.send_hello(addr);
+            self.sync_contact(peer);
+        }
+        self.join_answered(peer, None);
+    }
+
+    pub(super) fn on_join_keys_failed(&mut self, peer: PeerId, reason: FailReason) {
+        self.join_answered(peer, Some(reason));
+    }
+
+    /// One of the host's devices answered, or could not be reached. The UI
+    /// hears once that the contact is there, or that joining failed when no
+    /// device of theirs could be.
+    fn join_answered(&mut self, peer: PeerId, failure: Option<FailReason>) {
+        let Some(joining) = self.joining.get_mut(&peer) else {
+            return;
+        };
+        joining.outstanding = joining.outstanding.saturating_sub(1);
+        let first = failure.is_none() && !joining.added;
+        joining.added |= first;
+        let (finished, added, ids, link) = (
+            joining.outstanding == 0,
+            joining.added,
+            joining.ids.clone(),
+            joining.link.clone(),
+        );
+        if finished {
+            self.joining.remove(&peer);
+        }
+        for id in ids {
+            if first {
+                self.emit(Event::PeerAdded {
+                    peer,
+                    joined: Some(id),
+                });
+            } else if finished && !added {
+                let reason = failure.unwrap_or(FailReason::ServerError);
+                let link = link.clone();
+                self.emit(Event::JoinFailed { id, link, reason });
+            }
+        }
+    }
+
+    /// A fresh session with one device of a contact: one we had none with,
+    /// or one whose messages stopped decrypting. What waits for that device
+    /// goes out on it; theirs follow once it accepts.
+    pub(super) fn on_session_keys(
+        &mut self,
+        addr: Addr,
+        base: &[u8],
+        opk: Option<(u32, [u8; 32])>,
+    ) {
+        let known = if addr.peer == self.me.peer_id {
+            self.lists_own(addr.device)
+        } else {
+            self.peers.contains_key(&addr.peer)
+        };
+        if !known {
+            return;
+        }
+        let Some((mut fresh, _)) = self.initiate(addr, base, opk) else {
+            return;
+        };
+        if let Some(old) = self.sessions.remove(&addr) {
+            fresh.carry_over(old);
+        }
+        self.sessions.insert(addr, fresh);
+        self.persist_session(addr);
+        self.requeue_for(addr);
+        self.send_hello(addr);
+    }
+
+    /// Our side of a new session with a device from its published bundle,
+    /// and the identity key that bundle carries.
+    fn initiate(
+        &mut self,
+        addr: Addr,
+        base: &[u8],
+        opk: Option<(u32, [u8; 32])>,
+    ) -> Option<(Session, [u8; 32])> {
+        let mut raw = Vec::with_capacity(PrekeyBundle::MAX_LEN);
+        raw.extend_from_slice(base);
+        match opk {
+            Some((id, key)) => {
+                raw.push(1);
+                raw.extend_from_slice(&id.to_le_bytes());
+                raw.extend_from_slice(&key);
+            }
+            None => raw.push(0),
+        }
+        let bundle = PrekeyBundle::decode(&raw)
+            .ok()
+            .filter(|b| b.identity == addr.peer && b.device == addr.device)?;
+        let (ratchet, init) =
+            handshake::initiate(&self.me.identity, self.me.device, &bundle, &mut self.rng).ok()?;
+        let lineage = self.rng.next_u64();
+        Some((
+            Session::new(ratchet, Some(init), lineage),
+            bundle.identity_dh,
+        ))
+    }
+
+    /// Greets one device of a contact, once per session; a request or a
+    /// blocked contact hears nothing.
+    fn send_hello(&mut self, addr: Addr) {
+        let open = self
+            .peers
+            .get(&addr.peer)
+            .is_some_and(|p| !p.request && !p.blocked);
+        let Some(s) = self.sessions.get_mut(&addr) else {
+            return;
+        };
+        if s.hello_sent || !open {
+            return;
+        }
+        s.hello_sent = true;
+        self.persist_session(addr);
+        let hello = self.hello(&addr.peer);
+        self.send_control_to(addr, hello);
+    }
+
+    pub(super) fn on_relay(&mut self, sender: Addr, body: &Bytes, via_inbox: bool) {
+        match RelayBody::decode(body) {
+            Ok(RelayBody::Message {
+                init,
+                header,
+                ciphertext,
+            }) => self.on_message(sender, init.as_ref(), &header, &ciphertext),
+            Ok(RelayBody::Chunk {
+                file_id,
+                index,
+                data,
+            }) if !via_inbox => {
+                self.on_chunk(sender, file_id, index, &data);
+            }
+            Ok(RelayBody::Ack {
+                file_id,
+                next,
+                sack,
+                tag,
+            }) if !via_inbox => self.on_file_ack(sender, file_id, next, sack, &tag),
+            _ => {}
+        }
+    }
+
+    fn on_message(&mut self, sender: Addr, init: Option<&InitHeader>, header: &Header, ct: &[u8]) {
+        let from = sender.peer;
+        if self.peers.get(&from).is_some_and(|p| p.blocked) {
+            return;
+        }
+        let result = match init {
+            Some(init) => self.accept_init(sender, init, header, ct),
+            None => self.decrypt_existing(sender, header, ct),
+        };
+        let plaintext = match result {
+            Ok(Opened::New(pt)) => Zeroizing::new(pt),
+            // Nothing in the session moved, and nothing is owed: what the
+            // message asked for (a receipt) went out when it was first read.
+            Ok(Opened::Copy) | Err(CoreError::Conflict) => return,
+            Err(_) => {
+                self.emit(Event::Warning {
+                    reason: FailReason::DecryptFailed,
+                });
+                if init.is_none() {
+                    self.repair_session(sender);
+                }
+                return;
+            }
+        };
+        self.persist_session(sender);
+        let Ok(env) = Envelope::decode(&plaintext) else {
+            return;
+        };
+        if !self.recent.insert(env.msg_id) {
+            // Sent again because our receipt was lost: confirm it again.
+            if matches!(env.body, Body::Text { .. } | Body::File { .. }) {
+                self.send_receipt(from, env.msg_id);
+            }
+            return;
+        }
+        self.dispatch(sender, env);
+        // A device their identity has not listed (to our knowledge): their
+        // list may have grown.
+        if from == self.me.peer_id {
+            self.check_own_device(sender.device);
+        } else if self
+            .peers
+            .get(&from)
+            .is_some_and(|p| !p.lists(sender.device))
+        {
+            self.refresh_devices(from);
+        }
+    }
+
+    fn decrypt_existing(
+        &mut self,
+        sender: Addr,
+        header: &Header,
+        ct: &[u8],
+    ) -> Result<Opened, CoreError> {
+        let session = self.sessions.get_mut(&sender).ok_or(CoreError::Crypto)?;
+        let opened = Opened::decrypt(&mut session.ratchet, header, ct, self.now, &mut self.rng)?;
+        if matches!(opened, Opened::New(_)) {
+            session.pending_init = None;
+        }
+        Ok(opened)
+    }
+
+    fn accept_init(
+        &mut self,
+        sender: Addr,
+        init: &InitHeader,
+        header: &Header,
+        ct: &[u8],
+    ) -> Result<Opened, CoreError> {
+        let Addr {
+            peer: from,
+            device: from_device,
+        } = sender;
+        if let Some(s) = self.sessions.get_mut(&sender)
+            && s.accepted_ephemerals.contains(&init.ephemeral)
+        {
+            return Opened::decrypt(&mut s.ratchet, header, ct, self.now, &mut self.rng);
+        }
+        // Accepted before, yet its session no longer knows it (replaced
+        // since, or the init forgotten among later ones): a copy, not a
+        // session to start again.
+        if self.prekeys.accepted_init(init.spk_id, &init.ephemeral) {
+            return Ok(Opened::Copy);
+        }
+
+        let own = from == self.me.peer_id;
+        if !own
+            && !self.peers.contains_key(&from)
+            && self.pending_requests() >= MAX_PENDING_REQUESTS
+        {
+            // Quietly: a flood of strangers is not the user's problem.
+            return Err(CoreError::Conflict);
+        }
+        let who = self.init_sender(from);
+        self.check_init_prekeys(init)?;
+        let spk = self.prekeys.spk(init.spk_id).ok_or(CoreError::Crypto)?;
+        let opk = match init.opk_id {
+            Some(id) => Some(self.prekeys.opk(id).ok_or(CoreError::Crypto)?),
+            None => None,
+        };
+        let mut ratchet = handshake::respond(
+            &self.me.identity,
+            self.me.device,
+            spk,
+            opk,
+            (&from, from_device),
+            init,
+        )?;
+        let pt = ratchet.decrypt(header, ct, b"", self.now, &mut self.rng)?;
+        self.admit_init(init, who)?;
+
+        // Both sides started a session at once: the lower device keeps its
+        // own and ignores the other's. Spent either way, so that a copy of
+        // it is refused once ours is confirmed.
+        let keep_ours = self
+            .sessions
+            .get(&sender)
+            .is_some_and(Session::is_unconfirmed_initiator)
+            && (self.me.peer_id, self.me.device) < (from, from_device);
+        self.spend_init(init, who);
+        if keep_ours {
+            return Err(CoreError::Conflict);
+        }
+
+        if !own {
+            self.meet(from, init.identity_dh);
+        }
+        let mut fresh = Session::new(ratchet, None, self.rng.next_u64());
+        if let Some(old) = self.sessions.remove(&sender) {
+            fresh.carry_over(old);
+        }
+        fresh.remember_ephemeral(init.ephemeral);
+        self.sessions.insert(sender, fresh);
+        self.requeue_for(sender);
+        self.send_hello(sender);
+        Ok(Opened::New(pt))
+    }
+
+    /// Who `from` is, as far as how many of their inits are taken goes:
+    /// someone not (yet) taken as a contact is a request.
+    fn init_sender(&self, from: PeerId) -> InitSender {
+        if from != self.me.peer_id && self.peers.get(&from).is_none_or(|p| p.request) {
+            InitSender::Request(from)
+        } else {
+            InitSender::Contact(from)
+        }
+    }
+
+    /// Whether we hold the prekeys a new init names. Prekeys we lack (our
+    /// saved state fell behind what the server hands out) make us publish
+    /// fresh ones.
+    fn check_init_prekeys(&mut self, init: &InitHeader) -> Result<(), CoreError> {
+        let known = self.prekeys.spk(init.spk_id).is_some()
+            && init.opk_id.is_none_or(|id| self.prekeys.opk(id).is_some());
+        if !known {
+            self.resync_prekeys();
+            return Err(CoreError::Crypto);
+        }
+        Ok(())
+    }
+
+    /// Whether an authenticated init from `sender` is within the limits on
+    /// remembered inits. Only authenticated ones are checked, so no one can
+    /// make us turn anyone away in another's name; the first refusal of a
+    /// kind is told (someone is being turned away), later ones are not.
+    fn admit_init(&mut self, init: &InitHeader, sender: InitSender) -> Result<(), CoreError> {
+        if self.prekeys.may_init(init.spk_id, sender) {
+            return Ok(());
+        }
+        if self.prekeys.first_refusal(init.spk_id, sender) {
+            self.emit(Event::Warning {
+                reason: FailReason::Rejected,
+            });
+        }
+        Err(CoreError::Conflict)
+    }
+
+    /// Spends what an authenticated init used: its one-time prekey, and a
+    /// place among the inits remembered, so that a copy of it is refused
+    /// later. Saved before anything goes out; a prekey that filled up is
+    /// rotated and published.
+    fn spend_init(&mut self, init: &InitHeader, sender: InitSender) {
+        if let Some(id) = init.opk_id {
+            self.prekeys.take_opk(id);
+        }
+        let rotated = self.prekeys.remember_init(
+            init.spk_id,
+            init.ephemeral,
+            sender,
+            self.now,
+            &mut self.rng,
+        );
+        self.persist_prekeys();
+        if rotated {
+            self.publish_keys(false);
+        }
+    }
+
+    /// Someone new is a request until their `Hello` names one of our
+    /// invites; someone known keeps what they were.
+    fn meet(&mut self, from: PeerId, identity_dh: [u8; 32]) {
+        let p = self.peers.entry(from).or_insert_with(|| {
+            let mut stranger = Peer::new(identity_dh);
+            stranger.request = true;
+            stranger
+        });
+        p.identity_dh = identity_dh;
+        self.persist_peer(&from);
+    }
+
+    /// One device of a contact greets us: its inboxes, the name they go
+    /// by, and the invite they joined by, which makes a stranger a contact.
+    /// A `Hello` without inboxes names one no one reads: the last ones
+    /// heard of stay.
+    fn on_hello(
+        &mut self,
+        sender: Addr,
+        ad: Option<InboxAd>,
+        name: Option<&str>,
+        via: Option<&str>,
+    ) {
+        let from = sender.peer;
+        let invited = via.is_some_and(|code| self.take_own_link(code));
+        let name = name.and_then(clean_name);
+        let mut renamed = false;
+        if let (Some(s), Some(ad)) = (self.sessions.get_mut(&sender), ad) {
+            s.inbox = Some(ad);
+            s.sealed_off_until = 0;
+        }
+        if let Some(p) = self.peers.get_mut(&from) {
+            renamed = p.name != name;
+            p.name.clone_from(&name);
+        }
+        if renamed {
+            self.emit(Event::PeerProfile { peer: from, name });
+        }
+        match self.peers.get_mut(&from) {
+            Some(p) if p.request && invited => {
+                p.request = false;
+                self.emit(Event::PeerAdded {
+                    peer: from,
+                    joined: None,
+                });
+            }
+            Some(p) if p.request => self.emit(Event::ContactRequest { peer: from }),
+            _ => {}
+        }
+        self.persist_peer(&from);
+        self.persist_session(sender);
+        self.send_hello(sender);
+    }
+
+    fn dispatch(&mut self, sender: Addr, env: Envelope) {
+        let from = sender.peer;
+        let Envelope {
+            msg_id,
+            sent_at_ms,
+            body,
+        } = env;
+        // Our own devices only keep each other in step; only they may.
+        if from == self.me.peer_id {
+            match body {
+                Body::Sync(sync) => self.on_sync(sender, sync),
+                Body::Devices { list, .. } => self.on_own_list_body(&list),
+                // The history transfer between our own devices.
+                Body::FileCtl(ctl) => self.on_file_ctl(sender, ctl),
+                Body::Hello { .. }
+                | Body::Text { .. }
+                | Body::File { .. }
+                | Body::Receipt { .. } => {}
+            }
+            return;
+        }
+        match body {
+            Body::Hello { name, via, ad, .. } => {
+                self.on_hello(sender, ad, name.as_deref(), via.as_deref());
+            }
+            Body::Text { text, reply_to } => {
+                self.store_message(StoredMessage {
+                    msg_id,
+                    peer: from,
+                    outgoing: false,
+                    sent_at_ms,
+                    status: MessageStatus::Delivered,
+                    content: Content::Text { text, reply_to },
+                });
+                self.send_receipt(from, msg_id);
+            }
+            Body::File { desc, kind } => {
+                self.on_file_offer(sender, msg_id, sent_at_ms, desc, kind);
+                self.send_receipt(from, msg_id);
+            }
+            Body::FileCtl(ctl) => self.on_file_ctl(sender, ctl),
+            Body::Receipt { kind, ids } => self.on_receipt(sender, kind, ids),
+            Body::Devices { list, ads, .. } => self.on_devices_body(from, &list, ads),
+            Body::Sync(_) => {}
+        }
+    }
+
+    /// One device of a contact got (or read) our messages: they are done
+    /// there, and their status moves on, never back from "read".
+    fn on_receipt(&mut self, sender: Addr, kind: ReceiptKind, ids: Vec<MsgId>) {
+        let status = match kind {
+            ReceiptKind::Delivered => MessageStatus::Delivered,
+            ReceiptKind::Read => MessageStatus::Read,
+        };
+        for id in ids {
+            self.confirm(sender, id, status);
+        }
+    }
+
+    fn send_receipt(&mut self, peer: PeerId, id: MsgId) {
+        self.send_control(
+            peer,
+            Body::Receipt {
+                kind: ReceiptKind::Delivered,
+                ids: vec![id],
+            },
+        );
+    }
+}

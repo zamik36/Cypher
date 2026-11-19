@@ -1,82 +1,233 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/cypher-common",
-    "crates/cypher-proto",
+    "crates/cypher-types",
+    "crates/cypher-wire",
     "crates/cypher-crypto",
+    "crates/cypher-core",
+    "crates/cypher-media",
+    "crates/cypher-client",
+    "crates/cypher-wasm",
     "crates/cypher-tls",
     "crates/cypher-transport",
-    "crates/cypher-nat",
-    "crates/cypher-transfer",
-    "crates/cypher-client-core",
+    "crates/cypher-server-kit",
     "services/gateway",
     "services/signaling",
     "services/relay",
     "tools/load-test",
+    "tools/xtask",
+    "tests/e2e",
+    "apps/desktop/src-tauri",
+    "apps/desktop/src-tauri/plugins/cypher-files",
+    "apps/desktop/src-tauri/plugins/cypher-push",
+]
+default-members = [
+    "crates/cypher-types",
+    "crates/cypher-wire",
+    "crates/cypher-crypto",
+    "crates/cypher-core",
+    "crates/cypher-media",
+    "crates/cypher-client",
+    "crates/cypher-wasm",
+    "crates/cypher-tls",
+    "crates/cypher-transport",
+    "crates/cypher-server-kit",
+    "services/gateway",
+    "services/signaling",
+    "services/relay",
+    "tools/load-test",
+    "tests/e2e",
 ]
 exclude = [
-    "crates/cypher-proto/fuzz",
     "crates/cypher-crypto/fuzz",
-    "crates/cypher-nat/fuzz",
+    "crates/cypher-wire/fuzz",
 ]
 
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+# Application crates: nothing here is published to crates.io.
+publish = false
+
+[workspace.lints.rust]
+# tokio_unstable: set by `just console` for tokio-console builds.
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(tokio_unstable)'] }
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_qualifications = "deny"
+unreachable_pub = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_lifetimes = "deny"
+redundant_lifetimes = "deny"
+unit_bindings = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+unused_import_braces = "deny"
+unused_macro_rules = "deny"
+
+# Exceptions are written as #[expect(lint, reason = "...")] at the narrowest
+# scope; plain #[allow] is itself denied.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+# restriction: no panics or leftovers in production code
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+get_unwrap = "deny"
+mem_forget = "deny"
+# restriction: unsafe hygiene
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+# restriction: lint hygiene
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+# restriction: correctness and clarity
+clone_on_ref_ptr = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+mutex_atomic = "deny"
+lossy_float_literal = "deny"
+float_cmp_const = "deny"
+unused_result_ok = "deny"
+infinite_loop = "deny"
+read_zero_byte_vec = "deny"
+assertions_on_result_states = "deny"
+empty_drop = "deny"
+empty_structs_with_brackets = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+unneeded_field_pattern = "deny"
+verbose_file_reads = "deny"
+str_to_string = "deny"
+format_push_string = "deny"
+fn_to_numeric_cast_any = "deny"
+as_underscore = "deny"
+try_err = "deny"
+if_then_some_else_none = "deny"
+mixed_read_write_in_expression = "deny"
+same_name_method = "deny"
+redundant_type_annotations = "deny"
+large_include_file = "deny"
+# nursery picks
+cognitive_complexity = "deny"
+redundant_clone = "deny"
+use_self = "deny"
+or_fun_call = "deny"
+needless_collect = "deny"
+needless_pass_by_ref_mut = "deny"
+significant_drop_in_scrutinee = "deny"
+large_futures = "deny"
+
 [workspace.dependencies]
+console-subscriber = "0.5"
+criterion = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tokio-rustls = "0.26"
-rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "logging",
+    "tls12",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+    "tls12",
+] }
 bytes = "1"
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-config = "0.14"
+config = { version = "0.14", default-features = false, features = ["toml"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-aes-gcm = "0.10"
-hkdf = "0.13"
-hmac = "0.13"
-sha2 = "0.11"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+hkdf = "0.12"
+p256 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
 rand = "0.8"
+rand_core = { version = "0.6", features = ["getrandom"] }
+hex = "0.4"
+rand_chacha = "0.3"
+proptest = "1"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
 bip39 = { version = "2", features = ["std"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-crc32fast = "1"
-nom = "7"
+rusqlite = { version = "0.37", features = ["bundled"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-nats = "0.25"
 async-nats = { version = "0.47", default-features = false, features = ["server_2_10", "ring"] }
 futures = "0.3"
-zstd = "0.13"
-prometheus = "0.13"
+prometheus = { version = "0.13", default-features = false, features = ["process"] }
 clap = { version = "4", features = ["derive"] }
 rcgen = { version = "0.14", features = ["pem"] }
 webpki-roots = "1.0"
 rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
-tokio-tungstenite = "0.24"
-arti-client = "0.20"
-tor-rtcompat = "0.20"
+tokio-tungstenite = "0.28"
+tor-rtcompat = { version = "0.46", default-features = false, features = ["tokio", "rustls"] }
+arti-client = { version = "0.46", default-features = false, features = [
+    "tokio",
+    "rustls",
+    "compression",
+    "bridge-client",
+    "pt-client",
+    "static-sqlite",
+] }
 
 # Internal crates
-cypher-common = { path = "crates/cypher-common" }
-cypher-proto = { path = "crates/cypher-proto" }
+cypher-types = { path = "crates/cypher-types" }
+cypher-wire = { path = "crates/cypher-wire" }
+cypher-core = { path = "crates/cypher-core" }
+cypher-media = { path = "crates/cypher-media" }
+cypher-client = { path = "crates/cypher-client" }
+cypher-server-kit = { path = "crates/cypher-server-kit" }
 cypher-crypto = { path = "crates/cypher-crypto" }
-cypher-tls = { path = "crates/cypher-tls", default-features = false }
+cypher-tls = { path = "crates/cypher-tls" }
 cypher-transport = { path = "crates/cypher-transport" }
-cypher-nat = { path = "crates/cypher-nat" }
-cypher-transfer = { path = "crates/cypher-transfer" }
-cypher-client-core = { path = "crates/cypher-client-core" }
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
+# Abort on integer overflow instead of wrapping silently (nonces, lengths).
+overflow-checks = true
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
 opt-level = 3
+
+# Release code with symbols and line tables for perf / flamegraphs
+# (scripts/flamegraph.sh); build with frame pointers, see that script.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

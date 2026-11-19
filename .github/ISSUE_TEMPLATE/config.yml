@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Сообщить об уязвимости
+    url: https://github.com/zamik36/Cypher/blob/dev/.github/SECURITY.md
+    about: Порядок приватного сообщения. Не публикуйте уязвимости в issues.

@@ -1,0 +1,41 @@
+[profile.default]
+# Tests that take longer than this are reported as slow; after four periods
+# they are killed, so a hung test fails CI instead of stalling it.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# In-process stacks share one Redis and NATS: two at once would answer each
+# other's requests (one queue group), so they run one at a time. The
+# monitoring check (tests/e2e) starts a stack too. Default profile overrides
+# apply to every profile.
+[test-groups]
+live-stack = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "test(/in_process_stack/) | (package(e2e) & binary(monitoring))"
+test-group = "live-stack"
+
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# Miri interprets every instruction; crypto tests take minutes, not millis.
+# The whole-system core scenarios take up to an hour each there, so the PR job
+# skips them and the nightly job (profile miri-full) runs everything.
+[profile.miri]
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 10 }
+default-filter = "not (package(cypher-core) & binary(scenarios))"
+
+[profile.miri-full]
+fail-fast = false
+slow-timeout = { period = "300s", terminate-after = 12 }
+# The nightly job runs ignored tests too, but not the scenarios' behaviour
+# checks: one of them is ignored because it pins a known bug (it fails until
+# the bug is fixed), and together they take about 50 s natively (the
+# scenarios Miri runs, about 40 s), which would double a job already near
+# its time limit. They pin what the core decides, not memory safety; the
+# code they reach is the code the other scenarios reach.
+default-filter = "not (package(cypher-core) & binary(scenarios) & test(/^behaviour::/))"

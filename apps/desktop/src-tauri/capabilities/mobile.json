@@ -1,0 +1,7 @@
+{
+  "identifier": "mobile",
+  "description": "Phone-only abilities: scanning invite QR codes with the camera",
+  "platforms": ["android", "iOS"],
+  "windows": ["main"],
+  "permissions": ["barcode-scanner:default"]
+}

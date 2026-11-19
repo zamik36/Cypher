@@ -1,0 +1,10 @@
+modules:
+  # A TLS handshake. The name is not checked (probes go to container names);
+  # what matters is that the listener answers and when its certificate expires.
+  tls:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      tls: true
+      tls_config:
+        insecure_skip_verify: true

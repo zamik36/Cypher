@@ -1,0 +1,26 @@
+# Alerts go to a Telegram chat. The bot token and chat id are compose secrets
+# from ALERT_TELEGRAM_TOKEN and ALERT_TELEGRAM_CHAT_ID; without them alerts
+# are still listed in Alertmanager (http://localhost:9093 over SSH).
+route:
+  receiver: telegram
+  group_by: [alertname, job]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="critical"]
+      repeat_interval: 1h
+
+# A critical alert silences the warning of the same name.
+inhibit_rules:
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [alertname, instance]
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /run/secrets/alert_telegram_token
+        chat_id_file: /run/secrets/alert_telegram_chat_id
+        parse_mode: HTML
+        send_resolved: true

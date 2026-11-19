@@ -1,0 +1,14 @@
+{
+  "identifier": "default",
+  "description": "What the Cypher UI in the main window may call: the app's commands, events, deep links and notifications",
+  "windows": ["main"],
+  "permissions": [
+    "app-commands",
+    "core:event:default",
+    "deep-link:default",
+    "notification:default",
+    "notification:allow-notify",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission"
+  ]
+}

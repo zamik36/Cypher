@@ -4,24 +4,39 @@ on:
   push:
     branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NIGHTLY: nightly-2026-09-20
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository }}
 
+permissions:
+  contents: read
+
+# A newer push to a pull request supersedes the run in progress; runs on
+# main and dev always finish, since deploys and image tags follow them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Install ALSA headers (voice capture)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: cargo check
         run: cargo check --all-targets --all-features
       - name: cargo fmt
@@ -32,77 +47,370 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
-      - name: cargo test
-        run: cargo test --all
+      - name: Install ALSA headers (voice capture)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+      # Default members: everything but the desktop app, tested in its own job.
+      - name: cargo nextest
+        run: cargo nextest run --all-features --profile ci
+      - name: TLS feature tests
+        run: |
+          cargo nextest run -p cypher-tls --no-default-features --locked --profile ci
+          cargo nextest run -p cypher-tls --features server --locked --profile ci
+      - name: Doctests
+        run: cargo test --doc --all-features
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: junit
+          path: target/nextest/ci/junit.xml
+
+  coverage:
+    name: Coverage ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The in-process stack test (tests/e2e) runs against these, so services
+    # and the client driver count too.
+    env:
+      CYPHER_TEST_REDIS: redis://:ci@127.0.0.1:6379
+      CYPHER_TEST_NATS: nats://127.0.0.1:4222
+      CYPHER_REQUIRE_LIVE: "1"
+      GATEWAY_NATS_PASSWORD: gw
+      SIGNALING_NATS_PASSWORD: sig
+      RELAY_NATS_PASSWORD: rel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146,cargo-llvm-cov@0.9.1
+      - name: Start Redis and NATS
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065 redis-server --requirepass ci
+          docker run -d --name nats -p 4222:4222 -v "$PWD/deploy/nats.conf:/etc/nats/nats.conf:ro" \
+            -e GATEWAY_NATS_PASSWORD=gw -e SIGNALING_NATS_PASSWORD=sig -e RELAY_NATS_PASSWORD=rel \
+            nats:2-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652 -c /etc/nats/nats.conf
+      # The desktop crate embeds the frontend; its Rust tests need only the directory.
+      - name: Measure
+        run: |
+          mkdir -p apps/desktop/dist
+          cargo llvm-cov nextest --workspace --all-features --json --summary-only --output-path target/cov.json
+          cargo llvm-cov report --lcov --output-path target/lcov.info
+      - name: Gate
+        run: cargo run -p xtask -- coverage-gate
+      - name: Upload lcov
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: lcov
+          path: target/lcov.info
+
+  hygiene:
+    name: Hygiene (TOML, typos, deps, features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Install ALSA headers (voice capture)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: taplo-cli@0.10.0,typos-cli@1.50.3,cargo-machete@0.9.2,cargo-hack@0.6.45
+      - name: TOML formatting
+        run: taplo fmt --config .config/taplo.toml --check
+      - name: Typos
+        run: typos --config .config/typos.toml . .config
+      - name: Unused dependencies
+        run: cargo machete
+      - name: One version everywhere
+        run: cargo run -p xtask -- versions
+      - name: Every feature on its own
+        run: >-
+          cargo hack clippy --each-feature --all-targets
+          -p cypher-media -p cypher-client -p cypher-tls -p cypher-transport -- -D warnings
+      # Same images as deploy/compose/docker-compose.prod.yml.
+      - name: Alert rules, Prometheus and Alertmanager config
+        run: |
+          prometheus=prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
+          alertmanager=prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+          docker run --rm -v "$PWD/deploy:/d:ro" -w /d --entrypoint promtool "$prometheus" test rules alerts.test.yml
+          docker run --rm -v "$PWD/deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/deploy/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            --entrypoint promtool "$prometheus" check config /etc/prometheus/prometheus.yml
+          docker run --rm -v "$PWD/deploy:/d:ro" --entrypoint amtool "$alertmanager" check-config /d/alertmanager.yml
+
+  miri:
+    name: Miri (UB check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # No target cache and no secrets: Miri keeps the build environment in target/
+    # (Rust security advisory, 2026-09-21), so nothing from this job is reused.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: miri, rust-src
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: cargo miri nextest
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: >-
+          cargo +${{ env.NIGHTLY }} miri nextest run --profile miri
+          -p cypher-types -p cypher-wire -p cypher-crypto -p cypher-core -p cypher-media
 
   fuzz:
     name: Fuzz ${{ matrix.target.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         target:
-          - { crate: cypher-proto, name: fuzz_dispatch }
-          - { crate: cypher-proto, name: fuzz_decode_bytes }
+          - { crate: cypher-wire, name: fuzz_frames }
+          - { crate: cypher-wire, name: fuzz_bodies }
+          - { crate: cypher-wire, name: fuzz_history }
+          - { crate: cypher-wire, name: fuzz_relay }
           - { crate: cypher-crypto, name: fuzz_aead }
           - { crate: cypher-crypto, name: fuzz_ratchet }
+          - { crate: cypher-crypto, name: fuzz_decoders }
+          - { crate: cypher-crypto, name: fuzz_keysets }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.NIGHTLY }}
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
         with:
           key: fuzz-${{ matrix.target.crate }}-${{ matrix.target.name }}
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-fuzz@0.13.1
+      # The prebuilt cargo-fuzz targets musl by default; the toolchain is glibc.
       - name: Run fuzzer
-        run: cd crates/${{ matrix.target.crate }} && cargo +nightly fuzz run ${{ matrix.target.name }} -- -max_total_time=30
+        run: cd crates/${{ matrix.target.crate }} && cargo +${{ env.NIGHTLY }} fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target.name }} -- -max_total_time=30
 
+  # cargo-deny is pinned to the version .config/deny.toml is written for.
   deny:
-    name: Deny (license & advisories)
+    name: Deny (licenses, bans, sources, vulnerabilities)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
         with:
-          command: check
-          arguments: --all-features
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-deny@0.19.0
+      - name: Licenses, bans, sources
+        run: cargo deny --all-features check --config .config/deny.toml bans licenses sources
+      # A push fails only on a vulnerability. Unmaintained, unsound and
+      # yanked crates are warnings here: they appear without a code change,
+      # and the daily advisories.yml run reports them in an issue. With
+      # --warn, cargo-deny also lists the accepted ignores of those kinds
+      # (6 today, see .config/deny.toml) as warnings; that output is expected.
+      - name: Vulnerabilities
+        run: cargo deny --all-features check --config .config/deny.toml --warn unmaintained --warn unsound --warn yanked advisories
+
+  e2e:
+    name: End-to-end (live stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [check]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Build services
+        run: cargo build --release -p gateway -p signaling -p relay -p load-test
+      - name: Start stack
+        run: .github/scripts/start-stack.sh
+      - name: User journey
+        run: CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA=e2e/stack.pem cargo test --release -p e2e --test live
+      - name: Build WebAssembly core
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          npm run build:wasm -w apps/pwa
+      # The production bundle in Chromium (fake camera and microphone), driven
+      # through the UI: pairing, receipts, a file, reload, notes, recovery.
+      - name: Browser journeys (Playwright)
+        run: |
+          npx playwright install --with-deps chromium
+          npm run build -w apps/pwa
+          npm run e2e -w apps/pwa
+      - name: Playwright report
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: playwright-report
+          path: target/playwright/
+      # 5k clients across two gateway nodes (NATS). The memory budget is ~1.6x
+      # the measured cost of a connection (docs/performance.md).
+      - name: Cross-node load
+        run: |
+          ulimit -n 65536
+          target/release/load-test --connections 5000 --ramp 10 --duration 15 --msg-rate 5 \
+            --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
+            --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
+            --assert-max-bytes-per-conn 40000 --assert-tasks-return 5
+      - uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1 # v1.2.2
+        with:
+          k6-version: "2.3.0"
+      # The browser path: WebSocket clients on both nodes, thresholds in the
+      # script (tests/load); then every connection task must be gone. k6 is
+      # CPU-bound on its JavaScript Ed25519 (docs/performance.md): 300 pairs
+      # is what a 4-core runner drives next to both gateways without its own
+      # scheduling showing up as latency.
+      - name: WebSocket load (k6)
+        run: |
+          npm run build -w tests/load
+          tasks() { curl -s 127.0.0.1:9090/ | awk '/^tokio_alive_tasks /{print $2}'; }
+          before=$(tasks)
+          k6 run --quiet --summary-export e2e/k6.json \
+            -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
+            -e PAIRS=300 -e RAMP=10s -e HOLD=20s -e SESSION=20 target/k6/gateway-ws.js
+          sleep 5
+          after=$(tasks)
+          echo "gateway tasks: $before before, $after after"
+          [ "$after" -le $((before + 5)) ]
+      - name: Service logs
+        if: failure()
+        run: tail -n 100 e2e/*.log
+
+  desktop:
+    name: Desktop (Tauri)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build frontend
+        run: npm ci && npm run build -w apps/desktop
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: cargo clippy (desktop)
+        run: cargo clippy -p cypher-desktop --all-targets -- -D warnings
+      - name: Desktop tests
+        run: cargo test -p cypher-desktop
 
   pwa-build:
-    name: PWA Build
+    name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: clients/pwa/package-lock.json
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: cargo clippy (wasm32)
+        run: cargo clippy -p cypher-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Install dependencies
-        run: cd clients/pwa && npm ci
+        run: npm ci
+      - name: Build WebAssembly core
+        run: npm run build:wasm -w apps/pwa
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Formatting
+        run: npm run format:check
+      - name: Unit tests with coverage
+        run: npm run coverage
+      - name: Load-script protocol tests
+        run: npm test -w tests/load
       - name: Build PWA
-        run: cd clients/pwa && npm run build
+        run: npm run build -w apps/pwa
       - name: Upload PWA artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: pwa-dist
-          path: clients/pwa/dist/
+          path: apps/pwa/dist/
 
+  # Every pull request builds the images, so a broken Dockerfile fails CI;
+  # pushes also publish them, tagged with the commit (first 8 hex digits).
   docker-build:
-    name: Docker Build & Push
+    name: Docker ${{ matrix.image.name }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    timeout-minutes: 45
     needs: [check, test]
     permissions:
       contents: read
       packages: write
+      # Keyless signing: Sigstore certifies this workflow as the signer.
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { name: gateway, target: gateway, file: deploy/docker/Dockerfile }
+          - { name: signaling, target: signaling, file: deploy/docker/Dockerfile }
+          - { name: relay, target: relay, file: deploy/docker/Dockerfile }
+          - { name: pwa, target: "", file: apps/pwa/Dockerfile }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        if: github.event_name == 'push'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -110,62 +418,59 @@ jobs:
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v3
 
-      - name: Determine tag
-        id: tag
+      - name: Image name
+        id: image
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=dev" >> "$GITHUB_OUTPUT"
-          fi
-          echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${repo}/cypher-${{ matrix.image.name }}:${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
-      - name: Build & push gateway
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+      - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        id: build
         with:
           context: .
-          target: gateway
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-gateway:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-gateway:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: ${{ matrix.image.file }}
+          target: ${{ matrix.image.target }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.image.outputs.ref }}
+          # Published images carry an SBOM and how they were built.
+          sbom: ${{ github.event_name == 'push' }}
+          provenance: ${{ github.event_name == 'push' && 'mode=max' || 'false' }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
 
-      - name: Build & push signaling
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          target: signaling
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-signaling:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-signaling:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: github.event_name == 'push'
 
-      - name: Build & push relay
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          target: relay
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-relay:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-relay:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Sign the image
+        if: github.event_name == 'push'
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${REF%:*}@${DIGEST}"
 
-      - name: Build & push PWA
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+  # The moving tags (latest for main, dev for dev) point at a commit's images
+  # only once everything above has passed for it.
+  promote:
+    name: Promote images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push'
+    needs: [check, test, coverage, hygiene, miri, fuzz, deny, e2e, desktop, pwa-build, docker-build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
         with:
-          context: .
-          file: ./clients/pwa/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-pwa:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ steps.tag.outputs.repo }}/cypher-pwa:${{ steps.tag.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v3
+      - name: Retag
+        run: |
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then moving=latest; else moving=dev; fi
+          for name in gateway signaling relay pwa; do
+            base="ghcr.io/${repo}/cypher-${name}"
+            docker buildx imagetools create --tag "${base}:${moving}" "${base}:${GITHUB_SHA::8}"
+          done

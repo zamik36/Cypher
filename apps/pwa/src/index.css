@@ -1,0 +1,23 @@
+.install-prompt {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sp-4) + var(--safe-bottom));
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: min(480px, calc(100vw - 2 * var(--sp-4)));
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  box-shadow: var(--e-3);
+  font-size: var(--t-sm);
+  line-height: var(--t-sm-lh);
+  transform: translateX(-50%);
+}
+
+.install-prompt__text {
+  flex: 1;
+  min-width: 0;
+}

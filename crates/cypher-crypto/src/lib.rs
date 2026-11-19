@@ -1,9 +1,52 @@
-pub mod aead;
-pub mod identity;
-pub mod ratchet;
-pub mod x3dh;
+//! Cryptography of Cypher: identities, X3DH handshake, Double Ratchet,
+//! sealed sender, onion requests and per-file chunk encryption.
 
-pub use aead::{aead_decrypt, aead_encrypt};
-pub use identity::{EphemeralKeyPair, IdentityKeyPair, IdentitySeed, KeyBundle, SignedPreKey};
-pub use ratchet::RatchetState;
-pub use x3dh::{x3dh_initiator, x3dh_mutual, x3dh_responder, SharedSecret};
+// Counters here are nonces and message numbers: overflow must be handled
+// explicitly, never wrap or panic by accident.
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
+#![deny(clippy::integer_division_remainder_used)]
+
+pub mod aead;
+pub mod chunk;
+pub mod devices;
+pub mod double_ratchet;
+mod error;
+pub mod fingerprint;
+pub mod handshake;
+pub mod identity;
+pub mod identity_file;
+pub mod inbox;
+mod kdf;
+pub mod onion;
+pub mod onion_keys;
+pub mod prekey;
+mod reader;
+pub mod sealed;
+
+pub use chunk::{ChunkCipher, FileKey};
+pub use devices::DeviceList;
+pub use double_ratchet::{Header, Ratchet};
+pub use error::CryptoError;
+pub use handshake::InitHeader;
+pub use identity::{IdentityKeyPair, IdentitySeed};
+pub use prekey::{OneTimePreKey, PrekeyBundle, SignedPreKey};
+
+#[cfg(test)]
+pub(crate) fn assert_redacted_debug<T: std::fmt::Debug>(
+    value: &T,
+    expected: &str,
+    secrets: &[&[u8]],
+) {
+    use std::fmt::Write as _;
+
+    let shown = format!("{value:?}");
+    assert_eq!(shown, expected);
+    for secret in secrets {
+        assert!(!shown.contains(&format!("{secret:?}")));
+        let hex = secret.iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+        assert!(!shown.contains(&hex));
+    }
+}

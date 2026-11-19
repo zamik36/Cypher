@@ -1,0 +1,54 @@
+{
+  "productName": "Cypher",
+  "identifier": "dev.cypher.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https://asset.localhost; media-src 'self' blob: cypher-media: http://cypher-media.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    },
+    "windows": [
+      {
+        "title": "Шифр",
+        "width": 900,
+        "height": 650,
+        "resizable": true
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFRTc5NkJBNDU0RDc1NUIKUldSYmRVMUZ1cGJuVGxaVksvMGZCMkxtMUtocnIvdlRnK2kxcXNPcXFDM3AwYTRVc1BwVGtJSWYK",
+      "endpoints": ["https://github.com/zamik36/Cypher/releases/latest/download/latest.json"]
+    },
+    "deep-link": {
+      "desktop": { "schemes": ["cypher"] },
+      "mobile": [
+        { "scheme": ["cypher"], "host": "join", "appLink": false },
+        { "host": "cyphermessanger.tech", "pathPrefix": ["/join"] }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "android": {
+      "minSdkVersion": 26
+    },
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    }
+  }
+}

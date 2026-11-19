@@ -1,44 +1,391 @@
+//! Accept loop shared by every service that terminates client connections.
+//!
+//! Each accepted connection takes a permit and a slot for its client address
+//! (excess connections are closed at once), is upgraded on its own task so
+//! a slow handshake never blocks accepting, and is dropped when the service
+//! shuts down. A client connecting directly is counted before its handshake;
+//! one behind our reverse proxy only once the upgrade request names it.
+
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info, instrument};
+use tokio_util::sync::CancellationToken;
 
-use cypher_common::{Error, Result};
+use crate::limits::{ConnectionLimits, IpSlot, IpSlots};
+use crate::{FrameSink, FrameStream, Result, accept_tls, split};
 
-use crate::session::TransportSession;
+/// Serves upgraded frame connections.
+pub trait Handler: Send + Sync + 'static {
+    /// Drives one connection until it closes.
+    fn serve(
+        self: Arc<Self>,
+        stream: FrameStream,
+        sink: FrameSink,
+    ) -> impl Future<Output = ()> + Send;
 
-pub struct TransportListener {
-    tcp_listener: TcpListener,
-    tls_acceptor: TlsAcceptor,
+    /// A connection was refused because every permit was taken.
+    fn rejected(&self) {}
 }
 
-impl TransportListener {
-    #[instrument(skip(tls_config))]
-    pub async fn bind(addr: &str, tls_config: Arc<rustls::ServerConfig>) -> Result<Self> {
-        let tcp_listener = TcpListener::bind(addr).await?;
-        let tls_acceptor = TlsAcceptor::from(tls_config);
+/// How an accepted TCP connection becomes a frame connection.
+#[derive(Clone)]
+pub enum Upgrade {
+    Tls(TlsAcceptor),
+    /// Plain WebSocket; TLS is terminated by a reverse proxy in front,
+    /// whose connections come from these networks.
+    #[cfg(feature = "ws")]
+    WebSocket(crate::limits::TrustedProxies),
+}
 
-        info!("transport listener bound to {addr}");
+/// An upgraded connection and, behind our proxy, the client it forwards.
+type Upgraded = (FrameStream, FrameSink, Option<IpAddr>);
 
-        Ok(Self {
-            tcp_listener,
-            tls_acceptor,
-        })
+impl Upgrade {
+    /// `from_proxy`: whether the connection may name the client it
+    /// forwards (see [`Upgrade::forwards_for`]).
+    #[cfg_attr(
+        not(feature = "ws"),
+        expect(unused_variables, reason = "only WebSocket connections are proxied")
+    )]
+    async fn apply(&self, tcp: TcpStream, from_proxy: bool) -> Result<Upgraded> {
+        match self {
+            Self::Tls(acceptor) => accept_tls(acceptor, tcp).await.map(|conn| {
+                let (stream, sink) = split(conn);
+                (stream, sink, None)
+            }),
+            #[cfg(feature = "ws")]
+            Self::WebSocket(_) => crate::ws::accept_ws(tcp, from_proxy).await,
+        }
     }
 
-    pub async fn accept(&mut self) -> Result<TransportSession> {
-        let (tcp_stream, peer_addr) = self.tcp_listener.accept().await?;
-        debug!("accepted TCP connection from {peer_addr}");
+    /// Whether a connection from `peer` may name another client: only a
+    /// WebSocket from our own reverse proxy does.
+    #[cfg_attr(
+        not(feature = "ws"),
+        expect(unused_variables, reason = "only WebSocket connections are proxied")
+    )]
+    fn forwards_for(&self, peer: IpAddr) -> bool {
+        match self {
+            Self::Tls(_) => false,
+            #[cfg(feature = "ws")]
+            Self::WebSocket(proxies) => proxies.contains(peer),
+        }
+    }
+}
 
-        let tls_stream = self
-            .tls_acceptor
-            .accept(tcp_stream)
-            .await
-            .map_err(|e| Error::Transport(format!("TLS accept error: {e}")))?;
+/// A bound listener and how its connections are upgraded.
+pub struct Listener {
+    listener: TcpListener,
+    upgrade: Upgrade,
+}
 
-        debug!("TLS handshake complete with {peer_addr}");
+impl std::fmt::Debug for Upgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tls(_) => f.write_str("Upgrade::Tls(..)"),
+            #[cfg(feature = "ws")]
+            Self::WebSocket(_) => f.write_str("Upgrade::WebSocket(..)"),
+        }
+    }
+}
 
-        Ok(TransportSession::from_stream(tls_stream))
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Listener(..)")
+    }
+}
+
+impl Listener {
+    pub fn new(listener: TcpListener, upgrade: Upgrade) -> Self {
+        Self { listener, upgrade }
+    }
+
+    pub async fn bind(addr: SocketAddr, upgrade: Upgrade) -> std::io::Result<Self> {
+        Ok(Self::new(TcpListener::bind(addr).await?, upgrade))
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+}
+
+/// Accepts on every listener until `shutdown`. All listeners share the
+/// limits.
+pub async fn serve<H: Handler>(
+    listeners: Vec<Listener>,
+    handler: Arc<H>,
+    limits: ConnectionLimits,
+    shutdown: CancellationToken,
+) {
+    let shared = Shared {
+        permits: Arc::new(Semaphore::new(limits.total)),
+        slots: IpSlots::new(limits.per_ip),
+    };
+    let loops = listeners.into_iter().map(|listener| {
+        accept_loop(
+            listener,
+            Arc::clone(&handler),
+            shared.clone(),
+            shutdown.clone(),
+        )
+    });
+    futures::future::join_all(loops).await;
+}
+
+#[derive(Clone)]
+struct Shared {
+    permits: Arc<Semaphore>,
+    slots: Arc<IpSlots>,
+}
+
+/// A client's address slot: taken (or refused), or still to be taken once
+/// the proxy at this address names the client.
+enum Admission {
+    Admitted(Option<IpSlot>),
+    Deferred(IpAddr),
+    Refused,
+}
+
+fn admit_early(upgrade: &Upgrade, slots: &Arc<IpSlots>, peer: Option<IpAddr>) -> Admission {
+    match peer {
+        Some(ip) if upgrade.forwards_for(ip) => Admission::Deferred(ip),
+        Some(ip) => slots
+            .acquire(ip)
+            .map_or(Admission::Refused, |slot| Admission::Admitted(Some(slot))),
+        None => Admission::Admitted(None),
+    }
+}
+
+/// The admission once the upgrade is done: a deferred one counts the client
+/// the proxy `forwarded`, or the proxy itself when it named none.
+fn admit_late(early: Admission, forwarded: Option<IpAddr>, slots: &Arc<IpSlots>) -> Admission {
+    match early {
+        Admission::Deferred(proxy) => slots
+            .acquire(forwarded.unwrap_or(proxy))
+            .map_or(Admission::Refused, |slot| Admission::Admitted(Some(slot))),
+        decided @ (Admission::Admitted(_) | Admission::Refused) => decided,
+    }
+}
+
+const ACCEPT_RETRY: Duration = Duration::from_millis(50);
+const ACCEPT_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+fn accept_warning_due(last: &mut Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    if last
+        .as_ref()
+        .is_some_and(|at| now.saturating_duration_since(*at) < ACCEPT_LOG_INTERVAL)
+    {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Accepts the next TCP connection; accept errors (e.g. fd exhaustion) are
+/// transient, so this backs off instead of failing the listener. A persistent
+/// error is logged immediately, then at most once per second. The caller owns
+/// the warning state so a successful accept does not reset it.
+async fn accept(
+    listener: &TcpListener,
+    last_warning: &mut Option<tokio::time::Instant>,
+) -> TcpStream {
+    accept_with(
+        || async { listener.accept().await.map(|(tcp, _)| tcp) },
+        last_warning,
+    )
+    .await
+}
+
+async fn accept_with<F, Fut, T>(mut next: F, last_warning: &mut Option<tokio::time::Instant>) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    loop {
+        match next().await {
+            Ok(tcp) => return tcp,
+            Err(e) => {
+                if accept_warning_due(last_warning, tokio::time::Instant::now()) {
+                    tracing::warn!("accept failed: {e}");
+                }
+                tokio::time::sleep(ACCEPT_RETRY).await;
+            }
+        }
+    }
+}
+
+async fn accept_loop<H: Handler>(
+    Listener { listener, upgrade }: Listener,
+    handler: Arc<H>,
+    Shared { permits, slots }: Shared,
+    shutdown: CancellationToken,
+) {
+    let mut last_warning = None;
+    loop {
+        let tcp = tokio::select! {
+            () = shutdown.cancelled() => return,
+            tcp = accept(&listener, &mut last_warning) => tcp,
+        };
+        let peer = tcp.peer_addr().ok().map(|a| a.ip());
+        let early = admit_early(&upgrade, &slots, peer);
+        if matches!(early, Admission::Refused) {
+            handler.rejected();
+            continue;
+        }
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            handler.rejected();
+            continue;
+        };
+        // A child token per connection: polling one shared token from every
+        // connection task serialises all workers on its waiter lock.
+        let (upgrade, handler, slots, shutdown) = (
+            upgrade.clone(),
+            Arc::clone(&handler),
+            Arc::clone(&slots),
+            shutdown.child_token(),
+        );
+        tokio::spawn(async move {
+            let _permit = permit;
+            let connection = async {
+                let from_proxy = matches!(early, Admission::Deferred(_));
+                let Ok((stream, sink, forwarded)) = upgrade.apply(tcp, from_proxy).await else {
+                    return;
+                };
+                let Admission::Admitted(_slot) = admit_late(early, forwarded, &slots) else {
+                    handler.rejected();
+                    return;
+                };
+                handler.serve(stream, sink).await;
+            };
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                () = connection => {}
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use std::collections::VecDeque;
+    use std::future::ready;
+    use std::io;
+
+    use tokio::time::Instant;
+
+    use super::{ACCEPT_LOG_INTERVAL, ACCEPT_RETRY, accept_warning_due, accept_with};
+
+    #[test]
+    fn persistent_emfile_warnings_are_rate_limited() {
+        let start = Instant::now();
+        let mut last = None;
+        assert!(accept_warning_due(&mut last, start));
+        for retry in 1..20u32 {
+            assert!(
+                !accept_warning_due(&mut last, start + ACCEPT_RETRY * retry),
+                "unexpected warning at retry {retry}"
+            );
+        }
+        assert!(accept_warning_due(&mut last, start + ACCEPT_LOG_INTERVAL));
+        assert!(!accept_warning_due(
+            &mut last,
+            start + ACCEPT_LOG_INTERVAL + ACCEPT_RETRY
+        ));
+    }
+
+    async fn accept_once(results: Vec<io::Result<()>>, last: &mut Option<Instant>) {
+        let mut results = VecDeque::from(results);
+        accept_with(|| ready(results.pop_front().unwrap()), last).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_accepts_do_not_reset_warning_throttle() {
+        let start = Instant::now();
+        let mut last = None;
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert_eq!(last, Some(start));
+
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert_eq!(last, Some(start), "success reset the warning series");
+
+        tokio::time::sleep(ACCEPT_LOG_INTERVAL).await;
+        accept_once(vec![Err(io::Error::other("EMFILE")), Ok(())], &mut last).await;
+        assert!(last.is_some_and(|at| at >= start + ACCEPT_LOG_INTERVAL));
+    }
+}
+
+#[cfg(all(test, feature = "ws"))]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+    use crate::limits::TrustedProxies;
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// Admits a connection from `peer` whose upgrade names `forwarded`.
+    fn admit(
+        upgrade: &Upgrade,
+        slots: &Arc<IpSlots>,
+        peer: IpAddr,
+        forwarded: Option<IpAddr>,
+    ) -> Admission {
+        admit_late(admit_early(upgrade, slots, Some(peer)), forwarded, slots)
+    }
+
+    /// A trusted proxy that names no client is counted as one client
+    /// itself; it gets no way around the per-address limit.
+    #[test]
+    fn a_proxy_naming_no_client_counts_as_its_own_address() {
+        let slots = IpSlots::new(1);
+        let ws = Upgrade::WebSocket("172.30.0.2".parse().unwrap());
+        let proxy = v4(172, 30, 0, 2);
+        let first = admit(&ws, &slots, proxy, None);
+        assert!(matches!(first, Admission::Admitted(Some(_))));
+        assert!(matches!(
+            admit(&ws, &slots, proxy, None),
+            Admission::Refused
+        ));
+    }
+
+    /// A host on a private network, but not the deployment's proxy,
+    /// cannot pick a fresh per-address share for each connection by naming
+    /// another client in `X-Forwarded-For`.
+    #[test]
+    fn only_a_named_proxy_chooses_the_counted_address() {
+        let slots = IpSlots::new(1);
+        let ws = Upgrade::WebSocket(TrustedProxies::default());
+        let neighbour = v4(172, 18, 0, 9);
+        // Every admitted slot stays held, as by an open connection.
+        let mut held = Vec::new();
+        for n in 1..=50 {
+            if let Admission::Admitted(slot) =
+                admit(&ws, &slots, neighbour, Some(v4(198, 51, 100, n)))
+            {
+                held.push(slot);
+            }
+        }
+        assert_eq!(held.len(), 1, "counted by its own address, limit 1");
+
+        let proxy = v4(172, 30, 0, 2);
+        let ws = Upgrade::WebSocket("172.30.0.2".parse().unwrap());
+        let a = admit(&ws, &slots, proxy, Some(v4(203, 0, 113, 1)));
+        let b = admit(&ws, &slots, proxy, Some(v4(203, 0, 113, 2)));
+        assert!(matches!(a, Admission::Admitted(Some(_))));
+        assert!(
+            matches!(b, Admission::Admitted(Some(_))),
+            "clients behind the named proxy count by their own address"
+        );
+        assert!(matches!(
+            admit(&ws, &slots, proxy, Some(v4(203, 0, 113, 1))),
+            Admission::Refused
+        ));
     }
 }

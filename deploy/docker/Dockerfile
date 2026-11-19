@@ -1,0 +1,50 @@
+FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY services/ services/
+COPY tools/ tools/
+COPY tests/ tests/
+COPY apps/desktop/src-tauri/ apps/desktop/src-tauri/
+
+RUN cargo build --release --locked \
+    -p gateway \
+    -p signaling \
+    -p relay
+
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS runtime-base
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && adduser --disabled-password --no-create-home --uid 10001 --gecos "" app \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/* \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info \
+    && rm -rf /etc/init.d /etc/rc0.d /etc/rc1.d /etc/rc2.d /etc/rc3.d /etc/rc4.d /etc/rc5.d /etc/rc6.d /etc/rcS.d \
+    && rm -rf /etc/apt /var/lib/apt /var/lib/dpkg \
+    && rm -f /usr/bin/apt /usr/bin/apt-* /usr/bin/dpkg /usr/bin/dpkg-*
+
+FROM runtime-base AS gateway
+
+COPY --from=builder /app/target/release/gateway /usr/local/bin/gateway
+EXPOSE 9100 9101 9090
+ENV P2P_GATEWAY_ADDR=0.0.0.0:9100 \
+    P2P_WS_ADDR=0.0.0.0:9101
+USER app
+CMD ["gateway"]
+
+FROM runtime-base AS signaling
+
+COPY --from=builder /app/target/release/signaling /usr/local/bin/signaling
+RUN mkdir -p /data/signaling && chown app:app /data/signaling
+EXPOSE 9091
+WORKDIR /
+USER app
+CMD ["signaling"]
+
+FROM runtime-base AS relay
+
+COPY --from=builder /app/target/release/relay /usr/local/bin/relay
+EXPOSE 9300 9301 9092
+ENV P2P_WS_ADDR=0.0.0.0:9301
+USER app
+CMD ["relay"]

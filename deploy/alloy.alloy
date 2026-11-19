@@ -1,5 +1,7 @@
+// Production reads the Docker API through a read-only proxy (DOCKER_HOST);
+// local monitoring mounts the socket itself.
 discovery.docker "containers" {
-  host             = "unix:///var/run/docker.sock"
+  host             = coalesce(sys.env("DOCKER_HOST"), "unix:///var/run/docker.sock")
   refresh_interval = "5s"
 }
 
@@ -67,7 +69,7 @@ discovery.relabel "docker_logs" {
 }
 
 loki.source.docker "containers" {
-  host       = "unix:///var/run/docker.sock"
+  host       = coalesce(sys.env("DOCKER_HOST"), "unix:///var/run/docker.sock")
   targets    = discovery.relabel.docker_logs.output
   forward_to = [loki.process.json_logs.receiver]
 }

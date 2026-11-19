@@ -1,0 +1,67 @@
+use serde::{Deserialize, Serialize};
+use tauri::Runtime;
+use tauri::plugin::PluginHandle;
+use tauri::plugin::mobile::PluginInvokeError;
+
+/// Why a call to the Kotlin side failed. Its message is the string these
+/// calls have always failed with.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct Error(#[from] PluginInvokeError);
+
+/// The Kotlin side (`PushPlugin`), managed as app state.
+pub struct Push<R: Runtime>(pub(crate) PluginHandle<R>);
+
+impl<R: Runtime> std::fmt::Debug for Push<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Push(..)")
+    }
+}
+
+/// What the distributor answered: an endpoint and its Web Push keys
+/// (base64url, unpadded), or why there is none.
+#[derive(Debug, Deserialize)]
+pub struct Subscribed {
+    /// `ok`, `no_distributor` or `failed`.
+    pub status: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub p256dh: String,
+    #[serde(default)]
+    pub auth: String,
+}
+
+#[derive(Serialize)]
+struct SubscribeArgs<'a> {
+    vapid: &'a str,
+}
+
+#[derive(Deserialize)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "the Kotlin side answers with an empty object, which a unit struct does not take"
+)]
+struct Done {}
+
+impl<R: Runtime> Push<R> {
+    /// Registers with the phone's distributor for the server's VAPID key
+    /// (base64url). Blocks until the distributor answers.
+    ///
+    /// # Errors
+    /// The Kotlin side's message when registering cannot start.
+    pub fn subscribe(&self, vapid: &str) -> Result<Subscribed, Error> {
+        Ok(self
+            .0
+            .run_mobile_plugin::<Subscribed>("subscribe", SubscribeArgs { vapid })?)
+    }
+
+    /// Unregisters from the distributor.
+    ///
+    /// # Errors
+    /// The Kotlin side's message.
+    pub fn unsubscribe(&self) -> Result<(), Error> {
+        self.0.run_mobile_plugin::<Done>("unsubscribe", ())?;
+        Ok(())
+    }
+}

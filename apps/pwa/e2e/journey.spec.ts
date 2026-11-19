@@ -1,0 +1,198 @@
+import { createHash, randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { expect, test } from "@playwright/test";
+import {
+  createIdentity,
+  expectConnected,
+  incoming,
+  linkStatus,
+  messages,
+  newUser,
+  openFirstChat,
+  openSettings,
+  outgoing,
+  ownPeerId,
+  pair,
+  PASSPHRASE,
+  say,
+  setPassphrase,
+  unlock,
+} from "./users";
+
+test("two people pair, chat, send a file and come back later", async ({ browser, baseURL }) => {
+  const alice = await newUser(browser, baseURL ?? "");
+  const bob = await newUser(browser, baseURL ?? "");
+  await createIdentity(alice, "alice");
+  await createIdentity(bob, "bob");
+  await pair(alice, bob);
+  // Each side goes by the name it chose, sent inside the encrypted session.
+  await expect(alice.getByTestId("chat-header")).toContainText("bob");
+  await expect(bob.getByTestId("chat-header")).toContainText("alice");
+
+  await test.step("chat both ways with delivery and read receipts", async () => {
+    await say(bob, "hello alice");
+    await expect(incoming(alice).getByText("hello alice")).toBeVisible();
+    // Alice has the chat open, so the message is marked read.
+    await expect(outgoing(bob).locator('[data-testid="message-status"][data-status="read"]')).toBeVisible();
+    // Alice answers that message: the reply carries a quote of it.
+    await incoming(alice).filter({ hasText: "hello alice" }).click({ button: "right" });
+    await alice.getByRole("menuitem", { name: "Reply" }).click();
+    await say(alice, "hi bob");
+    const reply = incoming(bob).filter({ hasText: "hi bob" });
+    await expect(reply).toBeVisible();
+    await expect(reply.locator(".quote")).toContainText("hello alice");
+    // The chat list shows the conversation with its last message.
+    await expect(bob.getByTestId("chat-row").first()).toContainText("hi bob");
+  });
+
+  await test.step("both sides see the same safety number", async () => {
+    const readNumber = async (page: typeof alice) => {
+      await page.getByRole("button", { name: "Verify safety number" }).click();
+      const dialog = page.getByRole("dialog");
+      const digits = dialog.locator(".safety-digits");
+      await expect(digits.locator("li")).toHaveCount(12);
+      const number = (await digits.getAttribute("aria-label")) ?? "";
+      await dialog.getByRole("button", { name: "Close" }).click();
+      await expect(dialog).toBeHidden();
+      return number;
+    };
+    const [fromAlice, fromBob] = [await readNumber(alice), await readNumber(bob)];
+    expect(fromAlice).toMatch(/^\d{60}$/);
+    expect(fromAlice).toBe(fromBob);
+  });
+
+  await test.step("a 3 MiB file arrives intact, accepted from the chat", async () => {
+    const payload = randomBytes(3 * 1024 * 1024 + 12_345);
+    const chooser = bob.waitForEvent("filechooser");
+    await bob.getByRole("button", { name: "Attach a file" }).click();
+    await (await chooser).setFiles({ name: "payload.bin", mimeType: "application/octet-stream", buffer: payload });
+
+    const card = incoming(alice).getByTestId("file-card");
+    await expect(card).toContainText("payload.bin");
+    const download = alice.waitForEvent("download");
+    // Tapping the file offers what can be done with it.
+    await card.click();
+    await alice.getByRole("menuitem", { name: "Download" }).click();
+    const saved = await (await download).path();
+    const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+    expect(digest(await readFile(saved))).toBe(digest(payload));
+    await expect(card).toHaveAttribute("data-state", "complete");
+  });
+
+  await test.step("messages sent while offline arrive after unlocking", async () => {
+    await alice.reload();
+    await say(bob, "while you were away");
+    await unlock(alice, "not the passphrase");
+    await expect(alice.getByTestId("identity-error")).toBeVisible();
+    await unlock(alice);
+    await openFirstChat(alice);
+    for (const text of ["hello alice", "hi bob", "while you were away"]) {
+      await expect(messages(alice).locator(".bubble__text", { hasText: text })).toBeVisible();
+    }
+    await expect(alice.getByTestId("day-separator")).toHaveCount(1);
+
+    // The received file is still kept: it can be saved again.
+    const card = incoming(alice).getByTestId("file-card");
+    await expect(card).toHaveAttribute("data-state", "complete");
+    const again = alice.waitForEvent("download");
+    await card.click();
+    await alice.getByRole("menuitem", { name: "Save" }).click();
+    await expect(alice.getByRole("menu")).toBeHidden();
+    expect((await again).suggestedFilename()).toBe("payload.bin");
+  });
+
+  await test.step("a contact gets a name on this device, and back returns to the chat", async () => {
+    await alice.getByRole("button", { name: "Contact info" }).click();
+    await alice.getByLabel("Name", { exact: true }).fill("Bob");
+    await alice.getByRole("button", { name: "Save" }).click();
+    await expect(alice.getByRole("heading", { name: "Bob" })).toBeVisible();
+    await alice.goBack();
+    await expect(alice.getByTestId("chat-header")).toContainText("Bob");
+    await expect(alice.getByTestId("chat-row").first()).toContainText("Bob");
+  });
+
+  await test.step("a message deleted here stays deleted", async () => {
+    await say(alice, "oops, wrong chat");
+    const oops = outgoing(alice).filter({ hasText: "oops, wrong chat" });
+    await expect(oops).toBeVisible();
+    await oops.click({ button: "right" });
+    await alice.getByRole("menuitem", { name: "Delete for me" }).click();
+    await expect(oops).toHaveCount(0);
+    await alice.reload();
+    await unlock(alice);
+    await openFirstChat(alice);
+    await expect(messages(alice).getByText("hi bob")).toBeVisible();
+    await expect(messages(alice).getByText("oops, wrong chat")).toHaveCount(0);
+  });
+
+  await test.step("clearing history removes it from the screen and the device", async () => {
+    await openSettings(alice, "Data and storage");
+    await alice.getByRole("button", { name: "Clear all history" }).click();
+    await alice.getByRole("button", { name: "Clear", exact: true }).click();
+    await openFirstChat(alice);
+    await expect(messages(alice)).toHaveCount(0);
+
+    await alice.reload();
+    await unlock(alice);
+    await openFirstChat(alice);
+    await expect(alice.getByText("No messages yet. Say hello!")).toBeVisible();
+    await expect(messages(alice)).toHaveCount(0);
+  });
+});
+
+test("a recovery phrase restores the profile as another device", async ({ browser, baseURL }) => {
+  const original = await newUser(browser, baseURL ?? "");
+  const shown = await createIdentity(original, "carol");
+  const dave = await newUser(browser, baseURL ?? "");
+  await createIdentity(dave, "dave");
+  await pair(original, dave);
+  const peerId = await ownPeerId(original);
+
+  await original.getByPlaceholder("Passphrase", { exact: true }).fill(PASSPHRASE);
+  await original.getByRole("button", { name: "Show", exact: true }).click();
+  const words = original.getByTestId("recovery-phrase").locator("li");
+  await expect(words).toHaveCount(24);
+  const phrase = (await words.allTextContents()).join(" ");
+  expect(phrase).toBe(shown);
+
+  const restored = await newUser(browser, baseURL ?? "");
+  await restored.getByRole("button", { name: "Restore from phrase" }).click();
+  await expect(restored.getByText("This device joins your other devices")).toBeVisible();
+  await restored.getByPlaceholder("Recovery phrase (24 words)").fill(phrase);
+  await restored.getByPlaceholder("Nickname").fill("carol");
+  await setPassphrase(restored, "a different passphrase");
+  await restored.getByRole("button", { name: "Restore", exact: true }).click();
+  await expectConnected(restored);
+
+  // A new device of the profile: the first one keeps working, and the new
+  // one gets the contacts from it.
+  await expect(restored.getByTestId("restored-hint")).toBeVisible();
+  await expect(restored.getByTestId("chat-row")).toContainText("dave");
+  await expectConnected(original);
+  await expect(linkStatus(original)).toHaveAttribute("data-state", "online");
+
+  // What the contact writes reaches both, once it hears of the new device.
+  await openFirstChat(restored);
+  await expect(async () => {
+    const text = `to both of you ${Date.now()}`;
+    await say(dave, text);
+    await expect(incoming(restored).getByText(text)).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
+
+  await restored.getByTestId("restored-hint").getByRole("button", { name: "Open devices" }).click();
+  await expect(restored.getByTestId("devices").locator(".list-row")).toHaveCount(2);
+  expect(await ownPeerId(restored)).toBe(peerId);
+
+  // A forgotten passphrase: erase the device, then restore from the phrase.
+  await original.reload();
+  await original.getByRole("button", { name: "Forgot your passphrase?" }).click();
+  await original.getByRole("button", { name: "Erase this device", exact: true }).click();
+  await expect(original.getByPlaceholder("Nickname")).toBeVisible();
+  await original.getByRole("button", { name: "Restore from phrase" }).click();
+  await original.getByPlaceholder("Recovery phrase (24 words)").fill(phrase);
+  await original.getByPlaceholder("Nickname").fill("carol");
+  await setPassphrase(original, "a passphrase remembered");
+  await original.getByRole("button", { name: "Restore", exact: true }).click();
+  await expectConnected(original);
+  expect(await ownPeerId(original)).toBe(peerId);
+});

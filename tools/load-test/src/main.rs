@@ -1,192 +1,200 @@
-//! Load testing tool for the P2P gateway.
-//!
-//! Opens N concurrent TLS connections, sends SESSION_INIT + heartbeat PINGs,
-//! and reports connection rate, latency percentiles, and error counts.
+//! Gateway load generator: pairs of authenticated clients relaying frames
+//! through one or two gateways. Reports connect and `Send` → `SendAck`
+//! latency percentiles, throughput and the gateway's memory per connection,
+//! and fails on the thresholds it is given.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+mod args;
+mod client;
+mod probe;
+mod report;
+mod stats;
+
+use std::io::Write as _;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::Bytes;
 use clap::Parser;
-use tokio::sync::Semaphore;
-use tracing::{error, info};
+use tokio::task::JoinHandle;
 
-use cypher_proto::Serializable;
-use cypher_transport::frame::FrameFlags;
-use cypher_transport::TransportSession;
+use args::Args;
+use client::{PairOutcome, Plan, Stage};
+use probe::Snapshot;
+use report::{Limits, Report};
+use stats::Percentiles;
 
-#[derive(Parser, Debug)]
-#[command(name = "load-test", about = "P2P Gateway load testing tool")]
-struct Args {
-    /// Number of concurrent connections to open.
-    #[arg(long, default_value = "100")]
-    connections: usize,
+/// Lets the last connections of the ramp finish before memory is sampled.
+const SETTLE: Duration = Duration::from_secs(1);
+/// How long the gateway may take to notice every client left.
+const DRAIN: Duration = Duration::from_secs(15);
 
-    /// Duration to run the test in seconds.
-    #[arg(long, default_value = "30")]
-    duration: u64,
-
-    /// Gateway address (host:port).
-    #[arg(long, default_value = "127.0.0.1:9400")]
-    gateway_addr: String,
-
-    /// Maximum connections to open per second.
-    #[arg(long, default_value = "50")]
-    rate: usize,
-}
-
-struct Stats {
-    connected: AtomicU64,
-    errors: AtomicU64,
-    pongs_received: AtomicU64,
-    latencies_us: tokio::sync::Mutex<Vec<u64>>,
-}
-
-impl Stats {
-    fn new() -> Self {
-        Self {
-            connected: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-            pongs_received: AtomicU64::new(0),
-            latencies_us: tokio::sync::Mutex::new(Vec::new()),
-        }
-    }
-}
-
-async fn run_client(gateway_addr: String, client_id: u64, stats: Arc<Stats>, deadline: Instant) {
-    let connect_start = Instant::now();
-
-    let tls_config = cypher_tls::make_client_config();
-
-    let mut session = match TransportSession::connect(&gateway_addr, tls_config).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!(client_id, "connect error: {}", e);
-            stats.errors.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-    };
-
-    let connect_us = connect_start.elapsed().as_micros() as u64;
-    stats.latencies_us.lock().await.push(connect_us);
-    stats.connected.fetch_add(1, Ordering::Relaxed);
-
-    let init = cypher_proto::SessionInit {
-        client_id: client_id.to_le_bytes().to_vec(),
-        nonce: vec![0u8; 32],
-    };
-    let payload = Bytes::from(init.serialize());
-    if let Err(e) = session.send_frame(payload, FrameFlags::SESSION_INIT).await {
-        error!(client_id, "send_frame error: {}", e);
-        stats.errors.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    // Keep connection alive with PINGs until deadline.
-    while Instant::now() < deadline {
-        let ping_start = Instant::now();
-        if let Err(e) = session.send_frame(Bytes::new(), FrameFlags::PING).await {
-            error!(client_id, "ping send error: {}", e);
-            stats.errors.fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-
-        match tokio::time::timeout(Duration::from_secs(5), session.recv_frame()).await {
-            Ok(Ok(frame)) => {
-                if frame.flags.contains(FrameFlags::PONG) {
-                    let latency = ping_start.elapsed().as_micros() as u64;
-                    stats.latencies_us.lock().await.push(latency);
-                    stats.pongs_received.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Ok(Err(e)) => {
-                error!(client_id, "recv error: {}", e);
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-            Err(_) => {
-                error!(client_id, "ping timeout");
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    // Graceful close.
-    let _ = session.close().await;
+/// What the gateway's metrics said around the run.
+#[derive(Debug, Default)]
+struct Gateway {
+    before: Snapshot,
+    after_ramp: Snapshot,
+    tasks_after_close: Option<u64>,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    cypher_common::init_tracing();
-    let args = Args::parse();
-
-    info!(
-        connections = args.connections,
-        duration_secs = args.duration,
-        gateway = %args.gateway_addr,
-        rate = args.rate,
-        "Starting load test"
-    );
-
-    let stats = Arc::new(Stats::new());
-    let deadline = Instant::now() + Duration::from_secs(args.duration);
-
-    // Rate-limit connection creation.
-    let semaphore = Arc::new(Semaphore::new(args.rate));
-    let mut handles = Vec::new();
-
-    for i in 0..args.connections {
-        let permit = semaphore.clone().acquire_owned().await?;
-        let stats = stats.clone();
-        let addr = args.gateway_addr.clone();
-
-        let handle = tokio::spawn(async move {
-            run_client(addr, i as u64, stats, deadline).await;
-            // Release permit after a short delay to enforce rate.
-            tokio::time::sleep(Duration::from_millis(1000 / 50)).await;
-            drop(permit);
-        });
-        handles.push(handle);
-
-        if Instant::now() >= deadline {
-            break;
+async fn main() -> ExitCode {
+    // The process-wide TLS provider is the binary's choice; the configs
+    // cypher-tls builds carry their own. Nothing can have installed one yet.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this binary entry point owns the process-wide provider choice"
+    )]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    match run(Args::parse()).await {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr().lock(), "load-test: {e:#}");
+            ExitCode::from(2)
         }
     }
+}
 
-    // Wait for all clients to finish.
-    for h in handles {
-        let _ = h.await;
+async fn run(args: Args) -> Result<bool> {
+    let tls = match &args.ca_cert {
+        Some(path) => cypher_tls::make_client_config_with_pem(&std::fs::read_to_string(path)?)?,
+        None => cypher_tls::make_client_config(),
+    };
+    let mut gateway = Gateway {
+        before: snapshot(args.metrics_addr.as_deref()).await,
+        ..Gateway::default()
+    };
+    let pairs = args.connections.div_ceil(2).max(1);
+    let ramp = Duration::from_secs(args.ramp);
+    let started = Instant::now();
+    let plan = Arc::new(Plan {
+        peer_addr: args
+            .peer_gateway_addr
+            .clone()
+            .unwrap_or_else(|| args.gateway_addr.clone()),
+        addr: args.gateway_addr.clone(),
+        tls,
+        interval: Duration::from_secs(1) / args.msg_rate.max(1),
+        payload: Bytes::from(vec![0xA5u8; args.payload]),
+        load_end: started + ramp + Duration::from_secs(args.duration),
+    });
+
+    let tasks = ramp_up(&args, &plan, pairs, started + ramp).await;
+    tokio::time::sleep(SETTLE).await;
+    gateway.after_ramp = snapshot(args.metrics_addr.as_deref()).await;
+    let outcomes = join(tasks).await;
+    let elapsed = started.elapsed();
+    if let (Some(addr), Some(base)) = (args.metrics_addr.as_deref(), gateway.before.alive_tasks) {
+        let limit = base.saturating_add(args.assert_tasks_return.unwrap_or(0));
+        gateway.tasks_after_close = probe::tasks_settled(addr, limit, DRAIN).await;
     }
-
-    // Print results.
-    let connected = stats.connected.load(Ordering::Relaxed);
-    let errors = stats.errors.load(Ordering::Relaxed);
-    let pongs = stats.pongs_received.load(Ordering::Relaxed);
-    let mut latencies = stats.latencies_us.lock().await;
-    latencies.sort();
-
-    println!("\n=== Load Test Results ===");
-    println!("Connections attempted: {}", args.connections);
-    println!("Connections succeeded: {}", connected);
-    println!("Errors:               {}", errors);
-    println!("Pongs received:       {}", pongs);
-
-    if !latencies.is_empty() {
-        let p50 = latencies[latencies.len() / 2];
-        let p95 = latencies[latencies.len() * 95 / 100];
-        let p99 = latencies[latencies.len() * 99 / 100];
-        println!("Latency p50:          {} µs", p50);
-        println!("Latency p95:          {} µs", p95);
-        println!("Latency p99:          {} µs", p99);
+    let report = summarize(&args, outcomes, elapsed, &gateway);
+    print(&args, &report)?;
+    let limits = Limits::from(&args);
+    let violations = report.violations(&limits);
+    let mut err = std::io::stderr().lock();
+    for v in &violations {
+        writeln!(err, "FAIL: {v}")?;
     }
+    Ok(violations.is_empty())
+}
 
-    let rate = connected as f64 / args.duration as f64;
-    println!("Connections/sec:      {:.1}", rate);
+/// Starts one pair per spacing interval so all are connecting by `ramp_end`.
+async fn ramp_up(
+    args: &Args,
+    plan: &Arc<Plan>,
+    pairs: usize,
+    ramp_end: Instant,
+) -> Vec<JoinHandle<PairOutcome>> {
+    let started = Instant::now();
+    let spacing =
+        ramp_end.saturating_duration_since(started) / u32::try_from(pairs).unwrap_or(u32::MAX);
+    let mut tasks = Vec::with_capacity(pairs);
+    for i in 0..pairs {
+        let src = args.src_ips.get(i % args.src_ips.len().max(1)).copied();
+        let plan = Arc::clone(plan);
+        tasks.push(tokio::spawn(
+            async move { client::run_pair(&plan, src).await },
+        ));
+        let next = started + spacing * u32::try_from(i + 1).unwrap_or(u32::MAX);
+        tokio::time::sleep_until(next.into()).await;
+    }
+    tasks
+}
 
+/// A pair whose task panicked counts as failed while relaying.
+async fn join(tasks: Vec<JoinHandle<PairOutcome>>) -> Vec<PairOutcome> {
+    let mut outcomes = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        outcomes.push(task.await.unwrap_or_else(|_| PairOutcome {
+            failed: Some(Stage::Relay),
+            ..PairOutcome::default()
+        }));
+    }
+    outcomes
+}
+
+async fn snapshot(addr: Option<&str>) -> Snapshot {
+    let Some(addr) = addr else {
+        return Snapshot::default();
+    };
+    probe::scrape(addr)
+        .await
+        .inspect_err(|e| tracing::warn!("gateway metrics not read: {e:#}"))
+        .unwrap_or_default()
+}
+
+fn summarize(
+    args: &Args,
+    outcomes: Vec<PairOutcome>,
+    elapsed: Duration,
+    gateway: &Gateway,
+) -> Report {
+    let (mut connect_us, mut relay_us) = (Vec::new(), Vec::new());
+    let (mut connected, mut on_primary) = (0u64, 0u64);
+    let (mut connect_errors, mut relay_errors) = (0u64, 0u64);
+    for o in outcomes {
+        connected = connected.saturating_add(o.connected);
+        on_primary = on_primary.saturating_add(o.on_primary);
+        match o.failed {
+            Some(Stage::Connect) => connect_errors = connect_errors.saturating_add(1),
+            Some(Stage::Relay) => relay_errors = relay_errors.saturating_add(1),
+            None => {}
+        }
+        connect_us.extend(o.connect_us);
+        relay_us.extend(o.relay_us);
+    }
+    let relayed = relay_us.len() as u64;
+    Report {
+        connections: args.connections,
+        connected,
+        gateway_connections: on_primary,
+        connect_errors,
+        relay_errors,
+        relayed,
+        relayed_per_sec: relayed / elapsed.as_secs().max(1),
+        connect_us: Percentiles::of(connect_us),
+        relay_us: Percentiles::of(relay_us),
+        gateway_rss_before: gateway.before.resident_bytes,
+        gateway_rss_after: gateway.after_ramp.resident_bytes,
+        bytes_per_connection: Report::per_connection(
+            gateway.before.resident_bytes,
+            gateway.after_ramp.resident_bytes,
+            on_primary,
+        ),
+        gateway_tasks_before: gateway.before.alive_tasks,
+        gateway_tasks_after_close: gateway.tasks_after_close,
+    }
+}
+
+fn print(args: &Args, report: &Report) -> Result<()> {
+    let text = if args.json {
+        serde_json::to_string_pretty(report)? + "\n"
+    } else {
+        report.render()?
+    };
+    std::io::stdout().lock().write_all(text.as_bytes())?;
     Ok(())
 }

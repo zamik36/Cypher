@@ -1,21 +1,40 @@
 [package]
 name = "cypher-crypto"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Benchmarks are criterion targets; the library has none for libtest.
+[lib]
+bench = false
 
 [dependencies]
-cypher-common.workspace = true
+cypher-types.workspace = true
 x25519-dalek.workspace = true
 ed25519-dalek.workspace = true
 aes-gcm.workspace = true
 hkdf.workspace = true
+hmac.workspace = true
 sha2.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
-bytes.workspace = true
 serde.workspace = true
 zeroize.workspace = true
-argon2.workspace = true
 bip39.workspace = true
+argon2.workspace = true
 postcard.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+rand_chacha.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "crypto"
+harness = false
+
+[lints]
+workspace = true

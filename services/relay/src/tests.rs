@@ -1,0 +1,334 @@
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::time::Duration;
+
+use bytes::Bytes;
+use cypher_transport::server::Handler;
+use cypher_transport::{FrameSink, FrameStream};
+use cypher_wire::relay::{TAG_KEYS, TAG_ONION};
+use futures::channel::mpsc;
+use futures::{SinkExt, StreamExt};
+
+use super::*;
+
+/// Replies `ok:<request>`; `slow…` answers after a delay, `lost…` never.
+/// Key sets are numbered by how often they were asked for.
+#[derive(Default)]
+struct FakeSignaling {
+    key_sets: AtomicU8,
+    fetches: AtomicU8,
+    failures: AtomicU8,
+    key_set_delay_ms: AtomicU64,
+}
+
+impl OnionUpstream for FakeSignaling {
+    async fn forward(&self, subject: &'static str, request: Bytes) -> Option<Bytes> {
+        if subject == SIG_KEYS_SUBJECT {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
+            let delay = self.key_set_delay_ms.load(Ordering::Relaxed);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            if self
+                .failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return None;
+            }
+            let n = self.key_sets.fetch_add(1, Ordering::Relaxed);
+            return Some(Bytes::from(vec![b'k', n]));
+        }
+        if request.starts_with(b"lost") {
+            return None;
+        }
+        if request.starts_with(b"slow") {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Some([b"ok:".as_slice(), &request].concat().into())
+    }
+}
+
+struct Conn {
+    tx: mpsc::Sender<io::Result<Bytes>>,
+    rx: mpsc::Receiver<Bytes>,
+}
+
+impl Conn {
+    async fn send(&mut self, corr: u64, body: &[u8]) {
+        let frame = [corr.to_le_bytes().as_slice(), &[TAG_ONION], body].concat();
+        self.tx.send(Ok(frame.into())).await.unwrap();
+    }
+
+    async fn send_raw(&mut self, frame: Vec<u8>) {
+        self.tx.send(Ok(frame.into())).await.unwrap();
+    }
+
+    async fn reply(&mut self) -> (u64, Bytes) {
+        let frame = timeout(Duration::from_secs(5), self.rx.next())
+            .await
+            .expect("reply in time")
+            .expect("connection open");
+        let corr = u64::from_le_bytes(frame[..CORR_LEN].try_into().unwrap());
+        (corr, frame.slice(CORR_LEN..))
+    }
+}
+
+fn relay() -> Arc<Relay<FakeSignaling>> {
+    let metrics = RelayMetrics::register(&Metrics::new().unwrap()).unwrap();
+    Arc::new(Relay::new(FakeSignaling::default(), metrics))
+}
+
+fn connect(relay: &Arc<Relay<FakeSignaling>>) -> Conn {
+    connect_with(relay, 64)
+}
+
+/// `sink_buffer` is how many replies the relay may write before the client
+/// has to read; 0 behaves like a full TCP window.
+fn connect_with(relay: &Arc<Relay<FakeSignaling>>, sink_buffer: usize) -> Conn {
+    let (tx, in_rx) = mpsc::channel(64);
+    let (out_tx, rx) = mpsc::channel(sink_buffer);
+    let stream: FrameStream = Box::pin(in_rx);
+    let sink: FrameSink =
+        Box::pin(out_tx.sink_map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe)));
+    tokio::spawn(Arc::clone(relay).serve(stream, sink));
+    Conn { tx, rx }
+}
+
+#[tokio::test(start_paused = true)]
+async fn replies_keep_the_request_correlation_id() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    conn.send(7, b"hello").await;
+    assert_eq!(conn.reply().await, (7, Bytes::from_static(b"ok:hello")));
+    assert_eq!(relay.metrics.forwarded.get(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn malformed_frames_are_dropped_and_the_connection_survives() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    conn.send_raw(vec![0; CORR_LEN]).await;
+    conn.send_raw(vec![0; MAX_REQUEST + 1]).await;
+    conn.send(1, b"after").await;
+    assert_eq!(conn.reply().await, (1, Bytes::from_static(b"ok:after")));
+    assert_eq!(relay.metrics.dropped.get(), 2);
+}
+
+/// The key set is answered from memory for a minute, then asked for again;
+/// a tag the relay does not know is dropped.
+#[tokio::test(start_paused = true)]
+async fn the_key_set_is_cached_and_unknown_tags_are_dropped() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    let ask = |corr: u64| [corr.to_le_bytes().as_slice(), &[TAG_KEYS]].concat();
+    conn.send_raw(ask(1)).await;
+    assert_eq!(conn.reply().await, (1, Bytes::from_static(&[b'k', 0])));
+    conn.send_raw(ask(2)).await;
+    assert_eq!(conn.reply().await, (2, Bytes::from_static(&[b'k', 0])));
+    tokio::time::sleep(KEY_SET_TTL).await;
+    conn.send_raw(ask(3)).await;
+    assert_eq!(conn.reply().await, (3, Bytes::from_static(&[b'k', 1])));
+
+    conn.send_raw([9u64.to_le_bytes().as_slice(), &[TAG_KEYS, 0]].concat())
+        .await;
+    conn.send_raw([9u64.to_le_bytes().as_slice(), &[7, 0]].concat())
+        .await;
+    conn.send(4, b"after").await;
+    assert_eq!(conn.reply().await, (4, Bytes::from_static(b"ok:after")));
+    assert_eq!(relay.metrics.dropped.get(), 2);
+}
+
+/// Concurrent misses share one upstream fetch. Once a cached value expires,
+/// one caller refreshes it while the other can still answer with stale data.
+#[tokio::test(start_paused = true)]
+async fn concurrent_key_set_refreshes_are_shared() {
+    let relay = relay();
+    relay
+        .upstream
+        .key_set_delay_ms
+        .store(30_000, Ordering::Relaxed);
+
+    let (first, second) = tokio::join!(relay.key_set(), relay.key_set());
+    assert_eq!(first, Some(Bytes::from_static(&[b'k', 0])));
+    assert_eq!(second, Some(Bytes::from_static(&[b'k', 0])));
+    assert_eq!(relay.upstream.key_sets.load(Ordering::Relaxed), 1);
+
+    tokio::time::sleep(KEY_SET_TTL).await;
+    let (first, second) = tokio::join!(relay.key_set(), relay.key_set());
+    let mut replies = [first, second];
+    replies.sort();
+    assert_eq!(
+        replies,
+        [
+            Some(Bytes::from_static(&[b'k', 0])),
+            Some(Bytes::from_static(&[b'k', 1]))
+        ]
+    );
+    assert_eq!(relay.upstream.key_sets.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn failed_initial_key_set_fetch_is_not_cached() {
+    let relay = relay();
+    relay.upstream.failures.store(1, Ordering::Relaxed);
+
+    assert_eq!(relay.key_set().await, None);
+    assert!(relay.key_set.lock().unwrap().is_none());
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 1);
+
+    assert_eq!(relay.key_set().await, Some(Bytes::from_static(&[b'k', 0])));
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_key_set_refresh_preserves_stale_and_retries() {
+    let relay = relay();
+    assert_eq!(relay.key_set().await, Some(Bytes::from_static(&[b'k', 0])));
+    tokio::time::sleep(KEY_SET_TTL).await;
+    let stale = relay.key_set.lock().unwrap().clone();
+    relay.upstream.failures.store(1, Ordering::Relaxed);
+
+    assert_eq!(relay.key_set().await, None);
+    assert_eq!(*relay.key_set.lock().unwrap(), stale);
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 2);
+
+    assert_eq!(relay.key_set().await, Some(Bytes::from_static(&[b'k', 1])));
+    assert_eq!(relay.upstream.fetches.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn lost_upstream_replies_are_dropped_silently() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    conn.send(1, b"lost").await;
+    conn.send(2, b"next").await;
+    assert_eq!(conn.reply().await, (2, Bytes::from_static(b"ok:next")));
+    assert_eq!(relay.metrics.dropped.get(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_request_does_not_block_pipelined_ones() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    conn.send(1, b"slow").await;
+    conn.send(2, b"fast").await;
+    assert_eq!(conn.reply().await.0, 2);
+    assert_eq!(conn.reply().await.0, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn connection_gauge_tracks_open_connections() {
+    let relay = relay();
+    let conn = connect(&relay);
+    tokio::task::yield_now().await;
+    assert_eq!(relay.metrics.connections.get(), 1);
+    drop(conn);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(relay.metrics.connections.get(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn frames_beyond_the_rate_limit_are_dropped() {
+    let relay = relay();
+    let mut conn = connect(&relay);
+    // The bucket holds a two-second burst.
+    for corr in 0..FRAMES_PER_SEC * 3 {
+        conn.send(corr, b"burst").await;
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        relay.metrics.dropped.get() > 0,
+        "a burst over the limit is shed"
+    );
+    assert!(relay.metrics.forwarded.get() >= FRAMES_PER_SEC * 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_connections_are_closed() {
+    let relay = relay();
+    let _conn = connect(&relay);
+    tokio::task::yield_now().await;
+    assert_eq!(relay.metrics.connections.get(), 1);
+    tokio::time::sleep(IDLE_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(relay.metrics.connections.get(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_is_disconnected() {
+    let relay = relay();
+    let Conn { mut tx, rx } = connect(&relay);
+    drop(rx);
+    tx.send(Ok([1u64.to_le_bytes().as_slice(), &[TAG_ONION], b"x"]
+        .concat()
+        .into()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(relay.metrics.connections.get(), 0);
+}
+
+/// While a reply waits for a client that stopped reading, nothing
+/// else on the connection runs, the idle timer included; the stalled write
+/// itself closes the connection.
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_is_closed_when_a_reply_stalls() {
+    let relay = relay();
+    let mut stalled = connect_with(&relay, 0);
+    for corr in [1, 2, 3] {
+        stalled.send(corr, b"req").await;
+    }
+    let mut reading = connect(&relay);
+    reading.send(9, b"req").await;
+    assert_eq!(reading.reply().await.0, 9);
+    assert_eq!(relay.metrics.connections.get(), 2);
+
+    // Well before IDLE_TIMEOUT, so the reading client is still connected.
+    tokio::time::sleep(WRITE_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(
+        relay.metrics.connections.get(),
+        1,
+        "only the reading client is left"
+    );
+}
+
+#[test]
+fn refused_connections_are_counted() {
+    let relay = relay();
+    relay.rejected();
+    assert_eq!(relay.metrics.rejected.get(), 1);
+}
+
+#[test]
+fn settings_that_would_admit_no_one_are_refused() {
+    let valid = || Config {
+        relay_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: None,
+        nats: cypher_server_kit::NatsConfig {
+            url: "nats://127.0.0.1:4222".into(),
+            user: None,
+            password: None,
+            token: None,
+        },
+        tls_cert_path: None,
+        tls_key_path: None,
+        dev_cert_out: None,
+        metrics_addr: "127.0.0.1:0".parse().unwrap(),
+        max_connections: 10,
+        max_connections_per_ip: 2,
+    };
+    valid().validate().unwrap();
+    let no_connections = Config {
+        max_connections: 0,
+        ..valid()
+    };
+    assert!(no_connections.validate().is_err());
+    let no_connections_per_ip = Config {
+        max_connections_per_ip: 0,
+        ..valid()
+    };
+    assert!(no_connections_per_ip.validate().is_err());
+}

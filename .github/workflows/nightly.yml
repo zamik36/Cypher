@@ -1,0 +1,193 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NIGHTLY: nightly-2026-09-20
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  miri-full:
+    name: Miri (including slow tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # Same isolation as the CI Miri job: no target cache, no secrets.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: miri, rust-src
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: cargo miri nextest --run-ignored all
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: >-
+          cargo +${{ env.NIGHTLY }} miri nextest run --profile miri-full --run-ignored all
+          -p cypher-types -p cypher-wire -p cypher-crypto -p cypher-core -p cypher-media
+
+  fuzz:
+    name: Fuzz ${{ matrix.target.name }} (10 min)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { crate: cypher-wire, name: fuzz_frames }
+          - { crate: cypher-wire, name: fuzz_bodies }
+          - { crate: cypher-wire, name: fuzz_history }
+          - { crate: cypher-wire, name: fuzz_relay }
+          - { crate: cypher-crypto, name: fuzz_aead }
+          - { crate: cypher-crypto, name: fuzz_ratchet }
+          - { crate: cypher-crypto, name: fuzz_decoders }
+          - { crate: cypher-crypto, name: fuzz_keysets }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          key: fuzz-${{ matrix.target.crate }}-${{ matrix.target.name }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-fuzz@0.13.1
+      # The prebuilt cargo-fuzz targets musl by default; the toolchain is glibc.
+      - name: Run fuzzer
+        working-directory: crates/${{ matrix.target.crate }}
+        run: cargo +${{ env.NIGHTLY }} fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target.name }} -- -max_total_time=600
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fuzz-${{ matrix.target.name }}
+          path: crates/${{ matrix.target.crate }}/fuzz/artifacts/
+
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: cargo bench
+        run: >-
+          cargo bench --benches -p cypher-crypto -p cypher-wire -p cypher-core -p cypher-media
+          --features cypher-media/opus -- --noplot
+      - name: Upload criterion results
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: criterion
+          path: target/criterion/
+
+  load:
+    name: Load (10k connections, two nodes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - name: Build services
+        run: cargo build --release -p gateway -p signaling -p relay -p load-test
+      - name: Start stack
+        run: .github/scripts/start-stack.sh
+      - name: Load
+        run: |
+          ulimit -n 65536
+          target/release/load-test --connections 10000 --ramp 20 --duration 60 --msg-rate 5 \
+            --gateway-addr localhost:9100 --peer-gateway-addr localhost:9110 --ca-cert e2e/gateways.pem \
+            --metrics-addr 127.0.0.1:9090 --max-errors 0 --assert-p99-ms 50 \
+            --assert-max-bytes-per-conn 40000 --assert-tasks-return 5 --json | tee e2e/load.json
+      - uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1 # v1.2.2
+        with:
+          k6-version: "2.3.0"
+      - name: WebSocket load (k6)
+        run: |
+          ulimit -n 65536
+          npm ci -w tests/load --ignore-scripts
+          npm run build -w tests/load
+          k6 run --quiet --summary-export e2e/k6.json \
+            -e GATEWAY_WS=ws://127.0.0.1:9101 -e PEER_GATEWAY_WS=ws://127.0.0.1:9111 \
+            -e PAIRS=600 -e RAMP=20s -e HOLD=60s -e SESSION=60 target/k6/gateway-ws.js
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: load
+          path: e2e/
+
+  # The Android project builds as a release does (unsigned here), so a
+  # broken build shows up overnight rather than on the day of a tag.
+  android:
+    name: Android build (unsigned AAB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          key: android-nightly
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: cd apps/desktop && npm install
+      - name: Build AAB
+        run: cd apps/desktop && npx tauri android build --aab --target aarch64
+
+  mutants:
+    name: Mutation testing ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # Report only: surviving mutants point at weak tests, they do not gate merges.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [cypher-crypto, cypher-wire, cypher-core]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146,cargo-mutants@27.1.0
+      - name: cargo mutants
+        run: cargo mutants --package ${{ matrix.crate }} --test-tool nextest --jobs 2
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: mutants-${{ matrix.crate }}
+          path: mutants.out/

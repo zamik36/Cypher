@@ -1,25 +1,40 @@
 [package]
 name = "gateway"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+console = ["cypher-server-kit/console"]
 
 [dependencies]
-cypher-common.workspace = true
-cypher-proto.workspace = true
-cypher-tls.workspace = true
-cypher-transport.workspace = true
+cypher-types.workspace = true
+cypher-wire.workspace = true
+cypher-tls = { workspace = true, features = ["server"] }
+cypher-transport = { workspace = true, features = ["ws"] }
+cypher-server-kit.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+tokio-rustls.workspace = true
 bytes.workspace = true
 dashmap.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 anyhow.workspace = true
 async-nats.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 prometheus.workspace = true
 rand.workspace = true
-tokio-tungstenite.workspace = true
+ed25519-dalek.workspace = true
+
+[dev-dependencies]
+tokio-stream.workspace = true
+cypher-core.workspace = true
+cypher-crypto.workspace = true
+rand_chacha.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

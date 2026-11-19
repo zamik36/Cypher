@@ -1,0 +1,439 @@
+# Production overlay — use with: docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml up -d
+#
+# Runs images CI built from one commit: GHCR_REPO (e.g. ghcr.io/zamik36/cypher)
+# and IMAGE_TAG (the first 8 hex digits of its sha) come from .env, which the
+# deploy writes. Nothing is built on the server: a missing image fails the pull.
+# Docker keeps every container's log in one growing file unless told not to.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  caddy:
+    logging: *logging
+    image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    tmpfs:
+      - /tmp
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
+    depends_on:
+      - gateway
+      - pwa
+    restart: unless-stopped
+    networks: !override
+      - edge
+
+  # Copies Caddy's certificate and key for gateway and relay (deploy/sync-certs.sh),
+  # so they run unprivileged and never mount Caddy's data with its ACME key.
+  certs:
+    logging: *logging
+    image: caddy:2-alpine@sha256:3b2a0196e0687279c14c27adff9fc6b44acfa318dbb97eaebe385bdf99e5364c
+    entrypoint: ["/bin/sh", "/sync-certs.sh"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    network_mode: none
+    volumes:
+      - ./deploy/sync-certs.sh:/sync-certs.sh:ro
+      - caddy-data:/caddy-data:ro
+      - certs:/certs
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
+    healthcheck:
+      test: ["CMD", "test", "-s", "/certs/cert.pem"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5m
+    restart: unless-stopped
+
+  # The Docker API for Alloy, read-only and limited to containers: the raw
+  # socket would give it control of the host.
+  docker-proxy:
+    logging: *logging
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Listing containers and networks and reading logs; every write is refused.
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+    restart: unless-stopped
+    networks:
+      - docker-api
+
+  loki:
+    logging: *logging
+    image: grafana/loki@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./deploy/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    networks:
+      - monitoring
+
+  alloy:
+    logging: *logging
+    image: grafana/alloy@sha256:eadfe35ea52b26cbec4d4d780fbcc31edb31108c1c9e537ca59557a5a102c712
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./deploy/alloy.alloy:/etc/alloy/config.alloy:ro
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+    depends_on:
+      - loki
+      - docker-proxy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    networks:
+      - monitoring
+      - docker-api
+
+  prometheus:
+    logging: *logging
+    image: prom/prometheus@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    restart: unless-stopped
+    networks:
+      - internal
+      - monitoring
+
+  grafana:
+    logging: *logging
+    image: grafana/grafana@sha256:0dc5a246ab16bb2c38a349fb588174e832b4c6c2db0981d0c3e6cd774ba66a54
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD in .env}"
+    # Not published through Caddy: reach it over SSH,
+    # `ssh -L 3000:localhost:3000 <server>`, then http://localhost:3000.
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # Sends alerts (deploy/alerts.yml) to Telegram; see deploy/alertmanager.yml.
+  alertmanager:
+    logging: *logging
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    secrets:
+      - alert_telegram_token
+      - alert_telegram_chat_id
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # TLS handshakes with gateway and relay: up, and when the certificate expires.
+  blackbox:
+    logging: *logging
+    image: prom/blackbox-exporter:v0.28.0@sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./deploy/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    restart: unless-stopped
+    networks:
+      - edge
+      - monitoring
+
+  # Daily snapshots of Redis and the signaling volume (deploy/backup.sh);
+  # restore with deploy/restore.sh. Copy the backups volume off the host.
+  backup:
+    logging: *logging
+    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # Read the onion key, which belongs to the services' user.
+      - DAC_READ_SEARCH
+    environment:
+      REDISCLI_AUTH: "${REDIS_PASSWORD}"
+    volumes:
+      - ./deploy/backup.sh:/backup.sh:ro
+      - backups:/backups
+      - backup-metrics:/metrics
+      - signaling-data:/signaling:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # Host disk, memory and CPU; also the backup's last success (textfile).
+  node-exporter:
+    logging: *logging
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+      - backup-metrics:/textfile:ro
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  redis-exporter:
+    logging: *logging
+    image: oliver006/redis_exporter:v1.93.0@sha256:6ca518a72f30f7f576ef92963de1b91d3c3f5fd3aeac949f878bfda183587820
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  nats-exporter:
+    logging: *logging
+    image: natsio/prometheus-nats-exporter:0.20.2@sha256:c623b608e148e31e1c1c878673a197f1828e58ce90de4f01d22f1baa84c8fee9
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["-varz", "-connz", "http://nats:8222"]
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # IMPORTANT: never publish the plaintext WebSocket ports (gateway 9101,
+  # relay 9301); Caddy terminates TLS for them on /ws and /relay.
+  gateway:
+    logging: *logging
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-gateway:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
+    read_only: true
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    environment:
+      LOG_FORMAT: json
+      P2P_TLS_CERT_PATH: /certs/cert.pem
+      P2P_TLS_KEY_PATH: /certs/key.pem
+      # ~25 KB per idle connection (docs/performance.md): 20 000 fit the
+      # memory limit with room for traffic. Raise both together.
+      P2P_MAX_CONNECTIONS: "${GATEWAY_MAX_CONNECTIONS:-20000}"
+    volumes:
+      - certs:/certs:ro
+    depends_on:
+      certs:
+        condition: service_healthy
+    ports: !override
+      - "9100:9100"
+      - "127.0.0.1:9090:9090"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "1.0"
+    networks:
+      - internal
+      - edge
+
+  signaling:
+    logging: *logging
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-signaling:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
+    read_only: true
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    volumes:
+      - signaling-data:/data/signaling
+    environment:
+      LOG_FORMAT: json
+      P2P_RELAY_PUBLIC_ADDR: "${DOMAIN}:9300"
+      P2P_PUSH_CONTACT: "https://${DOMAIN}"
+    ports: !override
+      - "127.0.0.1:9091:9091"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  relay:
+    logging: *logging
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-relay:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
+    read_only: true
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    volumes:
+      - certs:/certs:ro
+    environment:
+      LOG_FORMAT: json
+      P2P_TLS_CERT_PATH: /certs/cert.pem
+      P2P_TLS_KEY_PATH: /certs/key.pem
+    depends_on:
+      certs:
+        condition: service_healthy
+    ports: !override
+      - "9300:9300"
+      - "127.0.0.1:9092:9092"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    networks:
+      - internal
+      - edge
+
+  pwa:
+    logging: *logging
+    image: ${GHCR_REPO:?Set GHCR_REPO in .env}/cypher-pwa:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build: !reset null
+    ports: !override []
+    networks: !override
+      - edge
+
+  redis:
+    logging: *logging
+    ports: !override []
+
+  nats:
+    logging: *logging
+    ports: !override []
+
+# internal: Redis, NATS and the services. edge: what Caddy proxies to.
+# monitoring: Prometheus, Grafana, Loki, Alloy. docker-api: Alloy and the
+# Docker API proxy only, with no route out.
+networks:
+  edge:
+  monitoring:
+  docker-api:
+    internal: true
+
+# Alert delivery; empty when the variables are unset (alerts then stay in
+# Alertmanager's own list).
+secrets:
+  alert_telegram_token:
+    environment: ALERT_TELEGRAM_TOKEN
+  alert_telegram_chat_id:
+    environment: ALERT_TELEGRAM_CHAT_ID
+
+volumes:
+  alertmanager-data:
+  backups:
+  backup-metrics:
+  caddy-data:
+  caddy-config:
+  certs:
+  signaling-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:

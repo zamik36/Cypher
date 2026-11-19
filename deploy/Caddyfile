@@ -8,8 +8,8 @@
 	header {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(self), microphone=(self), geolocation=()"
 		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 	}
 
@@ -17,8 +17,8 @@
 		reverse_proxy gateway:9101
 	}
 
-	handle /grafana* {
-		reverse_proxy grafana:3000
+	handle /relay* {
+		reverse_proxy relay:9301
 	}
 
 	handle {

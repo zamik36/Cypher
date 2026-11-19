@@ -1,8 +1,16 @@
 # Шифр (Cypher) — build & run commands
 # Install: cargo install just
 # Usage:  just <recipe>    (run `just` without args to see all recipes)
+#
+# Local services read secrets from .env (copy .env.example): each service
+# connects to NATS as its own least-privilege user (deploy/nats.conf).
 
 set windows-shell := ["bash", "-cu"]
+set dotenv-load := true
+
+nats_url := "nats://127.0.0.1:4222"
+# Development gateways and relays write their self-signed certificates here.
+certs := "target/dev-certs"
 
 # Default: show available recipes
 default:
@@ -12,11 +20,11 @@ default:
 
 # Start Redis + NATS in Docker
 infra:
-    docker compose up -d
+    docker compose --project-directory . -f deploy/compose/docker-compose.yml up -d redis nats
 
-# Stop Redis + NATS
+# Stop the Docker stack
 infra-down:
-    docker compose down
+    docker compose --project-directory . -f deploy/compose/docker-compose.yml down
 
 # ─── Backend services ────────────────────────────────────────────────────────
 
@@ -28,165 +36,204 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run gateway service
-gateway:
-    cargo run -p gateway
+# Run gateway service (TLS :9100, WebSocket :9101)
+gateway *cargo_args:
+    mkdir -p {{certs}}
+    P2P_NATS_URL={{nats_url}} P2P_NATS_USER=gateway P2P_NATS_PASSWORD="$GATEWAY_NATS_PASSWORD" \
+    P2P_WS_ADDR=127.0.0.1:9101 P2P_DEV_CERT_OUT={{certs}}/gateway.pem cargo run -p gateway {{cargo_args}}
 
-# Run signaling service
-signaling:
-    cargo run -p signaling
+# Run signaling service (NATS + Redis only)
+signaling *cargo_args:
+    P2P_NATS_URL={{nats_url}} P2P_NATS_USER=signaling P2P_NATS_PASSWORD="$SIGNALING_NATS_PASSWORD" \
+    P2P_REDIS_URL="redis://:$REDIS_PASSWORD@127.0.0.1:6379" P2P_RELAY_PUBLIC_ADDR=localhost:9300 \
+    cargo run -p signaling {{cargo_args}}
 
-# Run relay service
-relay:
-    cargo run -p relay
+# Run relay service (TLS :9300, WebSocket :9301)
+relay *cargo_args:
+    mkdir -p {{certs}}
+    P2P_NATS_URL={{nats_url}} P2P_NATS_USER=relay P2P_NATS_PASSWORD="$RELAY_NATS_PASSWORD" \
+    P2P_WS_ADDR=127.0.0.1:9301 P2P_DEV_CERT_OUT={{certs}}/relay.pem cargo run -p relay {{cargo_args}}
 
-# Run all 3 backend services (gateway + signaling + relay)
+# CPU flamegraph of a running service on Linux (perf + inferno), e.g. under
+# `just load-ws`: `just flamegraph gateway 30`. Build first with
+# `scripts/flamegraph.sh build` and run target/profiling/<service>.
+flamegraph service seconds="30":
+    scripts/flamegraph.sh {{service}} {{seconds}}
+
+# A service with tokio-console instrumentation; then run `tokio-console`
+# (cargo install --locked tokio-console). Own target dir: the cfg flag
+# rebuilds everything.
+console service:
+    RUSTFLAGS="--cfg tokio_unstable" CARGO_TARGET_DIR=target/console just {{service}} --features console
+
+# Run all 3 backend services
 services:
     #!/usr/bin/env bash
     set -e
-    echo "Starting gateway, signaling, relay..."
-    cargo run -p gateway &
-    cargo run -p signaling &
-    cargo run -p relay &
+    cargo build -p gateway -p signaling -p relay
+    just gateway & just signaling & just relay &
     wait
 
-# ─── Tests ───────────────────────────────────────────────────────────────────
+# ─── Quality ─────────────────────────────────────────────────────────────────
 
-# Run all tests
+nightly := "nightly-2026-09-20"
+
+# Run all tests (nextest) and doctests
 test:
-    cargo test --workspace
+    cargo nextest run --workspace --all-features
+    cargo test --doc --workspace --all-features
 
-# Run clippy
+# Formatting and clippy for every target the project ships
 lint:
-    cargo clippy --workspace -- -D warnings
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy -p cypher-desktop --all-targets -- -D warnings
+    cargo clippy -p cypher-wasm -p cypher-media --target wasm32-unknown-unknown -- -D warnings
 
-# Run tests + clippy
-check: test lint
+# TOML formatting, typos, unused dependencies, every feature on its own
+hygiene:
+    taplo fmt --config .config/taplo.toml --check
+    typos --config .config/typos.toml . .config
+    cargo machete
+    cargo hack clippy --each-feature --all-targets -p cypher-media -p cypher-client -p cypher-transport -- -D warnings
+    cargo deny --all-features check --config .config/deny.toml
+
+# Undefined-behaviour check; `just miri miri-full --run-ignored all` runs everything
+miri profile="miri" *args:
+    MIRIFLAGS=-Zmiri-strict-provenance cargo +{{nightly}} miri nextest run --profile {{profile}} \
+        -p cypher-types -p cypher-wire -p cypher-crypto -p cypher-core -p cypher-media {{args}}
+
+# Line-coverage ratchet (.config/coverage.toml); `just cov --bump` raises floors.
+# Set CYPHER_TEST_REDIS / CYPHER_TEST_NATS to include the in-process stack test.
+cov *args:
+    cargo llvm-cov nextest --workspace --all-features --json --summary-only --output-path target/cov.json
+    cargo run -q -p xtask -- coverage-gate {{args}}
+
+# Criterion benchmarks (release profile); reports in target/criterion
+bench *args:
+    cargo bench --benches -p cypher-crypto -p cypher-wire -p cypher-core -p cypher-media --features cypher-media/opus -- {{args}}
+
+# Run lint + hygiene + tests
+check: lint hygiene test
+
+# Fast gate before a push (no tests): the checks that most often fail CI,
+# with the deny policy of ci.yml (advisories block only on vulnerabilities).
+# `just check` remains the full run before a commit.
+prepush:
+    cargo fmt --all -- --check
+    taplo fmt --config .config/taplo.toml --check
+    typos --config .config/typos.toml . .config
+    cargo machete
+    cargo deny --all-features check --config .config/deny.toml bans licenses sources
+    cargo deny --all-features check --config .config/deny.toml --warn unmaintained --warn unsound --warn yanked advisories
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Needs locally running services (`just infra services`).
+# Live journeys: the native client, then the browser (web-e2e)
+e2e: && web-e2e
+    cat {{certs}}/gateway.pem {{certs}}/relay.pem > {{certs}}/stack.pem
+    CYPHER_LIVE_GATEWAY=localhost:9100 CYPHER_LIVE_CA={{certs}}/stack.pem cargo test --release -p e2e --test live
+
+# Native TLS load (tools/load-test) against a local gateway
+load connections="1000" duration="30":
+    cargo run --release -p load-test -- --connections {{connections}} --duration {{duration}} \
+        --gateway-addr localhost:9100 --ca-cert {{certs}}/gateway.pem --metrics-addr 127.0.0.1:9090
+
+# WebSocket load with k6 (tests/load) against a local gateway; install k6
+# first (winget install k6 / apt install k6). Summary: target/k6-summary.json
+load-ws pairs="100" hold="30s":
+    npm run build -w tests/load
+    k6 run --summary-export target/k6-summary.json -e PAIRS={{pairs}} -e HOLD={{hold}} \
+        -e GATEWAY_WS=ws://127.0.0.1:9101 target/k6/gateway-ws.js
+
+# ─── Frontend ────────────────────────────────────────────────────────────────
+
+# Install all frontend dependencies (npm workspaces)
+deps:
+    npm install
+
+# Build the WebAssembly core for the PWA
+wasm:
+    npm run build:wasm -w apps/pwa
+
+# Typecheck, lint (--max-warnings 0), formatting and unit tests with coverage
+web-check:
+    npm run typecheck
+    npm run lint
+    npm run format:check
+    npm run coverage
+
+# Needs `just wasm`, a running stack (`just services`) and, once,
+# `npx playwright install chromium`.
+# Browser journeys (Playwright) on the production bundle
+web-e2e:
+    npm run build -w apps/pwa
+    npm run e2e -w apps/pwa
 
 # ─── Desktop (Windows/Linux/macOS) ──────────────────────────────────────────
 
-# Install desktop frontend dependencies
-desktop-deps:
-    cd clients/desktop && npm install
-
 # Run desktop app in dev mode (hot-reload)
 desktop-dev:
-    cd clients/desktop && cargo tauri dev
+    cd apps/desktop && npm exec -- tauri dev
 
 # Build desktop app (release)
 desktop-build:
-    cd clients/desktop && cargo tauri build
+    cd apps/desktop && npm exec -- tauri build
 
 # ─── Android ─────────────────────────────────────────────────────────────────
 
 # Run Android app in dev mode (needs connected device/emulator)
 android-dev:
-    cd clients/desktop && cargo tauri android dev
+    cd apps/desktop && npm exec -- tauri android dev
 
 # Build Android debug APK
 android-debug:
-    cd clients/desktop && cargo tauri android build --apk
+    cd apps/desktop && npm exec -- tauri android build --apk --debug
 
 # Build Android release APK (unsigned)
 android-release:
-    cd clients/desktop && cargo tauri android build --apk --release
+    cd apps/desktop && npm exec -- tauri android build --apk
 
-# Build Android release APK and sign it
+# Sign the release APK with a local development keystore
 android-sign: android-release
     #!/usr/bin/env bash
     set -e
-    export ANDROID_HOME="C:/Users/Ilya/AppData/Local/Android/Sdk"
-    KEYSTORE="clients/desktop/src-tauri/gen/android/release.keystore"
-    APK_DIR="clients/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release"
+    : "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
+    PASS="${CYPHER_KEYSTORE_PASS:-p2ptest123}"
+    KEYSTORE="apps/desktop/src-tauri/gen/android/release.keystore"
+    APK_DIR="apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release"
     APK_UNSIGNED="$APK_DIR/app-universal-release-unsigned.apk"
     APK_SIGNED="$APK_DIR/cypher-release-signed.apk"
-
-    # Generate keystore if not exists
     if [ ! -f "$KEYSTORE" ]; then
-        echo "Generating debug signing keystore..."
-        keytool -genkeypair -v \
-            -keystore "$KEYSTORE" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -alias cypher \
-            -storepass p2ptest123 -keypass p2ptest123 \
-            -dname "CN=Cypher Dev, O=Cypher, L=Dev, C=US"
-        echo "Keystore created: $KEYSTORE"
+        keytool -genkeypair -v -keystore "$KEYSTORE" -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias cypher -storepass "$PASS" -keypass "$PASS" -dname "CN=Cypher Dev, O=Cypher, C=US"
     fi
-
-    # Find the unsigned APK
     if [ ! -f "$APK_UNSIGNED" ]; then
-        echo "Looking for APK..."
-        APK_UNSIGNED=$(find clients/desktop/src-tauri/gen/android/app/build/outputs/apk -name "*unsigned*.apk" | head -1)
+        APK_UNSIGNED=$(find apps/desktop/src-tauri/gen/android/app/build/outputs/apk -name "*unsigned*.apk" | head -1)
     fi
-
-    echo "Signing $APK_UNSIGNED ..."
-
-    # Align
     BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-    "$BT/zipalign.exe" -f 4 "$APK_UNSIGNED" "$APK_SIGNED"
-
-    # Sign with apksigner
-    "$BT/apksigner.bat" sign \
-        --ks "$KEYSTORE" \
-        --ks-key-alias cypher \
-        --ks-pass pass:p2ptest123 \
-        --key-pass pass:p2ptest123 \
-        "$APK_SIGNED"
-
-    echo ""
-    echo "=== Signed APK ready ==="
+    "$BT/zipalign" -f 4 "$APK_UNSIGNED" "$APK_SIGNED"
+    SIGNER="$BT/apksigner"; [ -f "$SIGNER.bat" ] && SIGNER="$SIGNER.bat"
+    "$SIGNER" sign --ks "$KEYSTORE" --ks-key-alias cypher --ks-pass "pass:$PASS" --key-pass "pass:$PASS" "$APK_SIGNED"
     realpath "$APK_SIGNED"
-    echo ""
 
-# ─── iOS / PWA ───────────────────────────────────────────────────────────────
+# ─── PWA ─────────────────────────────────────────────────────────────────────
 
-# Install PWA dependencies
-pwa-deps:
-    cd clients/pwa && npm install
-
-# Run PWA dev server (accessible on LAN at http://<your-ip>:5174)
-pwa-dev:
-    cd clients/pwa && npm run dev
+# Run PWA dev server; /ws and /relay are proxied to the local services
+pwa-dev: wasm
+    CYPHER_DEV_GATEWAY_WS=ws://127.0.0.1:9101 CYPHER_DEV_RELAY_WS=ws://127.0.0.1:9301 npm run dev -w apps/pwa
 
 # Build PWA for production
-pwa-build:
-    cd clients/pwa && npm run build
-
-# Serve built PWA on LAN (for iOS testing via Add to Home Screen)
-pwa-serve port="5174":
-    cd clients/pwa && npx serve dist -l {{port}} --no-clipboard
+pwa-build: wasm
+    npm run build -w apps/pwa
 
 # ─── Full stack (for testing) ────────────────────────────────────────────────
 
-# Start everything for local WiFi testing: infra + services + PWA dev server
-test-local:
+# Start infra, the three services and the PWA dev server
+test-local: infra
     #!/usr/bin/env bash
     set -e
-    echo "=== Starting infrastructure ==="
-    docker compose up -d
-    sleep 2
-
-    echo ""
-    echo "=== Starting backend services ==="
-    cargo run -p gateway &
-    cargo run -p signaling &
-    cargo run -p relay &
-    sleep 3
-
-    echo ""
-    echo "=== Starting PWA dev server ==="
-    cd clients/pwa && npm run dev &
-
-    echo ""
-    echo "========================================="
-    echo "  All services running!"
-    echo ""
-    echo "  Gateway TLS:  0.0.0.0:9100"
-    echo "  Gateway WS:   0.0.0.0:9101"
-    echo "  Signaling:    0.0.0.0:9200"
-    echo "  Relay:        0.0.0.0:9300"
-    echo "  PWA:          http://0.0.0.0:5174"
-    echo ""
-    echo "  From phone, open: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<your-ip>'):5174"
-    echo "========================================="
+    just services &
+    just pwa-dev &
+    echo "Gateway TLS :9100, WS :9101 | Relay TLS :9300, WS :9301 | PWA http://localhost:5174"
     wait
