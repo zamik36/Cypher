@@ -158,7 +158,7 @@ services:
 
   grafana:
     logging: *logging
-    image: grafana/grafana@sha256:0dc5a246ab16bb2c38a349fb588174e832b4c6c2db0981d0c3e6cd774ba66a54
+    image: grafana/grafana@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     security_opt:
       - no-new-privileges:true
     cap_drop:
