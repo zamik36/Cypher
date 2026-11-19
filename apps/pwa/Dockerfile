@@ -29,7 +29,7 @@ COPY apps/pwa/ apps/pwa/
 COPY --from=wasm /wasm apps/pwa/src/wasm
 RUN npm run build -w apps/pwa
 
-FROM caddy:2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
+FROM caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 
 RUN setcap -r /usr/bin/caddy \
     && addgroup -S app \
