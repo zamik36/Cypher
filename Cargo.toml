@@ -193,7 +193,7 @@ rustls-pki-types = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.28"
 tor-rtcompat = { version = "0.46", default-features = false, features = ["tokio", "rustls"] }
-arti-client = { version = "0.46", default-features = false, features = [
+arti-client = { version = "0.47", default-features = false, features = [
     "tokio",
     "rustls",
     "compression",
