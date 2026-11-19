@@ -91,7 +91,7 @@ services:
 
   loki:
     logging: *logging
-    image: grafana/loki@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
+    image: grafana/loki@sha256:b43c257ccfc925d4a50b8717cac61a3b51df8c48d01847936057e5c4075a24a7
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -111,7 +111,7 @@ services:
 
   alloy:
     logging: *logging
-    image: grafana/alloy@sha256:eadfe35ea52b26cbec4d4d780fbcc31edb31108c1c9e537ca59557a5a102c712
+    image: grafana/alloy@sha256:9acc2529bc1edb7f5b2bd801dd8334ebc80c158e3a9e5526ecd7c9a273d43189
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -183,7 +183,7 @@ services:
   # Sends alerts (deploy/alerts.yml) to Telegram; see deploy/alertmanager.yml.
   alertmanager:
     logging: *logging
-    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    image: prom/alertmanager:v0.35.0@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -207,7 +207,7 @@ services:
   # TLS handshakes with gateway and relay: up, and when the certificate expires.
   blackbox:
     logging: *logging
-    image: prom/blackbox-exporter:v0.28.0@sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc
+    image: prom/blackbox-exporter:v0.29.1@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -271,7 +271,7 @@ services:
 
   redis-exporter:
     logging: *logging
-    image: oliver006/redis_exporter:v1.93.0@sha256:6ca518a72f30f7f576ef92963de1b91d3c3f5fd3aeac949f878bfda183587820
+    image: oliver006/redis_exporter:v1.97.0@sha256:f5f903fbe77571d455ede0453b084d6840bc62fc105efac001034421cab83b99
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -286,7 +286,7 @@ services:
 
   nats-exporter:
     logging: *logging
-    image: natsio/prometheus-nats-exporter:0.20.2@sha256:c623b608e148e31e1c1c878673a197f1828e58ce90de4f01d22f1baa84c8fee9
+    image: natsio/prometheus-nats-exporter:0.20.3@sha256:4b8ddc1c86fec360b5cd3d5e1fbc6fb52bdafd5805bba3901cc52926538af255
     read_only: true
     security_opt:
       - no-new-privileges:true
