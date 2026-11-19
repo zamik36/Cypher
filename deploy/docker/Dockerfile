@@ -13,7 +13,7 @@ RUN cargo build --release --locked \
     -p signaling \
     -p relay
 
-FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS runtime-base
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && adduser --disabled-password --no-create-home --uid 10001 --gecos "" app \
