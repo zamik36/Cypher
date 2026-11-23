@@ -11,18 +11,18 @@
   },
   "dependencies": {
     "@cypher/ui": "*",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-barcode-scanner": "^2.5.1",
-    "@tauri-apps/plugin-deep-link": "^2.6.1",
-    "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-barcode-scanner": "^2.5.3",
+    "@tauri-apps/plugin-deep-link": "^2.6.3",
+    "@tauri-apps/plugin-notification": "^2.8.1",
     "@tauri-apps/plugin-process": "^2.4.0",
-    "@tauri-apps/plugin-updater": "2.13.1",
+    "@tauri-apps/plugin-updater": "2.14.1",
     "solid-js": "^1.9"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.12.6",
     "typescript": "^5",
-    "vite": "^8.3.3",
-    "vite-plugin-solid": "^2.11.12"
+    "vite": "^8.3.8",
+    "vite-plugin-solid": "^2.11.17"
   }
 }
