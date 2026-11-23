@@ -2,7 +2,7 @@
 # docker compose --project-directory . -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.prod.yml -f deploy/compose/docker-compose.monitoring.yml up -d
 services:
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:3.7.10
     volumes:
       - ./deploy/loki.yml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
@@ -14,7 +14,7 @@ services:
       - internal
 
   alloy:
-    image: grafana/alloy:v1.14.2
+    image: grafana/alloy:v1.22.0
     volumes:
       - ./deploy/alloy.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
