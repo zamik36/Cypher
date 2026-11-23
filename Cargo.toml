@@ -167,7 +167,7 @@ anyhow = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 aes-gcm = { version = "0.10", features = ["zeroize"] }
-hkdf = "0.12"
+hkdf = "0.13"
 p256 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 base64 = "0.22"
 hmac = "0.12"
