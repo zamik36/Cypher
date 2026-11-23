@@ -225,7 +225,7 @@ services:
   # restore with deploy/restore.sh. Copy the backups volume off the host.
   backup:
     logging: *logging
-    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
+    image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     entrypoint: ["/bin/sh", "/backup.sh"]
     read_only: true
     security_opt:
